@@ -1,0 +1,133 @@
+{
+  "generatedAt": "2026-06-23T17:32:00-04:00",
+  "runtime": {
+    "frontend": "http://localhost:5173",
+    "backend": "http://localhost:8787",
+    "health": {
+      "ok": true,
+      "version": "1.2.0",
+      "runtime": "node-http",
+      "env": "development",
+      "browserRuntime": false,
+      "externalActionsEnabled": true,
+      "authRequired": true
+    }
+  },
+  "securityProbes": {
+    "connectorsWithoutSession": {
+      "status": 401,
+      "result": "authentication_required"
+    },
+    "badOriginHealth": {
+      "status": 403,
+      "result": "origin_not_allowed"
+    },
+    "settingsPostWithoutCsrf": {
+      "status": 403,
+      "result": "csrf_failed"
+    },
+    "childSettingsPost": {
+      "status": 403,
+      "result": "insufficient_role"
+    },
+    "approvalBypassWithClientApprovedTrue": {
+      "status": 422,
+      "result": "approval_not_found"
+    },
+    "approvalInputChangedAfterApproval": {
+      "status": 422,
+      "result": "approval_input_changed"
+    },
+    "childCanApproveHighRiskServerApproval": {
+      "status": 200,
+      "result": "approved",
+      "decidedBy": "child-1",
+      "severity": "P0"
+    },
+    "childCanReachExecutionAfterApprovingHighRiskAction": {
+      "status": 422,
+      "result": "not_configured",
+      "note": "SMS was not configured, so no external message was sent. If configured, the role gate would not have stopped the child-approved execution path."
+    },
+    "customHttpLoopbackSsrf": {
+      "configuredReadiness": "connected",
+      "executeStatus": 422,
+      "result": "egress_blocked",
+      "message": "Target blocked by egress policy (loopback_blocked). Test config was revoked."
+    }
+  },
+  "connectorRuntimeProbes": {
+    "weatherUiRun": {
+      "ok": true,
+      "provider": "Open-Meteo",
+      "sampleResult": {
+        "location": "Home",
+        "temperatureC": 19.7,
+        "windKph": 12.3,
+        "weatherCode": 3,
+        "fetchedAt": "2026-06-23T17:26:52.238Z"
+      }
+    },
+    "webhookUiTestEvent": {
+      "ok": true,
+      "latestEvent": "Camp deposit",
+      "source": "test"
+    },
+    "googleOauthStart": {
+      "status": 200,
+      "ok": true,
+      "evidence": "Returned Google consent URL with redirect_uri=http://localhost:8787/api/oauth/callback, state, scope, code_challenge, and code_challenge_method=S256. Client id, state, and challenge were redacted from the working notes."
+    },
+    "microsoftOauthStart": {
+      "status": 422,
+      "result": "not_configured_by_deployment"
+    },
+    "browserAutomationSession": {
+      "status": 422,
+      "result": "runtime_unavailable"
+    }
+  },
+  "aiProviderProbes": {
+    "openaiHealth": {
+      "ok": true,
+      "status": "reachable",
+      "modelCount": 122,
+      "latencyMs": 901
+    },
+    "openaiChat": {
+      "ok": true,
+      "model": "gpt-4o-mini",
+      "text": "HomeOps provider check OK"
+    },
+    "anthropic": {
+      "ok": false,
+      "status": "not_configured"
+    },
+    "gemini": {
+      "ok": false,
+      "status": "not_configured"
+    },
+    "ollama": {
+      "ok": false,
+      "status": "unreachable"
+    },
+    "lmstudio": {
+      "ok": false,
+      "status": "unreachable"
+    }
+  },
+  "uiProbes": {
+    "profileGate": "Rendered profile chooser with Owner, Adult Admin, Child View, and Guest/Helper profiles; no console warnings.",
+    "dashboardAsk": "Broad natural-language request opened an empty command palette instead of answering or creating a traceable plan.",
+    "childDashboard": "Child View profile still saw approvals, bills, document titles, and adult quick actions on dashboard.",
+    "automationRun": "Morning Family Briefing Run created an instant local run: 'Family Briefing Agent · Test · Schedule ... Completed'.",
+    "connectionsCards": "Provider cards have accessible labels; household utility cards are clickable role=button divs without specific aria-labels."
+  },
+  "verificationCommands": {
+    "typecheck": "npm run typecheck - passed",
+    "build": "npm run build - passed with Vite deprecation warnings",
+    "audit": "npm audit --json - 0 vulnerabilities",
+    "backendHealthAfterProbes": "ok:true, externalActionsEnabled:true"
+  }
+}
+

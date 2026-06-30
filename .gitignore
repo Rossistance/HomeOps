@@ -1,0 +1,8 @@
+node_modules/
+dist/
+# Backend runtime data — local secrets vault, configs, audit log. Never commit.
+server/.data/
+*.log
+
+.env
+.env.local

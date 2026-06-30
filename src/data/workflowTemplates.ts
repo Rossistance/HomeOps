@@ -1,0 +1,925 @@
+/**
+ * HomeOps AI — seeded workflow templates.
+ *
+ * These are the 20 templates the app ships with, surfaced in the Workflow
+ * Builder / Automations area. Content is drawn from
+ * 05_WORKFLOW_TEMPLATE_CATALOG.md (authoritative) and the multi-agent
+ * breakdowns in 02_EXPANDED_USE_CASE_LIBRARY.md.
+ *
+ * Family/household/personal framing only.
+ */
+
+import type { WorkflowTemplate } from "@/types";
+import { WORKFLOW_TEMPLATE_IDS, AGENT_TEMPLATE_IDS } from "./catalogIds";
+
+export const workflowTemplates: WorkflowTemplate[] = [
+ {
+ id: WORKFLOW_TEMPLATE_IDS.dailyFamilyBriefing,
+ name: "Daily Family Briefing",
+ category: "Communication and Coordination",
+ prompt:
+ "Send me a daily briefing every morning based on my calendar, email, family tasks, school notices, and household reminders.",
+ recommendedAgent: "Family Briefing Agent",
+ recommendedAgentTemplateId: AGENT_TEMPLATE_IDS.familyBriefing,
+ requiredConnections: [
+ "Google Calendar",
+ "Gmail",
+ "Local reminders",
+ ],
+ optionalConnections: [
+ "Weather",
+ "Local Files",
+ "Text Messaging",
+ ],
+ triggerType: "Schedule",
+ approvalRequirements: [
+ "No approval required for in-app briefing.",
+ "Approval required before sending to external recipients.",
+ ],
+ fileProcessingNeeds: [
+ "Read recent school PDFs or notes.",
+ "Detect dates and action items.",
+ ],
+ browserNeeds: "None for default workflow.",
+ outputFormat: [
+ "Dashboard card.",
+ "Message thread.",
+ "Optional email/text-style message.",
+ ],
+ exampleOutput: [
+ "Today's schedule: 8:15 AM school drop-off, 2:30 PM dentist for Maya, 6:00 PM soccer practice.",
+ "School reminders: picture-day form due Friday, library books back tomorrow.",
+ "Bills due soon: electric bill ($142) due in 3 days.",
+ "Errands: pick up prescription, drop off dry cleaning.",
+ "Waiting-on items: reply from coach about carpool, grandma's availability for Saturday.",
+ "Recommended next actions: sign picture-day form, pay electric bill.",
+ ],
+ activityLogEvents: [
+ "Trigger fired.",
+ "Sources checked.",
+ "Briefing generated.",
+ "Message delivered.",
+ ],
+ failureStates: [
+ "Calendar unavailable.",
+ "Email connection paused.",
+ "Approval required but not granted.",
+ ],
+ setupChecklist: [
+ "Choose briefing time.",
+ "Select recipients.",
+ "Select spaces to include.",
+ "Confirm approval rules.",
+ ],
+ multiAgent: [
+ {
+ name: "Calendar Agent",
+ icon: "Calendar",
+ role: "Checks today's appointments, drop-offs, and weather-sensitive events.",
+ },
+ {
+ name: "Inbox Agent",
+ icon: "Mail",
+ role: "Finds important unread emails and anything needing a reply.",
+ },
+ {
+ name: "School Agent",
+ icon: "GraduationCap",
+ role: "Checks school and daycare documents, notices, and reminders.",
+ },
+ {
+ name: "Task Agent",
+ icon: "ListTodo",
+ role: "Checks chores, errands, and family tasks due today.",
+ },
+ {
+ name: "Finance Agent",
+ icon: "Wallet",
+ role: "Checks bills due soon and flags upcoming payments.",
+ },
+ {
+ name: "Parent Coordinator Agent",
+ icon: "Users",
+ role: "Merges every agent's results into one prioritized morning briefing.",
+ },
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.protectFocusBlocks,
+ name: "Protect Focus Blocks",
+ category: "Calendar Optimization",
+ prompt:
+ "When my day is fragmented by meetings or appointments, suggest schedule changes that create a protected focus block.",
+ recommendedAgent: "Calendar Helper Agent",
+ requiredConnections: ["Google Calendar"],
+ optionalConnections: [
+ "Task/reminder connection",
+ "Household schedule connection",
+ ],
+ triggerType: "Calendar Event Changed",
+ approvalRequirements: ["Approval required before modifying events."],
+ fileProcessingNeeds: ["None."],
+ browserNeeds: "None by default.",
+ outputFormat: [
+ "Suggested calendar moves.",
+ "Approval card.",
+ "Focus block preview.",
+ ],
+ exampleOutput: [
+ "Move grocery pickup from 11:30 AM to 4:30 PM to create a 10:00 AM-12:00 PM focus block.",
+ "Shift the dentist call to after school pickup so your morning admin window stays clear.",
+ ],
+ activityLogEvents: [
+ "Calendar analyzed.",
+ "Suggestions generated.",
+ "Approval requested.",
+ "Event changed or dismissed.",
+ ],
+ failureStates: [
+ "No movable items.",
+ "Protected event conflict.",
+ "Approval denied.",
+ ],
+ setupChecklist: [
+ "Set minimum focus block length.",
+ "Mark non-movable event categories.",
+ "Choose analysis days.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.fridayInboxCleanup,
+ name: "Friday Inbox Cleanup",
+ category: "Email Admin",
+ prompt:
+ "Every Friday, archive non-actionable emails, flag anything that needs a reply, and summarize what I should handle next week.",
+ recommendedAgent: "Inbox Helper Agent",
+ recommendedAgentTemplateId: AGENT_TEMPLATE_IDS.inboxHelper,
+ requiredConnections: ["Gmail"],
+ optionalConnections: ["Task/reminder connection", "Knowledge library"],
+ triggerType: "Schedule",
+ approvalRequirements: [
+ "Approval required before archiving or deleting important messages.",
+ "Low-risk newsletters may be auto-archived if user allows.",
+ ],
+ fileProcessingNeeds: ["Extract attachments if relevant."],
+ browserNeeds: "None by default.",
+ outputFormat: ["Inbox cleanup summary.", "Follow-up task list."],
+ exampleOutput: [
+ "Needs reply: 4.",
+ "Archived: 28.",
+ "Bills detected: 2.",
+ "School items: 1.",
+ "Follow up next week: confirm camp registration, reply to teacher about conference.",
+ ],
+ activityLogEvents: [
+ "Inbox scanned.",
+ "Messages classified.",
+ "Approval requested.",
+ "Summary generated.",
+ ],
+ failureStates: [
+ "Connection unavailable.",
+ "Classification confidence low.",
+ "Approval required but pending.",
+ ],
+ setupChecklist: [
+ "Define archive rules.",
+ "Define important senders.",
+ "Choose weekly schedule.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.appointmentRecap,
+ name: "Appointment or Meeting Recap",
+ category: "Notes and Follow-Up",
+ prompt:
+ "When I receive a transcript, appointment note, or call summary, extract action items, create tasks, and send a recap to the right people.",
+ recommendedAgent: "Recap Agent",
+ requiredConnections: [
+ "File upload or email connection",
+ "Task/reminder connection",
+ ],
+ optionalConnections: ["Calendar connection", "Message connection"],
+ triggerType: "File Changed",
+ approvalRequirements: ["Approval required before sending recap to others."],
+ fileProcessingNeeds: [
+ "Transcript parsing.",
+ "Action item extraction.",
+ "Date extraction.",
+ ],
+ browserNeeds: "None by default.",
+ outputFormat: [
+ "Recap note.",
+ "Task list.",
+ "Approval request for external sharing.",
+ ],
+ exampleOutput: [
+ "Summary: parent-teacher conference covered reading progress and homework routine.",
+ "Decisions: switch to 20 minutes of nightly reading; check in again in 6 weeks.",
+ "Action items: order leveled reading books, set nightly reading reminder.",
+ "Due dates: reading books by next Monday; follow-up email by Friday.",
+ "Open questions: is the spring field trip covered by the activity fee?",
+ ],
+ activityLogEvents: [
+ "File processed.",
+ "Action items extracted.",
+ "Tasks created.",
+ "Approval requested.",
+ ],
+ failureStates: [
+ "File unreadable.",
+ "No action items found.",
+ "Recipient unclear.",
+ ],
+ setupChecklist: [
+ "Select source folder or upload method.",
+ "Choose default recap recipients.",
+ "Set approval rule.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.replyNudge,
+ name: "Reply Nudge",
+ category: "Communication",
+ prompt:
+ "When someone asks me a question and I do not respond within two hours, remind me with context.",
+ recommendedAgent: "Reply Nudge Agent",
+ requiredConnections: ["Gmail"],
+ optionalConnections: ["Text-style notification"],
+ triggerType: "Text Message Received",
+ approvalRequirements: ["No approval required for self-reminder."],
+ fileProcessingNeeds: ["None."],
+ browserNeeds: "None by default.",
+ outputFormat: ["Reminder notification.", "Context summary."],
+ exampleOutput: [
+ "You were asked whether Tuesday pickup works. No reply after 2 hours.",
+ "The school parent group is waiting on your snack-sign-up answer from this morning.",
+ ],
+ activityLogEvents: [
+ "Message detected.",
+ "Timer started.",
+ "Reply observed or reminder sent.",
+ ],
+ failureStates: ["Message source unavailable.", "Reminder dismissed."],
+ setupChecklist: [
+ "Choose delay.",
+ "Choose monitored senders/channels.",
+ "Choose reminder channel.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.householdSupportTriage,
+ name: "Household Support Triage",
+ category: "Household Admin",
+ prompt:
+ "Run my household support inbox. Triage incoming issues, draft responses using our knowledge library, and escalate anything that needs approval.",
+ recommendedAgent: "Household Support Agent",
+ recommendedAgentTemplateId: AGENT_TEMPLATE_IDS.inboxHelper,
+ requiredConnections: ["Gmail", "Knowledge library"],
+ optionalConnections: ["Task/reminder connection", "Files connection"],
+ triggerType: "Email Received",
+ approvalRequirements: [
+ "Approval required before sending external responses.",
+ ],
+ fileProcessingNeeds: ["Attachment classification.", "Document summary."],
+ browserNeeds: "Optional for portal follow-up.",
+ outputFormat: [
+ "Triage queue.",
+ "Draft response.",
+ "Approval request.",
+ "Follow-up tasks.",
+ ],
+ exampleOutput: [
+ "School form requires signature by Friday. Drafted reply and created reminder.",
+ "Daycare asked about next week's pickup change. Drafted confirmation pending your approval.",
+ ],
+ activityLogEvents: [
+ "Message classified.",
+ "Knowledge consulted.",
+ "Draft created.",
+ "Escalation requested.",
+ ],
+ failureStates: [
+ "No matching knowledge.",
+ "Recipient ambiguous.",
+ "Sensitive data detected.",
+ ],
+ setupChecklist: [
+ "Choose inboxes.",
+ "Choose response rules.",
+ "Add knowledge files.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.personalChiefOfStaff,
+ name: "Personal Chief of Staff",
+ category: "Personal Operations",
+ prompt:
+ "Monitor my calendar, email, tasks, reminders, and important family updates. Tell me what needs my attention today.",
+ recommendedAgent: "Personal Chief of Staff Agent",
+ recommendedAgentTemplateId: AGENT_TEMPLATE_IDS.familyBriefing,
+ requiredConnections: [
+ "Google Calendar",
+ "Gmail",
+ "Task/reminder connection",
+ ],
+ optionalConnections: ["Files/knowledge", "Messages", "Budget tracker"],
+ triggerType: "Schedule",
+ approvalRequirements: [
+ "Approval required before changing events or sending messages.",
+ ],
+ fileProcessingNeeds: ["Scan recent important files."],
+ browserNeeds: "Optional by default.",
+ outputFormat: [
+ "Attention brief.",
+ "Suggested next actions.",
+ "Approval queue.",
+ ],
+ exampleOutput: [
+ "Three things need attention today: school form, unpaid bill, appointment prep.",
+ "Waiting on you: reply to contractor quote, approve grandma's caregiving schedule.",
+ "Can be ignored: 6 newsletters auto-archived.",
+ ],
+ activityLogEvents: [
+ "Sources scanned.",
+ "Priorities ranked.",
+ "Brief generated.",
+ ],
+ failureStates: ["Source unavailable.", "Conflicting data."],
+ setupChecklist: [
+ "Select sources.",
+ "Define priority categories.",
+ "Set briefing time.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.receiptCollector,
+ name: "Receipt Collector",
+ category: "Finance and Files",
+ prompt:
+ "Download receipts from my email and order accounts, organize them, and add them to my monthly expense tracker.",
+ recommendedAgent: "Receipt Agent",
+ recommendedAgentTemplateId: AGENT_TEMPLATE_IDS.billReceipt,
+ requiredConnections: ["Gmail", "Files/knowledge"],
+ optionalConnections: ["Browser workflow", "Budget mini app"],
+ triggerType: "Email Received",
+ approvalRequirements: [
+ "Approval required before logging into external account through browser workflow.",
+ ],
+ fileProcessingNeeds: [
+ "Receipt extraction.",
+ "Date/vendor/amount detection.",
+ "Categorization.",
+ ],
+ browserNeeds: "Optional for portals or order sites.",
+ outputFormat: [
+ "Receipt list.",
+ "Expense summary.",
+ "Files organized by month.",
+ ],
+ exampleOutput: [
+ "Found 12 receipts totaling $384.22. Three need category review.",
+ "Filed: 5 grocery, 3 medical, 2 home repair, 2 travel receipts into June folder.",
+ ],
+ activityLogEvents: [
+ "Receipts found.",
+ "Files saved.",
+ "Categories assigned.",
+ "Summary generated.",
+ ],
+ failureStates: [
+ "Receipt unreadable.",
+ "Amount not detected.",
+ "Login required.",
+ ],
+ setupChecklist: [
+ "Choose categories.",
+ "Choose folder structure.",
+ "Choose review threshold.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.financeReconciliation,
+ name: "Household Finance Reconciliation",
+ category: "Finance",
+ prompt:
+ "Every Monday, reconcile my spending records against receipts and imported transactions, then flag mismatches.",
+ recommendedAgent: "Finance Agent",
+ recommendedAgentTemplateId: AGENT_TEMPLATE_IDS.billReceipt,
+ requiredConnections: ["CSV/XLSX file import", "Receipt library"],
+ optionalConnections: ["Budget mini app"],
+ triggerType: "Schedule",
+ approvalRequirements: ["Approval required before marking items resolved."],
+ fileProcessingNeeds: [
+ "CSV/XLSX parsing.",
+ "Receipt matching.",
+ "Duplicate detection.",
+ ],
+ browserNeeds: "None by default.",
+ outputFormat: [
+ "Reconciliation report.",
+ "Exception list.",
+ "Budget updates.",
+ ],
+ exampleOutput: [
+ "Matched 38 of 41 transactions to receipts this week.",
+ "3 exceptions: missing receipt for $64.18 pharmacy charge, possible duplicate $19.99 streaming charge.",
+ "Groceries are $112 over the monthly budget so far.",
+ ],
+ activityLogEvents: [
+ "Transactions imported.",
+ "Receipts matched.",
+ "Exceptions flagged.",
+ "Report generated.",
+ ],
+ failureStates: [
+ "Missing transaction file.",
+ "Duplicate transactions.",
+ "Unmatched receipts.",
+ ],
+ setupChecklist: [
+ "Choose import file source.",
+ "Set matching tolerance.",
+ "Choose weekly schedule.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.subscriptionReview,
+ name: "Subscription Review and Cancellation Helper",
+ category: "Finance and Browser Workflows",
+ prompt:
+ "Review my subscriptions, identify unused ones, and help me cancel the ones I approve.",
+ recommendedAgent: "Subscription Agent",
+ recommendedAgentTemplateId: AGENT_TEMPLATE_IDS.billReceipt,
+ requiredConnections: [
+ "Gmail",
+ "Imported statement file",
+ ],
+ optionalConnections: ["Browser workflow", "Budget mini app"],
+ triggerType: "Schedule",
+ approvalRequirements: ["Approval required before cancellation."],
+ fileProcessingNeeds: ["Receipt and statement analysis."],
+ browserNeeds: "Browser automation (requires a connected runtime) for portals you approve.",
+ outputFormat: [
+ "Subscription tracker mini app.",
+ "Savings summary.",
+ "Cancellation approval cards.",
+ ],
+ exampleOutput: [
+ "Found 9 active subscriptions totaling $148/month.",
+ "Likely unused: a streaming service not opened in 4 months ($15.99/mo) and a duplicate music plan ($10.99/mo).",
+ "Approving both cancellations would save roughly $324 per year.",
+ ],
+ activityLogEvents: [
+ "Subscriptions detected.",
+ "Usage estimated.",
+ "Savings calculated.",
+ "Cancellation approval requested.",
+ ],
+ failureStates: [
+ "Subscription confidence low.",
+ "Login required.",
+ "Cancellation blocked.",
+ ],
+ setupChecklist: [
+ "Import statement file.",
+ "Set unused threshold.",
+ "Confirm cancellation approval rule.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.personalRecordsFiling,
+ name: "Personal Records Filing",
+ category: "Secure Files",
+ prompt:
+ "Log into my employee or provider portal, download important documents, and file them in my secure records folder.",
+ recommendedAgent: "Records Agent",
+ recommendedAgentTemplateId: AGENT_TEMPLATE_IDS.documentOrganizer,
+ requiredConnections: ["Browser workflow", "Files/knowledge"],
+ optionalConnections: ["Calendar reminders"],
+ triggerType: "Schedule",
+ approvalRequirements: [
+ "Approval required before browser workflow.",
+ "Approval required before uploading sensitive documents.",
+ ],
+ fileProcessingNeeds: [
+ "PDF classification.",
+ "Sensitive flag.",
+ "Folder organization.",
+ ],
+ browserNeeds:
+ "Login handoff and download workflow on the portal you choose.",
+ outputFormat: ["Filed records list.", "Missing document checklist."],
+ exampleOutput: [
+ "Downloaded and filed 2 pay stubs and 1 insurance card into the Secure Records folder.",
+ "Flagged the tax form as sensitive and held it for your approval before upload.",
+ "Missing: this year's W-2 is not yet posted to the portal.",
+ ],
+ activityLogEvents: [
+ "Login handoff requested.",
+ "Documents downloaded.",
+ "Sensitive flag applied.",
+ "Files filed.",
+ ],
+ failureStates: [
+ "Login required.",
+ "Portal structure changed.",
+ "Download failed.",
+ ],
+ setupChecklist: [
+ "Choose portal and login handoff.",
+ "Choose secure folder.",
+ "List expected documents.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.legalDocumentReview,
+ name: "Legal/Document Review Helper",
+ category: "Documents",
+ prompt:
+ "Review contracts or legal documents for unusual terms, track deadlines, prepare summaries, and flag anything that needs professional review.",
+ recommendedAgent: "Document Review Agent",
+ recommendedAgentTemplateId: AGENT_TEMPLATE_IDS.documentOrganizer,
+ requiredConnections: ["File upload", "Knowledge library"],
+ optionalConnections: ["Calendar/task reminders"],
+ triggerType: "File Changed",
+ approvalRequirements: [
+ "Approval required before sharing.",
+ "Always show professional-review disclaimer.",
+ ],
+ fileProcessingNeeds: [
+ "Clause extraction.",
+ "Deadline detection.",
+ "Summary.",
+ ],
+ browserNeeds: "None by default.",
+ outputFormat: ["Review summary.", "Risk flags.", "Deadline tasks."],
+ exampleOutput: [
+ "Summary: 12-month lease with automatic renewal and a 60-day notice window.",
+ "Unusual term: tenant is responsible for all appliance repairs over $100.",
+ "Deadlines: notice to not renew is due by March 1; security deposit return within 30 days.",
+ "This document may need professional review before you sign.",
+ ],
+ activityLogEvents: [
+ "Document parsed.",
+ "Clauses extracted.",
+ "Deadlines detected.",
+ "Risk flags raised.",
+ ],
+ failureStates: [
+ "File unreadable.",
+ "Terms ambiguous.",
+ "Professional review required.",
+ ],
+ setupChecklist: [
+ "Choose upload source.",
+ "Set deadline reminder rules.",
+ "Confirm sharing approval rule.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.homeOfficeDaycareSearch,
+ name: "Home/Office/Daycare Search",
+ category: "Browser Research",
+ prompt:
+ "Use the browser to find options that fit my criteria, contact providers, track responses, and help compare options.",
+ recommendedAgent: "Search Agent",
+ requiredConnections: ["Browser workflow", "Tracker mini app"],
+ optionalConnections: ["Email/message draft", "Calendar"],
+ triggerType: "Manual",
+ approvalRequirements: ["Approval required before contacting providers."],
+ fileProcessingNeeds: ["Save brochures or PDFs."],
+ browserNeeds:
+ "Search pages, extract listings, and track responses on the sites you choose.",
+ outputFormat: ["Comparison mini app.", "Outreach drafts."],
+ exampleOutput: [
+ "Found 6 daycares within 10 miles that match your hours and budget.",
+ "Top 3 by rating and availability added to the comparison tracker.",
+ "Drafted outreach messages asking about openings and tuition, pending your approval to send.",
+ ],
+ activityLogEvents: [
+ "Search run.",
+ "Listings extracted.",
+ "Options compared.",
+ "Outreach drafted.",
+ ],
+ failureStates: [
+ "Website blocks extraction.",
+ "Contact missing.",
+ "Criteria too broad.",
+ ],
+ setupChecklist: [
+ "Enter search criteria.",
+ "Choose tracker fields.",
+ "Confirm outreach approval rule.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.bookingBriefing,
+ name: "Booking Briefing",
+ category: "Research and Calendar",
+ prompt:
+ "When I get a new appointment or booking, research the person, provider, or organization and prepare a briefing.",
+ recommendedAgent: "Briefing Agent",
+ requiredConnections: ["Google Calendar or Webhook Receiver", "Browser research"],
+ optionalConnections: ["Knowledge library"],
+ triggerType: "Calendar Event Created",
+ approvalRequirements: ["No approval required for internal briefing."],
+ fileProcessingNeeds: ["Save reference notes or brochures if found."],
+ browserNeeds: "Light research on the provider or organization you booked.",
+ outputFormat: ["Briefing card.", "Key notes.", "Suggested questions."],
+ exampleOutput: [
+ "New appointment: Dr. Patel, pediatric specialist, Thursday 3:00 PM.",
+ "Key notes: practice focuses on childhood asthma; bring insurance card and medication list.",
+ "Suggested questions: is a follow-up needed, are there triggers to watch at home, refill timing.",
+ ],
+ activityLogEvents: [
+ "Booking detected.",
+ "Research run.",
+ "Briefing generated.",
+ "Notification sent.",
+ ],
+ failureStates: ["Not enough information.", "Research unavailable."],
+ setupChecklist: [
+ "Choose calendar or webhook source.",
+ "Choose briefing template.",
+ "Set notification timing before the event.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.relationshipNurturing,
+ name: "Relationship Nurturing",
+ category: "Personal Relationships",
+ prompt:
+ "Find important people I have not contacted in a while and suggest thoughtful reasons to reconnect.",
+ recommendedAgent: "Relationship Agent",
+ requiredConnections: ["Contact tracker", "Memory database"],
+ optionalConnections: ["Calendar", "Messages"],
+ triggerType: "Schedule",
+ approvalRequirements: ["Approval required before sending outreach."],
+ fileProcessingNeeds: ["None."],
+ browserNeeds: "None by default.",
+ outputFormat: [
+ "Suggested reconnect list.",
+ "Draft messages.",
+ "Reminders.",
+ ],
+ exampleOutput: [
+ "You have not talked to Aunt Carol in 3 months; her birthday is next week.",
+ "Old friend Dana mentioned a new job last time; a quick check-in would be thoughtful.",
+ "Drafted two warm, short messages pending your approval to send.",
+ ],
+ activityLogEvents: [
+ "Contacts reviewed.",
+ "Last-contact gaps found.",
+ "Outreach drafted.",
+ "Reminder created.",
+ ],
+ failureStates: ["No contact history.", "Sensitive relationship note."],
+ setupChecklist: [
+ "Choose key contacts.",
+ "Set reconnect interval.",
+ "Confirm outreach approval rule.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.websiteChangeMonitor,
+ name: "Website Change Monitor",
+ category: "Monitoring",
+ prompt:
+ "Monitor important websites for pricing, availability, policy, or schedule changes. Tell me when something changes and what it means.",
+ recommendedAgent: "Website Monitor Agent",
+ requiredConnections: ["Browser workflow"],
+ optionalConnections: ["Message alerts", "Knowledge library"],
+ triggerType: "Schedule",
+ approvalRequirements: [
+ "No approval required for alerts.",
+ "Approval required before taking external action.",
+ ],
+ fileProcessingNeeds: ["Capture page snapshots for before/after comparison."],
+ browserNeeds:
+ "Snapshot and compare the pages you choose, such as a camp registration page.",
+ outputFormat: [
+ "Change alert.",
+ "Before/after summary.",
+ "Recommended action.",
+ ],
+ exampleOutput: [
+ "Summer camp registration page changed: spots for Session 2 just opened.",
+ "Before: 'Waitlist only.' After: 'Register now - 8 spots left.'",
+ "Recommended action: register today before it fills up.",
+ ],
+ activityLogEvents: [
+ "Page checked.",
+ "Change detected.",
+ "Importance scored.",
+ "Alert sent.",
+ ],
+ failureStates: [
+ "Website unavailable.",
+ "Change too small.",
+ "Login required.",
+ ],
+ setupChecklist: [
+ "Add pages to monitor.",
+ "Choose check frequency.",
+ "Set importance threshold.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.feedMonitor,
+ name: "Podcast/Blog/Feed Monitor",
+ category: "Insights",
+ prompt:
+ "Monitor these podcasts, blogs, feeds, or channels for topics I care about and send me a summary when something useful appears.",
+ recommendedAgent: "Feed Monitor Agent",
+ requiredConnections: ["RSS / Feed"],
+ optionalConnections: ["Email/text notification", "Knowledge library"],
+ triggerType: "RSS Feed",
+ approvalRequirements: ["No approval required for summaries."],
+ fileProcessingNeeds: ["Summarize linked articles or show notes."],
+ browserNeeds: "None by default.",
+ outputFormat: ["Digest summary.", "Saved links.", "Tags."],
+ exampleOutput: [
+ "3 new items matched your topics this week.",
+ "Parenting blog: a practical bedtime routine for toddlers (saved, tagged 'sleep').",
+ "Local school district feed: spring break dates announced (saved, tagged 'school calendar').",
+ ],
+ activityLogEvents: [
+ "Feeds checked.",
+ "Items filtered by topic.",
+ "Summaries generated.",
+ "Digest sent.",
+ ],
+ failureStates: ["Feed unavailable.", "No relevant items."],
+ setupChecklist: [
+ "Add feeds.",
+ "Set topic filters.",
+ "Choose digest schedule.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.researchDeepDive,
+ name: "Research Deep Dive",
+ category: "Research",
+ prompt:
+ "When I label something 'research,' perform a deep dive on the topic and reply with findings.",
+ recommendedAgent: "Research Agent",
+ requiredConnections: ["Browser research", "Knowledge library"],
+ optionalConnections: ["Email label trigger", "Files"],
+ triggerType: "Email Label Applied",
+ approvalRequirements: [
+ "Approval required before sending results externally.",
+ ],
+ fileProcessingNeeds: [
+ "Read uploaded reference documents.",
+ "Capture sources.",
+ ],
+ browserNeeds: "Research across multiple sources on the labeled topic.",
+ outputFormat: [
+ "Structured research report.",
+ "Source list.",
+ "Recommendations.",
+ "Follow-up tasks.",
+ ],
+ exampleOutput: [
+ "Topic: comparing three local daycare options.",
+ "Findings: cost, hours, ratios, and waitlist status for each, with pros and cons.",
+ "Recommendation: tour the top two before committing; one has an opening next month.",
+ "Follow-up tasks: schedule tours, request references.",
+ ],
+ activityLogEvents: [
+ "Label detected.",
+ "Sources searched.",
+ "Documents reviewed.",
+ "Report generated.",
+ ],
+ failureStates: [
+ "Topic too broad.",
+ "Conflicting sources.",
+ "Sensitive topic.",
+ ],
+ setupChecklist: [
+ "Choose trigger label.",
+ "Set report depth.",
+ "Confirm external-sharing approval rule.",
+ ],
+ multiAgent: [
+ {
+ name: "Research Agent",
+ icon: "Search",
+ role: "Searches the web and trusted sources for relevant information.",
+ },
+ {
+ name: "File Agent",
+ icon: "FileText",
+ role: "Checks uploaded documents and reference files for context.",
+ },
+ {
+ name: "Summary Agent",
+ icon: "Sparkles",
+ role: "Writes the final structured report with recommendations.",
+ },
+ {
+ name: "Task Agent",
+ icon: "ListTodo",
+ role: "Creates follow-up actions and reminders from the findings.",
+ },
+ {
+ name: "Memory Agent",
+ icon: "Brain",
+ role: "Stores key findings so future research builds on what you learned.",
+ },
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.weeklyOperationsSummary,
+ name: "Weekly Family Operations Summary",
+ category: "Weekly Review",
+ prompt:
+ "Create a weekly summary of what got done, what changed, what is overdue, and what needs attention next week.",
+ recommendedAgent: "Weekly Summary Agent",
+ requiredConnections: ["Activity log", "Calendar", "Tasks/reminders"],
+ optionalConnections: ["Messages", "Files", "Budget mini app"],
+ triggerType: "Schedule",
+ approvalRequirements: [
+ "Approval required before sending outside household.",
+ ],
+ fileProcessingNeeds: [
+ "Compile activity into a report.",
+ "Prepare PDF/export placeholder.",
+ ],
+ browserNeeds: "None by default.",
+ outputFormat: [
+ "Weekly report.",
+ "PDF/export placeholder.",
+ "Message thread.",
+ ],
+ exampleOutput: [
+ "Completed this week: 14 tasks, including school forms and 2 bill payments.",
+ "Overdue: prescription refill, dentist follow-up call.",
+ "Upcoming next week: soccer tournament Saturday, electric bill due, parent-teacher conference.",
+ "Money/bills: spent $612; one duplicate charge flagged.",
+ "Waiting on others: contractor quote, grandma's caregiving schedule.",
+ ],
+ activityLogEvents: [
+ "Activity log analyzed.",
+ "Task status reviewed.",
+ "Calendar lookahead built.",
+ "Summary generated.",
+ ],
+ failureStates: ["Insufficient activity.", "Missing data sources."],
+ setupChecklist: [
+ "Choose report day and time.",
+ "Select sections to include.",
+ "Confirm sharing approval rule.",
+ ],
+ },
+ {
+ id: WORKFLOW_TEMPLATE_IDS.callConversationAnalysis,
+ name: "Call/Conversation Analysis",
+ category: "Insight and Follow-Up",
+ prompt:
+ "Review recurring calls or conversations, identify patterns, and suggest improvements or follow-ups.",
+ recommendedAgent: "Conversation Analysis Agent",
+ recommendedAgentTemplateId: AGENT_TEMPLATE_IDS.documentOrganizer,
+ requiredConnections: ["Transcript/file upload"],
+ optionalConnections: ["Task/reminder connection", "Knowledge library"],
+ triggerType: "File Changed",
+ approvalRequirements: ["Approval required before sharing analysis."],
+ fileProcessingNeeds: [
+ "Transcript ingestion.",
+ "Pattern detection.",
+ "Action item extraction.",
+ ],
+ browserNeeds: "None by default.",
+ outputFormat: [
+ "Summary.",
+ "Pattern notes.",
+ "Action items.",
+ "Follow-up reminders.",
+ ],
+ exampleOutput: [
+ "Across the last 4 caregiving calls, mealtime questions come up every time.",
+ "Pattern: medication timing is repeatedly unclear; consider a shared schedule.",
+ "Action items: create a meal-and-medication chart, confirm pharmacy refill cadence.",
+ "Follow-up reminder: review the new chart on next week's call.",
+ ],
+ activityLogEvents: [
+ "Transcripts ingested.",
+ "Patterns detected.",
+ "Action items extracted.",
+ "Follow-up reminders created.",
+ ],
+ failureStates: [
+ "Transcript unreadable.",
+ "Sensitive content.",
+ "No patterns detected.",
+ ],
+ setupChecklist: [
+ "Choose transcript source.",
+ "Group recurring conversations.",
+ "Confirm sharing approval rule.",
+ ],
+ },
+];

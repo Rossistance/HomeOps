@@ -1,0 +1,180 @@
+import { useRef, useState } from "react";
+import { useStore } from "@/store/useStore";
+import { brand } from "@/brand";
+import { exportBackup, importBackup } from "@/storage/backup";
+import { PageHeader, Card, SectionTitle, Button, Toggle, Select, Badge, Modal, HealthDot, Field, TextInput, Avatar } from "@/components/ui";
+import { Icon } from "@/components/Icon";
+import { AIProvidersPanel } from "@/screens/AIProviders";
+import { backend } from "@/connectors/api";
+import { useCalmMode } from "@/lib/prefs";
+
+export function Settings() {
+  const data = useStore((s) => s.data);
+  const settings = data.settings;
+  const storageMode = useStore((s) => s.storageMode);
+  const storageError = useStore((s) => s.storageError);
+  const backendOnline = useStore((s) => s.backendOnline);
+  const health = useStore((s) => s.backendHealth);
+  const externalActionsEnabled = useStore((s) => s.externalActionsEnabled);
+  const setKillSwitch = useStore((s) => s.setKillSwitch);
+  const connectors = useStore((s) => s.connectors);
+  const updateSettings = useStore((s) => s.updateSettings);
+  const toggleSoloMode = useStore((s) => s.toggleSoloMode);
+  const reseed = useStore((s) => s.reseed);
+  const startFresh = useStore((s) => s.startFresh);
+  const importData = useStore((s) => s.importData);
+  const navigate = useStore((s) => s.navigate);
+  const toast = useStore((s) => s.toast);
+  const session = useStore((s) => s.session);
+  const logout = useStore((s) => s.logout);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [freshOpen, setFreshOpen] = useState(false);
+  const [pin, setPin] = useState("");
+  const me = data.members.find((m) => m.id === session?.actorId) ?? data.members.find((m) => m.isCurrentUser);
+  const [calm, setCalm] = useCalmMode();
+  const setOwnerPin = async () => { if (!pin) return; await backend.setSettings({ ownerPin: pin }); setPin(""); toast({ kind: "success", title: "Owner PIN set", message: "Elevated profiles now require this PIN to sign in." }); };
+
+  const onImport = async (file?: File | null) => {
+    if (!file) return;
+    const res = await importBackup(file);
+    if (res.ok && res.data) importData(res.data);
+    else toast({ kind: "error", title: "Import failed", message: res.error });
+  };
+  const storageLabel = storageMode === "indexeddb" ? "IndexedDB (primary)" : storageMode === "localstorage" ? "localStorage (fallback)" : "Unavailable";
+
+  return (
+    <div className="animate-fade-in max-w-3xl">
+      <PageHeader title="Settings" subtitle="Runtime, connectors, privacy, and household preferences." icon="Settings" />
+      <input ref={fileRef} type="file" accept="application/json" className="hidden" onChange={(e) => onImport(e.target.files?.[0])} />
+
+      <div className="space-y-5">
+        {/* Account / session */}
+        <Card className="card-pad">
+          <SectionTitle icon="UserCircle">Profile & session</SectionTitle>
+          <div className="flex flex-wrap items-center gap-3">
+            {me && <Avatar initials={me.initials} color={me.avatarColor} size={40} />}
+            <div className="flex-1">
+              <p className="text-sm font-medium text-ink-800">{session?.actorName ?? me?.displayName}</p>
+              <p className="text-xs text-ink-500">Signed in · {session?.role ?? me?.role} {session?.csrf ? "" : "(local-only — backend offline)"}</p>
+            </div>
+            <Button size="sm" variant="secondary" onClick={() => logout()}><Icon name="LogOut" size={14} /> Sign out / switch profile</Button>
+          </div>
+          <div className="mt-3 border-t border-sand-100 pt-3">
+            <Field label="Owner PIN (protects Owner / Adult Admin sign-in)" hint="Set or change the PIN required to sign in as an elevated profile.">
+              <div className="flex gap-2">
+                <TextInput type="password" value={pin} placeholder="Choose a PIN" onChange={(e) => setPin(e.target.value)} />
+                <Button variant="secondary" disabled={!pin} onClick={setOwnerPin}>Set PIN</Button>
+              </div>
+            </Field>
+          </div>
+        </Card>
+
+        {/* Backend runtime */}
+        <Card className="card-pad">
+          <SectionTitle icon="Server">Backend runtime</SectionTitle>
+          <div className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+            <HealthDot ok={backendOnline} label={backendOnline ? "Online" : "Offline"} />
+            {health && <span className="text-ink-500">v{health.version} · {health.runtime}</span>}
+            <span className="text-ink-500">Browser automation: {health?.browserRuntime ? "runtime connected" : "not connected"}</span>
+          </div>
+          {health && <p className="mb-2 text-xs text-ink-500">Webhook base URL: <code className="rounded bg-sand-100 px-1">{health.webhookBaseUrl}</code></p>}
+          {!backendOnline && <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-600">The runtime is offline. Run <code className="rounded bg-sand-200 px-1">npm run dev</code> (it starts the backend + web together).</p>}
+          <Row label="External actions" desc="Master kill switch — when off, the backend blocks every write/send tool.">
+            <Toggle checked={externalActionsEnabled} onChange={(v) => setKillSwitch(v)} />
+          </Row>
+        </Card>
+
+        {/* Connectors */}
+        <Card className="card-pad">
+          <SectionTitle icon="Plug" action={<Button size="sm" variant="secondary" onClick={() => navigate("connections")}>Open Connections</Button>}>Connectors</SectionTitle>
+          <p className="mb-2 text-sm text-ink-500">{connectors.filter((c) => c.live).length} of {connectors.length} connectors are live. Configure providers, OAuth, API keys, and webhooks in Connections.</p>
+          <div className="flex flex-wrap gap-1.5">{connectors.map((c) => <Badge key={c.id} color="gray">{c.name}</Badge>)}</div>
+        </Card>
+
+        {/* AI providers (real adapters) */}
+        <Card className="card-pad">
+          <SectionTitle icon="Sparkles">AI providers</SectionTitle>
+          <AIProvidersPanel />
+        </Card>
+
+        {/* Privacy */}
+        <Card className="card-pad">
+          <SectionTitle icon="Lock">Privacy</SectionTitle>
+          <Row label="Sensitive memories stay within their space"><Toggle checked={settings.privacy.sensitiveMemoryStaysInSpace} onChange={(v) => updateSettings({ privacy: { ...settings.privacy, sensitiveMemoryStaysInSpace: v } })} /></Row>
+          <Row label="Require approval for actions outside the household"><Toggle checked={settings.privacy.requireApprovalForExternal} onChange={(v) => updateSettings({ privacy: { ...settings.privacy, requireApprovalForExternal: v } })} /></Row>
+        </Card>
+
+        {/* Notifications */}
+        <Card className="card-pad">
+          <SectionTitle icon="Bell">Notifications</SectionTitle>
+          <Row label="In-app notifications"><Toggle checked={settings.notifications.inApp} onChange={(v) => updateSettings({ notifications: { ...settings.notifications, inApp: v } })} /></Row>
+          <Row label="Email digest" desc="Requires a configured email connector."><Toggle checked={settings.notifications.emailDigest} onChange={(v) => updateSettings({ notifications: { ...settings.notifications, emailDigest: v } })} /></Row>
+          <Row label="Text-style alerts" desc="Requires a configured messaging connector."><Toggle checked={settings.notifications.textAlerts} onChange={(v) => updateSettings({ notifications: { ...settings.notifications, textAlerts: v } })} /></Row>
+        </Card>
+
+        {/* Appearance & solo mode */}
+        <Card className="card-pad">
+          <SectionTitle icon="Palette">Appearance & branding</SectionTitle>
+          <Row label="Theme"><Select value={settings.theme} onChange={(e) => updateSettings({ theme: e.target.value as "warm" | "warm-contrast" })} className="!w-44"><option value="warm">Warm</option><option value="warm-contrast">Warm (higher contrast)</option></Select></Row>
+          <p className="mt-2 rounded-lg bg-sand-50 px-3 py-2 text-sm text-ink-500">Rename the whole product in <code className="rounded bg-sand-200 px-1">src/brand.ts</code> — currently “{brand.name}”.</p>
+          <Row label="Solo Professional Mode" desc="Optionally surfaces side-business workflows. Off by default — HomeOps is family-first."><Toggle checked={settings.soloProfessionalMode} onChange={() => toggleSoloMode()} /></Row>
+        </Card>
+
+        {/* Comfort & accessibility — inclusive, neurodivergent-friendly controls */}
+        <Card className="card-pad">
+          <SectionTitle icon="Waves">Comfort & accessibility</SectionTitle>
+          <Row label="Calm Mode" desc="Stills motion, flattens depth, and softens color for a quieter, lower-stimulation interface.">
+            <Toggle checked={calm} onChange={(v) => setCalm(v)} ariaLabel="Calm Mode" />
+          </Row>
+          <p className="mt-2 rounded-xl bg-surface-sunken/60 px-3 py-2 text-sm text-ink-500">
+            Motion also follows your device's “reduce motion” setting automatically. Calm Mode goes further — turning off the ambient hearth glow and the lift-on-touch depth across every screen.
+          </p>
+        </Card>
+
+        {/* Data & backup */}
+        <Card className="card-pad">
+          <SectionTitle icon="Database">Local data & backup</SectionTitle>
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-sm text-ink-600"><Badge color={storageError ? "coral" : "sage"}>{storageLabel}</Badge><span>Schema v{data.schemaVersion}</span></div>
+          {storageError && <p className="mb-3 rounded-lg bg-coral-50 px-3 py-2 text-sm text-coral-600">{storageError}</p>}
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => exportBackup(data)}><Icon name="Download" size={15} /> Export backup</Button>
+            <Button variant="secondary" onClick={() => fileRef.current?.click()}><Icon name="Upload" size={15} /> Import backup</Button>
+            <Button variant="secondary" onClick={() => setResetOpen(true)}><Icon name="RotateCcw" size={15} /> Reset sample data</Button>
+            <Button variant="danger" onClick={() => setFreshOpen(true)}><Icon name="Trash2" size={15} /> Clear data & start my own</Button>
+          </div>
+          <p className="mt-2 text-xs text-ink-500">"Start my own" erases the sample household from this browser and takes you to first-run setup to create your own.</p>
+        </Card>
+
+        {/* Disclaimers */}
+        <Card className="card-pad">
+          <SectionTitle icon="ShieldAlert">Safety & disclaimers</SectionTitle>
+          <ul className="space-y-2 text-sm text-ink-600">
+            <li className="flex items-start gap-2"><Icon name="Scale" size={15} className="mt-0.5 shrink-0 text-ink-400" />Legal/document review summarizes and flags issues — <strong>not legal advice</strong>.</li>
+            <li className="flex items-start gap-2"><Icon name="Stethoscope" size={15} className="mt-0.5 shrink-0 text-ink-400" />Medical and caregiving notes <strong>do not replace professional advice</strong>.</li>
+            <li className="flex items-start gap-2"><Icon name="Wallet" size={15} className="mt-0.5 shrink-0 text-ink-400" />Review financial decisions before acting.</li>
+            <li className="flex items-start gap-2"><Icon name="ShieldCheck" size={15} className="mt-0.5 shrink-0 text-ink-400" />Every external action runs through a real connector and an approval gate — nothing leaves the household without your say-so.</li>
+          </ul>
+        </Card>
+      </div>
+
+      <Modal open={resetOpen} onClose={() => setResetOpen(false)} title="Reset sample data?" icon="RotateCcw" footer={<><Button variant="ghost" onClick={() => setResetOpen(false)}>Cancel</Button><Button variant="danger" onClick={() => { reseed(); setResetOpen(false); }}>Reset to The Harper Family</Button></>}>
+        <p className="text-sm text-ink-600">This clears local changes and restores the sample household. Export a backup first if you want to keep your changes. (Connector configuration in the backend vault is not affected.)</p>
+      </Modal>
+
+      <Modal open={freshOpen} onClose={() => setFreshOpen(false)} title="Clear data and start your own?" icon="Trash2" footer={<><Button variant="ghost" onClick={() => setFreshOpen(false)}>Cancel</Button><Button variant="danger" onClick={() => { setFreshOpen(false); void startFresh(); }}><Icon name="Trash2" size={15} /> Erase & start setup</Button></>}>
+        <p className="text-sm text-ink-600">This permanently erases the Harper sample household (members, spaces, agents, files, messages) from <strong>this browser</strong> and signs you out, then opens first-run setup so you can create your own household.</p>
+        <p className="mt-2 text-sm text-ink-600">Want to keep anything first? Click <strong>Export backup</strong> — you can re-import it later. Connected accounts in the backend vault aren't touched.</p>
+      </Modal>
+    </div>
+  );
+}
+
+function Row({ label, desc, children }: { label: string; desc?: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-b border-sand-100 py-2.5 last:border-0">
+      <div><p className="text-sm font-medium text-ink-800">{label}</p>{desc && <p className="text-xs text-ink-500">{desc}</p>}</div>
+      <div className="shrink-0">{children}</div>
+    </div>
+  );
+}

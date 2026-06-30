@@ -1,0 +1,38 @@
+# ============================================================
+# HomeOps AI — Render.com backend deployment
+# Copy this file to the REPO ROOT before deploying, or paste
+# the settings manually in the Render dashboard.
+# ============================================================
+services:
+  - type: web
+    name: homeops-backend
+    env: node
+    region: oregon
+    plan: free
+    rootDir: .
+    buildCommand: ""
+    startCommand: node server/index.mjs
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "8787"
+      # Set HOMEOPS_PUBLIC_URL to the Render service URL after first deploy.
+      - key: HOMEOPS_PUBLIC_URL
+        value: "https://homeops-backend.onrender.com"
+      # Set to your Netlify/Vercel frontend URL (comma-separated for multiple).
+      - key: HOMEOPS_ALLOWED_ORIGINS
+        value: "https://your-homeops-app.netlify.app,https://your-homeops-app.vercel.app"
+      # Google OAuth — set these in Render dashboard (never commit real values).
+      - key: HOMEOPS_OAUTH_GOOGLE_CLIENT_ID
+        sync: false
+      - key: HOMEOPS_OAUTH_GOOGLE_CLIENT_SECRET
+        sync: false
+      # Optional — other providers.
+      - key: HOMEOPS_OAUTH_MICROSOFT_CLIENT_ID
+        sync: false
+      - key: HOMEOPS_OAUTH_MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: HOMEOPS_OAUTH_SLACK_CLIENT_ID
+        sync: false
+      - key: HOMEOPS_OAUTH_SLACK_CLIENT_SECRET
+        sync: false

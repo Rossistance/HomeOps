@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#1f2535"/>
+  <!-- House silhouette -->
+  <path d="M256 112 L428 272 V408 Q428 424 412 424 H100 Q84 424 84 408 V272 Z" fill="#6fa873"/>
+  <!-- Door cutout -->
+  <rect x="210" y="320" width="92" height="104" rx="8" fill="#1f2535"/>
+  <!-- Left window -->
+  <rect x="118" y="280" width="76" height="68" rx="6" fill="#1f2535" opacity="0.45"/>
+  <!-- Right window -->
+  <rect x="318" y="280" width="76" height="68" rx="6" fill="#1f2535" opacity="0.45"/>
+</svg>

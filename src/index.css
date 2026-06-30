@@ -1,0 +1,280 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===========================================================================
+   Tactile Hearth — a warm, material design system for a calm home OS.
+   Surfaces behave like lit physical materials (paper, ceramic, clay); depth
+   encodes hierarchy and "what's pressable"; motion is calm by default and
+   settles like a real object. Everything respects reduced-motion + Calm Mode.
+   =========================================================================== */
+
+:root {
+  color-scheme: light;
+  --ring: 210 122 53; /* ember focus ring (r g b) */
+  --font-display: "Fraunces", Georgia, Cambria, "Times New Roman", serif;
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Live ember glow — referenced by the hearth + accents. */
+  --ember-glow: radial-gradient(120% 120% at 78% -10%, rgba(228, 127, 53, 0.42), transparent 55%);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply text-ink-800 antialiased;
+  font-family: var(--font-ui);
+  /* Warm, layered "room light" — daylight from above-right, hearth warmth below. */
+  background-color: #ece3d5;
+  background-image:
+    radial-gradient(1100px 620px at 85% -12%, rgba(228, 127, 53, 0.10), transparent 58%),
+    radial-gradient(1000px 560px at -8% 8%, rgba(125, 102, 192, 0.08), transparent 55%),
+    radial-gradient(1100px 600px at 50% 118%, rgba(111, 168, 115, 0.10), transparent 56%);
+  background-repeat: no-repeat;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* Display face for headings / heroes / big numbers. */
+.font-display {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  letter-spacing: -0.01em;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(174, 77, 24, 0.28) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(82, 93, 118, 0.30);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(82, 93, 118, 0.5);
+  background-clip: content-box;
+}
+
+@layer components {
+  /* ----------------------------- Surfaces ------------------------------- */
+  .card {
+    @apply relative rounded-3xl border border-ink-900/[0.06] bg-surface-raised shadow-e1
+      transition-[transform,box-shadow] duration-200 ease-out;
+  }
+  .card-pad {
+    @apply p-5;
+  }
+  .panel {
+    @apply rounded-3xl border border-ink-900/[0.06] bg-surface-raised shadow-e1;
+  }
+  /* Tactile interactions — opt-in utilities used by cards, tiles, buttons. */
+  .lift {
+    @apply transition-[transform,box-shadow] duration-200 ease-out hover:-translate-y-0.5 hover:shadow-e2;
+  }
+  .pressable {
+    @apply active:scale-[0.985] active:transition-none;
+  }
+  /* A sunken "well" — inputs, inset regions, recessed tracks. */
+  .well {
+    @apply rounded-2xl border border-ink-900/[0.05] bg-surface-sunken shadow-well;
+  }
+
+  /* ------------------------------ Buttons ------------------------------- */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-2xl px-3.5 py-2 text-sm font-semibold
+      transition-[transform,box-shadow,background-color,border-color] duration-150 ease-out
+      focus:outline-none focus-visible:ring-2 focus-visible:ring-[rgb(var(--ring))] focus-visible:ring-offset-2
+      focus-visible:ring-offset-surface-raised disabled:cursor-not-allowed disabled:opacity-50
+      active:scale-[0.97];
+  }
+  .btn-primary {
+    @apply btn border border-ink-900/40 bg-gradient-to-b from-ink-700 to-ink-900 text-white
+      shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_2px_6px_rgba(23,27,38,0.28)]
+      hover:from-ink-600 hover:to-ink-800 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_6px_16px_rgba(23,27,38,0.30)];
+  }
+  /* Ember — the signature warm CTA, for the single most inviting action on a view.
+     Dark ink text on the bright ember keeps the warm "firelight" look while meeting
+     WCAG AA (ink #171b26 on ember-400 ≈ 6:1; white would only reach ~2.8:1). */
+  .btn-ember {
+    @apply btn border border-ember-600/40 bg-gradient-to-b from-ember-400 to-ember-500 text-ink-900
+      shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_4px_14px_rgba(214,108,46,0.34)]
+      hover:from-ember-300 hover:to-ember-400 hover:shadow-ember;
+  }
+  .btn-secondary {
+    @apply btn border border-ink-900/10 bg-surface-raised text-ink-700
+      shadow-[inset_0_1px_0_rgba(255,255,255,0.7),0_1px_2px_rgba(38,30,20,0.05)]
+      hover:border-ink-900/20 hover:bg-surface-overlay;
+  }
+  .btn-ghost {
+    @apply btn text-ink-600 hover:bg-ink-900/[0.05];
+  }
+  /* Semantic action buttons — solid -600 so white text clears WCAG AA
+     (coral-600 ≈ 4.6:1, sage-600 ≈ 5.9:1); hover darkens slightly for feedback
+     without dropping contrast. */
+  .btn-danger {
+    @apply btn border border-coral-600/50 bg-coral-600 text-white
+      shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_3px_10px_rgba(196,80,47,0.30)]
+      hover:brightness-95;
+  }
+  .btn-success {
+    @apply btn border border-sage-600/50 bg-sage-600 text-white
+      shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_3px_10px_rgba(67,110,70,0.28)]
+      hover:brightness-95;
+  }
+  .btn-sm {
+    @apply rounded-xl px-2.5 py-1.5 text-xs;
+  }
+
+  /* ------------------------------ Inputs -------------------------------- */
+  .input {
+    @apply w-full rounded-2xl border border-ink-900/10 bg-surface-rim px-3.5 py-2.5 text-sm text-ink-800
+      placeholder:text-ink-400 shadow-well
+      transition-shadow focus:border-ember-400/60 focus:outline-none
+      focus:ring-2 focus:ring-[rgba(210,122,53,0.28)];
+  }
+  .label {
+    @apply mb-1.5 block text-xs font-semibold uppercase tracking-wide text-ink-500;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+
+  .section-title {
+    @apply text-xs font-semibold uppercase tracking-[0.12em] text-ink-500;
+  }
+
+  /* --------------------------- Navigation ------------------------------- */
+  .nav-link {
+    @apply flex items-center gap-3 rounded-2xl px-3 py-2.5 text-sm font-medium text-ink-300
+      transition-[background-color,color,box-shadow,transform] duration-150
+      hover:bg-white/[0.07] hover:text-white
+      focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ember-400;
+  }
+  .nav-link-active {
+    @apply bg-white/[0.10] text-white
+      shadow-[inset_0_1px_0_rgba(255,255,255,0.08),inset_3px_0_0_0_theme(colors.ember.400)];
+  }
+
+  .data-row {
+    @apply flex items-center justify-between gap-3 rounded-2xl border border-transparent px-3 py-2.5
+      transition-colors hover:border-ink-900/[0.06] hover:bg-surface-overlay;
+  }
+
+  /* ----------------------- Signature: the Hearth ------------------------ */
+  /* Dark, dimensional panels (hero, sidebar contexts) with a warm ember glow. */
+  .hero {
+    @apply relative overflow-hidden rounded-[1.9rem] border border-white/10 text-white shadow-e3;
+    background-image: linear-gradient(135deg, #1b2030 0%, #262e42 48%, #333d54 100%);
+  }
+  /* The Hearth — the emotional center. A lit panel whose warmth comes from a
+     soft ember glow in the upper-right, like firelight in a room. */
+  .hearth {
+    @apply relative overflow-hidden rounded-[1.9rem] border border-white/10 text-white shadow-e3;
+    background-image:
+      var(--ember-glow),
+      linear-gradient(150deg, #1b2030 0%, #232a3c 46%, #2c3144 100%);
+  }
+  .hearth-glow {
+    @apply pointer-events-none absolute -right-10 -top-16 h-64 w-64 rounded-full;
+    background: radial-gradient(closest-side, rgba(228, 127, 53, 0.55), rgba(228, 127, 53, 0) 72%);
+    filter: blur(6px);
+  }
+  .glass {
+    @apply border border-white/50 bg-surface-raised/70 backdrop-blur-xl;
+  }
+  .ring-soft {
+    @apply ring-1 ring-ink-900/5;
+  }
+}
+
+/* ------------------------------- Motion --------------------------------- */
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slide-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slide-in-right { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes scale-in { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: scale(1); } }
+@keyframes soft-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+@keyframes shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+.animate-fade-in { animation: fade-in 0.18s ease-out; }
+.animate-slide-up { animation: slide-up 0.22s cubic-bezier(0.22, 1, 0.36, 1); }
+.animate-slide-in-right { animation: slide-in-right 0.26s cubic-bezier(0.22, 1, 0.36, 1); }
+.animate-scale-in { animation: scale-in 0.16s ease-out; }
+.animate-soft-pulse { animation: soft-pulse 1.6s ease-in-out infinite; }
+
+/* Staggered "rise" for grids/lists — set --i on children for a gentle cascade. */
+.stagger > * { animation: rise 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; animation-delay: calc(var(--i, 0) * 45ms); }
+
+.skeleton {
+  background: linear-gradient(90deg, rgba(38,30,20,0.05) 25%, rgba(38,30,20,0.09) 37%, rgba(38,30,20,0.05) 63%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+/* ----------------- Inclusive: Calm Mode + reduced motion ---------------- *
+ * Calm Mode (toggled in Settings, persisted, applied as data-calm on <html>)
+ * flattens depth, stills all motion, and softens color — for neurodivergent
+ * comfort and lower sensory load. prefers-reduced-motion gets the motion half
+ * automatically. Both are real, working behaviors, not decoration.            */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+html[data-calm="true"] {
+  --ember-glow: none;
+}
+html[data-calm="true"] body {
+  background-image: none; /* still, even surface — no ambient glows */
+}
+html[data-calm="true"] *,
+html[data-calm="true"] *::before,
+html[data-calm="true"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+/* Flatten depth + lift in Calm Mode: surfaces stay clearly bordered for
+   contrast, but the dimensional shadows and hover translate are removed. */
+html[data-calm="true"] .card,
+html[data-calm="true"] .panel,
+html[data-calm="true"] .well,
+html[data-calm="true"] .btn,
+html[data-calm="true"] .btn-primary,
+html[data-calm="true"] .btn-ember,
+html[data-calm="true"] .btn-secondary,
+html[data-calm="true"] .input,
+html[data-calm="true"] .hero,
+html[data-calm="true"] .hearth {
+  box-shadow: none !important;
+}
+html[data-calm="true"] .card,
+html[data-calm="true"] .panel {
+  border-color: rgba(23, 27, 38, 0.14);
+}
+html[data-calm="true"] .lift:hover,
+html[data-calm="true"] .pressable:active {
+  transform: none !important;
+}
+html[data-calm="true"] .hearth-glow,
+html[data-calm="true"] .animate-soft-pulse {
+  display: none;
+  animation: none !important;
+}
+html[data-calm="true"] .hearth {
+  background-image: linear-gradient(150deg, #1f2535 0%, #262d3e 100%);
+}
+/* Gentler color load. */
+html[data-calm="true"] body { filter: saturate(0.86); }

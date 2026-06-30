@@ -1,0 +1,14 @@
+{
+  "name": "homeops-browser-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Optional Playwright headless-browser runtime for the HomeOps Browser Automation connector. Runs as its own process so the main backend stays dependency-free.",
+  "scripts": {
+    "start": "node index.mjs",
+    "setup": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

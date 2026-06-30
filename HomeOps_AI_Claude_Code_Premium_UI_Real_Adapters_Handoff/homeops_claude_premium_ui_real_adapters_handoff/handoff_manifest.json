@@ -1,0 +1,48 @@
+{
+  "package": "HomeOps_AI_Claude_Code_Premium_UI_Real_Adapters_Handoff",
+  "created_at": "2026-06-20T06:37:50.219066Z",
+  "purpose": "Second-stage handoff for Claude Code to rebuild the Claude-created HomeOps AI app with premium UI and real adapter infrastructure.",
+  "source_audit": {
+    "uploaded_package": "/mnt/data/home ops claude.zip",
+    "inspected_root": "/mnt/data/home_ops_claude_inspect",
+    "build_after_npm_ci": "npm run build succeeded after dependencies were installed",
+    "major_findings": [
+      "README explicitly states demo adapters only and no backend required.",
+      "brand.ts contains demoMode: true.",
+      "Connections UI includes 'Authorize (demo)' and describes demo authorization.",
+      "Seed data includes demo providers, demo URLs, demo webhook URLs, demo browser workflows, and disabled placeholder AI providers.",
+      "Workflow templates repeatedly refer to demo connections.",
+      "UI structure is functional but generic: left sidebar, simple card grid, low emotional product quality, limited family operating-system feel.",
+      "Current architecture is frontend/local-first; real OAuth, webhooks, background jobs, cloud browser sessions, and secret storage require backend/runtime additions."
+    ]
+  },
+  "non_negotiables": [
+    "Existing UI below quality bar",
+    "No restyle-only pass",
+    "No simulated adapters",
+    "No mock external success",
+    "Real connector infrastructure required",
+    "Backend/runtime boundaries required",
+    "Development first; validation after implementation",
+    "Loopback gates block premature success claims"
+  ],
+  "files": [
+    "00_CLAUDE_CODE_STARTER_PROMPT_EXECUTE_PREMIUM_UI_REAL_ADAPTERS.md",
+    "01_MASTER_RESCUE_BUILD_PROMPT.md",
+    "02_CURRENT_CLAUDE_BUILD_AUDIT.md",
+    "03_PREMIUM_FAMILY_OS_PRODUCT_AND_UI_DIRECTION.md",
+    "04_SCREEN_BY_SCREEN_REDESIGN_SPEC.md",
+    "05_DESIGN_SYSTEM_AND_VISUAL_QUALITY_BAR.md",
+    "06_REAL_ADAPTER_MANDATE_NO_MOCKS_POLICY.md",
+    "07_CONNECTOR_INFRASTRUCTURE_ARCHITECTURE.md",
+    "08_TOOL_TRIGGER_APPROVAL_EXECUTION_ENGINE.md",
+    "09_BACKEND_AUTH_SECRETS_BROWSER_AUTOMATION_BOUNDARIES.md",
+    "10_IMPLEMENTATION_SEQUENCE_CLAUDE_CODE.md",
+    "11_SUCCESS_CRITERIA_AND_LOOPBACK_AUDIT_GATES.md",
+    "12_VISUAL_QA_AND_SCREENSHOT_AUDIT.md",
+    "13_FINAL_HANDOFF_REPORT_TEMPLATE.md",
+    "14_SOURCE_CONTEXT_AND_REFERENCES.md",
+    "CLAUDE.md",
+    "README.md"
+  ]
+}

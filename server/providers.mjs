@@ -1,0 +1,273 @@
+// HomeOps connector platform — first-party provider registry + scope catalog +
+// declarative tool manifests. No managed connector provider is used.
+//
+// Client credentials are read from deployment ENVIRONMENT VARIABLES only and are
+// never serialized to any API response. Tool executors receive a bound `api()`
+// that calls the real provider with the connected account's token (auto-refresh).
+// Health/identity are real network calls — nothing here is seeded or simulated.
+
+const env = (name) => (name ? process.env[name] : undefined);
+
+/**
+ * Each ProviderDef:
+ *  - authType: "oauth2"
+ *  - clientIdEnv / clientSecretEnv: deployment env var NAMES (values never leave the server)
+ *  - tokenAuth: "body" | "basic"      (how client creds are presented at token exchange)
+ *  - tokenStyle: "form" | "json"
+ *  - scopes: catalog entries the consent screen lists
+ *  - identityFromToken(raw) OR identity(api): resolve { externalAccountId, displayName }
+ *  - health(api): real reachability check
+ *  - tools: declarative manifests with run(api, input)
+ * `api(url, opts)` resolves to { ok, status, json, text }.
+ */
+export const PROVIDERS = [
+  {
+    id: "google",
+    name: "Google",
+    category: "Email, Calendar & Drive",
+    authType: "oauth2",
+    authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+    tokenUrl: "https://oauth2.googleapis.com/token",
+    usePKCE: true, scopeSeparator: " ", refresh: "rotating",
+    tokenAuth: "body", tokenStyle: "form",
+    extraAuthParams: { access_type: "offline", prompt: "consent" },
+    clientIdEnv: "HOMEOPS_OAUTH_GOOGLE_CLIENT_ID",
+    clientSecretEnv: "HOMEOPS_OAUTH_GOOGLE_CLIENT_SECRET",
+    scopes: [
+      { key: "gmail.read", oauthScope: "https://www.googleapis.com/auth/gmail.readonly", label: "Read Gmail", risk: "Sensitive", enablesTools: ["gmail.search"] },
+      { key: "gmail.send", oauthScope: "https://www.googleapis.com/auth/gmail.send", label: "Send email", risk: "High", enablesTools: ["gmail.send"] },
+      { key: "calendar", oauthScope: "https://www.googleapis.com/auth/calendar.events", label: "Manage calendar events", risk: "Medium", enablesTools: ["calendar.list", "calendar.create"] },
+      { key: "drive", oauthScope: "https://www.googleapis.com/auth/drive.readonly", label: "Read Google Drive", risk: "Medium", enablesTools: ["drive.list"] },
+    ],
+    identity: async (api) => { const r = await api("https://www.googleapis.com/oauth2/v2/userinfo"); return { externalAccountId: r.json?.id ?? r.json?.email, displayName: r.json?.email ?? "Google account" }; },
+    health: async (api) => { const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/profile"); return { ok: r.ok, status: r.ok ? "healthy" : "error", detail: r.json?.emailAddress }; },
+    tools: [
+      { id: "gmail.search", name: "Search inbox", action: "Read", risk: "Sensitive", requiresApproval: false, scopes: ["gmail.read"], inputs: [{ key: "query", label: "Search query", type: "text", default: "newer_than:7d" }],
+        run: async (api, input) => {
+          const q = encodeURIComponent(input.query || "newer_than:7d");
+          const list = (await api(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5&q=${q}`)).json;
+          const messages = [];
+          for (const m of (list.messages ?? []).slice(0, 5)) {
+            const mj = (await api(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`)).json;
+            const hdr = (n) => mj.payload?.headers?.find((h) => h.name === n)?.value;
+            messages.push({ id: m.id, subject: hdr("Subject"), from: hdr("From"), snippet: mj.snippet });
+          }
+          return { query: input.query || "newer_than:7d", count: messages.length, messages };
+        } },
+      { id: "gmail.send", name: "Send email", action: "Send", risk: "High", requiresApproval: true, scopes: ["gmail.send"], inputs: [{ key: "to", label: "To", type: "text", required: true }, { key: "subject", label: "Subject", type: "text", required: true }, { key: "body", label: "Message", type: "textarea" }],
+        run: async (api, input) => {
+          if (!input.to || !input.subject) throw new Error("Provide `to` and `subject`.");
+          const raw = Buffer.from(`To: ${input.to}\r\nSubject: ${input.subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${input.body ?? ""}`, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+          const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ raw }) });
+          if (!r.ok) throw new Error(r.json?.error?.message ?? "Gmail send failed");
+          return { sent: true, id: r.json.id, to: input.to };
+        } },
+      { id: "calendar.list", name: "List events", action: "Read", risk: "Low", requiresApproval: false, scopes: ["calendar"], inputs: [],
+        run: async (api) => { const r = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=10&singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(new Date().toISOString())}`); return { count: (r.json.items ?? []).length, events: (r.json.items ?? []).map((e) => ({ summary: e.summary, start: e.start?.dateTime ?? e.start?.date, location: e.location })) }; } },
+      { id: "calendar.create", name: "Create event", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["calendar"], inputs: [{ key: "summary", label: "Title", type: "text", required: true }, { key: "start", label: "Start (ISO)", type: "text", required: true }, { key: "location", label: "Location", type: "text" }],
+        run: async (api, input) => {
+          if (!input.summary || !input.start) throw new Error("Provide `summary` and `start`.");
+          const end = new Date(new Date(input.start).getTime() + 3600000).toISOString();
+          const r = await api("https://www.googleapis.com/calendar/v3/calendars/primary/events", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ summary: input.summary, start: { dateTime: input.start }, end: { dateTime: end }, location: input.location }) });
+          if (!r.ok) throw new Error(r.json?.error?.message ?? "Calendar create failed");
+          return { created: true, id: r.json.id, htmlLink: r.json.htmlLink };
+        } },
+      { id: "drive.list", name: "List recent files", action: "Read", risk: "Medium", requiresApproval: false, scopes: ["drive"], inputs: [],
+        run: async (api) => { const r = await api("https://www.googleapis.com/drive/v3/files?pageSize=10&orderBy=modifiedTime desc&fields=files(id,name,mimeType,modifiedTime)"); return { count: (r.json.files ?? []).length, files: (r.json.files ?? []).map((f) => ({ id: f.id, name: f.name, type: f.mimeType, modified: f.modifiedTime })) }; } },
+    ],
+  },
+
+  {
+    id: "microsoft",
+    name: "Microsoft 365",
+    category: "Outlook, Calendar & OneDrive",
+    authType: "oauth2",
+    authUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+    tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    usePKCE: true, scopeSeparator: " ", refresh: "rotating",
+    tokenAuth: "body", tokenStyle: "form",
+    clientIdEnv: "HOMEOPS_OAUTH_MICROSOFT_CLIENT_ID",
+    clientSecretEnv: "HOMEOPS_OAUTH_MICROSOFT_CLIENT_SECRET",
+    scopes: [
+      { key: "offline", oauthScope: "offline_access", label: "Stay connected", risk: "Low", enablesTools: [] },
+      { key: "mail.read", oauthScope: "Mail.Read", label: "Read Outlook mail", risk: "Sensitive", enablesTools: ["outlook.search"] },
+      { key: "mail.send", oauthScope: "Mail.Send", label: "Send Outlook mail", risk: "High", enablesTools: ["outlook.send"] },
+      { key: "calendar", oauthScope: "Calendars.ReadWrite", label: "Manage calendar", risk: "Medium", enablesTools: ["mscal.list", "mscal.create"] },
+      { key: "files", oauthScope: "Files.Read", label: "Read OneDrive", risk: "Medium", enablesTools: ["onedrive.list"] },
+    ],
+    identity: async (api) => { const r = await api("https://graph.microsoft.com/v1.0/me"); return { externalAccountId: r.json?.id, displayName: r.json?.userPrincipalName ?? r.json?.mail ?? "Microsoft account" }; },
+    health: async (api) => { const r = await api("https://graph.microsoft.com/v1.0/me"); return { ok: r.ok, status: r.ok ? "healthy" : "error" }; },
+    tools: [
+      { id: "outlook.search", name: "Search mail", action: "Read", risk: "Sensitive", requiresApproval: false, scopes: ["mail.read"], inputs: [],
+        run: async (api) => { const r = await api("https://graph.microsoft.com/v1.0/me/messages?$top=5&$select=subject,from,bodyPreview"); return { count: (r.json.value ?? []).length, messages: (r.json.value ?? []).map((m) => ({ subject: m.subject, from: m.from?.emailAddress?.address, snippet: m.bodyPreview })) }; } },
+      { id: "outlook.send", name: "Send mail", action: "Send", risk: "High", requiresApproval: true, scopes: ["mail.send"], inputs: [{ key: "to", label: "To", type: "text", required: true }, { key: "subject", label: "Subject", type: "text", required: true }, { key: "body", label: "Message", type: "textarea" }],
+        run: async (api, input) => { if (!input.to || !input.subject) throw new Error("Provide `to` and `subject`."); const r = await api("https://graph.microsoft.com/v1.0/me/sendMail", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: { subject: input.subject, body: { contentType: "Text", content: input.body ?? "" }, toRecipients: [{ emailAddress: { address: input.to } }] } }) }); if (!r.ok) throw new Error(r.json?.error?.message ?? "Send failed"); return { sent: true, to: input.to }; } },
+      { id: "mscal.list", name: "List events", action: "Read", risk: "Low", requiresApproval: false, scopes: ["calendar"], inputs: [],
+        run: async (api) => { const r = await api("https://graph.microsoft.com/v1.0/me/events?$top=10&$select=subject,start,location"); return { count: (r.json.value ?? []).length, events: (r.json.value ?? []).map((e) => ({ summary: e.subject, start: e.start?.dateTime, location: e.location?.displayName })) }; } },
+      { id: "mscal.create", name: "Create event", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["calendar"], inputs: [{ key: "summary", label: "Title", type: "text", required: true }, { key: "start", label: "Start (ISO)", type: "text", required: true }],
+        run: async (api, input) => { if (!input.summary || !input.start) throw new Error("Provide `summary` and `start`."); const end = new Date(new Date(input.start).getTime() + 3600000).toISOString(); const r = await api("https://graph.microsoft.com/v1.0/me/events", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ subject: input.summary, start: { dateTime: input.start, timeZone: "UTC" }, end: { dateTime: end, timeZone: "UTC" } }) }); if (!r.ok) throw new Error(r.json?.error?.message ?? "Create failed"); return { created: true, id: r.json.id }; } },
+      { id: "onedrive.list", name: "List OneDrive files", action: "Read", risk: "Medium", requiresApproval: false, scopes: ["files"], inputs: [],
+        run: async (api) => { const r = await api("https://graph.microsoft.com/v1.0/me/drive/root/children?$top=10&$select=name,size,lastModifiedDateTime"); return { count: (r.json.value ?? []).length, files: (r.json.value ?? []).map((f) => ({ name: f.name, size: f.size, modified: f.lastModifiedDateTime })) }; } },
+    ],
+  },
+
+  {
+    id: "slack",
+    name: "Slack",
+    category: "Messaging",
+    authType: "oauth2",
+    authUrl: "https://slack.com/oauth/v2/authorize",
+    tokenUrl: "https://slack.com/api/oauth.v2.access",
+    usePKCE: false, scopeSeparator: ",", refresh: "none",
+    tokenAuth: "body", tokenStyle: "form",
+    clientIdEnv: "HOMEOPS_OAUTH_SLACK_CLIENT_ID",
+    clientSecretEnv: "HOMEOPS_OAUTH_SLACK_CLIENT_SECRET",
+    scopes: [
+      { key: "channels", oauthScope: "channels:read", label: "List channels", risk: "Low", enablesTools: ["slack.listChannels"] },
+      { key: "chat", oauthScope: "chat:write", label: "Post messages", risk: "High", enablesTools: ["slack.postMessage"] },
+      { key: "users", oauthScope: "users:read", label: "Read members", risk: "Low", enablesTools: [] },
+    ],
+    identityFromToken: (raw) => ({ externalAccountId: raw.team?.id ?? raw.bot_user_id, displayName: raw.team?.name ? `${raw.team.name} (Slack)` : "Slack workspace" }),
+    health: async (api) => { const r = await api("https://slack.com/api/auth.test", { method: "POST" }); return { ok: !!r.json?.ok, status: r.json?.ok ? "healthy" : "error", detail: r.json?.team }; },
+    tools: [
+      { id: "slack.listChannels", name: "List channels", action: "Read", risk: "Low", requiresApproval: false, scopes: ["channels"], inputs: [],
+        run: async (api) => { const r = await api("https://slack.com/api/conversations.list?limit=20&types=public_channel"); if (!r.json?.ok) throw new Error(r.json?.error ?? "Slack error"); return { count: (r.json.channels ?? []).length, channels: (r.json.channels ?? []).map((c) => ({ id: c.id, name: c.name })) }; } },
+      { id: "slack.postMessage", name: "Post message", action: "Send", risk: "High", requiresApproval: true, scopes: ["chat"], inputs: [{ key: "channel", label: "Channel ID", type: "text", required: true }, { key: "text", label: "Message", type: "textarea", required: true }],
+        run: async (api, input) => { if (!input.channel || !input.text) throw new Error("Provide `channel` and `text`."); const r = await api("https://slack.com/api/chat.postMessage", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: input.channel, text: input.text }) }); if (!r.json?.ok) throw new Error(r.json?.error ?? "Slack post failed"); return { sent: true, ts: r.json.ts, channel: input.channel }; } },
+    ],
+  },
+
+  {
+    id: "dropbox",
+    name: "Dropbox",
+    category: "Documents & Storage",
+    authType: "oauth2",
+    authUrl: "https://www.dropbox.com/oauth2/authorize",
+    tokenUrl: "https://api.dropboxapi.com/oauth2/token",
+    usePKCE: true, scopeSeparator: " ", refresh: "rotating",
+    tokenAuth: "body", tokenStyle: "form",
+    extraAuthParams: { token_access_type: "offline" },
+    clientIdEnv: "HOMEOPS_OAUTH_DROPBOX_CLIENT_ID",
+    clientSecretEnv: "HOMEOPS_OAUTH_DROPBOX_CLIENT_SECRET",
+    scopes: [
+      { key: "read", oauthScope: "files.metadata.read", label: "Read file list", risk: "Medium", enablesTools: ["dropbox.list"] },
+      { key: "write", oauthScope: "files.content.write", label: "Create folders/files", risk: "High", enablesTools: ["dropbox.createFolder"] },
+    ],
+    identity: async (api) => { const r = await api("https://api.dropboxapi.com/2/users/get_current_account", { method: "POST", headers: { "content-type": "application/json" }, body: "null" }); return { externalAccountId: r.json?.account_id, displayName: r.json?.email ?? r.json?.name?.display_name ?? "Dropbox account" }; },
+    health: async (api) => { const r = await api("https://api.dropboxapi.com/2/users/get_current_account", { method: "POST", headers: { "content-type": "application/json" }, body: "null" }); return { ok: r.ok, status: r.ok ? "healthy" : "error" }; },
+    tools: [
+      { id: "dropbox.list", name: "List files", action: "Read", risk: "Medium", requiresApproval: false, scopes: ["read"], inputs: [{ key: "path", label: "Folder path", type: "text", default: "" }],
+        run: async (api, input) => { const r = await api("https://api.dropboxapi.com/2/files/list_folder", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: input.path || "" }) }); if (!r.ok) throw new Error(r.json?.error_summary ?? "Dropbox error"); return { count: (r.json.entries ?? []).length, entries: (r.json.entries ?? []).map((e) => ({ name: e.name, type: e[".tag"] })) }; } },
+      { id: "dropbox.createFolder", name: "Create folder", action: "Write", risk: "High", requiresApproval: true, scopes: ["write"], inputs: [{ key: "path", label: "Folder path", type: "text", required: true, placeholder: "/HomeOps/Receipts" }],
+        run: async (api, input) => { if (!input.path) throw new Error("Provide a folder `path`."); const r = await api("https://api.dropboxapi.com/2/files/create_folder_v2", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: input.path }) }); if (!r.ok) throw new Error(r.json?.error_summary ?? "Create failed"); return { created: true, path: r.json.metadata?.path_display }; } },
+    ],
+  },
+
+  {
+    id: "notion",
+    name: "Notion",
+    category: "Notes & Docs",
+    authType: "oauth2",
+    authUrl: "https://api.notion.com/v1/oauth/authorize",
+    tokenUrl: "https://api.notion.com/v1/oauth/token",
+    usePKCE: false, scopeSeparator: " ", refresh: "none",
+    tokenAuth: "basic", tokenStyle: "json",
+    extraAuthParams: { owner: "user" },
+    extraHeaders: { "Notion-Version": "2022-06-28" },
+    clientIdEnv: "HOMEOPS_OAUTH_NOTION_CLIENT_ID",
+    clientSecretEnv: "HOMEOPS_OAUTH_NOTION_CLIENT_SECRET",
+    scopes: [
+      { key: "content", oauthScope: "", label: "Read & write shared pages", risk: "Medium", enablesTools: ["notion.search", "notion.createPage"] },
+    ],
+    identityFromToken: (raw) => ({ externalAccountId: raw.workspace_id ?? raw.bot_id, displayName: raw.workspace_name ? `${raw.workspace_name} (Notion)` : "Notion workspace" }),
+    health: async (api) => { const r = await api("https://api.notion.com/v1/users/me"); return { ok: r.ok, status: r.ok ? "healthy" : "error" }; },
+    tools: [
+      { id: "notion.search", name: "Search pages", action: "Read", risk: "Medium", requiresApproval: false, scopes: ["content"], inputs: [{ key: "query", label: "Query", type: "text" }],
+        run: async (api, input) => { const r = await api("https://api.notion.com/v1/search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query: input.query || "", page_size: 10 }) }); if (!r.ok) throw new Error(r.json?.message ?? "Notion error"); return { count: (r.json.results ?? []).length, results: (r.json.results ?? []).map((p) => ({ id: p.id, type: p.object, title: p.properties ? Object.values(p.properties).map((v) => v.title?.[0]?.plain_text).find(Boolean) : undefined })) }; } },
+      { id: "notion.createPage", name: "Create page", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["content"], inputs: [{ key: "parentPageId", label: "Parent page ID", type: "text", required: true }, { key: "title", label: "Title", type: "text", required: true }],
+        run: async (api, input) => { if (!input.parentPageId || !input.title) throw new Error("Provide `parentPageId` and `title`."); const r = await api("https://api.notion.com/v1/pages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ parent: { page_id: input.parentPageId }, properties: { title: { title: [{ text: { content: input.title } }] } } }) }); if (!r.ok) throw new Error(r.json?.message ?? "Create failed"); return { created: true, id: r.json.id, url: r.json.url }; } },
+    ],
+  },
+
+  {
+    id: "todoist",
+    name: "Todoist",
+    category: "Tasks",
+    authType: "oauth2",
+    authUrl: "https://todoist.com/oauth/authorize",
+    tokenUrl: "https://todoist.com/oauth/access_token",
+    usePKCE: false, scopeSeparator: ",", refresh: "none",
+    tokenAuth: "body", tokenStyle: "form",
+    clientIdEnv: "HOMEOPS_OAUTH_TODOIST_CLIENT_ID",
+    clientSecretEnv: "HOMEOPS_OAUTH_TODOIST_CLIENT_SECRET",
+    scopes: [
+      { key: "rw", oauthScope: "data:read_write", label: "Read & write tasks", risk: "Medium", enablesTools: ["todoist.listTasks", "todoist.createTask"] },
+    ],
+    identity: async (api) => { const r = await api("https://api.todoist.com/rest/v2/projects"); return { externalAccountId: "todoist", displayName: r.ok ? "Todoist account" : "Todoist" }; },
+    health: async (api) => { const r = await api("https://api.todoist.com/rest/v2/projects"); return { ok: r.ok, status: r.ok ? "healthy" : "error" }; },
+    tools: [
+      { id: "todoist.listTasks", name: "List tasks", action: "Read", risk: "Low", requiresApproval: false, scopes: ["rw"], inputs: [],
+        run: async (api) => { const r = await api("https://api.todoist.com/rest/v2/tasks"); if (!r.ok) throw new Error("Todoist error"); return { count: (r.json ?? []).length, tasks: (r.json ?? []).slice(0, 15).map((t) => ({ id: t.id, content: t.content, due: t.due?.date })) }; } },
+      { id: "todoist.createTask", name: "Create task", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["rw"], inputs: [{ key: "content", label: "Task", type: "text", required: true }, { key: "due_string", label: "Due (natural language)", type: "text" }],
+        run: async (api, input) => { if (!input.content) throw new Error("Provide task `content`."); const r = await api("https://api.todoist.com/rest/v2/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: input.content, due_string: input.due_string || undefined }) }); if (!r.ok) throw new Error("Create failed"); return { created: true, id: r.json.id, content: r.json.content }; } },
+    ],
+  },
+
+  {
+    id: "ticktick",
+    name: "TickTick",
+    category: "Tasks",
+    authType: "oauth2",
+    authUrl: "https://ticktick.com/oauth/authorize",
+    tokenUrl: "https://ticktick.com/oauth/token",
+    usePKCE: false, scopeSeparator: " ", refresh: "none",
+    tokenAuth: "basic", tokenStyle: "form", includeScopeInToken: true,
+    clientIdEnv: "HOMEOPS_OAUTH_TICKTICK_CLIENT_ID",
+    clientSecretEnv: "HOMEOPS_OAUTH_TICKTICK_CLIENT_SECRET",
+    scopes: [
+      { key: "read", oauthScope: "tasks:read", label: "Read tasks", risk: "Low", enablesTools: ["ticktick.listProjects"] },
+      { key: "write", oauthScope: "tasks:write", label: "Create tasks", risk: "Medium", enablesTools: ["ticktick.createTask"] },
+    ],
+    identity: async (api) => { const r = await api("https://api.ticktick.com/open/v1/project"); return { externalAccountId: "ticktick", displayName: r.ok ? "TickTick account" : "TickTick" }; },
+    health: async (api) => { const r = await api("https://api.ticktick.com/open/v1/project"); return { ok: r.ok, status: r.ok ? "healthy" : "error" }; },
+    tools: [
+      { id: "ticktick.listProjects", name: "List projects", action: "Read", risk: "Low", requiresApproval: false, scopes: ["read"], inputs: [],
+        run: async (api) => { const r = await api("https://api.ticktick.com/open/v1/project"); if (!r.ok) throw new Error("TickTick error"); return { count: (r.json ?? []).length, projects: (r.json ?? []).map((p) => ({ id: p.id, name: p.name })) }; } },
+      { id: "ticktick.createTask", name: "Create task", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["write"], inputs: [{ key: "title", label: "Task", type: "text", required: true }, { key: "projectId", label: "Project ID", type: "text" }],
+        run: async (api, input) => { if (!input.title) throw new Error("Provide task `title`."); const r = await api("https://api.ticktick.com/open/v1/task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: input.title, projectId: input.projectId || undefined }) }); if (!r.ok) throw new Error("Create failed"); return { created: true, id: r.json.id, title: r.json.title }; } },
+    ],
+  },
+];
+
+export function providerById(id) {
+  return PROVIDERS.find((p) => p.id === id);
+}
+export function toolDef(provider, toolId) {
+  return providerById(provider)?.tools.find((t) => t.id === toolId);
+}
+export function findToolGlobal(toolId) {
+  for (const p of PROVIDERS) { const t = p.tools.find((x) => x.id === toolId); if (t) return { provider: p, tool: t }; }
+  return null;
+}
+
+// Are this provider's deployment credentials present in the environment?
+export function providerConfigured(p) {
+  return !!(env(p.clientIdEnv) && env(p.clientSecretEnv));
+}
+export function clientCreds(p) {
+  return { clientId: env(p.clientIdEnv), clientSecret: env(p.clientSecretEnv) };
+}
+
+// Public, secret-free provider view for the frontend.
+export function publicProvider(p) {
+  return {
+    id: p.id, name: p.name, category: p.category, authType: p.authType,
+    readiness: providerConfigured(p) ? "configured" : "not_configured_by_deployment",
+    clientIdEnv: p.clientIdEnv, clientSecretEnv: p.clientSecretEnv, // names only, not values
+    scopes: p.scopes.map((s) => ({ key: s.key, label: s.label, risk: s.risk })),
+    tools: p.tools.map((t) => ({ id: t.id, name: t.name, action: t.action, risk: t.risk, requiresApproval: t.requiresApproval, scopes: t.scopes, inputs: t.inputs ?? [] })),
+  };
+}
+export function listProviders() {
+  return PROVIDERS.map(publicProvider);
+}

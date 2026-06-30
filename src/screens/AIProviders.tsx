@@ -1,0 +1,125 @@
+import { useEffect, useState } from "react";
+import { useStore } from "@/store/useStore";
+import { Button, Card, Field, TextInput, Badge, Select } from "@/components/ui";
+import { Icon } from "@/components/Icon";
+import { backend, type AIProvider, type AIHealth } from "@/connectors/api";
+
+/**
+ * Real AI provider control panel. Cloud providers take a single secure key entry;
+ * local providers (Ollama / LM Studio) discover models over their localhost APIs.
+ * Health performs a real reachability check; "Send test message" makes a real call.
+ */
+export function AIProvidersPanel() {
+  const toast = useStore((s) => s.toast);
+  const canAdmin = useStore((s) => s.canAccess("settings"));
+  const [providers, setProviders] = useState<AIProvider[]>([]);
+  const [forms, setForms] = useState<Record<string, { apiKey: string; baseUrl: string; model: string }>>({});
+  const [health, setHealth] = useState<Record<string, AIHealth>>({});
+  const [models, setModels] = useState<Record<string, string[]>>({});
+  const [testOut, setTestOut] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = async () => {
+    const list = await backend.aiProviders();
+    setProviders(list);
+    setForms((prev) => {
+      const next = { ...prev };
+      for (const p of list) if (!next[p.id]) next[p.id] = { apiKey: "", baseUrl: p.baseUrl || p.defaultBaseUrl, model: p.model || p.defaultModel };
+      return next;
+    });
+  };
+  useEffect(() => { void load(); }, []);
+
+  const save = async (p: AIProvider) => {
+    setBusy(p.id);
+    const f = forms[p.id];
+    const r = await backend.aiSaveProvider(p.id, { apiKey: f.apiKey || undefined, baseUrl: f.baseUrl, model: f.model });
+    setBusy(null);
+    if (r.provider) { toast({ kind: "success", title: `${p.name} saved` }); setForms((s) => ({ ...s, [p.id]: { ...s[p.id], apiKey: "" } })); await load(); }
+    else toast({ kind: "error", title: "Could not save", message: r.error === "insufficient_role" ? "Admins only." : r.error });
+  };
+  const check = async (p: AIProvider) => {
+    setBusy(p.id);
+    const h = await backend.aiHealth(p.id);
+    setHealth((s) => ({ ...s, [p.id]: h }));
+    if (h.ok && h.models) setModels((s) => ({ ...s, [p.id]: h.models! }));
+    setBusy(null);
+    toast({ kind: h.ok ? "success" : "warn", title: h.ok ? `${p.name} reachable` : `${p.name}: ${h.status ?? "unreachable"}`, message: h.ok ? `${h.modelCount ?? 0} models · ${h.latencyMs ?? 0}ms` : h.message });
+  };
+  const discover = async (p: AIProvider) => {
+    setBusy(p.id);
+    const r = await backend.aiModels(p.id);
+    setBusy(null);
+    if (r.ok && r.models?.length) { setModels((s) => ({ ...s, [p.id]: r.models! })); toast({ kind: "success", title: `${r.models.length} models`, message: p.name }); }
+    else toast({ kind: "warn", title: "No models found", message: r.error ?? "Is the local server running?" });
+  };
+  const test = async (p: AIProvider) => {
+    setBusy(p.id);
+    const r = await backend.aiChat({ providerId: p.id, messages: [{ role: "user", content: "Reply with a friendly 6-word hello for a family app." }], model: forms[p.id]?.model || undefined });
+    setBusy(null);
+    setTestOut((s) => ({ ...s, [p.id]: { ok: r.ok, text: r.ok ? r.text ?? "" : r.message ?? r.error ?? "error" } }));
+  };
+  const setActive = async (p: AIProvider) => { await backend.aiSetActive(p.id); await load(); toast({ kind: "success", title: `${p.name} is the active model` }); };
+  const revoke = async (p: AIProvider) => { await backend.aiRevokeProvider(p.id); await load(); toast({ kind: "info", title: `${p.name} disconnected` }); };
+
+  return (
+    <div className="space-y-3.5">
+      <p className="text-sm leading-relaxed text-ink-500">Connect a real model provider. Cloud keys are stored only in the backend vault. Local providers run on your machine and are discovered over their localhost APIs.</p>
+      {!canAdmin && <p className="rounded-2xl border border-amber-200/70 bg-amber-50 px-3.5 py-2.5 text-sm text-amber-700">Only an Adult Admin or Owner can change provider configuration.</p>}
+      <div className="stagger space-y-3.5">
+      {providers.map((p, i) => {
+        const f = forms[p.id] ?? { apiKey: "", baseUrl: p.defaultBaseUrl, model: p.defaultModel };
+        const h = health[p.id];
+        const ms = models[p.id];
+        const out = testOut[p.id];
+        return (
+          <div key={p.id} style={{ ["--i" as string]: i }} className={`card card-pad ${p.active ? "border-ember-200" : ""}`}>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-ink-100 text-ink-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]"><Icon name={p.local ? "MonitorSmartphone" : "Sparkles"} size={16} /></span>
+              <span className="font-display text-base font-semibold text-ink-900">{p.name}</span>
+              <Badge color={p.local ? "sky" : "gray"}>{p.local ? "local" : "cloud"}</Badge>
+              {p.readiness === "configured" ? <Badge color="sage">Configured</Badge> : <Badge color="amber">Not configured</Badge>}
+              {p.active && <Badge color="sage"><Icon name="Check" size={11} /> Active</Badge>}
+              {h && <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${h.ok ? "text-sage-600" : "text-amber-600"}`}><span className={`h-1.5 w-1.5 rounded-full ${h.ok ? "bg-sage-500 animate-soft-pulse" : "bg-amber-500"}`} />{h.ok ? `reachable · ${h.modelCount ?? 0} models` : `${h.status ?? "unreachable"}`}</span>}
+            </div>
+            <p className="mt-2 text-xs text-ink-500">{p.docs}</p>
+
+            <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              {p.needsKey && (
+                <Field label={`API key${p.keySet ? " (saved)" : ""}`} className="sm:col-span-2">
+                  <TextInput type="password" value={f.apiKey} disabled={!canAdmin} placeholder={p.keySet ? "•••••••• saved — leave blank to keep" : "Paste your API key"} onChange={(e) => setForms((s) => ({ ...s, [p.id]: { ...f, apiKey: e.target.value } }))} />
+                </Field>
+              )}
+              {(p.local || p.needsBaseUrl) && (
+                <Field label="Base URL">
+                  <TextInput value={f.baseUrl} disabled={!canAdmin} placeholder={p.defaultBaseUrl} onChange={(e) => setForms((s) => ({ ...s, [p.id]: { ...f, baseUrl: e.target.value } }))} />
+                </Field>
+              )}
+              <Field label="Model">
+                {ms && ms.length ? (
+                  <Select value={f.model} disabled={!canAdmin} onChange={(e) => setForms((s) => ({ ...s, [p.id]: { ...f, model: e.target.value } }))}>
+                    <option value="">(auto)</option>
+                    {ms.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </Select>
+                ) : (
+                  <TextInput value={f.model} disabled={!canAdmin} placeholder={p.defaultModel || "model id"} onChange={(e) => setForms((s) => ({ ...s, [p.id]: { ...f, model: e.target.value } }))} />
+                )}
+              </Field>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {canAdmin && <Button size="sm" variant="primary" disabled={busy === p.id} onClick={() => save(p)}><Icon name="Save" size={13} /> Save</Button>}
+              <Button size="sm" variant="secondary" disabled={busy === p.id} onClick={() => check(p)}><Icon name="Activity" size={13} /> Test connection</Button>
+              {p.local && <Button size="sm" variant="secondary" disabled={busy === p.id} onClick={() => discover(p)}><Icon name="Search" size={13} /> Discover models</Button>}
+              <Button size="sm" variant="ghost" disabled={busy === p.id || p.readiness !== "configured"} onClick={() => test(p)}><Icon name="MessageSquare" size={13} /> Send test message</Button>
+              {!p.active && p.readiness === "configured" && canAdmin && <Button size="sm" variant="ember" onClick={() => setActive(p)}><Icon name="Star" size={13} /> Set active</Button>}
+              {p.readiness === "configured" && canAdmin && <Button size="sm" variant="ghost" onClick={() => revoke(p)}><Icon name="Ban" size={13} /> Disconnect</Button>}
+            </div>
+            {out && <p className={`mt-3 rounded-2xl px-3.5 py-2.5 text-xs ${out.ok ? "bg-sage-50 text-ink-700" : "bg-coral-50 text-coral-700"}`}>{out.ok ? `“${out.text}”` : `✗ ${out.text}`}</p>}
+          </div>
+        );
+      })}
+      </div>
+    </div>
+  );
+}

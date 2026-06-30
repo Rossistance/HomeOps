@@ -1,0 +1,234 @@
+- generic [ref=e9]:
+  - complementary [ref=e10]:
+    - generic [ref=e11]:
+      - img [ref=e13]
+      - generic [ref=e16]:
+        - paragraph [ref=e17]: HomeOps AI
+        - paragraph [ref=e18]: The Harper Family
+    - navigation [ref=e20]:
+      - generic [ref=e21]:
+        - paragraph [ref=e22]: Command Center
+        - button "Home" [ref=e24] [cursor=pointer]:
+          - img [ref=e25]
+          - generic [ref=e30]: Home
+      - generic [ref=e31]:
+        - paragraph [ref=e32]: Agents & Workflows
+        - generic [ref=e33]:
+          - button "Helper Agents" [ref=e34] [cursor=pointer]:
+            - img [ref=e35]
+            - generic [ref=e38]: Helper Agents
+          - button "Automations" [ref=e39] [cursor=pointer]:
+            - img [ref=e40]
+            - generic [ref=e44]: Automations
+      - generic [ref=e45]:
+        - paragraph [ref=e46]: Family Systems
+        - generic [ref=e47]:
+          - button "Messages & Approvals 4 2" [ref=e48] [cursor=pointer]:
+            - img [ref=e49]
+            - generic [ref=e51]: Messages & Approvals
+            - generic [ref=e52]: "4"
+            - generic [ref=e53]: "2"
+          - button "Household Spaces" [ref=e54] [cursor=pointer]:
+            - img [ref=e55]
+            - generic [ref=e60]: Household Spaces
+          - button "Mini Apps" [ref=e61] [cursor=pointer]:
+            - img [ref=e62]
+            - generic [ref=e67]: Mini Apps
+      - generic [ref=e68]:
+        - paragraph [ref=e69]: Knowledge & Files
+        - generic [ref=e70]:
+          - button "Files & Knowledge" [ref=e71] [cursor=pointer]:
+            - img [ref=e72]
+            - generic [ref=e74]: Files & Knowledge
+          - button "Playbooks" [ref=e75] [cursor=pointer]:
+            - img [ref=e76]
+            - generic [ref=e79]: Playbooks
+          - button "Activity & Memory" [ref=e80] [cursor=pointer]:
+            - img [ref=e81]
+            - generic [ref=e83]: Activity & Memory
+      - generic [ref=e84]:
+        - paragraph [ref=e85]: Connections & Settings
+        - generic [ref=e86]:
+          - button "Connections" [ref=e87] [cursor=pointer]:
+            - img [ref=e88]
+            - generic [ref=e90]: Connections
+          - button "Settings" [ref=e91] [cursor=pointer]:
+            - img [ref=e92]
+            - generic [ref=e95]: Settings
+    - generic [ref=e96]:
+      - button "Runtime online 4 connectors live" [ref=e97] [cursor=pointer]:
+        - generic [ref=e99]:
+          - generic [ref=e100]: Runtime online
+          - text: 4 connectors live
+        - img [ref=e101]
+      - button "AH Alex Harper Owner" [active] [ref=e103] [cursor=pointer]:
+        - generic [ref=e104]: AH
+        - generic [ref=e105]:
+          - paragraph [ref=e106]: Alex Harper
+          - paragraph [ref=e107]: Owner
+  - generic [ref=e108]:
+    - banner [ref=e109]:
+      - button "Ask HomeOps, search, or run a command… ⌘K" [ref=e110] [cursor=pointer]:
+        - img [ref=e111]
+        - generic [ref=e113]: Ask HomeOps, search, or run a command…
+        - generic [ref=e114]: ⌘K
+      - generic [ref=e115]:
+        - button "4 to approve" [ref=e116] [cursor=pointer]:
+          - img [ref=e117]
+          - text: 4 to approve
+        - generic [ref=e119]:
+          - img
+          - combobox "Filter by household space" [ref=e120]:
+            - option "All spaces" [selected]
+            - option "Personal"
+            - option "Family"
+            - option "School"
+            - option "Bills"
+            - option "Medical"
+            - option "Travel"
+            - option "Home Maintenance"
+            - option "Caregiving"
+            - option "Pets"
+          - img
+    - main [ref=e121]:
+      - generic [ref=e547]:
+        - generic [ref=e549]:
+          - img [ref=e551]
+          - generic [ref=e556]:
+            - heading "Household Spaces" [level=1] [ref=e557]
+            - paragraph [ref=e558]: Members, shared spaces, and who can access what.
+        - generic [ref=e559]:
+          - button "Spaces" [ref=e560] [cursor=pointer]:
+            - img [ref=e561]
+            - text: Spaces
+          - button "Members" [ref=e563] [cursor=pointer]:
+            - img [ref=e564]
+            - text: Members
+          - button "Roles & Access" [ref=e569] [cursor=pointer]:
+            - img [ref=e570]
+            - text: Roles & Access
+        - generic [ref=e574]:
+          - button "Add member" [ref=e576] [cursor=pointer]:
+            - img [ref=e577]
+            - text: Add member
+          - generic [ref=e580]:
+            - generic [ref=e581]:
+              - generic [ref=e582]:
+                - generic [ref=e583]: AH
+                - generic [ref=e584]:
+                  - generic [ref=e585]:
+                    - paragraph [ref=e586]: Alex Harper
+                    - generic [ref=e587]: You
+                  - paragraph [ref=e588]: Parent
+              - generic [ref=e589]:
+                - generic [ref=e590]:
+                  - generic [ref=e591]: Role
+                  - combobox [disabled] [ref=e592]:
+                    - option "Owner" [selected]
+                    - option "Adult Admin"
+                    - option "Adult Member"
+                    - option "Limited Member"
+                    - option "Child View"
+                    - option "Guest/Helper"
+                - generic [ref=e593]: "Spaces: Personal, Family, School, Bills, Medical, Travel, Home Maintenance, Caregiving, Pets"
+                - generic [ref=e594]: "Contact: Primary email, Mobile (text)"
+            - generic [ref=e595]:
+              - generic [ref=e596]:
+                - generic [ref=e597]: MH
+                - generic [ref=e598]:
+                  - paragraph [ref=e600]: Morgan Harper
+                  - paragraph [ref=e601]: Parent
+                - button "Remove" [ref=e602] [cursor=pointer]:
+                  - img [ref=e603]
+              - generic [ref=e606]:
+                - generic [ref=e607]:
+                  - generic [ref=e608]: Role
+                  - combobox [ref=e609]:
+                    - option "Owner"
+                    - option "Adult Admin" [selected]
+                    - option "Adult Member"
+                    - option "Limited Member"
+                    - option "Child View"
+                    - option "Guest/Helper"
+                - generic [ref=e610]: "Spaces: Family, School, Bills, Medical, Travel, Home Maintenance, Caregiving"
+                - generic [ref=e611]: "Contact: Primary email"
+            - generic [ref=e612]:
+              - generic [ref=e613]:
+                - generic [ref=e614]: LH
+                - generic [ref=e615]:
+                  - paragraph [ref=e617]: Lily Harper
+                  - paragraph [ref=e618]: Child (age 9)
+                - button "Remove" [ref=e619] [cursor=pointer]:
+                  - img [ref=e620]
+              - generic [ref=e623]:
+                - generic [ref=e624]:
+                  - generic [ref=e625]: Role
+                  - combobox [ref=e626]:
+                    - option "Owner"
+                    - option "Adult Admin"
+                    - option "Adult Member"
+                    - option "Limited Member"
+                    - option "Child View" [selected]
+                    - option "Guest/Helper"
+                - generic [ref=e627]: "Spaces: Family, School, Travel, Pets"
+                - generic [ref=e628]: "Contact: none"
+            - generic [ref=e629]:
+              - generic [ref=e630]:
+                - generic [ref=e631]: NH
+                - generic [ref=e632]:
+                  - paragraph [ref=e634]: Noah Harper
+                  - paragraph [ref=e635]: Child (age 6)
+                - button "Remove" [ref=e636] [cursor=pointer]:
+                  - img [ref=e637]
+              - generic [ref=e640]:
+                - generic [ref=e641]:
+                  - generic [ref=e642]: Role
+                  - combobox [ref=e643]:
+                    - option "Owner"
+                    - option "Adult Admin"
+                    - option "Adult Member"
+                    - option "Limited Member"
+                    - option "Child View" [selected]
+                    - option "Guest/Helper"
+                - generic [ref=e644]: "Spaces: Family, School, Travel, Pets"
+                - generic [ref=e645]: "Contact: none"
+            - generic [ref=e646]:
+              - generic [ref=e647]:
+                - generic [ref=e648]: EB
+                - generic [ref=e649]:
+                  - paragraph [ref=e651]: Elaine Brooks
+                  - paragraph [ref=e652]: Grandparent / caregiving contact
+                - button "Remove" [ref=e653] [cursor=pointer]:
+                  - img [ref=e654]
+              - generic [ref=e657]:
+                - generic [ref=e658]:
+                  - generic [ref=e659]: Role
+                  - combobox [ref=e660]:
+                    - option "Owner"
+                    - option "Adult Admin"
+                    - option "Adult Member"
+                    - option "Limited Member"
+                    - option "Child View"
+                    - option "Guest/Helper" [selected]
+                - generic [ref=e661]: "Spaces: Caregiving"
+                - generic [ref=e662]: "Contact: Mobile (prefers text)"
+            - generic [ref=e663]:
+              - generic [ref=e664]:
+                - generic [ref=e665]: SR
+                - generic [ref=e666]:
+                  - paragraph [ref=e668]: Sam Rivera
+                  - paragraph [ref=e669]: Babysitter
+                - button "Remove" [ref=e670] [cursor=pointer]:
+                  - img [ref=e671]
+              - generic [ref=e674]:
+                - generic [ref=e675]:
+                  - generic [ref=e676]: Role
+                  - combobox [ref=e677]:
+                    - option "Owner"
+                    - option "Adult Admin"
+                    - option "Adult Member"
+                    - option "Limited Member"
+                    - option "Child View"
+                    - option "Guest/Helper" [selected]
+                - generic [ref=e678]: "Spaces: —"
+                - generic [ref=e679]: "Contact: Mobile"

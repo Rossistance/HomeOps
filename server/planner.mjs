@@ -1,0 +1,335 @@
+// HomeOps AI — the planning brain. Turns a plain-English goal into a concrete,
+// executable plan by giving the connected AI provider the LIVE tool catalog (real
+// provider + connector tools, annotated with whether THIS actor has connected the
+// account each needs) and asking it to select tools, fill inputs, and decide which
+// steps require approval. Nothing here is simulated: the catalog is real, the model
+// call is real (server/ai.mjs), and every selected step maps to a real executor.
+import { PROVIDERS } from "./providers.mjs";
+import { CONNECTORS, readinessOf } from "./connectors.mjs";
+import { listAccountsFor } from "./accounts.mjs";
+import { providerChat, providerChatStream } from "./ai.mjs";
+import { getSettings, listEvents, listTasks, listMemory, listMembers, canSeeEntity } from "./store.mjs";
+import { listInternalFunctions } from "./internal-functions.mjs";
+
+// Input hints for the internal family-data tools, so the planner knows how to fill them.
+const INTERNAL_INPUTS = {
+  "homeops.create_event_draft": [{ key: "title", required: true }, { key: "startAt" }, { key: "location" }, { key: "participantIds" }, { key: "driverId" }, { key: "visibility" }],
+  "homeops.update_event_checklist": [{ key: "eventId", required: true }, { key: "items", required: true }],
+  "homeops.assign_driver": [{ key: "eventId", required: true }, { key: "driverId", required: true }],
+  "homeops.assign_what_to_bring": [{ key: "eventId", required: true }, { key: "items", required: true }],
+  "homeops.create_task": [{ key: "title", required: true }, { key: "dueAt" }, { key: "assignedMemberId" }, { key: "priority" }],
+  "homeops.create_list_item": [{ key: "text", required: true }, { key: "listName" }],
+  "homeops.attach_note_or_file_reference": [{ key: "eventId", required: true }, { key: "note" }, { key: "fileRef" }],
+  "homeops.send_notification_draft": [{ key: "to" }, { key: "body", required: true }, { key: "subject" }, { key: "channel" }],
+  "homeops.write_memory": [{ key: "text", required: true }, { key: "scope" }],
+  "homeops.create_artifact": [{ key: "title", required: true }, { key: "body" }, { key: "kind" }],
+  "homeops.create_approval": [{ key: "subject", required: true }, { key: "detail" }],
+};
+
+const ICONS = ["Bot", "Sun", "Mail", "Inbox", "Calendar", "Receipt", "CreditCard", "UtensilsCrossed", "Plane", "Stethoscope", "Wrench", "HeartHandshake", "FolderOpen", "PawPrint", "Gift", "Search", "ShoppingCart", "Bell", "ShieldCheck", "FileText", "Globe", "MessageSquare", "ListChecks"];
+const TRIGGERS = ["Schedule", "Webhook", "RSS Feed", "Email Received", "Email Label Applied", "Text Message Received", "Email Reply Received", "Calendar Event Created", "File Changed", "Manual", "Agent-to-Agent"];
+const SPACE_TYPES = ["Personal", "Family", "School", "Bills", "Medical", "Travel", "Home Maintenance", "Caregiving", "Pets", "Custom"];
+const MINIAPP_TYPES = ["Chore Board", "Trip Planner", "Budget Snapshot", "Grocery List", "Medical Tracker", "Subscription Tracker", "Research Comparison", "Custom"];
+const RISKS = ["Low", "Medium", "High", "Sensitive"];
+const EXECUTABLE = ["connected", "authorized_write", "authorized_readonly", "local_only"];
+
+function activeProviderId(explicit) {
+  return explicit || getSettings().aiActiveProvider || null;
+}
+
+/** The full, live tool catalog with per-actor connectedness — the planner's menu. */
+export function toolCatalog(session) {
+  const accountProviders = new Set(
+    (session ? listAccountsFor(session.householdId, session.actorId) : []).map((a) => a.provider),
+  );
+  const out = [];
+  const mapInputs = (inputs) => (inputs ?? []).map((i) => ({ key: i.key, label: i.label, type: i.type ?? "text", required: !!i.required, default: i.default }));
+  for (const p of PROVIDERS) {
+    const connected = accountProviders.has(p.id);
+    for (const t of p.tools) {
+      out.push({ toolId: t.id, name: t.name, action: t.action, risk: t.risk, requiresApproval: !!t.requiresApproval, connectorId: p.id, connectorName: p.name, source: "provider", connected, inputs: mapInputs(t.inputs) });
+    }
+  }
+  for (const c of CONNECTORS) {
+    const readiness = readinessOf(c);
+    const connected = EXECUTABLE.includes(readiness);
+    for (const t of (c.tools ?? [])) {
+      out.push({ toolId: t.id, name: t.name, action: t.action, risk: t.risk, requiresApproval: !!t.requiresApproval, connectorId: c.id, connectorName: c.name, source: "connector", connected, readiness, inputs: mapInputs(t.inputs) });
+    }
+  }
+  // Internal HomeOps data tools — always available (no external account needed), so the
+  // planner grounds family work on real server-owned events/tasks/memory rather than
+  // reaching for unconnected external apps.
+  for (const f of listInternalFunctions()) {
+    out.push({ toolId: f.id, name: f.name, action: f.action, risk: f.risk, requiresApproval: !!f.requiresApproval, connectorId: f.connectorId, connectorName: f.connectorName, source: "internal", connected: true, inputs: mapInputs(INTERNAL_INPUTS[f.id] ?? []) });
+  }
+  return out;
+}
+
+/** Tolerant JSON extraction — handles code fences and surrounding prose. */
+function extractJSON(text) {
+  if (!text) return null;
+  let t = String(text).trim();
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) t = fence[1].trim();
+  const first = t.indexOf("{");
+  const last = t.lastIndexOf("}");
+  if (first === -1 || last === -1 || last < first) return null;
+  const slice = t.slice(first, last + 1);
+  try { return JSON.parse(slice); } catch { return null; }
+}
+
+function normalizePlan(p, catalog, goal) {
+  const byId = new Map(catalog.map((t) => [t.toolId, t]));
+  const icon = ICONS.includes(p.icon) ? p.icon : "Bot";
+  const spaceType = SPACE_TYPES.includes(p.spaceType) ? p.spaceType : "Personal";
+  const tType = p.trigger?.type ?? p.triggerType;
+  const triggerType = TRIGGERS.includes(tType) ? tType : "Manual";
+  const rawSteps = Array.isArray(p.steps) ? p.steps : [];
+  const steps = rawSteps.slice(0, 12).map((s) => {
+    const t = s && s.toolId ? byId.get(s.toolId) : undefined;
+    return {
+      toolId: t ? s.toolId : null,
+      title: String(s?.title ?? t?.name ?? "Step"),
+      detail: String(s?.detail ?? ""),
+      requiresApproval: t ? t.requiresApproval : !!s?.requiresApproval,
+      risk: t?.risk ?? (RISKS.includes(s?.risk) ? s.risk : "Low"),
+      connectorId: t?.connectorId ?? null,
+      connectorName: t?.connectorName ?? null,
+      connected: t ? t.connected : true,
+      input: s && typeof s.input === "object" && s.input ? s.input : {},
+    };
+  });
+  const connectorIds = [...new Set(steps.map((s) => s.connectorId).filter(Boolean))];
+  const requiredConnectors = connectorIds.map((cid) => {
+    const t = catalog.find((x) => x.connectorId === cid);
+    return { id: cid, name: t?.connectorName ?? cid, connected: !!t?.connected };
+  });
+  const missing = requiredConnectors.filter((c) => !c.connected).map((c) => c.name);
+  const risk = RISKS.includes(p.risk) ? p.risk : (steps.some((s) => s.requiresApproval) ? "High" : "Low");
+  return {
+    title: String(p.title ?? goal.slice(0, 60)),
+    summary: String(p.summary ?? ""),
+    icon, spaceType, triggerType,
+    triggerDetail: String(p.trigger?.detail ?? p.triggerDetail ?? ""),
+    instructions: String(p.instructions ?? ""),
+    steps, connectorIds, requiredConnectors, missing,
+    approvalGates: Array.isArray(p.approvalGates) && p.approvalGates.length ? p.approvalGates.map(String) : steps.filter((s) => s.requiresApproval).map((s) => s.title),
+    risk,
+    approvalRequired: steps.some((s) => s.requiresApproval),
+  };
+}
+
+const PLAN_SYS = `You are HomeOps' planning engine for a family operating system. Turn the user's plain-English goal into a single concrete plan that a helper agent will run.
+
+Rules:
+- Select tools ONLY from the provided catalog (match the exact "id"). If a step is reasoning/notify/summarize with no matching tool, set "toolId" to null.
+- Prefer tools whose "connected" is true. You may still include a needed tool that is not connected — the app will tell the user to connect it.
+- For each tool step, fill "input" using ONLY that tool's listed input keys; use sensible concrete values from the goal (leave unknown values as empty string).
+- Mark "requiresApproval" true for any step that sends, writes, deletes, downloads, posts, or pays.
+- Keep it to the fewest steps that achieve the goal (max ~8).
+- Respond with ONLY a JSON object — no prose, no markdown fences.
+
+JSON shape:
+{
+  "title": string,                       // short name for the agent/automation
+  "summary": string,                     // 1-2 plain sentences: what this does
+  "icon": string,                        // pick one from the allowed icons
+  "spaceType": string,                   // pick one from the allowed space types
+  "instructions": string,                // 2-4 sentences the agent will follow
+  "trigger": { "type": string, "detail": string },   // type from allowed triggers
+  "steps": [ { "toolId": string|null, "title": string, "detail": string, "input": object, "requiresApproval": boolean } ],
+  "approvalGates": [string],
+  "risk": "Low"|"Medium"|"High"|"Sensitive"
+}`;
+
+export async function planFromGoal({ goal, session, providerId } = {}) {
+  if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe what you want first." };
+  const id = activeProviderId(providerId);
+  if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then try plain-English generation." };
+  const catalog = toolCatalog(session);
+  const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
+  const user = `Available tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nGoal: ${String(goal).trim()}`;
+  const out = await providerChat(id, { messages: [{ role: "system", content: PLAN_SYS }, { role: "user", content: user }] });
+  if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
+  const parsed = extractJSON(out.text);
+  if (!parsed) return { ok: false, error: "parse_failed", message: "The AI response could not be parsed into a plan. Try rephrasing the goal." };
+  return { ok: true, plan: normalizePlan(parsed, catalog, String(goal).trim()), model: out.model };
+}
+
+/* --------------------------- Assistant brain ---------------------------- *
+ * The conversational loop's brain. Given a user message + a compact household
+ * context (sent by the client; household data stays local-first), it decides
+ * whether to ANSWER (grounded in context) or propose an ACTION PLAN (same real
+ * AgentPlan the planner produces, executed through the server approval gate).   */
+const ASSISTANT_SYS = `You are HomeOps, a warm, capable assistant for a family's household operations. You either ANSWER with information grounded in the provided household context, or you propose an ACTION PLAN using the available tools.
+
+Choose:
+- ANSWER when the user wants information, a summary, status, or advice. Ground every claim in the provided context; if needed data isn't connected or present, say so plainly — never invent events, counts, or results.
+- PLAN when the user wants something done (send, schedule, create, find-and-do, remind, automate, pay). Build the smallest plan that achieves it.
+
+Plan rules:
+- Use tools ONLY from the catalog, matched by exact "id". For a reasoning/notify/summarize step with no matching tool, set "toolId" to null.
+- Fill each tool step's "input" using ONLY that tool's listed input keys, with concrete values from the request (unknown values = empty string).
+- Set "requiresApproval" true for any step that sends, writes, deletes, posts, downloads, or pays.
+
+Respond with ONLY a JSON object (no prose, no markdown fences), one of:
+{ "kind": "answer", "answer": string }
+{ "kind": "plan", "answer": string, "plan": { "title": string, "summary": string, "icon": string, "spaceType": string, "instructions": string, "trigger": { "type": string, "detail": string }, "steps": [ { "toolId": string|null, "title": string, "detail": string, "input": object, "requiresApproval": boolean } ], "approvalGates": [string], "risk": "Low"|"Medium"|"High"|"Sensitive" } }
+For a plan, "answer" is one friendly sentence summarizing what you'll do.`;
+
+/**
+ * Build the assistant's grounding context from SERVER-OWNED data (events, tasks,
+ * memory, members), visibility-filtered to the requesting actor. This replaces blind
+ * trust in the client-provided context: the server's view of the household is
+ * authoritative, and a child's assistant never sees adults-only items. The client
+ * context (if any) is kept only as a low-priority hint.
+ */
+export function buildServerContext(session, clientContext) {
+  if (!session) return clientContext ?? {};
+  const hh = session.householdId;
+  const now = new Date().toISOString();
+  const events = listEvents((e) => e.householdId === hh)
+    .filter((e) => canSeeEntity(e, session))
+    .filter((e) => !e.startAt || e.startAt >= now)
+    .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
+    .slice(0, 8)
+    .map((e) => ({ id: e.id, title: e.title, startAt: e.startAt, location: e.location, driverId: e.driverId, participants: e.participantIds }));
+  const tasks = listTasks((t) => t.householdId === hh)
+    .filter((t) => canSeeEntity(t, session))
+    .filter((t) => t.status !== "done")
+    .slice(0, 10)
+    .map((t) => ({ id: t.id, title: t.title, type: t.type, dueAt: t.dueAt, assignedMemberId: t.assignedMemberId }));
+  const memory = listMemory({ householdId: hh, limit: 6 })
+    .filter((m) => m.scope !== "personal" || m.source?.actorId === session.actorId)
+    .map((m) => ({ text: m.text, scope: m.scope }));
+  const members = listMembers({ householdId: hh }).map((m) => ({ id: m.actorId, name: m.displayName, role: m.role }));
+  return {
+    now, asActor: { id: session.actorId, role: session.role },
+    members, upcomingEvents: events, openTasks: tasks, recentMemory: memory,
+    clientHints: clientContext ?? undefined,
+  };
+}
+
+export async function assistantRespond({ message, context, session, providerId } = {}) {
+  if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
+  const id = activeProviderId(providerId);
+  if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
+  const catalog = toolCatalog(session);
+  const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
+  const serverCtx = buildServerContext(session, context);
+  const ctxStr = JSON.stringify(serverCtx).slice(0, 4000);
+  const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nUser message: ${String(message).trim()}`;
+  const out = await providerChat(id, { messages: [{ role: "system", content: ASSISTANT_SYS }, { role: "user", content: user }] });
+  if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
+  const parsed = extractJSON(out.text);
+  // Robust chat: if the model didn't return clean JSON, treat its prose as an answer.
+  if (!parsed) return { ok: true, kind: "answer", answer: String(out.text || "").trim() || "I'm not sure how to help with that yet.", model: out.model };
+  if (parsed.kind === "plan" && parsed.plan && typeof parsed.plan === "object") {
+    const plan = normalizePlan(parsed.plan, catalog, String(message).trim());
+    return { ok: true, kind: "plan", answer: String(parsed.answer ?? plan.summary ?? "Here's my plan."), plan, model: out.model };
+  }
+  return { ok: true, kind: "answer", answer: String(parsed.answer ?? out.text ?? "").trim() || "I'm not sure how to help with that yet.", model: out.model };
+}
+
+/**
+ * Streaming assistant — same logic as assistantRespond but uses providerChatStream.
+ * The onToken callback fires with each raw text chunk from the provider (useful for
+ * liveness signals; the JSON tokens are not meaningful mid-stream). Returns the
+ * same {ok, kind, answer, plan, model} shape when the full response is assembled.
+ */
+export async function assistantStream({ message, context, session, providerId } = {}, onToken) {
+  if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
+  const id = activeProviderId(providerId);
+  if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
+  const catalog = toolCatalog(session);
+  const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
+  const serverCtx = buildServerContext(session, context);
+  const ctxStr = JSON.stringify(serverCtx).slice(0, 4000);
+  const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nUser message: ${String(message).trim()}`;
+  const out = await providerChatStream(id, { messages: [{ role: "system", content: ASSISTANT_SYS }, { role: "user", content: user }] }, onToken);
+  if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
+  const parsed = extractJSON(out.text);
+  if (!parsed) return { ok: true, kind: "answer", answer: String(out.text || "").trim() || "I'm not sure how to help with that yet.", model: out.model };
+  if (parsed.kind === "plan" && parsed.plan && typeof parsed.plan === "object") {
+    const plan = normalizePlan(parsed.plan, catalog, String(message).trim());
+    return { ok: true, kind: "plan", answer: String(parsed.answer ?? plan.summary ?? "Here's my plan."), plan, model: out.model };
+  }
+  return { ok: true, kind: "answer", answer: String(parsed.answer ?? out.text ?? "").trim() || "I'm not sure how to help with that yet.", model: out.model };
+}
+
+/* ------------------------- Evolution (learning) ------------------------- *
+ * Given a real run trace (what an agent/plan did and where it struggled),
+ * propose ONE concrete, low-risk improvement. The client computes a deterministic
+ * evidence baseline first; this LLM pass refines the wording + the suggested
+ * "after" instructions. Grounded in the trace — never invents failures.          */
+const EVOLVE_SYS = `You are HomeOps' improvement engine. Given a run trace, propose ONE concrete, low-risk improvement grounded ONLY in what the trace shows. Never invent failures or capabilities. Respond with ONLY a JSON object (no prose, no fences):
+{ "title": string, "reason": string, "summary": string, "after": string, "risk": "Low"|"Medium"|"High" }
+- "reason": cite the specific step/error from the trace.
+- "summary": the improvement in one or two plain sentences.
+- "after": improved agent instructions (if the trace includes an agent) or a one-line tool-usage tip otherwise. Keep it practical, safe, and family-appropriate.`;
+
+export async function proposeEvolution({ trace, session, providerId } = {}) {
+  const id = activeProviderId(providerId);
+  if (!id) return { ok: false, error: "no_provider" };
+  if (!trace || typeof trace !== "object") return { ok: false, error: "empty_trace" };
+  const out = await providerChat(id, { messages: [{ role: "system", content: EVOLVE_SYS }, { role: "user", content: `Run trace (JSON): ${JSON.stringify(trace).slice(0, 4000)}` }] });
+  if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message };
+  const parsed = extractJSON(out.text);
+  if (!parsed) return { ok: false, error: "parse_failed" };
+  const risk = ["Low", "Medium", "High"].includes(parsed.risk) ? parsed.risk : "Low";
+  return { ok: true, proposal: { title: String(parsed.title ?? "Improvement"), reason: String(parsed.reason ?? ""), summary: String(parsed.summary ?? ""), after: parsed.after != null ? String(parsed.after) : undefined, risk }, model: out.model };
+}
+
+const MINIAPP_SYS = `You generate the seed DATA for a HomeOps "mini app" (a small interactive household tracker) from a plain-English request. Respond with ONLY a JSON object — no prose, no markdown fences:
+{ "type": <one of the allowed types>, "name": string, "description": string, "data": object }
+
+Use the data shape that matches the chosen type:
+- "Trip Planner": { "destination": string, "dates": string, "itinerary": [{ "day": string, "items": [string] }], "packing": [{ "id": string, "text": string, "done": false }], "todos": [{ "id": string, "text": string, "done": false }], "reservations": [{ "name": string, "detail": string }], "documents": [string], "budget": [{ "label": string, "amount": number }] }
+- "Subscription Tracker": { "subscriptions": [{ "id": string, "name": string, "monthly": number, "lastCharge": ISODate, "usage": string, "recommendation": string }] }
+- "Budget Snapshot": { "rows": [{ "id": string, "label": string, "amount": number, "date": ISODate, "source": string }], "categoryTotals": [{ "label": string, "amount": number }], "alerts": [string] }
+- "Chore Board": { "columns": [{ "key": "todo|in-progress|done|needs-help", "title": string }] }
+- Anything else ("Grocery List", "Medical Tracker", "Research Comparison", "Custom"): { "sections": [{ "title": string, "items": [string] }] }
+Generate realistic, useful starter content (3-8 items) inferred from the request. Use plain ISO dates (YYYY-MM-DD) where dates are needed.`;
+
+export async function generateMiniApp({ goal, type, session, providerId } = {}) {
+  if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe the mini app you want." };
+  const id = activeProviderId(providerId);
+  if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers to generate mini apps." };
+  const user = `Allowed types: ${MINIAPP_TYPES.join(", ")}.${type ? ` Preferred type: ${type}.` : ""}\nRequest: ${String(goal).trim()}`;
+  const out = await providerChat(id, { messages: [{ role: "system", content: MINIAPP_SYS }, { role: "user", content: user }] });
+  if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
+  const parsed = extractJSON(out.text);
+  if (!parsed) return { ok: false, error: "parse_failed", message: "The AI response could not be parsed. Try rephrasing." };
+  const t = MINIAPP_TYPES.includes(parsed.type) ? parsed.type : (type && MINIAPP_TYPES.includes(type) ? type : "Custom");
+  return { ok: true, app: { type: t, name: String(parsed.name ?? String(goal).slice(0, 40)), description: String(parsed.description ?? ""), data: parsed.data && typeof parsed.data === "object" ? parsed.data : {} }, model: out.model };
+}
+
+const PLAYBOOK_SYS = `You write a reusable HomeOps "playbook" — step-by-step instructions a helper agent follows for a recurring household workflow — from a plain-English request. Respond with ONLY a JSON object — no prose, no markdown fences:
+{ "name": string, "description": string, "whenToUse": string, "category": string, "steps": [string], "requiredConnections": [string], "outputFormat": string, "approvalRules": [string] }
+Write 4-8 concrete, ordered steps. requiredConnections name real services (e.g. "Gmail", "Google Calendar", "Local Files"). approvalRules list any step that should pause for human approval.`;
+
+export async function generatePlaybook({ goal, session, providerId } = {}) {
+  if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe the playbook you want." };
+  const id = activeProviderId(providerId);
+  if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers to generate playbooks." };
+  const out = await providerChat(id, { messages: [{ role: "system", content: PLAYBOOK_SYS }, { role: "user", content: `Request: ${String(goal).trim()}` }] });
+  if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
+  const parsed = extractJSON(out.text);
+  if (!parsed) return { ok: false, error: "parse_failed", message: "The AI response could not be parsed. Try rephrasing." };
+  const steps = (Array.isArray(parsed.steps) ? parsed.steps : []).map((s) => String(typeof s === "string" ? s : s?.text ?? "")).filter(Boolean);
+  return {
+    ok: true,
+    playbook: {
+      name: String(parsed.name ?? String(goal).slice(0, 48)),
+      description: String(parsed.description ?? ""),
+      whenToUse: String(parsed.whenToUse ?? ""),
+      category: String(parsed.category ?? "Custom"),
+      steps,
+      requiredConnections: (Array.isArray(parsed.requiredConnections) ? parsed.requiredConnections : []).map(String),
+      outputFormat: String(parsed.outputFormat ?? ""),
+      approvalRules: (Array.isArray(parsed.approvalRules) ? parsed.approvalRules : []).map(String),
+    },
+    model: out.model,
+  };
+}
