@@ -27,6 +27,11 @@ services:
         value: https://homeops-ai.onrender.com
       - key: HOMEOPS_SECRET_KEY
         generateValue: true
+      # REQUIRED for elevated sign-in on a public deployment: production refuses
+      # Owner / Adult Admin logins until a PIN exists. Set a family PIN here, sign
+      # in with it, then optionally change it in Settings (which takes precedence).
+      - key: HOMEOPS_BOOTSTRAP_PIN
+        sync: false
       # Optional OAuth providers. Fill these in the Render dashboard.
       - key: HOMEOPS_OAUTH_GOOGLE_CLIENT_ID
         sync: false

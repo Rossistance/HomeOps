@@ -13,13 +13,22 @@
       "distribution": "internal",
       "ios": {
         "buildConfiguration": "Release"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://homeops-ai.onrender.com"
       }
     },
     "production": {
       "autoIncrement": true,
       "ios": {
         "buildConfiguration": "Release"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://homeops-ai.onrender.com"
       }
     }
+  },
+  "submit": {
+    "production": {}
   }
 }

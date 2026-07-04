@@ -338,11 +338,24 @@ const server = http.createServer(async (req, res) => {
         if (member.archived) { audit({ type: "session.login", ok: false, error: "member_archived", actorId }, req); return json(res, 403, { error: "member_archived", message: "This profile was removed from the household." }, req); }
         const role = member.role;
         const actorName = member.displayName ?? body.actorName ?? actorId;
-        // Optional owner PIN gate for elevated roles (gated on the RESOLVED role).
-        const pinHash = getSettings().ownerPinHash;
-        if (pinHash && (role === "Owner" || role === "Adult Admin")) {
-          const given = crypto.createHash("sha256").update(String(body.pin ?? "")).digest("hex");
-          if (given !== pinHash) { audit({ type: "session.login", ok: false, error: "bad_pin", actorId }, req); return json(res, 403, { error: "pin_required" }, req); }
+        // Owner PIN gate for elevated roles (gated on the RESOLVED role). Dev keeps it
+        // optional; PRODUCTION FAILS CLOSED — on a public deployment the seed actor ids
+        // are public knowledge, so elevated sign-in with no PIN configured would hand
+        // Owner to anyone who finds the URL. HOMEOPS_BOOTSTRAP_PIN (env) seeds the gate
+        // before the first login; a PIN set later in Settings takes precedence.
+        let pinHash = getSettings().ownerPinHash;
+        if (!pinHash && process.env.HOMEOPS_BOOTSTRAP_PIN) {
+          pinHash = crypto.createHash("sha256").update(String(process.env.HOMEOPS_BOOTSTRAP_PIN)).digest("hex");
+        }
+        if (role === "Owner" || role === "Adult Admin") {
+          if (!pinHash && IS_PROD) {
+            audit({ type: "session.login", ok: false, error: "pin_not_configured", actorId }, req);
+            return json(res, 403, { error: "pin_not_configured", message: "Elevated sign-in is locked until an Owner PIN exists. Set HOMEOPS_BOOTSTRAP_PIN in the deployment's environment, then sign in with it." }, req);
+          }
+          if (pinHash) {
+            const given = crypto.createHash("sha256").update(String(body.pin ?? "")).digest("hex");
+            if (given !== pinHash) { audit({ type: "session.login", ok: false, error: "bad_pin", actorId }, req); return json(res, 403, { error: "pin_required" }, req); }
+          }
         }
         const s = createSession({ actorId, actorName, role, householdId: member.householdId ?? "local" });
         audit({ type: "session.login", ok: true, actorId }, req, s);
@@ -369,7 +382,7 @@ const server = http.createServer(async (req, res) => {
     const SEED_ACTOR_IDS = ["m-alex", "m-morgan", "m-lily", "m-noah", "m-elaine", "m-sam"];
     if (path === "/api/profiles" && method === "GET") {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
-      const pinSet = !!getSettings().ownerPinHash;
+      const pinSet = !!(getSettings().ownerPinHash || process.env.HOMEOPS_BOOTSTRAP_PIN);
       const profiles = listMembers({ householdId: "local" }).filter((m) => !m.archived).map((m) => ({
         actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null,
         pinRequired: pinSet && (m.role === "Owner" || m.role === "Adult Admin"),
