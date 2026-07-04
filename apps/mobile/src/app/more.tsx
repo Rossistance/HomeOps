@@ -18,6 +18,7 @@ const FAMILY: Row[] = [
   { icon: "people-outline", label: "Household", hint: "Members, roles, spaces & visibility", href: "/household" },
 ];
 const SYSTEM: Row[] = [
+  { icon: "notifications-outline", label: "Notifications", hint: "What your helpers delivered", href: "/notifications" },
   { icon: "pulse-outline", label: "Activity", hint: "Runs & audit trail", href: "/activity" },
   { icon: "link-outline", label: "Connections", hint: "Accounts & connectors", href: "/connections" },
   { icon: "settings-outline", label: "Settings", hint: "AI providers, session", href: "/settings" },

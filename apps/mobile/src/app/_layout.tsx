@@ -38,6 +38,7 @@ function TabsNav() {
       <Tabs.Screen name="more" options={{ title: "More", tabBarIcon: tabIcon("grid-outline") }} />
       {/* Reachable from the More hub (and deep links), not the tab bar. */}
       <Tabs.Screen name="activity" options={{ href: null }} />
+      <Tabs.Screen name="notifications" options={{ href: null }} />
       <Tabs.Screen name="connections" options={{ href: null }} />
       <Tabs.Screen name="settings" options={{ href: null }} />
       <Tabs.Screen name="meals" options={{ href: null }} />
