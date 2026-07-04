@@ -20,8 +20,10 @@ export default defineConfig({
         name: "HomeOps AI",
         short_name: "HomeOps",
         description: "Personal agent teams for family life and household admin",
-        theme_color: "#1f2535",
-        background_color: "#1f2535",
+        // Warm paper — a dark navy here painted visible dark bands around the app
+        // in iOS standalone mode (the "doesn't fit the screen" letterbox effect).
+        theme_color: "#ece3d5",
+        background_color: "#ece3d5",
         display: "standalone",
         orientation: "portrait",
         start_url: "/",

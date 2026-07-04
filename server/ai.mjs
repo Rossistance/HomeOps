@@ -100,6 +100,32 @@ export function setActiveProvider(id) {
   return id;
 }
 
+/* Env bootstrap for hosted deployments: hand keys via environment variables
+ * (OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY) instead of pasting into
+ * Settings after every fresh deploy. Runs once at startup. It NEVER overwrites a
+ * provider that already has a key in the vault (a person's Settings choice wins),
+ * and it only claims the active slot when no provider is active yet.
+ * HOMEOPS_AI_MODEL sets the bootstrapped provider's model (e.g. "gpt-5.5"). */
+export function bootstrapAIFromEnv() {
+  const sources = [
+    { id: "openai", env: "OPENAI_API_KEY" },
+    { id: "anthropic", env: "ANTHROPIC_API_KEY" },
+    { id: "gemini", env: "GEMINI_API_KEY" },
+  ];
+  const applied = [];
+  for (const s of sources) {
+    const key = process.env[s.env];
+    if (!key || !String(key).trim()) continue;
+    if (getSecret(cfgId(s.id), "apiKey")) continue; // already configured — hands off
+    const body = { apiKey: String(key).trim() };
+    if (process.env.HOMEOPS_AI_MODEL) body.model = String(process.env.HOMEOPS_AI_MODEL).trim();
+    setProviderConfig(s.id, body);
+    if (!getSettings().aiActiveProvider) setActiveProvider(s.id);
+    applied.push(s.id);
+  }
+  return applied;
+}
+
 // Default 12s suits quick probes (health, model discovery). Chat completions pass a
 // much longer budget — capable/reasoning models routinely take >12s on a real
 // planning prompt, and aborting them surfaced as a bogus "fetch failed".

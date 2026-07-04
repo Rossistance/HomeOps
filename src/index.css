@@ -27,6 +27,10 @@ body,
 body {
   @apply text-ink-800 antialiased;
   font-family: var(--font-ui);
+  /* iOS standalone (PWA): fill the REAL screen and keep the app out of the notch /
+     home-indicator zones — without this the safe areas render as bare gaps. */
+  min-height: 100dvh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   /* Warm, layered "room light" — daylight from above-right, hearth warmth below. */
   background-color: #ece3d5;
   background-image:

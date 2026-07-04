@@ -60,7 +60,7 @@ import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode } from "./notify.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
 import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast } from "./auth.mjs";
-import { listProviders as listAIProviders, aiProviderById, setProviderConfig, revokeProvider, setActiveProvider, providerHealth, providerModels, providerChat } from "./ai.mjs";
+import { listProviders as listAIProviders, aiProviderById, setProviderConfig, revokeProvider, setActiveProvider, providerHealth, providerModels, providerChat, bootstrapAIFromEnv } from "./ai.mjs";
 import { listProviders as listConnectorProviders, providerById as connectorProviderById, providerConfigured, publicProvider as publicConnectorProvider, findToolGlobal } from "./providers.mjs";
 import { buildAuthUrl, exchangeCode, apiForAccount } from "./oauth.mjs";
 import { listAccountsFor, getOwnedAccount, upsertAccount, revokeAccount, checkAccountHealth, publicAccount } from "./accounts.mjs";
@@ -2409,6 +2409,9 @@ function htmlMessage(title, body) {
 
 server.listen(PORT, () => {
   seedDefaults();          // ensure a real agent + runnable hybrid skill exist
+  // Hosted deployments hand AI keys via env — configure + activate once, never
+  // overwriting a Settings-made choice (see bootstrapAIFromEnv).
+  try { const boot = bootstrapAIFromEnv(); if (boot.length) console.log(`[ai] bootstrapped from env: ${boot.join(", ")}`); } catch { /* non-fatal */ }
   recoverRuns().catch(() => {}); // re-drive any runs that were mid-flight at shutdown
   setInterval(() => { try { expireStaleRuns(); } catch { /* non-fatal */ } }, 60_000); // sweep stale parked runs
   setInterval(() => { tick().catch(() => {}); }, 10_000); // fire due schedule/recurring triggers (no browser needed)
