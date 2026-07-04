@@ -261,22 +261,51 @@ function Detail({ label, value }: { label: string; value: string }) {
 
 function Contacts() {
   const data = useStore((s) => s.data);
-  const verify = useStore((s) => s.verifyContactMethod);
+  const session = useStore((s) => s.session);
+  const sendCode = useStore((s) => s.sendContactVerification);
+  const confirmCode = useStore((s) => s.confirmContactVerification);
+  const manualVerify = useStore((s) => s.verifyContactMethod);
   const setAllowed = useStore((s) => s.setContactAllowedAgents);
   const addContact = useStore((s) => s.addContactMethod);
   const toast = useStore((s) => s.toast);
   const [addingFor, setAddingFor] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
+  // The true verification loop: request a code through the method's real channel,
+  // then enter it. The adult-only manual override is offered only when the channel
+  // honestly can't deliver a code yet (needs setup in Connections).
+  const isAdult = ["Owner", "Adult Admin", "Adult Member"].includes(session?.role ?? "");
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [codeEntryId, setCodeEntryId] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [manualOfferId, setManualOfferId] = useState<string | null>(null);
+
+  const startVerify = async (id: string) => {
+    setSendingId(id); setManualOfferId(null);
+    const r = await sendCode(id);
+    setSendingId(null);
+    if (r.ok) { setCodeEntryId(id); setCode(""); }
+    else if (r.needsSetup) setManualOfferId(id);
+  };
+  const submitCode = async (id: string) => {
+    if (!/^\d{6}$/.test(code.trim())) return;
+    setConfirming(true);
+    const r = await confirmCode(id, code.trim());
+    setConfirming(false);
+    if (r.ok) { setCodeEntryId(null); setCode(""); }
+  };
 
   // Item 16b: actually attempt delivery through the method's real channel and report the
-  // honest result (delivered, or which connector needs setup).
+  // honest result (delivered, or which connector needs setup). The send goes by methodId
+  // so the SERVER resolves channel + address from its registry — including the verified/
+  // opt-in gate, which is enforced there, not here.
   const sendTest = async (c: { id: string; type: string; value: string; label: string }) => {
     setTestingId(c.id);
-    const external = c.type === "Email" || c.type === "Phone/Text";
-    const r = await backend.notify({ methodType: c.type, to: external ? c.value : null, title: "HomeOps test", body: `This is a test notification to your "${c.label}" contact method.` });
+    const r = await backend.notify({ methodId: c.id, title: "HomeOps test", body: `This is a test notification to your "${c.label}" contact method.` });
     setTestingId(null);
     if (r.delivered) toast({ kind: "success", title: "Test sent", message: r.message ?? "Delivered." });
     else if (r.needsSetup) toast({ kind: "warn", title: "Channel needs setup", message: r.message ?? "Connect the required service in Connections." });
+    else if (r.error === "method_not_verified" || r.error === "method_not_opted_in") toast({ kind: "warn", title: "Not deliverable yet", message: r.message ?? "Verify this contact method first." });
     else toast({ kind: "error", title: "Couldn't deliver", message: r.message ?? r.error ?? "Delivery failed." });
   };
 
@@ -299,10 +328,35 @@ function Contacts() {
                     <div className="flex items-center gap-2"><Icon name={c.type === "Email" ? "Mail" : c.type === "Phone/Text" ? "Smartphone" : "Bell"} size={15} className="text-ink-500" /><div><p className="text-sm font-medium text-ink-800">{c.label}</p><p className="text-xs text-ink-500">{c.value}</p></div></div>
                     <div className="flex items-center gap-2">
                       <Button size="sm" variant="ghost" disabled={testingId === c.id} onClick={() => sendTest(c)}>{testingId === c.id ? <Icon name="Loader2" size={13} className="animate-spin" /> : <Icon name="Send" size={13} />} Send test</Button>
-                      {c.verified ? <Badge color="sage"><Icon name="BadgeCheck" size={11} /> Verified</Badge> : <Button size="sm" variant="secondary" onClick={() => verify(c.id)}>Verify</Button>}
+                      {c.verified ? <Badge color="sage"><Icon name="BadgeCheck" size={11} /> Verified</Badge> : (
+                        <Button size="sm" variant="secondary" disabled={sendingId === c.id} onClick={() => startVerify(c.id)}>
+                          {sendingId === c.id ? <Icon name="Loader2" size={13} className="animate-spin" /> : <Icon name="ShieldCheck" size={13} />} Verify
+                        </Button>
+                      )}
                       <StatusDot color={c.optInStatus === "Opted In" ? "sage" : "amber"} label={c.optInStatus} />
                     </div>
                   </div>
+                  {codeEntryId === c.id && !c.verified && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 rounded-2xl border border-sky-200/70 bg-sky-50 p-2.5">
+                      <p className="text-xs text-sky-700">Enter the 6-digit code sent to <strong>{c.value}</strong>:</p>
+                      <TextInput
+                        value={code}
+                        onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                        onKeyDown={(e) => e.key === "Enter" && submitCode(c.id)}
+                        placeholder="000000"
+                        inputMode="numeric"
+                        className="w-28 text-center tracking-[0.3em]"
+                      />
+                      <Button size="sm" variant="primary" disabled={!/^\d{6}$/.test(code) || confirming} onClick={() => submitCode(c.id)}>{confirming ? <Icon name="Loader2" size={13} className="animate-spin" /> : <Icon name="Check" size={13} />} Confirm</Button>
+                      <Button size="sm" variant="ghost" onClick={() => { setCodeEntryId(null); setCode(""); }}>Cancel</Button>
+                    </div>
+                  )}
+                  {manualOfferId === c.id && !c.verified && isAdult && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 rounded-2xl border border-amber-200/70 bg-amber-50 p-2.5">
+                      <p className="text-xs text-amber-700">This channel can't deliver a code until it's set up in Connections. As an adult you can take responsibility and mark it verified.</p>
+                      <Button size="sm" variant="secondary" onClick={() => { setManualOfferId(null); void manualVerify(c.id); }}><Icon name="ShieldAlert" size={13} /> Mark verified manually</Button>
+                    </div>
+                  )}
                   <div className="mt-2">
                     <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-400">Agents allowed to message this</p>
                     <div className="flex flex-wrap gap-x-4 gap-y-1">

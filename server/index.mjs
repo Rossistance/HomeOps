@@ -26,6 +26,8 @@ import {
   canSeeEntity, listMemory, listArtifacts, getMemoryEntry, deleteMemoryEntry,
   listRiskOverrides, putRiskOverride, deleteRiskOverrideRec, getRiskOverride,
   listNotifications, markNotificationRead,
+  listContactMethods, getContactMethod, putContactMethod, patchContactMethod, deleteContactMethodRec,
+  getContactVerification, putContactVerification, patchContactVerification, deleteContactVerification,
   listFiles, getFileRec, putFileRec, writeFileBlob, readFileBlob, deleteFileRec,
   listPlaybooks, getPlaybook, putPlaybook, deletePlaybookRec,
 } from "./store.mjs";
@@ -54,7 +56,7 @@ import {
   publicTrigger, listPublicTriggers, getTriggerSecret, tick, TRIGGER_TYPES,
 } from "./triggers.mjs";
 import { getTrigger } from "./store.mjs";
-import { pushApprovalNotification, deliverNotification } from "./notify.mjs";
+import { pushApprovalNotification, deliverNotification, sendVerificationCode } from "./notify.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
 import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast } from "./auth.mjs";
 import { listProviders as listAIProviders, aiProviderById, setProviderConfig, revokeProvider, setActiveProvider, providerHealth, providerModels, providerChat } from "./ai.mjs";
@@ -380,6 +382,15 @@ const server = http.createServer(async (req, res) => {
      * information the lock screen displays. Origin-gated; no secrets (names/roles only). */
     const VALID_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member", "Child View", "Guest/Helper"];
     const SEED_ACTOR_IDS = ["m-alex", "m-morgan", "m-lily", "m-noah", "m-elaine", "m-sam"];
+    // Contact-method vocabulary (mirrors the web ContactMethod type). In-App and
+    // Family Dashboard aren't external addresses — their value is a fixed channel tag.
+    const CONTACT_METHOD_TYPES = ["Email", "Phone/Text", "In-App", "Family Dashboard"];
+    const CONTACT_FIXED_VALUES = { "In-App": "in-app", "Family Dashboard": "dashboard" };
+    const OPT_IN_STATES = ["Opted In", "Pending", "Not Set"];
+    const validContactValue = (type, value) =>
+      type === "Email" ? /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+      : type === "Phone/Text" ? String(value).replace(/\D/g, "").length >= 7
+      : true;
     if (path === "/api/profiles" && method === "GET") {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
       const pinSet = !!(getSettings().ownerPinHash || process.env.HOMEOPS_BOOTSTRAP_PIN);
@@ -1203,17 +1214,196 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { artifacts: all }, req);
     }
 
+    /* ---- Contact methods (server-owned registry) ----
+     * Canonical per-member delivery addresses with verified/opt-in state and a
+     * per-agent allowlist. Reads are household-scoped (the roster's coordination
+     * data — no secrets). Writes are role-gated: adults manage anyone's methods,
+     * everyone else manages only their own. Honest states: a new external method
+     * starts unverified/Pending and notify refuses it until it's verified;
+     * in-app/dashboard methods have no external address to confirm, so they are
+     * born verified. Changing an external address resets verification. */
+    if (path === "/api/contact-methods" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const methods = listContactMethods((c) => c.householdId === g.session.householdId);
+      return json(res, 200, { contactMethods: methods }, req);
+    }
+    if (path === "/api/contact-methods" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const memberId = String(body.memberId ?? g.session.actorId).trim();
+      if (!isAdultRole(g.session.role) && memberId !== g.session.actorId) return json(res, 403, { error: "insufficient_role" }, req);
+      const member = getMember(memberId);
+      if (!member || member.archived || (member.householdId ?? "local") !== g.session.householdId) return json(res, 404, { error: "member_not_found" }, req);
+      const label = String(body.label ?? "").trim();
+      if (!label) return json(res, 400, { error: "label_required" }, req);
+      if (!CONTACT_METHOD_TYPES.includes(body.type)) return json(res, 400, { error: "bad_type", valid: CONTACT_METHOD_TYPES }, req);
+      const fixed = CONTACT_FIXED_VALUES[body.type];
+      const value = fixed ?? String(body.value ?? "").trim();
+      if (!fixed && !validContactValue(body.type, value)) return json(res, 400, { error: "invalid_value", message: body.type === "Email" ? "Enter a valid email address." : "Enter a valid phone number." }, req);
+      // Client→server migration preserves ids (idempotent: an existing id is returned
+      // unchanged, mirroring the agents migration contract).
+      const suppliedId = typeof body.id === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(body.id) ? body.id : null;
+      if (suppliedId) {
+        const existing = getContactMethod(suppliedId);
+        if (existing && existing.householdId === g.session.householdId) return json(res, 200, { contactMethod: existing }, req);
+        if (existing) return json(res, 409, { error: "id_conflict" }, req);
+      }
+      const cm = putContactMethod({
+        id: suppliedId ?? ("cm_" + crypto.randomBytes(8).toString("hex")),
+        householdId: g.session.householdId, memberId, label, type: body.type, value,
+        // Internal channels are deliverable by construction; external ones must be
+        // verified first — via the code loop (send-verification/verify). Only an
+        // adult may carry over an already-verified state on create (the migration
+        // path); a non-adult can never self-attest an address they merely typed.
+        verified: fixed ? true : (isAdultRole(g.session.role) && !!body.verified),
+        optInStatus: fixed ? "Opted In" : (isAdultRole(g.session.role) && OPT_IN_STATES.includes(body.optInStatus) ? body.optInStatus : "Pending"),
+        allowedAgentIds: Array.isArray(body.allowedAgentIds) ? body.allowedAgentIds.filter((a) => typeof a === "string") : [],
+        createdBy: g.session.actorId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      });
+      audit({ type: "contact_method.create", contactMethodId: cm.id, memberId, methodType: cm.type, ok: true }, req, g.session);
+      return json(res, 200, { contactMethod: cm }, req);
+    }
+    /* ---- The true verification loop ----
+     * send-verification: a 6-digit code goes out through the method's REAL channel
+     * (email via the caller's connected Google, text via the SMS connector). Honest
+     * when the channel isn't set up — nothing is sent and the response says so.
+     * verify: entering the code proves control of the address → verified + opted-in.
+     * One pending challenge per method; 10-minute expiry; 5 attempts; 60s resend
+     * cooldown after a successful send. Manage-gated like every other write. */
+    const contactSendVerification = path.match(/^\/api\/contact-methods\/([^/]+)\/send-verification$/);
+    if (contactSendVerification && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const cm = getContactMethod(contactSendVerification[1]);
+      if (!cm || cm.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!isAdultRole(g.session.role) && cm.memberId !== g.session.actorId) return json(res, 403, { error: "insufficient_role" }, req);
+      if (cm.verified) return json(res, 400, { error: "already_verified", message: "This contact method is already verified." }, req);
+      if (CONTACT_FIXED_VALUES[cm.type]) return json(res, 400, { error: "not_applicable", message: "In-app methods have no external address to verify." }, req);
+      // Resend cooldown only counts sends that actually went out — a needs-setup
+      // failure shouldn't lock the user out of retrying right after they fix it.
+      const prior = getContactVerification(cm.id);
+      if (prior?.delivered && prior.nextSendAt > Date.now()) {
+        return json(res, 429, { error: "resend_too_soon", retryInMs: prior.nextSendAt - Date.now(), message: "A code was just sent — wait a moment before requesting another." }, req);
+      }
+      const code = String(crypto.randomInt(100000, 1000000));
+      const out = await sendVerificationCode({ session: g.session, method: cm, code });
+      if (!out.ok) {
+        deleteContactVerification(cm.id); // no code reached the address; nothing to enter
+        audit({ type: "contact_method.verification_sent", contactMethodId: cm.id, channel: out.channel, ok: false, needsSetup: out.needsSetup ?? undefined }, req, g.session);
+        return json(res, 200, { ok: false, channel: out.channel, needsSetup: out.needsSetup, message: out.message ?? "Couldn't send the verification code." }, req);
+      }
+      putContactVerification({
+        id: cm.id, householdId: g.session.householdId, code, channel: out.channel, delivered: true,
+        attempts: 0, maxAttempts: 5, expiresAt: Date.now() + 10 * 60 * 1000, nextSendAt: Date.now() + 60 * 1000,
+        requestedBy: g.session.actorId, createdAt: new Date().toISOString(),
+      });
+      audit({ type: "contact_method.verification_sent", contactMethodId: cm.id, channel: out.channel, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, channel: out.channel, expiresInMs: 10 * 60 * 1000, message: `Code sent to ${cm.value}.` }, req);
+    }
+    const contactVerify = path.match(/^\/api\/contact-methods\/([^/]+)\/verify$/);
+    if (contactVerify && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const cm = getContactMethod(contactVerify[1]);
+      if (!cm || cm.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!isAdultRole(g.session.role) && cm.memberId !== g.session.actorId) return json(res, 403, { error: "insufficient_role" }, req);
+      if (cm.verified) return json(res, 200, { ok: true, alreadyVerified: true, contactMethod: cm }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const given = String(body.code ?? "").trim();
+      if (!given) return json(res, 400, { error: "code_required" }, req);
+      const ch = getContactVerification(cm.id);
+      if (!ch) return json(res, 400, { error: "no_pending_verification", message: "No code has been sent — request one first." }, req);
+      if (ch.expiresAt < Date.now()) {
+        deleteContactVerification(cm.id);
+        return json(res, 400, { error: "code_expired", message: "That code expired — request a new one." }, req);
+      }
+      if (ch.attempts >= ch.maxAttempts) {
+        deleteContactVerification(cm.id);
+        return json(res, 429, { error: "too_many_attempts", message: "Too many wrong attempts — request a new code." }, req);
+      }
+      // Constant-time compare; short-lived local codes, but no reason to be sloppy.
+      // (Shape-check first — timingSafeEqual throws on unequal lengths.)
+      const wellFormed = /^\d{6}$/.test(given);
+      if (!wellFormed || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(String(ch.code)))) {
+        const updated = patchContactVerification(cm.id, { attempts: ch.attempts + 1 });
+        audit({ type: "contact_method.verify", contactMethodId: cm.id, ok: false, error: "code_incorrect" }, req, g.session);
+        return json(res, 400, { error: "code_incorrect", attemptsLeft: Math.max(0, ch.maxAttempts - updated.attempts), message: "That code doesn't match." }, req);
+      }
+      deleteContactVerification(cm.id); // single-use
+      const updated = patchContactMethod(cm.id, {
+        verified: true, optInStatus: "Opted In",
+        verifiedVia: ch.channel, verifiedBy: g.session.actorId, verifiedAt: new Date().toISOString(),
+      });
+      audit({ type: "contact_method.verify", contactMethodId: cm.id, via: ch.channel, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, contactMethod: updated }, req);
+    }
+    const contactOne = path.match(/^\/api\/contact-methods\/([^/]+)$/);
+    if (contactOne && (method === "PATCH" || method === "POST")) {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const cm = getContactMethod(contactOne[1]);
+      if (!cm || cm.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!isAdultRole(g.session.role) && cm.memberId !== g.session.actorId) return json(res, 403, { error: "insufficient_role" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const patch = {};
+      if (body.label != null) { const l = String(body.label).trim(); if (!l) return json(res, 400, { error: "label_required" }, req); patch.label = l; }
+      if (body.value != null) {
+        if (CONTACT_FIXED_VALUES[cm.type]) return json(res, 400, { error: "value_fixed", message: "This method type has no external address to change." }, req);
+        const v = String(body.value).trim();
+        if (!validContactValue(cm.type, v)) return json(res, 400, { error: "invalid_value" }, req);
+        // A changed address is a NEW address — honesty requires re-verification,
+        // and any code sent to the OLD address must stop working immediately.
+        if (v !== cm.value) { patch.value = v; patch.verified = false; patch.optInStatus = "Pending"; patch.verifiedVia = null; deleteContactVerification(cm.id); }
+      }
+      if (body.allowedAgentIds != null) {
+        if (!Array.isArray(body.allowedAgentIds)) return json(res, 400, { error: "bad_allowed_agents" }, req);
+        patch.allowedAgentIds = body.allowedAgentIds.filter((a) => typeof a === "string");
+      }
+      if (body.verified != null) {
+        // The honest path to verified is the code loop (send-verification → verify).
+        // Setting it directly is an ADULT-ONLY manual override, recorded as such —
+        // a member can no longer self-attest an address by flipping a flag.
+        if (body.verified && !isAdultRole(g.session.role)) {
+          return json(res, 403, { error: "insufficient_role", message: "Verify with the code sent to this contact method, or ask an adult to override." }, req);
+        }
+        patch.verified = !!body.verified;
+        patch.verifiedVia = body.verified ? "manual" : null;
+        if (body.verified) { patch.verifiedBy = g.session.actorId; patch.verifiedAt = new Date().toISOString(); }
+      }
+      if (body.optInStatus != null) {
+        if (!OPT_IN_STATES.includes(body.optInStatus)) return json(res, 400, { error: "bad_opt_in_status", valid: OPT_IN_STATES }, req);
+        patch.optInStatus = body.optInStatus;
+      }
+      const updated = patchContactMethod(cm.id, patch);
+      audit({ type: "contact_method.update", contactMethodId: cm.id, verified: updated.verified, ok: true }, req, g.session);
+      return json(res, 200, { contactMethod: updated }, req);
+    }
+    if (contactOne && method === "DELETE") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const cm = getContactMethod(contactOne[1]);
+      if (!cm || cm.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!isAdultRole(g.session.role) && cm.memberId !== g.session.actorId) return json(res, 403, { error: "insufficient_role" }, req);
+      deleteContactMethodRec(cm.id);
+      deleteContactVerification(cm.id); // a pending code for a deleted method is dead
+      audit({ type: "contact_method.delete", contactMethodId: cm.id, ok: true }, req, g.session);
+      return json(res, 200, { ok: true }, req);
+    }
+
     /* ---- Notification delivery (item 16b) ----
      * Real routing to a contact method's channel (in-app/dashboard now; email via the
      * caller's connected Google; text via the sms connector). Honest about what needs
      * setup. Email/text use the SESSION actor's own connected account — never someone
-     * else's. GET lists the actor's own in-app notifications. */
+     * else's. GET lists the actor's own in-app notifications.
+     * Pass methodId to resolve the channel/address from the server-owned registry
+     * (verified + opt-in enforced, per-agent allowlist honored); methodType/to stays
+     * for ad-hoc sends. */
     if (path === "/api/notify" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const methodType = String(body.methodType ?? body.channel ?? "In-App");
-      const out = await deliverNotification({ session: g.session, methodType, to: body.to ?? null, title: body.title, body: body.body });
-      audit({ type: "notify", channel: out.channel, ok: out.ok, needsSetup: out.needsSetup ?? undefined }, req, g.session);
+      const out = await deliverNotification({
+        session: g.session, methodId: typeof body.methodId === "string" ? body.methodId : null,
+        methodType, to: body.to ?? null, title: body.title, body: body.body,
+        agentId: typeof body.agentId === "string" ? body.agentId : null,
+      });
+      audit({ type: "notify", channel: out.channel, methodId: body.methodId ?? undefined, ok: out.ok, needsSetup: out.needsSetup ?? undefined }, req, g.session);
       return json(res, 200, out, req);
     }
     if (path === "/api/notifications" && method === "GET") {

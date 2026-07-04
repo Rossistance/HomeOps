@@ -3,7 +3,7 @@
 // to select and execute out of the box. The seeded skill uses only internal
 // functions (+ a gated sign-off step), so it runs end-to-end with no external
 // account — demonstrating the full approval→resume→execute→audit→memory loop.
-import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction, listMembers, putMember, listPlaybooks, putPlaybook } from "./store.mjs";
+import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction, listMembers, putMember, listPlaybooks, putPlaybook, listContactMethods, putContactMethod } from "./store.mjs";
 
 // Canonical household roster — the server-owned source of truth for each actor's
 // role. Mirrors the frontend demo family (src/data/seed.ts) so the dev profile
@@ -26,6 +26,24 @@ export function seedDefaults() {
   const haveMembers = new Set(listMembers().map((m) => m.actorId));
   for (const m of SEED_MEMBERS) {
     if (!haveMembers.has(m.actorId)) putMember({ ...m, householdId: "local" });
+  }
+
+  // Contact methods — the server-owned delivery registry. Same ids/state as the
+  // frontend demo seed (src/data/seed.ts), so the web client's one-time migration
+  // is a no-op for these and mobile sees the same registry. Idempotent by id;
+  // household edits (verify, allowlists, deletes of OTHER methods) are never clobbered.
+  const haveContacts = new Set(listContactMethods().map((c) => c.id));
+  const activeMembers = new Set(listMembers().filter((m) => !m.archived).map((m) => m.actorId));
+  for (const c of [
+    { id: "ct-alex-email", memberId: "m-alex", label: "Primary email", type: "Email", value: "alex@harper.example", verified: true, optInStatus: "Opted In" },
+    { id: "ct-alex-text", memberId: "m-alex", label: "Mobile (text)", type: "Phone/Text", value: "(555) 010-2244", verified: true, optInStatus: "Opted In" },
+    { id: "ct-morgan-email", memberId: "m-morgan", label: "Primary email", type: "Email", value: "morgan@harper.example", verified: true, optInStatus: "Opted In" },
+    { id: "ct-elaine-text", memberId: "m-elaine", label: "Mobile (prefers text)", type: "Phone/Text", value: "(555) 018-7700", verified: true, optInStatus: "Opted In" },
+    { id: "ct-sam-text", memberId: "m-sam", label: "Mobile", type: "Phone/Text", value: "(555) 044-3311", verified: false, optInStatus: "Pending" },
+  ]) {
+    if (!haveContacts.has(c.id) && activeMembers.has(c.memberId)) {
+      putContactMethod({ ...c, householdId: "local", allowedAgentIds: [], createdBy: "system", createdAt: nowISO, updatedAt: nowISO });
+    }
   }
 
   if (!listAgents().some((a) => a.id === "agt_household")) {

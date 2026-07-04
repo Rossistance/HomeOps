@@ -107,6 +107,15 @@ export interface PlaybookRec {
 }
 export interface ArtifactRec { id: string; runId?: string; kind: string; title: string; body?: string; createdAt: number }
 export interface MemberRec { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean }
+// Contact methods — the server-owned delivery registry (per-member email/phone/in-app/
+// dashboard entries with verified + opt-in state and a per-agent allowlist). Same
+// records the web Contacts tab manages; the server enforces the role gates.
+export type ContactMethodType = "Email" | "Phone/Text" | "In-App" | "Family Dashboard";
+export interface ContactMethodRec {
+  id: string; memberId: string; label: string; type: ContactMethodType; value: string;
+  verified: boolean; optInStatus: "Opted In" | "Pending" | "Not Set";
+  allowedAgentIds: string[]; createdAt?: string; updatedAt?: string;
+}
 // AI providers (server truth — readiness is verified, never assumed).
 export interface AIProviderRec {
   id: string; name: string; kind: "cloud" | "local"; local: boolean; needsKey: boolean; needsBaseUrl: boolean;
@@ -222,9 +231,44 @@ export const api = {
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
-  /* ---- notifications (item 16b mirror; real channel routing, honest availability) ---- */
-  async notify(input: { methodType: string; to?: string | null; title: string; body: string }): Promise<{ ok?: boolean; channel?: string; delivered?: boolean; needsSetup?: string; message?: string; error?: string }> {
+  /* ---- notifications (item 16b mirror; real channel routing, honest availability) ----
+   * methodId resolves channel + address from the server-owned contact-method registry
+   * (verified/opt-in enforced server-side); methodType/to stays for ad-hoc sends. */
+  async notify(input: { methodId?: string; methodType?: string; to?: string | null; title: string; body: string }): Promise<{ ok?: boolean; channel?: string; delivered?: boolean; needsSetup?: string; message?: string; error?: string }> {
     const r = await req<{ ok?: boolean; channel?: string; delivered?: boolean; needsSetup?: string; message?: string; error?: string }>("/notify", { method: "POST", body: JSON.stringify(input) });
+    return r.data ?? { error: "network" };
+  },
+  /* ---- contact methods (server-owned delivery registry; adults manage anyone,
+   * everyone else manages their own — the server enforces it) ---- */
+  async contactMethods(): Promise<ContactMethodRec[]> {
+    const r = await req<{ contactMethods: ContactMethodRec[] }>("/contact-methods");
+    return r.data?.contactMethods ?? [];
+  },
+  async createContactMethod(body: { memberId?: string; label: string; type: ContactMethodType; value?: string }): Promise<{ contactMethod?: ContactMethodRec; error?: string; message?: string }> {
+    const r = await req<{ contactMethod?: ContactMethodRec; error?: string; message?: string }>("/contact-methods", { method: "POST", body: JSON.stringify(body) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async patchContactMethod(id: string, patch: { label?: string; value?: string; verified?: boolean; optInStatus?: string; allowedAgentIds?: string[] }): Promise<{ contactMethod?: ContactMethodRec; error?: string; message?: string }> {
+    const r = await req<{ contactMethod?: ContactMethodRec; error?: string; message?: string }>(`/contact-methods/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async deleteContactMethod(id: string): Promise<{ ok?: boolean; error?: string }> {
+    const r = await req<{ ok?: boolean; error?: string }>(`/contact-methods/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  // The true verification loop: a 6-digit code through the method's real channel,
+  // then confirm it to prove control of the address (verified + opted-in).
+  async sendContactVerification(id: string): Promise<{ ok?: boolean; channel?: string; needsSetup?: string; retryInMs?: number; message?: string; error?: string }> {
+    const r = await req<{ ok?: boolean; channel?: string; needsSetup?: string; retryInMs?: number; message?: string; error?: string }>(`/contact-methods/${encodeURIComponent(id)}/send-verification`, { method: "POST", body: "{}" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async confirmContactVerification(id: string, code: string): Promise<{ ok?: boolean; alreadyVerified?: boolean; contactMethod?: ContactMethodRec; attemptsLeft?: number; message?: string; error?: string }> {
+    const r = await req<{ ok?: boolean; alreadyVerified?: boolean; contactMethod?: ContactMethodRec; attemptsLeft?: number; message?: string; error?: string }>(`/contact-methods/${encodeURIComponent(id)}/verify`, { method: "POST", body: JSON.stringify({ code }) });
+    if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
   async notifications(): Promise<{ id: string; channel: string; title: string; body: string; read: boolean; createdAt: number }[]> {

@@ -42,7 +42,7 @@ import { pushActivity, executeAgentRun, subagentDefsFor, processFile } from "@/l
 import { parseAgentPrompt, buildWorkflowPlan, routeToAgent, detectApprovalGates } from "@/lib/ai";
 import { buildSearchIndex, search } from "@/lib/search";
 import { getAdvancedMode, setAdvancedMode } from "@/lib/prefs";
-import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerMemory, type ServerAgent } from "@/connectors/api";
+import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerMemory, type ServerAgent, type ServerContactMethod } from "@/connectors/api";
 
 /** A plan shape the live runner can execute (AgentPlan satisfies this). */
 export interface RunnableStep { toolId: string | null; title: string; detail: string; input: Record<string, unknown>; requiresApproval: boolean }
@@ -358,6 +358,7 @@ export interface Store extends UIState {
   loadBackend: () => Promise<void>;
   hydrateFromServer: () => Promise<void>;
   migrateAgentsToServer: () => Promise<void>;
+  migrateContactMethodsToServer: () => Promise<void>;
   configureConnector: (id: string, values: Record<string, string>) => Promise<void>;
   revokeConnector: (id: string) => Promise<void>;
   checkConnectorHealth: (id: string) => Promise<{ ok: boolean; status?: string; latencyMs?: number; error?: string }>;
@@ -386,9 +387,14 @@ export interface Store extends UIState {
   escalateThread: (id: string) => void;
   reopenThread: (id: string) => void;
   markThreadRead: (id: string) => void;
-  addContactMethod: (memberId: string, input: Partial<ContactMethod> & { label: string; value: string }) => void;
-  verifyContactMethod: (id: string) => void;
-  setContactAllowedAgents: (id: string, agentIds: string[]) => void;
+  addContactMethod: (memberId: string, input: Partial<ContactMethod> & { label: string; value: string }) => Promise<void>;
+  /** Send a 6-digit verification code through the method's real channel. */
+  sendContactVerification: (id: string) => Promise<{ ok: boolean; needsSetup?: string; message?: string }>;
+  /** Enter the delivered code — proves control of the address → verified + opted-in. */
+  confirmContactVerification: (id: string, code: string) => Promise<{ ok: boolean; message?: string }>;
+  /** Adult-only manual override (server-enforced); the code loop is the honest path. */
+  verifyContactMethod: (id: string) => Promise<void>;
+  setContactAllowedAgents: (id: string, agentIds: string[]) => Promise<void>;
   approveRequest: (id: string, newPreview?: string) => Promise<void>;
   denyRequest: (id: string) => Promise<void>;
   askAgentForChanges: (id: string, note: string) => Promise<void>;
@@ -1213,6 +1219,7 @@ export const useStore = create<Store>((set, get) => {
       set({ backendHealth: health, backendOnline: !!health, connectors, providers: prov.providers, accounts, externalActionsEnabled: health ? health.externalActionsEnabled : true });
       if (health) {
         void get().migrateAgentsToServer();
+        void get().migrateContactMethodsToServer();
         void get().hydrateFromServer();
       }
     },
@@ -1222,8 +1229,8 @@ export const useStore = create<Store>((set, get) => {
     // from the server member registry (the client can render but never mint roles). If the
     // backend is offline this is a no-op and the local-first cache continues to render.
     hydrateFromServer: async () => {
-      const [events, tasks, members, conversations, memory, serverAgents] = await Promise.all([
-        backend.events(), backend.tasks(), backend.members(), backend.conversations(), backend.memory(), backend.agents(),
+      const [events, tasks, members, conversations, memory, serverAgents, contactMethods] = await Promise.all([
+        backend.events(), backend.tasks(), backend.members(), backend.conversations(), backend.memory(), backend.agents(), backend.contactMethods(),
       ]);
       const mapEvent = (e: ServerEvent): CalendarEvent => ({
         id: e.id, serverId: e.id, title: e.title, startAt: e.startAt ?? "", endAt: e.endAt ?? undefined,
@@ -1260,9 +1267,22 @@ export const useStore = create<Store>((set, get) => {
           status: m.role === "assistant" ? (m.build ? (m.built ? "built" : "planned") : m.plan ? "planned" : "answered") : undefined,
         })),
       });
+      const mapContact = (c: ServerContactMethod): ContactMethod => ({
+        id: c.id, memberId: c.memberId, label: c.label, type: c.type, value: c.value,
+        verified: c.verified, optInStatus: c.optInStatus, allowedAgentIds: c.allowedAgentIds ?? [],
+      });
       commit((d) => {
         const evIds = new Set(events.map((e) => e.id));
         d.events = [...events.map(mapEvent), ...d.events.filter((e) => !evIds.has(e.serverId ?? e.id))];
+        // Contact methods are server-owned (the delivery registry). Before the one-time
+        // migration completes, local-only entries survive so nothing vanishes from the UI;
+        // once migrated, the server is fully authoritative — including DELETIONS, so a
+        // method removed on another client can't linger here as a stale local ghost.
+        const contactsMigrated = typeof localStorage !== "undefined" && !!localStorage.getItem("homeops.contactsMigrated.v1");
+        const cmIds = new Set(contactMethods.map((c) => c.id));
+        d.contactMethods = contactsMigrated
+          ? contactMethods.map(mapContact)
+          : [...contactMethods.map(mapContact), ...d.contactMethods.filter((c) => !cmIds.has(c.id))];
         const tkIds = new Set(tasks.map((t) => t.id));
         d.tasks = [...tasks.map(mapTask), ...d.tasks.filter((t) => !tkIds.has(t.serverId ?? t.id))];
         // Roles are server-authoritative: overlay role/relationship onto local members,
@@ -1307,6 +1327,27 @@ export const useStore = create<Store>((set, get) => {
           if (r.error) { ok = false; break; }
         }
         if (ok && typeof localStorage !== "undefined") localStorage.setItem("homeops.agentsMigrated.v1", "1");
+      } catch { /* non-fatal — retry on next backend load */ }
+    },
+    // One-time IndexedDB→server contact-method migration (same contract as agents):
+    // ids and verified/opt-in state are PRESERVED, the server create is idempotent on a
+    // supplied id, and we only mark done when every push succeeded — a non-adult session
+    // (which may not push other members' methods) simply retries on the next load.
+    migrateContactMethodsToServer: async () => {
+      if (typeof localStorage !== "undefined" && localStorage.getItem("homeops.contactsMigrated.v1")) return;
+      try {
+        const server = await backend.contactMethods();
+        const serverIds = new Set(server.map((c) => c.id));
+        const locals = get().data.contactMethods.filter((c) => !serverIds.has(c.id));
+        let ok = true;
+        for (const c of locals) {
+          const r = await backend.createContactMethod({
+            id: c.id, memberId: c.memberId, label: c.label, type: c.type, value: c.value,
+            verified: c.verified, optInStatus: c.optInStatus, allowedAgentIds: c.allowedAgentIds ?? [],
+          });
+          if (r.error) { ok = false; break; }
+        }
+        if (ok && typeof localStorage !== "undefined") localStorage.setItem("homeops.contactsMigrated.v1", "1");
       } catch { /* non-fatal — retry on next backend load */ }
     },
     configureConnector: async (id, values) => {
@@ -1726,36 +1767,75 @@ export const useStore = create<Store>((set, get) => {
         const t = d.threads.find((x) => x.id === id);
         if (t) t.unread = false;
       }),
-    addContactMethod: (memberId, input) => {
+    // Contact methods live in the server-owned registry (the source notify.mjs resolves
+    // from), so every mutation goes through the backend and the local copy only mirrors
+    // what the server confirmed — no fake local success when the backend refuses/is down.
+    addContactMethod: async (memberId, input) => {
+      const r = await backend.createContactMethod({
+        memberId, label: input.label, type: input.type ?? "Email", value: input.value,
+        allowedAgentIds: input.allowedAgentIds ?? [],
+      });
+      const cm = r.contactMethod;
+      if (!cm) {
+        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not add contact method", message: r.error === "insufficient_role" ? "You can only add contact methods for yourself." : r.message ?? (r.error === "backend_unreachable" ? "Start the HomeOps runtime to manage contacts." : "The server rejected this contact method.") });
+        return;
+      }
       commit((d) => {
-        d.contactMethods.push({
-          id: uid("contact"),
-          memberId,
-          label: input.label,
-          type: input.type ?? "Email",
-          value: input.value,
-          verified: false,
-          optInStatus: "Pending",
-          allowedAgentIds: input.allowedAgentIds ?? [],
+        d.contactMethods.push({ id: cm.id, memberId: cm.memberId, label: cm.label, type: cm.type, value: cm.value, verified: cm.verified, optInStatus: cm.optInStatus, allowedAgentIds: cm.allowedAgentIds ?? [] });
+      });
+      toast({ kind: "info", title: "Contact method added", message: cm.verified ? undefined : "Verify it to let agents send to it." });
+    },
+    // The true verification loop: request a code through the method's real channel…
+    sendContactVerification: async (id) => {
+      const r = await backend.sendContactVerification(id);
+      if (r.ok) toast({ kind: "success", title: "Code sent", message: r.message ?? "Enter the 6-digit code to verify." });
+      else if (r.needsSetup) toast({ kind: "warn", title: "Channel needs setup", message: r.message ?? "Connect the required service in Connections first." });
+      else if (r.error === "resend_too_soon") toast({ kind: "warn", title: "Code already sent", message: r.message ?? "Wait a moment before requesting another." });
+      else toast({ kind: "error", title: "Couldn't send code", message: r.message ?? (r.error === "backend_unreachable" ? "Start the HomeOps runtime to manage contacts." : r.error) });
+      return { ok: !!r.ok, needsSetup: r.needsSetup, message: r.message };
+    },
+    // …and confirm it. Entering the code is the proof of address control.
+    confirmContactVerification: async (id, code) => {
+      const r = await backend.confirmContactVerification(id, code);
+      const cm = r.contactMethod;
+      if ((r.ok && cm) || r.alreadyVerified) {
+        commit((d) => {
+          const c = d.contactMethods.find((x) => x.id === id);
+          if (c && cm) { c.verified = cm.verified; c.optInStatus = cm.optInStatus; }
         });
-      });
-      toast({ kind: "info", title: "Contact method added", message: "Verify it to let agents send to it." });
+        toast({ kind: "success", title: "Contact verified", message: "Agents can now message this method." });
+        return { ok: true };
+      }
+      const message = r.message ?? (r.error === "code_incorrect" ? `That code doesn't match${r.attemptsLeft != null ? ` — ${r.attemptsLeft} attempts left` : ""}.` : r.error);
+      toast({ kind: "error", title: "Couldn't verify", message });
+      return { ok: false, message };
     },
-    verifyContactMethod: (id) => {
+    // Adult-only manual override, recorded server-side as verifiedVia:"manual".
+    verifyContactMethod: async (id) => {
+      const r = await backend.patchContactMethod(id, { verified: true, optInStatus: "Opted In" });
+      const cm = r.contactMethod;
+      if (!cm) {
+        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not verify", message: r.message ?? (r.error === "insufficient_role" ? "Verify with the code sent to this method, or ask an adult to override." : "Start the HomeOps runtime to manage contacts.") });
+        return;
+      }
       commit((d) => {
         const c = d.contactMethods.find((x) => x.id === id);
-        if (c) {
-          c.verified = true;
-          c.optInStatus = "Opted In";
-        }
+        if (c) { c.verified = cm.verified; c.optInStatus = cm.optInStatus; }
       });
-      toast({ kind: "success", title: "Contact verified" });
+      toast({ kind: "success", title: "Marked verified", message: "Recorded as a manual override." });
     },
-    setContactAllowedAgents: (id, agentIds) =>
+    setContactAllowedAgents: async (id, agentIds) => {
+      const r = await backend.patchContactMethod(id, { allowedAgentIds: agentIds });
+      const cm = r.contactMethod;
+      if (!cm) {
+        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not update", message: r.error === "insufficient_role" ? "Only adults can change another member's agent allowlist." : "Start the HomeOps runtime to manage contacts." });
+        return;
+      }
       commit((d) => {
         const c = d.contactMethods.find((x) => x.id === id);
-        if (c) c.allowedAgentIds = agentIds;
-      }),
+        if (c) c.allowedAgentIds = cm.allowedAgentIds ?? [];
+      });
+    },
     approveRequest: async (id, newPreview) => {
       const existing = get().data.approvals.find((x) => x.id === id);
       if (!existing) return;

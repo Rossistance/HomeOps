@@ -16,6 +16,7 @@ const FAMILY: Row[] = [
   // "Recipes" mirrors the web IA: playbooks folded into a read-only reference view.
   { icon: "map-outline", label: "Recipes", hint: "Step-by-step household workflows", href: "/playbooks" },
   { icon: "people-outline", label: "Household", hint: "Members, roles, spaces & visibility", href: "/household" },
+  { icon: "call-outline", label: "Contacts", hint: "Delivery methods, verification & opt-in", href: "/contacts" },
 ];
 const SYSTEM: Row[] = [
   { icon: "notifications-outline", label: "Notifications", hint: "What your helpers delivered", href: "/notifications" },

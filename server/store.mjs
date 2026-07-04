@@ -736,6 +736,31 @@ export function getRiskOverride(householdId, toolId) {
   return _riskOverrides.get(`${householdId}:${toolId}`) ?? null;
 }
 
+/* ---- Contact methods (server-owned registry) ----
+ * The canonical per-member delivery registry (email/phone/in-app/dashboard) with
+ * verified + opt-in state and a per-agent allowlist. Previously client-only
+ * (IndexedDB); server-owned so mobile can manage it and notify.mjs can resolve a
+ * method's real channel/address instead of trusting ad-hoc per-call input. */
+const _contactMethods = keyedCollection("contact_methods.json");
+export const listContactMethods = (filter) => _contactMethods.list(filter);
+export const getContactMethod = (id) => _contactMethods.get(id);
+export const putContactMethod = (c) => _contactMethods.put(c);
+export const patchContactMethod = (id, patch) => _contactMethods.patch(id, patch);
+export const deleteContactMethodRec = (id) => _contactMethods.remove(id);
+
+/* ---- Contact verification challenges (the true verification loop) ----
+ * One pending challenge per contact method (keyed by methodId): a 6-digit code
+ * sent through the method's REAL channel; entering it proves control of the
+ * address and flips the method to verified + opted-in. Codes are stored plain:
+ * they are short-lived (10 min), single-use, attempt-limited, and live in the
+ * same local data dir that already holds the vault key file and plaintext
+ * session bearer tokens — disk access is total compromise regardless. */
+const _contactVerifications = keyedCollection("contact_verifications.json");
+export const getContactVerification = (methodId) => _contactVerifications.get(methodId);
+export const putContactVerification = (v) => _contactVerifications.put(v);
+export const patchContactVerification = (methodId, patch) => _contactVerifications.patch(methodId, patch);
+export const deleteContactVerification = (methodId) => _contactVerifications.remove(methodId);
+
 /* ---- In-app notifications (item 16b) ----
  * Durable per-household notification records — the "in-app / family dashboard" delivery
  * channel, and the audit trail for email/text sends. Actor-scoped reads. */

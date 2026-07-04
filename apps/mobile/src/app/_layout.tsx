@@ -45,6 +45,7 @@ function TabsNav() {
       <Tabs.Screen name="files" options={{ href: null }} />
       <Tabs.Screen name="playbooks" options={{ href: null }} />
       <Tabs.Screen name="household" options={{ href: null }} />
+      <Tabs.Screen name="contacts" options={{ href: null }} />
     </Tabs>
   );
 }

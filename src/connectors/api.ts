@@ -414,6 +414,13 @@ export interface EmailReviewLabel { id: string; name: string; type: string }
 export interface EmailReview { runId: string; messages: EmailReviewMessage[]; labels: EmailReviewLabel[]; touchedGmail: boolean }
 /* ---- Notifications (item 16b): delivered in-app records ---- */
 export interface ServerNotification { id: string; householdId: string; actorId: string; channel: string; title: string; body: string; to: string | null; read: boolean; createdAt: number }
+/* ---- Contact methods: the server-owned delivery registry ---- */
+export interface ServerContactMethod {
+  id: string; householdId: string; memberId: string; label: string;
+  type: "Email" | "Phone/Text" | "In-App" | "Family Dashboard"; value: string;
+  verified: boolean; optInStatus: "Opted In" | "Pending" | "Not Set";
+  allowedAgentIds: string[]; createdBy?: string; createdAt?: string; updatedAt?: string;
+}
 
 // CSRF token for the current session (set on login / session bootstrap). Never persisted.
 let csrfToken: string | null = null;
@@ -791,8 +798,31 @@ export const backend = {
     try { return await req<EmailReview>(`/runs/${runId}/email-review`); } catch { return null; }
   },
   // Item 16b: deliver a notification to a contact method's channel (honest availability).
-  async notify(input: { methodType: string; to?: string | null; title: string; body: string }): Promise<{ ok: boolean; channel?: string; delivered?: boolean; needsSetup?: string; message?: string; error?: string }> {
+  // methodId resolves channel + address from the server-owned registry (verified/opt-in
+  // enforced there); methodType/to remains for ad-hoc sends.
+  async notify(input: { methodId?: string; methodType?: string; to?: string | null; title: string; body: string; agentId?: string }): Promise<{ ok: boolean; channel?: string; delivered?: boolean; needsSetup?: string; message?: string; error?: string }> {
     try { return await req(`/notify`, { method: "POST", body: JSON.stringify(input), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  /* ---- contact methods (server-owned delivery registry) ---- */
+  async contactMethods(): Promise<ServerContactMethod[]> {
+    try { return (await req<{ contactMethods: ServerContactMethod[] }>(`/contact-methods`)).contactMethods ?? []; } catch { return []; }
+  },
+  async createContactMethod(input: { id?: string; memberId?: string; label: string; type: string; value?: string; verified?: boolean; optInStatus?: string; allowedAgentIds?: string[] }): Promise<{ contactMethod?: ServerContactMethod; error?: string; message?: string }> {
+    try { return await req(`/contact-methods`, { method: "POST", body: JSON.stringify(input), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async patchContactMethod(id: string, patch: { label?: string; value?: string; verified?: boolean; optInStatus?: string; allowedAgentIds?: string[] }): Promise<{ contactMethod?: ServerContactMethod; error?: string; message?: string }> {
+    try { return await req(`/contact-methods/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async deleteContactMethod(id: string): Promise<{ ok?: boolean; error?: string }> {
+    try { return await req(`/contact-methods/${encodeURIComponent(id)}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  // The true verification loop: a 6-digit code goes out through the method's real
+  // channel; entering it (verify) proves control of the address.
+  async sendContactVerification(id: string): Promise<{ ok?: boolean; channel?: string; needsSetup?: string; retryInMs?: number; message?: string; error?: string }> {
+    try { return await req(`/contact-methods/${encodeURIComponent(id)}/send-verification`, { method: "POST", body: "{}", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  async confirmContactVerification(id: string, code: string): Promise<{ ok?: boolean; alreadyVerified?: boolean; contactMethod?: ServerContactMethod; attemptsLeft?: number; message?: string; error?: string }> {
+    try { return await req(`/contact-methods/${encodeURIComponent(id)}/verify`, { method: "POST", body: JSON.stringify({ code }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
   },
   async notifications(): Promise<ServerNotification[]> {
     try { return (await req<{ notifications: ServerNotification[] }>(`/notifications`)).notifications ?? []; } catch { return []; }
