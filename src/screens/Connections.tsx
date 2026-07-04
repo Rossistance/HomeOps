@@ -46,6 +46,9 @@ export function Connections() {
         </div>
       </div>
 
+      {/* Calendar subscriptions — the read-only "linked" calendar layer (ICS feeds) */}
+      <CalendarSubscriptions />
+
       {/* Household utilities (no per-user sign-in) */}
       {connectors.length > 0 && (
         <>
@@ -56,6 +59,108 @@ export function Connections() {
 
       {selProvider && <ProviderDrawer provider={selProvider} onClose={() => setSelectedProvider(null)} />}
       {sel && <ConnectorDrawer connector={sel} onClose={() => setSelected(null)} />}
+    </div>
+  );
+}
+
+/* -------- Calendar subscriptions (ICS feeds → read-only linked layer) -------- */
+function CalendarSubscriptions() {
+  const toast = useStore((s) => s.toast);
+  const role = useStore((s) => s.session?.role);
+  const accounts = useStore((s) => s.accounts);
+  const hydrate = useStore((s) => s.hydrateFromServer);
+  const canManage = role === "Owner" || role === "Adult Admin" || role === "Adult Member";
+  const googleAccount = accounts.find((a) => a.provider === "google" && a.status !== "revoked");
+  const [subs, setSubs] = useState<import("@/connectors/api").CalendarSubscription[]>([]);
+  const [mode, setMode] = useState<"none" | "url" | "paste">("none");
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [ics, setIcs] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => setSubs(await backend.calendarSubscriptions());
+  useEffect(() => { void load(); }, []);
+
+  const afterChange = async (label: string, detail?: string) => { await load(); await hydrate(); toast({ kind: "success", title: label, message: detail }); };
+
+  const addUrl = async () => {
+    if (!url.trim()) return; setBusy(true);
+    const r = await backend.subscribeCalendar({ name: name.trim() || undefined, url: url.trim() });
+    setBusy(false);
+    if (r.subscription) { setUrl(""); setName(""); setMode("none"); await afterChange("Calendar subscribed", `${r.sync?.imported ?? 0} events imported`); }
+    else toast({ kind: "error", title: "Couldn't subscribe", message: r.error === "insufficient_role" ? "Adults only." : r.error });
+  };
+  const addPaste = async () => {
+    if (!ics.trim()) return; setBusy(true);
+    const r = await backend.importIcs({ name: name.trim() || undefined, ics });
+    setBusy(false);
+    if (r.subscription) { setIcs(""); setName(""); setMode("none"); await afterChange("Calendar imported", `${r.sync?.imported ?? 0} events imported`); }
+    else toast({ kind: "error", title: "Import failed", message: r.message ?? (r.error === "insufficient_role" ? "Adults only." : r.error) });
+  };
+  const connectGoogle = async () => {
+    setBusy(true);
+    const r = await backend.connectGoogleCalendar();
+    setBusy(false);
+    if (r.subscription && r.sync?.ok) await afterChange("Google Calendar connected", `${r.sync.imported ?? 0} events imported`);
+    else toast({ kind: "warn", title: "Couldn't connect Google Calendar", message: r.message ?? (r.error === "connect_google_first" ? "Connect Google in Your apps first." : r.error === "needs_reconnect" ? "Reconnect Google and grant calendar access." : r.error) });
+  };
+  const sync = async (id: string) => { setBusy(true); const r = await backend.syncCalendar(id); setBusy(false); if (r.sync?.ok) await afterChange("Synced", `${r.sync.updated ?? 0} updated · ${r.sync.imported ?? 0} new`); else toast({ kind: "warn", title: "Sync failed", message: r.error }); };
+  const remove = async (id: string) => { setBusy(true); const r = await backend.deleteCalendarSubscription(id); setBusy(false); if (r.ok) await afterChange("Removed", `${r.removedEvents ?? 0} events removed`); };
+
+  return (
+    <div className="mb-7">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+        <div><p className="section-title">Subscribed calendars</p><p className="mt-1 text-xs text-ink-400">Add a school, sports, or holidays feed (.ics). Events appear read-only on your calendar — copy one to edit it.</p></div>
+        {canManage && mode === "none" && (
+          <div className="flex flex-wrap gap-2">
+            {googleAccount
+              ? <Button size="sm" variant="ember" disabled={busy} onClick={connectGoogle}><Icon name="Calendar" size={13} /> Connect Google Calendar</Button>
+              : <span className="self-center text-xs text-ink-400">Connect Google above to pull your Google Calendar.</span>}
+            <Button size="sm" variant="secondary" onClick={() => setMode("url")}><Icon name="Link" size={13} /> Add feed URL</Button>
+            <Button size="sm" variant="ghost" onClick={() => setMode("paste")}><Icon name="ClipboardPaste" size={13} /> Paste .ics</Button>
+          </div>
+        )}
+      </div>
+
+      {mode === "url" && (
+        <Card className="card-pad mb-3">
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+            <Field label="Name (optional)"><TextInput value={name} placeholder="Riverside School" onChange={(e) => setName(e.target.value)} /></Field>
+            <Field label="Feed URL (.ics / webcal)"><TextInput value={url} placeholder="https://…/calendar.ics" onChange={(e) => setUrl(e.target.value)} /></Field>
+          </div>
+          <div className="mt-3 flex gap-2"><Button size="sm" variant="ember" disabled={busy || !url.trim()} onClick={addUrl}>{busy ? <Icon name="Loader2" size={13} className="animate-spin" /> : <Icon name="Plus" size={13} />} Subscribe</Button><Button size="sm" variant="ghost" onClick={() => setMode("none")}>Cancel</Button></div>
+        </Card>
+      )}
+      {mode === "paste" && (
+        <Card className="card-pad mb-3">
+          <Field label="Name (optional)"><TextInput value={name} placeholder="Imported calendar" onChange={(e) => setName(e.target.value)} /></Field>
+          <Field label="Paste the contents of an .ics file" className="mt-2"><TextArea value={ics} rows={5} placeholder="BEGIN:VCALENDAR…" onChange={(e) => setIcs(e.target.value)} /></Field>
+          <div className="mt-3 flex gap-2"><Button size="sm" variant="ember" disabled={busy || !ics.trim()} onClick={addPaste}>{busy ? <Icon name="Loader2" size={13} className="animate-spin" /> : <Icon name="Download" size={13} />} Import</Button><Button size="sm" variant="ghost" onClick={() => setMode("none")}>Cancel</Button></div>
+        </Card>
+      )}
+
+      {subs.length === 0 ? (
+        mode === "none" && <p className="text-sm text-ink-400">No subscribed calendars yet.</p>
+      ) : (
+        <div className="stagger grid grid-cols-1 gap-3 md:grid-cols-2">
+          {subs.map((s) => (
+            <Card key={s.id} className="card-pad flex items-start gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-sky-50 text-sky-600"><Icon name="CalendarDays" size={16} /></span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold text-ink-900">{s.name}</p>
+                <p className="truncate text-xs text-ink-400">{s.url ?? "Pasted .ics"} · {s.eventCount} events{s.lastSyncAt ? ` · synced ${relativeTime(new Date(s.lastSyncAt).toISOString())}` : ""}</p>
+                {s.lastResult?.error && <p className="mt-0.5 text-xs text-coral-600">Last sync: {s.lastResult.error}</p>}
+                {canManage && (
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" variant="secondary" disabled={busy} onClick={() => sync(s.id)}><Icon name="RefreshCw" size={12} /> Sync</Button>
+                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => remove(s.id)}><Icon name="Trash2" size={12} /> Remove</Button>
+                  </div>
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

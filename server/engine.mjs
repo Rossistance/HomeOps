@@ -13,6 +13,7 @@ import {
   createApproval, consumeApproval, getApproval, decideApproval,
   appendAudit, getSettings, putEvolution, patchEvolution,
   idempotencyKey, checkIdempotency, recordIdempotency, withRunLock, hashInput,
+  getRiskOverride, addArtifact, addMemory, listMemory,
 } from "./store.mjs";
 import { findToolGlobal } from "./providers.mjs";
 import { listConnectors, executeTool } from "./connectors.mjs";
@@ -24,6 +25,7 @@ import { getAgent } from "./store.mjs";
 import { isToolStepAllowed } from "./agents.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
 import { proposeEvolution } from "./planner.mjs";
+import { providerChat } from "./ai.mjs";
 
 const RUN_STEP_TIMEOUT_MS = 60_000;
 const MAX_ATTEMPTS = 3;
@@ -51,8 +53,108 @@ function summarize(result) {
 }
 function externalActionsEnabled() { return getSettings().externalActionsEnabled !== false; }
 
+/* ---- Agentic step execution (data flows BETWEEN steps) ----
+ * Two engine capabilities that turn a static plan into a working run:
+ *   1. Reasoning steps (toolId:null) actually reason: the LLM works over prior step
+ *      results and stores {text, data} — e.g. selecting which message ids to act on.
+ *   2. Tool inputs are resolved from prior results before execution — and crucially
+ *      BEFORE the approval record is created, so what a human approves is the real,
+ *      final input (the consume-once hash then binds exactly that input).
+ * Both fail open and honest: with no AI provider they leave the plan's static input
+ * untouched and say so, and the downstream tool surfaces its own truthful error. */
+const REASONING_SYS = `You execute ONE reasoning step inside a household automation run. Use the run goal, this step's instruction, and prior step results. Be decisive and concrete. Respond with ONLY a JSON object: {"text": string, "data": object|null}. "text" = 1-3 sentence human summary of what you determined. "data" = machine-usable output later steps may need (ids, lists, selections), e.g. {"messageIds": ["abc","def"]}. COMPLETENESS IS MANDATORY: process EVERY item in the prior results, not a sample — if 200 items are present, your selection must consider all 200, and "data" must list every qualifying item's id. Use ONLY real values from prior results — never invent ids. No prose outside the JSON.`;
+const FILL_SYS = `You fill the input fields for ONE tool step inside a household automation run, using prior step results. Respond with ONLY a JSON object mapping input keys to STRING values. Rules: keep any provided non-empty value unless it contains a {{template}}; join lists into comma-separated strings; when a prior reasoning step selected a set of items, include EVERY selected id — never a sample or truncation; use ONLY real values from prior results or the run goal — NEVER invent ids or addresses. If a required value truly cannot be determined, set it to "".`;
+
+function activeAiProvider() { return getSettings().aiActiveProvider || null; }
+
+// Item 11 (second half): AUTOMATIC memory-writing. After a run completes, one AI pass
+// judges whether the outcome contains a durable household fact/preference/routine worth
+// remembering — without the planner having scripted a write_memory step. Strict bar:
+// one-off task outcomes are NOT memories. Fire-and-forget (never delays or fails the
+// run), deduped against existing memory text, always audited.
+const MEMORY_JUDGE_SYS = `You decide whether a completed household-assistant run revealed something DURABLE about the household worth remembering for future runs.
+Remember ONLY lasting facts, preferences, routines, or rules (e.g. "The family does taco night on Wednesdays", "Noah's dentist is Dr. Lee").
+Do NOT remember one-off task outcomes, generic summaries, or anything already obvious from the run title.
+Respond with ONLY JSON: {"remember": boolean, "text": string, "type": "fact"|"preference"|"routine"|"rule"|"insight"}. When remember is false, text may be empty.`;
+async function proposeRunMemory(runId) {
+  const run = getRun(runId);
+  if (!run || run.status !== "completed") return;
+  const provider = activeAiProvider();
+  if (!provider) return;
+  const material = run.steps
+    .filter((s) => s.status === "succeeded")
+    .map((s) => ({ title: s.title, detail: (s.detail ?? "").slice(0, 300), text: s.result?.text ? String(s.result.text).slice(0, 1200) : null }))
+    .slice(0, 12);
+  if (!material.length) return;
+  const user = `Run title: ${run.title}\n\nStep outcomes (JSON): ${JSON.stringify(material)}`;
+  const out = await providerChat(provider, { messages: [{ role: "system", content: MEMORY_JUDGE_SYS }, { role: "user", content: user }] }).catch(() => null);
+  if (!out?.ok) return;
+  const parsed = extractJSONLoose(out.text);
+  const text = String(parsed?.text ?? "").trim();
+  if (!parsed?.remember || text.length < 8 || text.length > 500) return;
+  // Dedupe: an identical (case-insensitive) memory already exists → no noise.
+  const existing = listMemory({ householdId: run.householdId, limit: 500 });
+  if (existing.some((m) => String(m.text).trim().toLowerCase() === text.toLowerCase())) return;
+  const type = ["fact", "preference", "routine", "rule", "insight"].includes(parsed.type) ? parsed.type : "insight";
+  addMemory({ householdId: run.householdId, scope: "household", type, text, source: { runId, actorId: run.actorId, via: "auto" } });
+  appendAudit({ type: "run.memory_captured", runId, householdId: run.householdId, memoryType: type });
+}
+function extractJSONLoose(text) {
+  if (!text) return null;
+  let t = String(text).trim();
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) t = fence[1].trim();
+  const first = t.indexOf("{"); const last = t.lastIndexOf("}");
+  if (first === -1 || last <= first) return null;
+  try { return JSON.parse(t.slice(first, last + 1)); } catch { return null; }
+}
+function priorResultsJSON(run, uptoIndex) {
+  const out = [];
+  for (let j = 0; j < uptoIndex; j++) {
+    const s = run.steps[j];
+    if (!s || s.status !== "succeeded") continue;
+    let result = s.result ?? s.detail ?? null;
+    let str = JSON.stringify(result);
+    // Generous per-step budget: a paginated gmail.search of 250 compact messages is
+    // ~50KB, and truncating it would silently break the "process EVERY item" contract.
+    if (str && str.length > 60000) result = str.slice(0, 60000) + "…(truncated)";
+    out.push({ step: j + 1, title: s.title, toolId: s.toolId, result });
+  }
+  let str = JSON.stringify(out);
+  if (str.length > 90000) str = str.slice(0, 90000) + "…";
+  return str;
+}
+function toolInputSchema(resolved) {
+  const raw = resolved?.tool?.inputs ?? resolved?.def?.input_schema ?? [];
+  return (Array.isArray(raw) ? raw : []).map((f) => ({ key: f.key, label: f.label ?? f.key, required: !!f.required }));
+}
+// Does this step's input need resolving from prior results?
+function inputNeedsFill(step, schema, stepIndex) {
+  if (stepIndex === 0) return false; // nothing earlier to draw from
+  const inp = step.input ?? {};
+  const hasTemplate = Object.values(inp).some((v) => typeof v === "string" && v.includes("{{"));
+  const missingRequired = schema.some((f) => f.required && !String(inp[f.key] ?? "").trim());
+  return hasTemplate || missingRequired;
+}
+async function fillStepInput(run, stepIndex, step, schema) {
+  const provider = activeAiProvider();
+  if (!provider) return { filled: null, note: "No AI provider connected — used the plan's original input." };
+  const user = `Run goal: ${run.goal ?? run.plan?.title ?? ""}\nPlan summary: ${run.plan?.summary ?? ""}\n\nTool: ${step.toolId}\nStep: ${step.title}${step.detail ? ` — ${step.detail}` : ""}\nInput schema: ${JSON.stringify(schema)}\nCurrent input: ${JSON.stringify(step.input ?? {})}\n\nPrior step results (JSON): ${priorResultsJSON(run, stepIndex)}`;
+  const out = await providerChat(provider, { messages: [{ role: "system", content: FILL_SYS }, { role: "user", content: user }] }).catch(() => null);
+  if (!out?.ok) return { filled: null, note: `Input resolution unavailable (${out?.error ?? "provider error"}) — used the plan's original input.` };
+  const parsed = extractJSONLoose(out.text);
+  if (!parsed || typeof parsed !== "object") return { filled: null, note: "Input resolution returned no usable values — used the plan's original input." };
+  const filled = { ...(step.input ?? {}) };
+  for (const f of schema) {
+    if (parsed[f.key] == null) continue;
+    const v = parsed[f.key];
+    filled[f.key] = Array.isArray(v) ? v.map(String).join(",") : String(v);
+  }
+  return { filled, note: null };
+}
+
 /* ---- authoritative tool resolution (server decides requiresApproval, NOT client) ---- */
-function resolveTool(toolId) {
+function resolveToolBase(toolId) {
   const internal = getInternalFunction(toolId);
   if (internal) return { kind: "internal", def: internal, requiresApproval: !!internal.requiresApproval, action: internal.action, risk: internal.risk, connectorId: internal.connectorId, connectorName: internal.connectorName };
   const platform = findToolGlobal(toolId);
@@ -66,6 +168,23 @@ function resolveTool(toolId) {
   const registered = resolveRegisteredFunction(toolId);
   if (registered) return registered;
   return null;
+}
+// Household risk override (item 9): an Owner/Adult Admin may re-class a tool's risk and
+// skip its approval gate for THEIR household. Applied here — inside the single server
+// authority — so every caller (run steps, catalogs) sees the same effective values.
+// baseRequiresApproval is kept so audits can record when a gate was actually bypassed.
+function resolveTool(toolId, householdId) {
+  const base = resolveToolBase(toolId);
+  if (!base || !householdId) return base;
+  const ov = getRiskOverride(householdId, toolId);
+  if (!ov) return base;
+  return {
+    ...base,
+    baseRequiresApproval: base.requiresApproval,
+    requiresApproval: ov.skipApproval ? false : base.requiresApproval,
+    risk: ov.riskClass ?? base.risk,
+    riskOverridden: true,
+  };
 }
 
 // Execute a resolved tool. For gated steps this is called only AFTER the approval
@@ -111,7 +230,7 @@ export async function startRun({ source = "manual", sourceRef = {}, plan, params
   const runId = "run_" + crypto.randomBytes(10).toString("hex");
   const now = Date.now();
   const steps = (plan?.steps ?? []).map((s, i) => {
-    const resolved = s.toolId ? resolveTool(s.toolId) : null;
+    const resolved = s.toolId ? resolveTool(s.toolId, session?.householdId) : null;
     return {
       index: i,
       toolId: s.toolId ?? null,
@@ -180,24 +299,66 @@ async function _drive(runId) {
     if (i >= run.steps.length) {
       patchRun(runId, { status: "completed", finishedAt: Date.now(), lease: null });
       appendAudit({ type: "run.complete", runId, householdId: run.householdId, steps: run.steps.length });
+      // Knowledge capture (item 15): a completed run whose reasoning produced a real
+      // written result gets saved as a durable artifact — findable later in Files &
+      // Knowledge instead of buried in run history. Only substantive text (>120 chars)
+      // qualifies, and never when the plan already wrote its own artifact (no dupes).
+      try {
+        const wroteOwn = run.steps.some((s) => s.toolId === "homeops.create_artifact" && s.status === "succeeded");
+        const reasoningText = run.steps
+          .filter((s) => !s.toolId && s.status === "succeeded" && s.result?.text)
+          .map((s) => s.result.text).join("\n\n").trim();
+        if (!wroteOwn && reasoningText.length > 120) {
+          addArtifact({ householdId: run.householdId, runId, kind: "run_summary", title: run.title || "Run summary", body: reasoningText.slice(0, 20_000) });
+          appendAudit({ type: "run.artifact_captured", runId, householdId: run.householdId });
+        }
+      } catch { /* knowledge capture is best-effort — never fails the run */ }
+      // Automatic memory (item 11b) — fire-and-forget so completion is never delayed.
+      void proposeRunMemory(runId).catch(() => {});
       emit(runId, "run.completed");
       return { ok: true, status: "completed" };
     }
     const step = run.steps[i];
     if (["succeeded", "skipped"].includes(step.status)) { patchRun(runId, { cursor: i + 1 }); continue; }
 
-    // Reasoning step (no tool) — nothing to execute.
+    // Reasoning step (no tool) — the LLM works over prior step results and stores
+    // {text, data}; later steps draw on `data` (e.g. which message ids to act on).
     if (!step.toolId) {
-      patchRunStep(runId, i, { status: "succeeded", detail: step.detail || "Reasoning step.", finishedAt: Date.now() });
+      const provider = activeAiProvider();
+      if (!provider) {
+        patchRunStep(runId, i, { status: "succeeded", detail: `${step.detail || "Reasoning step"} (no AI provider connected — reasoning skipped)`, finishedAt: Date.now() });
+        patchRun(runId, { cursor: i + 1 });
+        emit(runId, "run.step");
+        continue;
+      }
+      patchRunStep(runId, i, { status: "running", startedAt: step.startedAt ?? Date.now() });
+      emit(runId, "run.step");
+      const user = `Run goal: ${run.goal ?? run.plan?.title ?? ""}\nPlan summary: ${run.plan?.summary ?? ""}\n\nThis step: ${step.title}\nInstruction: ${step.detail ?? ""}\n\nPrior step results (JSON): ${priorResultsJSON(run, i)}`;
+      const out = await providerChat(provider, { messages: [{ role: "system", content: REASONING_SYS }, { role: "user", content: user }] }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+      const parsed = out?.ok ? extractJSONLoose(out.text) : null;
+      const text = parsed?.text ? String(parsed.text) : out?.ok ? String(out.text ?? "").slice(0, 400) : null;
+      const result = parsed ? { text: text ?? "", data: parsed.data ?? null } : text ? { text, data: null } : null;
+      patchRunStep(runId, i, {
+        status: "succeeded",
+        detail: text ?? `${step.detail || "Reasoning step"} (reasoning unavailable: ${out?.error ?? "provider error"})`,
+        result, finishedAt: Date.now(),
+      });
+      appendAudit({ type: "run.step", runId, toolId: null, ok: true, action: "Reason", householdId: run.householdId, actorId: run.actorId });
       patchRun(runId, { cursor: i + 1 });
       emit(runId, "run.step");
       continue;
     }
 
-    const resolved = resolveTool(step.toolId);
+    const resolved = resolveTool(step.toolId, run.householdId);
     if (!resolved) {
       patchRunStep(runId, i, { status: "failed", detail: `Unknown tool: ${step.toolId}`, finishedAt: Date.now() });
       return finishFailed(runId, "unknown_tool");
+    }
+    // When a household override actually bypasses a default approval gate, that fact is
+    // audited — approval-skipping is admin-sanctioned but never silent.
+    if (resolved.riskOverridden && resolved.baseRequiresApproval && !resolved.requiresApproval && !step.riskOverrideAudited) {
+      appendAudit({ type: "run.approval_skipped_by_override", runId, toolId: step.toolId, householdId: run.householdId, actorId: run.actorId });
+      patchRunStep(runId, i, { riskOverrideAudited: true });
     }
 
     // Agent policy re-validation (Slice 5): if this run is attributed to an agent that
@@ -215,20 +376,42 @@ async function _drive(runId) {
       }
     }
 
+    // Resolve this step's input from prior results (agentic threading) — exactly once,
+    // and BEFORE any approval exists, so the human approves the real, final input and
+    // the consume-once hash binds it. Never re-fills after an approval was created.
+    if (!step.inputResolved && !step.approvalId) {
+      const schema = toolInputSchema(resolved);
+      if (inputNeedsFill(step, schema, i)) {
+        const { filled, note } = await fillStepInput(run, i, step, schema);
+        if (filled) {
+          patchRunStep(runId, i, { input: filled, inputResolved: true, detail: step.detail });
+          appendAudit({ type: "run.input_resolved", runId, toolId: step.toolId, keys: Object.keys(filled), householdId: run.householdId });
+        } else {
+          patchRunStep(runId, i, { inputResolved: true, detail: note ? `${step.detail ?? step.title} — ${note}` : step.detail });
+        }
+        run = getRun(runId);
+      } else {
+        patchRunStep(runId, i, { inputResolved: true });
+      }
+    }
+    // Re-read the step: its input may have just been resolved; everything below
+    // (approval, hash, execution) must use the FINAL input.
+    const stepNow = getRun(runId).steps[i];
+
     // Approval gate — create the approval, park, and return until a human decides.
     if (resolved.requiresApproval) {
-      if (!step.approvalId) {
-        const a = createApproval({ actorId: run.actorId, householdId: run.householdId, connectorId: resolved.connectorId, toolId: step.toolId, input: step.input, risk: resolved.risk, category: resolved.action, preview: step.title });
+      if (!stepNow.approvalId) {
+        const a = createApproval({ actorId: run.actorId, householdId: run.householdId, connectorId: resolved.connectorId, toolId: stepNow.toolId, input: stepNow.input, risk: resolved.risk, category: resolved.action, preview: stepNow.title });
         patchRunStep(runId, i, { status: "waiting_for_approval", approvalId: a.id });
         patchRun(runId, { status: "waiting_for_approval" });
-        appendAudit({ type: "run.await_approval", runId, toolId: step.toolId, approvalId: a.id, householdId: run.householdId });
+        appendAudit({ type: "run.await_approval", runId, toolId: stepNow.toolId, approvalId: a.id, householdId: run.householdId });
         // Push-notify the household — crucial for scheduled/trigger runs that park with
         // no browser open. Fire-and-forget; no-op when no device tokens are registered.
         pushApprovalNotification(a).catch(() => {});
         emit(runId, "run.waiting_for_approval");
         return { ok: true, status: "waiting_for_approval", approvalId: a.id };
       }
-      const appr = getApproval(step.approvalId);
+      const appr = getApproval(stepNow.approvalId);
       if (!appr || appr.status === "pending") {
         patchRun(runId, { status: "waiting_for_approval" });
         emit(runId, "run.waiting_for_approval");
@@ -243,7 +426,7 @@ async function _drive(runId) {
     }
 
     // Idempotency — never run the same step's side effect twice (across restarts too).
-    const idem = idempotencyKey(runId, i, step.toolId, JSON.stringify(step.input ?? {}));
+    const idem = idempotencyKey(runId, i, stepNow.toolId, JSON.stringify(stepNow.input ?? {}));
     const prior = checkIdempotency(idem);
     if (prior?.done) {
       patchRunStep(runId, i, { status: "succeeded", detail: prior.summary ?? "Already done.", finishedAt: Date.now(), idempotencyKey: idem });
@@ -252,17 +435,17 @@ async function _drive(runId) {
       continue;
     }
 
-    const attempts = (step.attempts ?? 0) + 1;
-    patchRunStep(runId, i, { status: "running", startedAt: step.startedAt ?? Date.now(), idempotencyKey: idem, attempts });
+    const attempts = (stepNow.attempts ?? 0) + 1;
+    patchRunStep(runId, i, { status: "running", startedAt: stepNow.startedAt ?? Date.now(), idempotencyKey: idem, attempts });
     emit(runId, "run.step");
 
     // Consume the approval atomically with the FROZEN input (hash must match).
     let approvalId;
     if (resolved.requiresApproval) {
-      const c = consumeApproval({ id: step.approvalId, actorId: run.actorId, householdId: run.householdId, toolId: step.toolId, input: step.input });
+      const c = consumeApproval({ id: stepNow.approvalId, actorId: run.actorId, householdId: run.householdId, toolId: stepNow.toolId, input: stepNow.input });
       if (c.error) {
         patchRunStep(runId, i, { status: "failed", detail: c.error, finishedAt: Date.now() });
-        appendAudit({ type: "run.step", runId, toolId: step.toolId, ok: false, error: c.error, householdId: run.householdId });
+        appendAudit({ type: "run.step", runId, toolId: stepNow.toolId, ok: false, error: c.error, householdId: run.householdId });
         return finishFailed(runId, c.error);
       }
       approvalId = c.approval.id;
@@ -271,15 +454,15 @@ async function _drive(runId) {
     let out;
     const t0 = Date.now();
     try {
-      out = await withTimeout(execResolved(resolved, step.input, { householdId: run.householdId, actorId: run.actorId, runId, accountId: run.params?.accountId }, approvalId), RUN_STEP_TIMEOUT_MS);
+      out = await withTimeout(execResolved(resolved, stepNow.input, { householdId: run.householdId, actorId: run.actorId, runId, accountId: run.params?.accountId }, approvalId), RUN_STEP_TIMEOUT_MS);
     } catch (e) {
       out = { ok: false, error: "timeout", message: String(e?.message ?? e) };
     }
     const durationMs = Date.now() - t0;
     // First-class trace fields (P3.2): who acted, which account/connector, the input
     // hash, and the approval consumed — enough to explain why an automation acted.
-    appendToolCall(runId, i, { ok: !!out.ok, error: out.ok ? null : out.error, durationMs, approvalId: approvalId ?? null, actorId: run.actorId, accountId: run.params?.accountId ?? null, connectorId: resolved.connectorId ?? null, attribution: resolved.kind, inputHash: hashInput(step.input), resultSummary: out.ok ? summarize(out.result) : (out.message ?? out.error) });
-    appendAudit({ type: "run.step", runId, toolId: step.toolId, connectorId: resolved.connectorId, ok: !!out.ok, error: out.ok ? undefined : out.error, action: resolved.action, householdId: run.householdId, actorId: run.actorId });
+    appendToolCall(runId, i, { ok: !!out.ok, error: out.ok ? null : out.error, durationMs, approvalId: approvalId ?? null, actorId: run.actorId, accountId: run.params?.accountId ?? null, connectorId: resolved.connectorId ?? null, attribution: resolved.kind, inputHash: hashInput(stepNow.input), resultSummary: out.ok ? summarize(out.result) : (out.message ?? out.error) });
+    appendAudit({ type: "run.step", runId, toolId: stepNow.toolId, connectorId: resolved.connectorId, ok: !!out.ok, error: out.ok ? undefined : out.error, action: resolved.action, householdId: run.householdId, actorId: run.actorId });
 
     if (out.ok) {
       recordIdempotency(idem, { done: true, summary: summarize(out.result) });

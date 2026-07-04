@@ -581,6 +581,19 @@ export function addMemory(entry) {
   writeJSON("memory.json", all);
   return rec;
 }
+// Archiving/deleting a memory entry only removes it as a future reference — it's a
+// standing record of something already learned, not a live dependency any in-flight
+// agent/skill/tool/function behavior holds a pointer to. Deleting one can never break
+// prior evolution: whatever was already baked into an accepted skill/agent version
+// stays baked in regardless of whether the memory entry that originally informed it
+// still exists.
+export function deleteMemoryEntry(id) {
+  const all = readJSON("memory.json", []);
+  const had = all.some((m) => m.id === id);
+  if (!had) return false;
+  writeJSON("memory.json", all.filter((m) => m.id !== id));
+  return true;
+}
 
 /* ---- Artifacts (reports/briefings/checklists produced by runs) ---- */
 export function listArtifacts({ householdId, runId, limit = 100 } = {}) {
@@ -642,6 +655,54 @@ export const putTask = (t) => _tasks.put(t);
 export const patchTask = (id, patch) => _tasks.patch(id, patch);
 export const deleteTaskRec = (id) => _tasks.remove(id);
 
+// Meal plan — a week of family meals. Grocery items reuse tasks.json (type:"list").
+const _meals = keyedCollection("meals.json");
+export const listMeals = (filter) => _meals.list(filter);
+export const getMeal = (id) => _meals.get(id);
+export const putMeal = (m) => _meals.put(m);
+export const patchMeal = (id, patch) => _meals.patch(id, patch);
+export const deleteMealRec = (id) => _meals.remove(id);
+
+// Calendar subscriptions (ICS feeds) — the source records for the read-only "linked"
+// calendar layer. Synced events are stored in events.json with layer:"linked".
+const _subs = keyedCollection("calendar_subscriptions.json");
+export const listSubscriptions = (filter) => _subs.list(filter);
+export const getSubscription = (id) => _subs.get(id);
+export const putSubscription = (s) => _subs.put(s);
+export const patchSubscription = (id, patch) => _subs.patch(id, patch);
+export const deleteSubscriptionRec = (id) => _subs.remove(id);
+
+/* ---- Playbooks (Phase 6): server-owned step-by-step household workflows ---- */
+const _playbooks = keyedCollection("playbooks.json");
+export const listPlaybooks = (filter) => _playbooks.list(filter);
+export const getPlaybook = (id) => _playbooks.get(id);
+export const putPlaybook = (p) => _playbooks.put(p);
+export const patchPlaybook = (id, patch) => _playbooks.patch(id, patch);
+export const deletePlaybookRec = (id) => _playbooks.remove(id);
+
+/* ---- Household files (Phase 5): server-owned file library ----
+ * Metadata lives in household_files.json (keyed collection, visibility-scoped like
+ * events/tasks); the bytes live beside it in DATA_DIR/files/<id>.bin so JSON files
+ * stay small and atomic writes stay fast. */
+const _files = keyedCollection("household_files.json");
+export const listFiles = (filter) => _files.list(filter);
+export const getFileRec = (id) => _files.get(id);
+export const putFileRec = (f) => _files.put(f);
+export const patchFileRec = (id, patch) => _files.patch(id, patch);
+const FILES_DIR = join(DATA_DIR, "files");
+export function writeFileBlob(id, buf) {
+  fs.mkdirSync(FILES_DIR, { recursive: true });
+  fs.writeFileSync(join(FILES_DIR, `${id}.bin`), buf);
+}
+export function readFileBlob(id) {
+  const p = join(FILES_DIR, `${id}.bin`);
+  return fs.existsSync(p) ? fs.readFileSync(p) : null;
+}
+export function deleteFileRec(id) {
+  _files.remove(id);
+  try { fs.unlinkSync(join(FILES_DIR, `${id}.bin`)); } catch { /* already gone */ }
+}
+
 /* ---- Server-durable assistant conversations (P1.1) ----
  * Threads + messages live server-side so history survives refresh and the assistant
  * context can be retrieved from the server rather than trusted from the client. */
@@ -661,5 +722,30 @@ export function appendConversationMessage(id, message) {
   writeJSON("conversations.json", all);
   return c;
 }
+
+/* ---- Per-entity risk-class overrides (item 9) ----
+ * A household may lower (or raise) a tool/function's risk class and skip the human
+ * approval gate for it. Server-owned and consulted inside the engine's authoritative
+ * resolveTool — the client can never grant itself a skip. Records are keyed
+ * `${householdId}:${toolId}` so overrides can never leak across households. */
+const _riskOverrides = keyedCollection("risk_overrides.json");
+export const listRiskOverrides = (filter) => _riskOverrides.list(filter);
+export const putRiskOverride = (r) => _riskOverrides.put(r);
+export const deleteRiskOverrideRec = (id) => _riskOverrides.remove(id);
+export function getRiskOverride(householdId, toolId) {
+  return _riskOverrides.get(`${householdId}:${toolId}`) ?? null;
+}
+
+/* ---- In-app notifications (item 16b) ----
+ * Durable per-household notification records — the "in-app / family dashboard" delivery
+ * channel, and the audit trail for email/text sends. Actor-scoped reads. */
+const _notifications = keyedCollection("notifications.json");
+export const listNotifications = (filter) => _notifications.list(filter);
+export function addNotification(n) {
+  const rec = { id: "ntf_" + crypto.randomBytes(8).toString("hex"), read: false, createdAt: Date.now(), ...n };
+  _notifications.put(rec);
+  return rec;
+}
+export function markNotificationRead(id) { return _notifications.patch(id, { read: true }); }
 
 export { DATA_DIR };

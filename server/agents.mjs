@@ -12,6 +12,7 @@ import {
 } from "./store.mjs";
 import { toolCatalog } from "./planner.mjs";
 import { listPublicFunctions } from "./functions.mjs";
+import { listInternalFunctions } from "./internal-functions.mjs";
 
 /* ------------------------------ versioning ------------------------------ */
 export function listAgentVersions(agentId) {
@@ -40,6 +41,30 @@ function normalizeAgent(body, base = {}) {
     approvalPolicy: body.approvalPolicy ?? base.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] },
     triggers: Array.isArray(body.triggers) ? body.triggers : (base.triggers ?? []),
   };
+}
+
+/* --------------------------- capability derivation ----------------------- */
+// Intelligent tool preselection for chat-built agents: an agent created alongside a
+// skill inherits the capabilities its skill's steps actually reference, split against
+// the live catalogs (real tool ids → allowedToolIds, internal function ids →
+// allowedFunctionIds). Without this, chat-built agents landed with empty allow-lists
+// and permitted∩available made them inert — "created" but unable to execute anything.
+export function deriveCapabilitiesFromSteps(stepToolIds, session) {
+  const tools = new Set();
+  const fns = new Set();
+  const catalogIds = new Set(toolCatalog(session).map((t) => t.toolId));
+  // Function ids come from BOTH registries: built-in internal functions (homeops.*)
+  // and household-defined custom functions.
+  const functionIds = new Set([
+    ...listInternalFunctions().map((f) => f.id),
+    ...listPublicFunctions(session).map((f) => f.id),
+  ]);
+  for (const id of stepToolIds) {
+    if (!id) continue; // null = reasoning step, no capability needed
+    if (functionIds.has(id)) fns.add(id);
+    else tools.add(id); // catalog tools AND unknown ids — permitted∩available filters unknowns at run time
+  }
+  return { allowedToolIds: [...tools], allowedFunctionIds: [...fns], knownToolCount: [...tools].filter((t) => catalogIds.has(t)).length };
 }
 
 /* --------------------------------- CRUD --------------------------------- */

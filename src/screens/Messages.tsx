@@ -6,6 +6,7 @@ import {
 import { Icon } from "@/components/Icon";
 import { relativeTime, fmtDateTime } from "@/lib/dates";
 import { cn } from "@/lib/cn";
+import { backend } from "@/connectors/api";
 import type { ApprovalRequest, MessageThread } from "@/types";
 
 export function Messages() {
@@ -263,7 +264,21 @@ function Contacts() {
   const verify = useStore((s) => s.verifyContactMethod);
   const setAllowed = useStore((s) => s.setContactAllowedAgents);
   const addContact = useStore((s) => s.addContactMethod);
+  const toast = useStore((s) => s.toast);
   const [addingFor, setAddingFor] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+
+  // Item 16b: actually attempt delivery through the method's real channel and report the
+  // honest result (delivered, or which connector needs setup).
+  const sendTest = async (c: { id: string; type: string; value: string; label: string }) => {
+    setTestingId(c.id);
+    const external = c.type === "Email" || c.type === "Phone/Text";
+    const r = await backend.notify({ methodType: c.type, to: external ? c.value : null, title: "HomeOps test", body: `This is a test notification to your "${c.label}" contact method.` });
+    setTestingId(null);
+    if (r.delivered) toast({ kind: "success", title: "Test sent", message: r.message ?? "Delivered." });
+    else if (r.needsSetup) toast({ kind: "warn", title: "Channel needs setup", message: r.message ?? "Connect the required service in Connections." });
+    else toast({ kind: "error", title: "Couldn't deliver", message: r.message ?? r.error ?? "Delivery failed." });
+  };
 
   return (
     <div className="space-y-4">
@@ -283,6 +298,7 @@ function Contacts() {
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2"><Icon name={c.type === "Email" ? "Mail" : c.type === "Phone/Text" ? "Smartphone" : "Bell"} size={15} className="text-ink-500" /><div><p className="text-sm font-medium text-ink-800">{c.label}</p><p className="text-xs text-ink-500">{c.value}</p></div></div>
                     <div className="flex items-center gap-2">
+                      <Button size="sm" variant="ghost" disabled={testingId === c.id} onClick={() => sendTest(c)}>{testingId === c.id ? <Icon name="Loader2" size={13} className="animate-spin" /> : <Icon name="Send" size={13} />} Send test</Button>
                       {c.verified ? <Badge color="sage"><Icon name="BadgeCheck" size={11} /> Verified</Badge> : <Button size="sm" variant="secondary" onClick={() => verify(c.id)}>Verify</Button>}
                       <StatusDot color={c.optInStatus === "Opted In" ? "sage" : "amber"} label={c.optInStatus} />
                     </div>
@@ -306,16 +322,41 @@ function Contacts() {
   );
 }
 
+// Per-type shape for the "Value" field — this is the bug fix: the field used to be
+// hardcoded to phone formatting regardless of which type was selected. In-App and
+// Family Dashboard aren't external addresses at all (there's nothing to type — the
+// notification is just "shown inside HomeOps" / "shown on the shared dashboard"), so
+// they get a fixed, non-editable value instead of an address field.
+const CONTACT_TYPE_META: Record<"Email" | "Phone/Text" | "In-App" | "Family Dashboard", {
+  inputType: string; placeholder: string; hint: string; fixedValue: string | null; validate: (v: string) => boolean;
+}> = {
+  "Email": { inputType: "email", placeholder: "you@example.com", hint: "Used for email notifications.", fixedValue: null, validate: (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) },
+  "Phone/Text": { inputType: "tel", placeholder: "(555) 000-0000", hint: "Used for text message notifications.", fixedValue: null, validate: (v) => v.replace(/\D/g, "").length >= 7 },
+  "In-App": { inputType: "text", placeholder: "", hint: "Notifications appear in HomeOps when this profile is signed in — no address needed.", fixedValue: "in-app", validate: () => true },
+  "Family Dashboard": { inputType: "text", placeholder: "", hint: "Shown on the shared household dashboard display — no address needed.", fixedValue: "dashboard", validate: () => true },
+};
+
 function AddContactModal({ memberId, onClose, onAdd }: { memberId: string; onClose: () => void; onAdd: (memberId: string, input: { label: string; value: string; type?: "Email" | "Phone/Text" | "In-App" | "Family Dashboard" }) => void }) {
   const [label, setLabel] = useState("");
   const [value, setValue] = useState("");
   const [type, setType] = useState<"Email" | "Phone/Text" | "In-App" | "Family Dashboard">("Email");
+  const meta = CONTACT_TYPE_META[type];
+  const effectiveValue = meta.fixedValue ?? value;
+  const valueValid = meta.fixedValue != null || (value.trim() !== "" && meta.validate(value.trim()));
+  const changeType = (t: typeof type) => { setType(t); if (CONTACT_TYPE_META[t].fixedValue == null) setValue(""); };
   return (
-    <Modal open onClose={onClose} title="Add contact method" icon="Plus" footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!label.trim() || !value.trim()} onClick={() => { onAdd(memberId, { label, value, type }); onClose(); }}>Add</Button></>}>
+    <Modal open onClose={onClose} title="Add contact method" icon="Plus" footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!label.trim() || !valueValid} onClick={() => { onAdd(memberId, { label, value: effectiveValue, type }); onClose(); }}>Add</Button></>}>
       <div className="space-y-3">
-        <Field label="Type"><Select value={type} onChange={(e) => setType(e.target.value as typeof type)}><option>Email</option><option>Phone/Text</option><option>In-App</option><option>Family Dashboard</option></Select></Field>
+        <Field label="Type"><Select value={type} onChange={(e) => changeType(e.target.value as typeof type)}><option>Email</option><option>Phone/Text</option><option>In-App</option><option>Family Dashboard</option></Select></Field>
         <Field label="Label"><TextInput value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Mobile" /></Field>
-        <Field label="Value"><TextInput value={value} onChange={(e) => setValue(e.target.value)} placeholder="(555) 000-0000" /></Field>
+        {meta.fixedValue == null ? (
+          <Field label="Value" hint={meta.hint}>
+            <TextInput type={meta.inputType} value={value} onChange={(e) => setValue(e.target.value)} placeholder={meta.placeholder} />
+            {value.trim() !== "" && !valueValid && <p className="mt-1 text-xs text-coral-600">{type === "Email" ? "Enter a valid email address." : "Enter a valid phone number."}</p>}
+          </Field>
+        ) : (
+          <Field label="Value" hint={meta.hint}><p className="rounded-lg border border-ink-900/[0.06] bg-surface-sunken/60 px-3 py-2 text-sm text-ink-500">No address needed for this type.</p></Field>
+        )}
       </div>
     </Modal>
   );

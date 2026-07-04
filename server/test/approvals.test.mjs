@@ -79,3 +79,26 @@ test("cross-household / unknown approval id is a 404", async () => {
   const decide = await owner.req(`/api/approvals/apr_does_not_exist/decide`, { method: "POST", body: JSON.stringify({ decision: "approve" }) });
   assert.equal(decide.status, 404);
 });
+
+// Rich preview (2026-07-03 fix): the human reviewing an approval needs to see the REAL
+// resolved content, not a description of a description. The approval record itself never
+// stores raw input (only a hash, by design — see the comment on publicApproval), but the
+// ORIGINATING RUN STEP does, and the run API now exposes it.
+test("a gated run step exposes its resolved input via GET /api/runs/:id (for a rich approval preview)", async () => {
+  const start = await owner.req("/api/runs/start", {
+    method: "POST",
+    body: JSON.stringify({ source: "manual", plan: { title: "Preview test", steps: [{ toolId: "gmail.modifyLabels", title: "Label test messages", input: { messageIds: "a,b,c", addLabels: "Social", removeLabels: "" }, requiresApproval: true }] } }),
+  });
+  const runId = start.data.run.id;
+  const run = (await owner.req(`/api/runs/${runId}`)).data.run;
+  const step = run.steps[0];
+  assert.equal(step.status, "waiting_for_approval");
+  assert.deepEqual(step.input, { messageIds: "a,b,c", addLabels: "Social", removeLabels: "" }, "the real input is visible, not stripped");
+  assert.ok(step.approvalId);
+});
+
+test("the approval record itself never carries the raw input — only its hash (by design)", async () => {
+  const created = await createSms(owner);
+  assert.equal(created.status, 200);
+  assert.equal(created.data.approval.input, undefined, "publicApproval intentionally omits input — the run step is the source of truth");
+});

@@ -1,36 +1,33 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@/store/useStore";
-import { Card, Button, Badge, RiskBadge } from "@/components/ui";
+import { Card, Button, Badge, RiskBadge, IconButton } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { InlineApprovals } from "@/components/InlineApprovals";
 import { MarkdownContent } from "@/lib/markdown";
+import { suggestAskPrompts } from "@/lib/ai";
 import type { AssistantConversation, AssistantMessage, AutomationRun } from "@/types";
-import type { AgentPlan } from "@/connectors/api";
-
-const SUGGESTIONS = [
-  { icon: "Sun", text: "Summarize today's family schedule and what needs my attention" },
-  { icon: "Mail", text: "Draft an email to the soccer coach that Noah will miss Saturday practice" },
-  { icon: "Receipt", text: "What bills are due this week?" },
-  { icon: "BellPlus", text: "Remind me to sign the field-trip permission form tomorrow" },
-];
+import { backend, type AgentPlan, type ChatBuild, type EmailReviewMessage, type EmailReviewLabel } from "@/connectors/api";
 
 export function Assistant() {
   const conversations = useStore((s) => s.data.conversations) ?? [];
   const convId = useStore((s) => s.route.params?.id);
   const startConversation = useStore((s) => s.startConversation);
   const sendToAssistant = useStore((s) => s.sendToAssistant);
+  const deleteConversation = useStore((s) => s.deleteConversation);
   const navigate = useStore((s) => s.navigate);
   const conv = conversations.find((c) => c.id === convId);
 
-  if (!conv) return <AssistantHome conversations={conversations} onStart={startConversation} onOpen={(id) => navigate("assistant", { id })} />;
+  if (!conv) return <AssistantHome conversations={conversations} onStart={startConversation} onOpen={(id) => navigate("assistant", { id })} onDismiss={deleteConversation} />;
   return <Conversation key={conv.id} conv={conv} onSend={(t) => sendToAssistant(conv.id, t)} />;
 }
 
 /* ------------------------------- Home / empty --------------------------- */
-function AssistantHome({ conversations, onStart, onOpen }: { conversations: AssistantConversation[]; onStart: (t: string) => void; onOpen: (id: string) => void }) {
+function AssistantHome({ conversations, onStart, onOpen, onDismiss }: { conversations: AssistantConversation[]; onStart: (t: string) => void; onOpen: (id: string) => void; onDismiss: (id: string) => void }) {
   const [text, setText] = useState("");
+  const data = useStore((s) => s.data);
   const me = useStore((s) => s.currentMember());
   const first = (me?.displayName ?? "there").split(" ")[0];
+  const suggestions = useMemo(() => suggestAskPrompts(data, me), [data, me]);
   const submit = () => { const t = text.trim(); if (t) { onStart(t); setText(""); } };
   return (
     <div className="animate-fade-in mx-auto flex min-h-[60vh] max-w-2xl flex-col justify-center py-6">
@@ -57,7 +54,7 @@ function AssistantHome({ conversations, onStart, onOpen }: { conversations: Assi
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
-        {SUGGESTIONS.map((s) => (
+        {suggestions.map((s) => (
           <button key={s.text} onClick={() => onStart(s.text)} className="group flex items-center gap-3 rounded-2xl border border-ink-900/[0.06] bg-surface-rim px-3.5 py-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] transition-all hover:-translate-y-0.5 hover:border-ember-200 hover:shadow-e2">
             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-ember-50 text-ember-600"><Icon name={s.icon} size={16} /></span>
             <span className="text-sm text-ink-700">{s.text}</span>
@@ -70,10 +67,17 @@ function AssistantHome({ conversations, onStart, onOpen }: { conversations: Assi
           <p className="section-title mb-2">Recent</p>
           <div className="flex flex-col gap-1.5">
             {conversations.slice(0, 6).map((c) => (
-              <button key={c.id} onClick={() => onOpen(c.id)} className="data-row cursor-pointer text-left">
-                <span className="flex min-w-0 items-center gap-2"><Icon name="MessageSquare" size={14} className="shrink-0 text-ink-400" /><span className="truncate text-sm text-ink-700">{c.title}</span></span>
-                <Icon name="ChevronRight" size={15} className="shrink-0 text-ink-300" />
-              </button>
+              <div key={c.id} className="group data-row flex items-center">
+                <button onClick={() => onOpen(c.id)} className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left">
+                  <Icon name="MessageSquare" size={14} className="shrink-0 text-ink-400" /><span className="truncate text-sm text-ink-700">{c.title}</span>
+                </button>
+                <IconButton
+                  icon="X" label={`Remove "${c.title}" from recent chats`}
+                  className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                  onClick={(e) => { e.stopPropagation(); onDismiss(c.id); }}
+                />
+                <Icon name="ChevronRight" size={15} className="ml-1 shrink-0 text-ink-300" />
+              </div>
             ))}
           </div>
         </div>
@@ -165,8 +169,212 @@ function MessageRow({ conversationId, m }: { conversationId: string; m: Assistan
           <PhaseStrip runStatus={run.status} />
         )}
         {m.plan && <PlanCard conversationId={conversationId} messageId={m.id} plan={m.plan} runId={m.runId} />}
+        {m.build && <BuildCard conversationId={conversationId} messageId={m.id} build={m.build} status={m.status} progress={m.buildProgress} builtIds={m.builtIds} />}
+        {/* Item 3: after a completed run that touched Gmail labels, an inline review card. */}
+        {m.runId && run && run.status === "Completed" && <EmailReviewCard runId={m.runId} />}
       </div>
     </div>
+  );
+}
+
+/* ---------------------------- Email review card ------------------------- *
+ * Item 3: after a Gmail-triage run, review each modified message inline and undo /
+ * relabel / mark-unread per row. Each action dispatches a fresh one-step
+ * gmail.modifyLabels run (runPlan) so it still flows through the normal approval gate
+ * (unless the household set a risk override for that tool). Reversal is derived from
+ * what the original run applied: revert = add-back what was removed, remove what was added. */
+function EmailReviewRow({ msg, labels, onAction }: { msg: EmailReviewMessage; labels: EmailReviewLabel[]; onAction: (m: EmailReviewMessage, add: string[], remove: string[], verb: string) => void }) {
+  const [relabel, setRelabel] = useState("");
+  const [done, setDone] = useState<string | null>(null);
+  const act = (add: string[], remove: string[], verb: string) => { onAction(msg, add, remove, verb); setDone(verb); };
+  const senderName = msg.from.replace(/<[^>]*>/, "").trim() || msg.from;
+  return (
+    <li className="rounded-xl border border-ink-900/[0.06] bg-surface-sunken/40 px-3 py-2.5">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-ink-800">{msg.subject || "(no subject)"}</p>
+          <p className="truncate text-xs text-ink-500">{senderName}</p>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {msg.added.map((l) => <Badge key={`a${l}`} color="sage">+{l}</Badge>)}
+            {msg.removed.map((l) => <Badge key={`r${l}`} color="gray">−{l}</Badge>)}
+          </div>
+        </div>
+      </div>
+      {done ? (
+        <p className="mt-2 flex items-center gap-1.5 text-xs text-sage-600"><Icon name="CheckCircle2" size={13} /> {done} — sent{done === "Kept as-is" ? "" : " for approval"}.</p>
+      ) : (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <Button size="sm" variant="ghost" onClick={() => setDone("Kept as-is")}>Keep</Button>
+          {(msg.added.length > 0 || msg.removed.length > 0) && (
+            <Button size="sm" variant="secondary" onClick={() => act(msg.removed, msg.added, "Reverted")}><Icon name="Undo2" size={12} /> Revert</Button>
+          )}
+          {!msg.removed.includes("UNREAD") ? null : (
+            <Button size="sm" variant="secondary" onClick={() => act(["UNREAD"], [], "Marked unread")}><Icon name="Mail" size={12} /> Mark unread</Button>
+          )}
+          <div className="flex items-center gap-1">
+            <select value={relabel} onChange={(e) => setRelabel(e.target.value)} className="rounded-lg border border-ink-900/10 bg-surface-raised px-2 py-1 text-xs text-ink-700">
+              <option value="">Relabel…</option>
+              {labels.map((l) => <option key={l.id} value={l.name}>{l.name}</option>)}
+            </select>
+            {relabel && <Button size="sm" variant="ember" onClick={() => act([relabel], msg.added, `Relabeled → ${relabel}`)}>Apply</Button>}
+          </div>
+        </div>
+      )}
+    </li>
+  );
+}
+
+function EmailReviewCard({ runId }: { runId: string }) {
+  const runPlan = useStore((s) => s.runPlan);
+  const toast = useStore((s) => s.toast);
+  const [messages, setMessages] = useState<EmailReviewMessage[]>([]);
+  const [labels, setLabels] = useState<EmailReviewLabel[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [customLabel, setCustomLabel] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    void backend.emailReview(runId).then((r) => {
+      if (!alive || !r) { setLoaded(true); return; }
+      setMessages(r.touchedGmail ? r.messages : []);
+      setLabels(r.labels);
+      setLoaded(true);
+    });
+    return () => { alive = false; };
+  }, [runId]);
+
+  if (!loaded || messages.length === 0) return null;
+
+  const action = (m: EmailReviewMessage, add: string[], remove: string[], verb: string) => {
+    // One-step gmail.modifyLabels run — reuses the durable engine + approval gate.
+    void runPlan({
+      title: verb === "Reverted" ? `Revert label change for "${m.subject}"` : `${verb} — "${m.subject}"`,
+      summary: "",
+      steps: [{ toolId: "gmail.modifyLabels", title: verb, detail: `${verb} for ${m.from}`, requiresApproval: true, input: { messageIds: m.id, addLabels: add.join(","), removeLabels: remove.join(",") } }],
+    }, { label: "Email review" });
+    toast({ kind: "info", title: verb, message: "Sent to your runs — approve it in Messages & Approvals if prompted." });
+  };
+
+  return (
+    <Card className="card-pad">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-sky-400 to-sky-600 text-white"><Icon name="MailCheck" size={16} /></span>
+        <div>
+          <p className="font-display text-sm font-semibold text-ink-900">Review what changed</p>
+          <p className="text-xs text-ink-500">{messages.length} email{messages.length === 1 ? "" : "s"} modified — keep, revert, relabel, or mark unread.</p>
+        </div>
+      </div>
+      <ul className="space-y-2">
+        {messages.map((m) => <EmailReviewRow key={m.id} msg={m} labels={labels} onAction={action} />)}
+      </ul>
+      <div className="mt-3 flex items-center gap-2 border-t border-ink-900/[0.06] pt-3">
+        <input value={customLabel} onChange={(e) => setCustomLabel(e.target.value)} placeholder="New label for all…" className="min-w-0 flex-1 rounded-lg border border-ink-900/10 bg-surface-raised px-2.5 py-1.5 text-xs text-ink-700" />
+        <Button size="sm" variant="secondary" disabled={!customLabel.trim()} onClick={() => {
+          const ids = messages.map((m) => m.id).join(",");
+          void runPlan({ title: `Label ${messages.length} emails → ${customLabel}`, summary: "", steps: [{ toolId: "gmail.modifyLabels", title: `Relabel → ${customLabel}`, detail: "Bulk relabel from review", requiresApproval: true, input: { messageIds: ids, addLabels: customLabel.trim(), removeLabels: "" } }] }, { label: "Email review" });
+          toast({ kind: "info", title: "Bulk relabel queued", message: `Creating "${customLabel}" and applying it — approve if prompted.` });
+          setCustomLabel("");
+        }}>Apply to all</Button>
+      </div>
+    </Card>
+  );
+}
+
+/* -------------------------------- Build card ---------------------------- *
+ * The unified chat-builder surface: previews the durable agent/skill/automation the
+ * assistant proposes (each row expands to inspect details), then "Approve & build"
+ * materializes them server-side (role-gated) with live per-entity progress — so you
+ * build by talking, watch it happen, in the same thread. */
+type RowState = "idle" | "building" | "done";
+function BuildRow({ icon, kind, title, subtitle, detail, state, accent }: { icon: string; kind: string; title: string; subtitle?: string; detail?: React.ReactNode; state: RowState; accent?: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className={`rounded-xl border px-3 py-2 ${accent ? "border-amber-200/60 bg-amber-50/60" : "border-ink-900/[0.05] bg-surface-sunken/50"}`}>
+      <div className="flex items-start gap-2.5">
+        {state === "building" ? <Icon name="Loader2" size={15} className="mt-0.5 shrink-0 animate-spin text-sky-500" />
+          : state === "done" ? <Icon name="CheckCircle2" size={15} className="mt-0.5 shrink-0 text-sage-500" />
+          : <Icon name={icon} size={15} className={`mt-0.5 shrink-0 ${accent ? "text-amber-600" : "text-ink-500"}`} />}
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-ink-800">{kind} · {title}</p>
+          {subtitle && <p className="text-xs text-ink-500">{subtitle}</p>}
+        </div>
+        {detail && (
+          <button onClick={() => setOpen((v) => !v)} className="shrink-0 text-ink-400 transition-colors hover:text-ink-700" aria-label={open ? "Hide details" : "Show details"} aria-expanded={open}>
+            <Icon name={open ? "ChevronUp" : "ChevronDown"} size={15} />
+          </button>
+        )}
+      </div>
+      {open && detail && <div className="mt-2 border-t border-ink-900/[0.06] pt-2 text-xs text-ink-600">{detail}</div>}
+    </li>
+  );
+}
+function BuildCard({ conversationId, messageId, build, status, progress, builtIds }: { conversationId: string; messageId: string; build: ChatBuild; status?: string; progress?: string[]; builtIds?: { skillId?: string; agentId?: string; triggerId?: string } }) {
+  const buildFromChat = useStore((s) => s.buildFromChat);
+  const navigate = useStore((s) => s.navigate);
+  const [busy, setBusy] = useState(false);
+  const built = status === "built";
+  const running = status === "running";
+  const done = new Set(progress ?? []);
+  // A row's state: done once its entity arrived in the progress stream (or the whole
+  // build finished); building while the build is running but this row hasn't arrived yet.
+  const rowState = (key: string): RowState => built ? "done" : running ? (done.has(key) ? "done" : "building") : "idle";
+  const go = async () => { setBusy(true); try { await buildFromChat(conversationId, messageId); } finally { setBusy(false); } };
+  const editOnly = !build.skill && !build.agent && !build.automation && (build.edits ?? []).length > 0;
+  return (
+    <Card className="card-pad">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-sky-400 to-sky-600 text-white"><Icon name="Wand2" size={16} /></span>
+        <div>
+          <p className="font-display text-sm font-semibold text-ink-900">{built ? "Built" : editOnly ? "I'll update this" : "I'll set this up"}</p>
+          <p className="text-xs text-ink-500">{build.summary}</p>
+        </div>
+      </div>
+      <ul className="space-y-1.5">
+        {build.skill && (
+          <BuildRow icon="ListChecks" kind="Skill" title={build.skill.name} state={rowState("skill")}
+            subtitle={build.skill.description || (build.skill.steps?.length ? `${build.skill.steps.length} step${build.skill.steps.length === 1 ? "" : "s"}` : undefined)}
+            detail={
+              <div className="space-y-1">
+                {build.skill.planner_guidance && <p><span className="text-ink-400">Guidance:</span> {build.skill.planner_guidance}</p>}
+                {build.skill.risk_level && <p><span className="text-ink-400">Risk:</span> {build.skill.risk_level}</p>}
+                {build.skill.steps && build.skill.steps.length > 0 && (
+                  <ol className="ml-3 list-decimal space-y-0.5">
+                    {build.skill.steps.map((s, i) => <li key={i}>{s.name}{s.tool_id ? <span className="text-ink-400"> · {s.tool_id}</span> : <span className="text-ink-400"> · reasoning</span>}{s.approval_required && <span className="text-coral-600"> · approval</span>}</li>)}
+                  </ol>
+                )}
+              </div>
+            } />
+        )}
+        {build.agent && (
+          <BuildRow icon="Bot" kind="Agent" title={build.agent.name} state={rowState("agent")} subtitle={build.agent.purpose}
+            detail={build.agent.instructions ? <p><span className="text-ink-400">Instructions:</span> {build.agent.instructions}</p> : undefined} />
+        )}
+        {build.automation && (
+          <BuildRow icon="Clock" kind="Automation" title={build.automation.name} state={rowState("automation")} subtitle={build.automation.type}
+            detail={
+              <p>{build.automation.type === "recurring" && build.automation.intervalMs ? `Runs every ${Math.round(build.automation.intervalMs / 3600000)}h` : build.automation.type === "schedule" && build.automation.runAt ? `Runs at ${build.automation.runAt}` : `Trigger: ${build.automation.type}`}. Gated steps still pause for approval.</p>
+            } />
+        )}
+        {(build.edits ?? []).map((e, i) => (
+          <BuildRow key={i} icon="Pencil" accent kind={`Update ${e.kind}`} title={e.id} state={rowState(e.kind)} subtitle={e.summary}
+            detail={<pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] text-ink-600">{JSON.stringify(e.patch, null, 2)}</pre>} />
+        ))}
+      </ul>
+      {built ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <p className="flex items-center gap-1.5 text-sm text-sage-600"><Icon name="CheckCircle2" size={15} /> Done.</p>
+          {builtIds?.agentId && <Button size="sm" variant="secondary" onClick={() => navigate("agents", { id: builtIds.agentId! })}><Icon name="Bot" size={13} /> Open helper</Button>}
+          {builtIds?.triggerId && <Button size="sm" variant="secondary" onClick={() => navigate("automations", { id: builtIds.triggerId! })}><Icon name="Workflow" size={13} /> Open automation</Button>}
+        </div>
+      ) : (
+        <div className="mt-3 flex items-center gap-2">
+          <Button variant="ember" disabled={busy || running} onClick={go}>
+            {busy || running ? <><Icon name="Loader2" size={15} className="animate-spin" /> {editOnly ? "Applying…" : "Building…"}</> : <><Icon name="Wand2" size={15} /> {editOnly ? "Approve & apply" : "Approve & build"}</>}
+          </Button>
+          <span className="text-xs text-ink-400">{editOnly ? "Changes are versioned and reversible." : "Creates a draft — gated steps still ask for approval when it runs."}</span>
+        </div>
+      )}
+    </Card>
   );
 }
 

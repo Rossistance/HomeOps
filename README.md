@@ -23,11 +23,26 @@ Other scripts:
 ```bash
 npm run dev:web    # web only (Vite)
 npm run server     # backend runtime only (Node, :8787)
+npm start          # production server; serves /api plus built dist/ if present
 npm run build      # typecheck (tsc) + production build (vite)
 npm run typecheck  # type-check only
 ```
 
 Requirements: Node 18+ (built on Node 20). No external accounts are required to run it — out of the box the **Weather** connector is live (real Open-Meteo calls) and the **Webhook Receiver** accepts real inbound events. Everything else shows an honest "Setup required" state until you configure it.
+
+## Deploy
+
+The recommended deployment for this repo is a **single Render web service**. The Node backend serves both `/api/*` and the built Vite app from `dist/`, which keeps session cookies and CSRF same-origin.
+
+The included Blueprint uses Render's `starter` plan because HomeOps stores its vault and household data on disk, and Render Free web services cannot attach persistent disks. For a disposable demo, you can remove the `disk` block and `HOMEOPS_DATA_DIR` env var and change `plan` to `free`, but local app data will be lost on redeploys/restarts.
+
+1. Push this repo to GitHub/GitLab/Bitbucket.
+2. In Render, create a Blueprint from the root `render.yaml`.
+3. If Render assigns a different URL than `https://homeops-ai.onrender.com`, update `HOMEOPS_PUBLIC_URL` and `HOMEOPS_ALLOWED_ORIGINS` to the actual service URL.
+4. Set optional OAuth provider values in the Render dashboard. Do not commit real secrets.
+5. For Google OAuth, add this authorized redirect URI: `https://your-render-url/api/oauth/callback`.
+
+The Blueprint runs `npm ci && npm run build`, starts with `npm start`, and mounts `/data` as persistent storage for the file-backed vault and household data.
 
 ---
 
@@ -105,7 +120,7 @@ A master **kill switch** (Settings) disables all write/send tools at the backend
 - **Network egress** is required for Weather/RSS/HTTP/Gmail/Twilio to actually return data. In a sandbox without egress, these fail honestly with `provider_error` (they do not fabricate results).
 - **Browser automation** ships as a boundary: it reports an honest runtime status and login-handoff and integrates approvals, but you must connect a real runtime (`BROWSER_RUNTIME_URL`) to drive a live browser.
 - **Cloud AI providers** require an API key; the local deterministic engine powers on-device assistance.
-- The backend is a lightweight local-development runtime (single-process, file-backed vault). It is real and runnable, not a production deployment.
+- The backend is a lightweight single-process runtime with a file-backed vault. For hosted use, mount persistent storage (the included Render Blueprint mounts `/data`); for larger or regulated production use, migrate durable state to managed storage.
 
 ---
 

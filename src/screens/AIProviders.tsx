@@ -72,13 +72,25 @@ export function AIProvidersPanel() {
         const h = health[p.id];
         const ms = models[p.id];
         const out = testOut[p.id];
+        // Truthful readiness (P1.3): "configured" = set up; "healthy" = verified reachable;
+        // both are usable/selectable. "unreachable" = set up but a probe failed;
+        // "needs_health_check" = local default URL only; "not_configured" = missing key/URL.
+        const usable = p.readiness === "configured" || p.readiness === "healthy";
+        const rb = ({
+          healthy: { color: "sage" as const, label: "Reachable" },
+          configured: { color: "sage" as const, label: "Configured" },
+          unreachable: { color: "amber" as const, label: "Unreachable" },
+          needs_health_check: { color: "sky" as const, label: "Test to verify" },
+          not_configured: { color: "amber" as const, label: "Not configured" },
+        } as const)[p.readiness as string] ?? { color: "amber" as const, label: "Not configured" };
+        const configuredish = usable || p.readiness === "unreachable"; // something is set → can disconnect
         return (
           <div key={p.id} style={{ ["--i" as string]: i }} className={`card card-pad ${p.active ? "border-ember-200" : ""}`}>
             <div className="flex flex-wrap items-center gap-2">
               <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-ink-100 text-ink-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]"><Icon name={p.local ? "MonitorSmartphone" : "Sparkles"} size={16} /></span>
               <span className="font-display text-base font-semibold text-ink-900">{p.name}</span>
               <Badge color={p.local ? "sky" : "gray"}>{p.local ? "local" : "cloud"}</Badge>
-              {p.readiness === "configured" ? <Badge color="sage">Configured</Badge> : <Badge color="amber">Not configured</Badge>}
+              <Badge color={rb.color}>{rb.label}</Badge>
               {p.active && <Badge color="sage"><Icon name="Check" size={11} /> Active</Badge>}
               {h && <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${h.ok ? "text-sage-600" : "text-amber-600"}`}><span className={`h-1.5 w-1.5 rounded-full ${h.ok ? "bg-sage-500 animate-soft-pulse" : "bg-amber-500"}`} />{h.ok ? `reachable · ${h.modelCount ?? 0} models` : `${h.status ?? "unreachable"}`}</span>}
             </div>
@@ -111,9 +123,9 @@ export function AIProvidersPanel() {
               {canAdmin && <Button size="sm" variant="primary" disabled={busy === p.id} onClick={() => save(p)}><Icon name="Save" size={13} /> Save</Button>}
               <Button size="sm" variant="secondary" disabled={busy === p.id} onClick={() => check(p)}><Icon name="Activity" size={13} /> Test connection</Button>
               {p.local && <Button size="sm" variant="secondary" disabled={busy === p.id} onClick={() => discover(p)}><Icon name="Search" size={13} /> Discover models</Button>}
-              <Button size="sm" variant="ghost" disabled={busy === p.id || p.readiness !== "configured"} onClick={() => test(p)}><Icon name="MessageSquare" size={13} /> Send test message</Button>
-              {!p.active && p.readiness === "configured" && canAdmin && <Button size="sm" variant="ember" onClick={() => setActive(p)}><Icon name="Star" size={13} /> Set active</Button>}
-              {p.readiness === "configured" && canAdmin && <Button size="sm" variant="ghost" onClick={() => revoke(p)}><Icon name="Ban" size={13} /> Disconnect</Button>}
+              <Button size="sm" variant="ghost" disabled={busy === p.id || !usable} onClick={() => test(p)}><Icon name="MessageSquare" size={13} /> Send test message</Button>
+              {!p.active && usable && canAdmin && <Button size="sm" variant="ember" onClick={() => setActive(p)}><Icon name="Star" size={13} /> Set active</Button>}
+              {configuredish && canAdmin && <Button size="sm" variant="ghost" onClick={() => revoke(p)}><Icon name="Ban" size={13} /> Disconnect</Button>}
             </div>
             {out && <p className={`mt-3 rounded-2xl px-3.5 py-2.5 text-xs ${out.ok ? "bg-sage-50 text-ink-700" : "bg-coral-50 text-coral-700"}`}>{out.ok ? `“${out.text}”` : `✗ ${out.text}`}</p>}
           </div>

@@ -9,6 +9,7 @@ import type {
   FileAsset,
   KnowledgeItem,
   MemoryEntry,
+  MemoryType,
   MiniApp,
   Playbook,
   Route,
@@ -40,7 +41,8 @@ import { uid } from "@/lib/ids";
 import { pushActivity, executeAgentRun, subagentDefsFor, processFile } from "@/lib/runtime";
 import { parseAgentPrompt, buildWorkflowPlan, routeToAgent, detectApprovalGates } from "@/lib/ai";
 import { buildSearchIndex, search } from "@/lib/search";
-import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation } from "@/connectors/api";
+import { getAdvancedMode, setAdvancedMode } from "@/lib/prefs";
+import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerMemory, type ServerAgent } from "@/connectors/api";
 
 /** A plan shape the live runner can execute (AgentPlan satisfies this). */
 export interface RunnableStep { toolId: string | null; title: string; detail: string; input: Record<string, unknown>; requiresApproval: boolean }
@@ -63,6 +65,31 @@ function mapStepStatus(s: string): RunStep["status"] {
 }
 const TERMINAL_RUN = ["completed", "failed", "cancelled", "expired"];
 const PARKED_RUN = ["waiting_for_approval", "waiting_for_connector", "waiting_for_provider"];
+// Renders a tool's resolved input into a human-readable preview instead of the generic
+// "Draft prepared by your helper agent…" boilerplate — this is the actual, real content
+// (which messages, what label, the literal draft text) the human is being asked to
+// approve, not a description OF a description. A long comma-joined id list (e.g. 93
+// message ids) collapses to a count — the ids themselves aren't meaningful to a human.
+function formatApprovalInput(input: Record<string, unknown> | undefined | null): string {
+  if (!input) return "";
+  const lines: string[] = [];
+  for (const [key, raw] of Object.entries(input)) {
+    if (raw == null || raw === "") continue;
+    let display: string;
+    if (Array.isArray(raw)) {
+      display = raw.length > 4 ? `${raw.length} item(s)` : raw.join(", ");
+    } else if (typeof raw === "string" && raw.includes(",") && raw.split(",").length > 4) {
+      display = `${raw.split(",").filter(Boolean).length} item(s)`;
+    } else if (typeof raw === "object") {
+      display = JSON.stringify(raw);
+    } else {
+      display = String(raw);
+    }
+    const label = key.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase()).trim();
+    lines.push(`${label}: ${display}`);
+  }
+  return lines.join("\n");
+}
 function runFromServer(sr: ServerRun, ctx: { agentId: string; automationId?: string; label?: string; startedAt: string }): AutomationRun {
   const status = mapRunStatus(sr.status);
   const ran = sr.steps.filter((s) => s.status === "succeeded").length;
@@ -140,9 +167,13 @@ export function screenAllowedForRole(screen: ScreenId, role: Role | undefined): 
 }
 
 /** Map a connector display name / alias to its backend connector id. */
+// IDs here MUST match real backend connector/provider ids (server/connectors.mjs,
+// server/providers.mjs) — a fictional id (the previous "gmail"/"gcal" split) silently
+// matches nothing, so connectionIds/allowedToolIds derived from it end up empty even
+// though the alias logic "succeeded". Gmail, Calendar, and Drive are all scopes of the
+// single "google" provider, not separate connectors.
 const CONNECTOR_ALIASES: { id: string; aliases: string[] }[] = [
-  { id: "gmail", aliases: ["gmail", "email"] },
-  { id: "gcal", aliases: ["calendar", "google calendar"] },
+  { id: "google", aliases: ["gmail", "email", "calendar", "google calendar", "drive", "google"] },
   { id: "weather", aliases: ["weather"] },
   { id: "rss", aliases: ["rss", "feed", "podcast", "blog"] },
   { id: "http", aliases: ["http", "custom api", "api"] },
@@ -150,6 +181,12 @@ const CONNECTOR_ALIASES: { id: string; aliases: string[] }[] = [
   { id: "files-local", aliases: ["local files", "file", "drive", "storage", "csv", "budget", "import"] },
   { id: "browser", aliases: ["browser"] },
   { id: "sms", aliases: ["text", "sms", "message"] },
+  { id: "microsoft", aliases: ["microsoft", "outlook", "onedrive"] },
+  { id: "slack", aliases: ["slack"] },
+  { id: "dropbox", aliases: ["dropbox"] },
+  { id: "notion", aliases: ["notion"] },
+  { id: "todoist", aliases: ["todoist"] },
+  { id: "ticktick", aliases: ["ticktick"] },
 ];
 function connectorIdsForNames(names: string[]): string[] {
   const ids = new Set<string>();
@@ -159,6 +196,72 @@ function connectorIdsForNames(names: string[]): string[] {
     if (hit) ids.add(hit.id);
   }
   return [...ids];
+}
+// Intelligent tool preselection: an agent created from a template or a plain-English
+// goal should already be allowed to use the real tools its chosen connectors expose —
+// without this, allowedToolIds ships empty and the agent can't do anything until a
+// human manually re-checks every tool by hand in the builder.
+function toolIdsForConnectorIds(connectorIds: string[], connectors: BackendConnector[], providers: ConnectorProvider[]): string[] {
+  const ids = new Set<string>();
+  for (const cid of connectorIds) {
+    connectors.find((c) => c.id === cid)?.tools.forEach((t) => ids.add(t.id));
+    providers.find((p) => p.id === cid)?.tools.forEach((t) => ids.add(t.id));
+  }
+  return [...ids];
+}
+// Reverse of the above: given real tool ids (e.g. from a server agent's allow-list),
+// resolve which connector/provider each belongs to — so a hydrated server agent shows
+// its connections in the UI instead of an empty chip row.
+function connectorIdsForToolIds(toolIds: string[], connectors: BackendConnector[], providers: ConnectorProvider[]): string[] {
+  const ids = new Set<string>();
+  for (const tid of toolIds) {
+    const c = connectors.find((x) => x.tools.some((t) => t.id === tid));
+    if (c) { ids.add(c.id); continue; }
+    const p = providers.find((x) => x.tools.some((t) => t.id === tid));
+    if (p) ids.add(p.id);
+  }
+  return [...ids];
+}
+// Merge server-registry agents into client state (server-wins-by-id, same pattern as
+// events/tasks/memory). Chat-built agents exist ONLY server-side — without this merge
+// they never appeared in Helper Agents even though the chat truthfully said "created".
+// For ids that already exist locally, only server-authoritative fields are overlaid so
+// local presentation wiring (space, owner, playbooks, files) is preserved.
+function mergeServerAgents(d: AppData, serverAgents: ServerAgent[], opts: { connectors: BackendConnector[]; providers: ConnectorProvider[]; actorId?: string }) {
+  // Deletion propagates: a local agent that WAS server-backed (has serverId) but is no
+  // longer in the server registry was deleted there — drop the local ghost. Purely
+  // local agents (no serverId yet) are always kept.
+  const serverIds = new Set(serverAgents.map((a) => a.id));
+  d.agents = d.agents.filter((a) => !a.serverId || serverIds.has(a.serverId));
+  for (const sa of serverAgents) {
+    const local = d.agents.find((a) => a.id === sa.id || a.serverId === sa.id);
+    if (local) {
+      local.serverId = sa.id;
+      local.name = sa.name;
+      local.purpose = sa.purpose;
+      local.instructions = sa.instructions;
+      local.status = sa.status;
+      if (sa.allowedToolIds.length) {
+        local.allowedToolIds = sa.allowedToolIds;
+        const conns = connectorIdsForToolIds(sa.allowedToolIds, opts.connectors, opts.providers);
+        if (conns.length) local.connectionIds = conns;
+      }
+    } else {
+      const space = d.spaces.find((s) => s.type === sa.spaceType) ?? d.spaces.find((s) => s.id === "sp-family") ?? d.spaces[0];
+      d.agents.unshift({
+        id: sa.id, serverId: sa.id, name: sa.name, icon: sa.icon || "Bot", purpose: sa.purpose,
+        status: sa.status, spaceId: space?.id ?? "sp-family",
+        ownerMemberId: opts.actorId ?? d.members.find((m) => m.isCurrentUser)?.id ?? d.members[0]?.id ?? "",
+        instructions: sa.instructions,
+        connectionIds: connectorIdsForToolIds(sa.allowedToolIds, opts.connectors, opts.providers),
+        allowedToolIds: sa.allowedToolIds,
+        playbookIds: [], memoryIds: [], knowledgeItemIds: [], fileIds: [],
+        approvalPolicy: sa.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] },
+        safetyLimits: [],
+        createdAt: new Date(sa.createdAt).toISOString(), updatedAt: sa.updatedAt,
+      });
+    }
+  }
 }
 
 export interface Toast {
@@ -239,6 +342,7 @@ export interface Store extends UIState {
   startConversation: (text: string) => Promise<string>;
   sendToAssistant: (conversationId: string, text: string) => Promise<void>;
   runConversationPlan: (conversationId: string, messageId: string) => Promise<void>;
+  buildFromChat: (conversationId: string, messageId: string) => Promise<void>;
   deleteConversation: (id: string) => void;
   // Evolution — evidence-backed improvement proposals from real run traces.
   maybeProposeEvolution: (runId: string) => Promise<void>;
@@ -429,7 +533,27 @@ export const useStore = create<Store>((set, get) => {
       await saveAppData(data).catch(() => {});
       set({ data, needsOnboarding: false });
       const owner = data.members.find((m) => m.isCurrentUser) ?? data.members[0];
-      if (owner) await get().loginAs(owner.id);
+      if (choice !== "sample" && owner) {
+        // Roles are server-owned: register the new owner with the backend, or the
+        // profile can never open a server session and every server-backed screen
+        // (Connections, AI providers, approvals) silently fails.
+        const claim = await backend.claimHousehold({ ownerName: owner.displayName, actorId: owner.id });
+        if (claim.session) {
+          const s = claim.session;
+          commit((d) => d.members.forEach((x) => (x.isCurrentUser = x.id === s.actorId)));
+          set({ session: s });
+          void get().loadBackend();
+        } else if (claim.error === "already_claimed") {
+          // The backend may already know this exact owner (e.g. re-running onboarding
+          // after a claim) — a normal login settles it before we bother the user.
+          const ok = await get().loginAs(owner.id);
+          if (!ok) toast({ kind: "error", title: "Backend already has a household", message: claim.message ?? "Sign in as its Owner and add this profile in Settings, or reset the server data." });
+        } else if (claim.error) {
+          toast({ kind: "warn", title: "Backend not registered", message: "The backend is unreachable — server features (connections, AI providers, approvals) stay locked until this profile is registered." });
+        }
+      } else if (owner) {
+        await get().loginAs(owner.id);
+      }
       toast({ kind: "success", title: choice === "sample" ? "Sample household loaded" : choice === "import" ? "Backup restored" : "Household created", message: data.household.name });
     },
     bootstrapSession: async () => {
@@ -448,12 +572,34 @@ export const useStore = create<Store>((set, get) => {
       if (!m) return false;
       set({ authBusy: true });
       const r = await backend.login({ actorId: m.id, actorName: m.displayName, role: m.role, pin });
-      // Local-first: even if the backend is offline, establish a local persona/role
-      // session so role enforcement works; backend mutations stay gated server-side.
+      // Explicit server rejections are surfaced, never papered over with a fake
+      // local session (that's how "signed in but every page is broken" happens).
+      if (r.error === "pin_required") { set({ authBusy: false, session: null }); toast({ kind: "error", title: "PIN required", message: "Enter the owner PIN to sign in as an admin." }); return false; }
+      if (r.error === "unknown_actor" && get().data.household.ownerMemberId === m.id) {
+        // Self-heal: this is the local household's owner but the backend still has
+        // only the demo roster (created before the claim flow existed). Claim it.
+        const claim = await backend.claimHousehold({ ownerName: m.displayName, actorId: m.id });
+        if (claim.session) {
+          const s = claim.session;
+          commit((d) => d.members.forEach((x) => (x.isCurrentUser = x.id === s.actorId)));
+          set({ session: s, authBusy: false });
+          toast({ kind: "success", title: "Household registered with the backend", message: "Your profile now owns the server household — connections and AI providers are unlocked." });
+          void get().loadBackend();
+          return true;
+        }
+      }
+      if (r.error === "unknown_actor" || r.error === "member_archived") {
+        set({ authBusy: false, session: null });
+        toast({ kind: "error", title: r.error === "member_archived" ? "Profile removed" : "Profile not registered with the backend", message: r.message ?? "Ask an Owner to add this profile in Settings → Household." });
+        return false;
+      }
+      // Local-first fallback ONLY when the backend is unreachable (offline dev):
+      // establish a local persona so role-gated UI works; server mutations stay
+      // gated server-side and server-backed screens will show their offline states.
       const session: Session = r.session ?? { actorId: m.id, actorName: m.displayName, role: m.role, csrf: "", householdId: "local" };
+      if (!r.session) toast({ kind: "warn", title: "Backend offline", message: "Signed in locally — connections, AI providers, and approvals stay unavailable until the backend is reachable." });
       commit((d) => d.members.forEach((x) => (x.isCurrentUser = x.id === memberId)));
       set({ session, authBusy: false });
-      if (r.error === "pin_required") { toast({ kind: "error", title: "PIN required", message: "Enter the owner PIN to sign in as an admin." }); set({ session: null }); return false; }
       void get().loadBackend();
       return true;
     },
@@ -495,7 +641,18 @@ export const useStore = create<Store>((set, get) => {
     },
 
     /* --------------------------- navigation / UI -------------------------- */
-    navigate: (screen, params) => set({ route: { screen, params }, commandOpen: false }),
+    navigate: (screen, params) => {
+      // Advanced screens are hidden from the nav by default, but flows may legitimately
+      // land here (function deep links, playbook chips, activity entries). Auto-enable
+      // Advanced Mode on arrival so the nav entries appear and the user isn't stranded
+      // on a screen they can't navigate back to. (User-chosen behavior, item 14.)
+      const ADVANCED_SCREENS: ScreenId[] = ["skills", "functions", "playbooks"];
+      if (ADVANCED_SCREENS.includes(screen) && !getAdvancedMode()) {
+        setAdvancedMode(true);
+        toast({ kind: "info", title: "Advanced Mode enabled", message: "Skills and Functions are now in your menu — turn Advanced Mode off in Settings anytime." });
+      }
+      set({ route: { screen, params }, commandOpen: false });
+    },
     setCommandOpen: (open) => set({ commandOpen: open }),
     setSpaceFilter: (id) => set({ spaceFilter: id }),
     toast,
@@ -578,6 +735,7 @@ export const useStore = create<Store>((set, get) => {
         templateId,
         spaceId: space?.id,
         connectionIds: connIds,
+        allowedToolIds: toolIdsForConnectorIds(connIds, get().connectors, get().providers),
         playbookIds,
         approvalPolicy: { autoAllow: tmpl?.defaultAutoAllow ?? [], alwaysApprove: tmpl?.defaultApprovalRules ?? [] },
         safetyLimits: tmpl?.defaultApprovalRules ?? [],
@@ -596,6 +754,7 @@ export const useStore = create<Store>((set, get) => {
         status: "Draft",
         spaceId: space?.id,
         connectionIds: connIds,
+        allowedToolIds: toolIdsForConnectorIds(connIds, get().connectors, get().providers),
         approvalPolicy: {
           autoAllow: ["Create a draft", "Create a reminder", "Add a task", "Generate a summary", "Tag a file"],
           alwaysApprove: parsed.approvalGates,
@@ -666,7 +825,15 @@ export const useStore = create<Store>((set, get) => {
     createAgentFromPlan: (plan, opts) => {
       const d0 = get().data;
       const space = d0.spaces.find((s) => s.type === plan.spaceType);
-      const allowedToolIds = [...new Set(plan.steps.map((s) => s.toolId).filter(Boolean))] as string[];
+      const finalConnectorIds = new Set(opts?.connectorIds ?? plan.connectorIds);
+      // Every tool the plan's steps actually use — EXCEPT tools behind a connector the
+      // user unchecked in the plan-preview step (a step with no connector, e.g. an
+      // internal homeops.* tool or a reasoning step, is always kept).
+      const allowedToolIds = [...new Set(
+        plan.steps
+          .filter((s) => s.toolId && (s.connectorId == null || finalConnectorIds.has(s.connectorId)))
+          .map((s) => s.toolId),
+      )] as string[];
       return get().createAgent({
         name: plan.title,
         icon: plan.icon,
@@ -795,7 +962,10 @@ export const useStore = create<Store>((set, get) => {
         const gated = sr.steps[sr.cursor];
         if (gated?.approvalId && !get().data.approvals.some((a) => a.backendApprovalId === gated.approvalId)) {
           // Mirror the server-created approval into the local console as a
-          // server-managed gate: the server resumes execution once decided.
+          // server-managed gate: the server resumes execution once decided. The preview
+          // is the REAL resolved input (which messages, what label, the actual draft) —
+          // not a generic description of a description.
+          const inputPreview = formatApprovalInput(gated.input);
           const aprId = get().requestApproval({
             title: gated.title,
             proposedAction: gated.detail || gated.title,
@@ -803,7 +973,7 @@ export const useStore = create<Store>((set, get) => {
             category: gated.connectorId === "homeops" ? "Form" : "Message",
             agentId: ctx.agentId || undefined,
             dataUsedSummary: gated.connectorName ?? "HomeOps",
-            previewContent: `${gated.title}\n\nApprove to let HomeOps run this step.`,
+            previewContent: [gated.detail || gated.title, inputPreview].filter(Boolean).join("\n\n") || `${gated.title}\n\nApprove to let HomeOps run this step.`,
             toolId: gated.toolId ?? undefined,
             connectorId: gated.connectorId ?? undefined,
             backendApprovalId: gated.approvalId,
@@ -889,11 +1059,61 @@ export const useStore = create<Store>((set, get) => {
               : "I couldn't reach the AI provider just now. Check it's configured and reachable in Settings → AI Providers, then ask me again.";
         } else if (r.kind === "plan" && r.plan) {
           m.status = "planned"; m.text = r.answer || r.plan.summary || "Here's my plan."; m.plan = r.plan; m.model = r.model;
+        } else if (r.kind === "build" && r.build) {
+          m.status = "planned"; m.text = r.answer || r.build.summary || "Here's what I'll set up."; m.build = r.build; m.model = r.model;
         } else {
           m.status = "answered"; m.text = r.answer || "I'm not sure how to help with that yet."; m.model = r.model;
         }
         c.updatedAt = nowISO();
       });
+    },
+    // Unified chat-builder: approve a proposed build and materialize it server-side, then
+    // mark the chat message "built" and append a confirmation listing what was created.
+    buildFromChat: async (conversationId, messageId) => {
+      const c = get().data.conversations?.find((x) => x.id === conversationId);
+      const m = c?.messages.find((x) => x.id === messageId);
+      if (!m?.build) return;
+      commit((d) => { const mm = d.conversations?.find((x) => x.id === conversationId)?.messages.find((x) => x.id === messageId); if (mm) { mm.status = "running"; mm.buildProgress = []; } });
+      // Stream per-entity progress so the card checks off each piece as it's built.
+      // conversationId travels too: the server durably marks this message built and
+      // appends the confirmation, so the card's state survives a refresh.
+      const res = await backend.streamBuild(m.build, (ev) => {
+        commit((d) => {
+          const mm = d.conversations?.find((x) => x.id === conversationId)?.messages.find((x) => x.id === messageId);
+          if (mm) mm.buildProgress = [...(mm.buildProgress ?? []), ev.entity];
+        });
+      }, conversationId);
+      if (!res.ok) {
+        commit((d) => { const mm = d.conversations?.find((x) => x.id === conversationId)?.messages.find((x) => x.id === messageId); if (mm) mm.status = "planned"; });
+        toast({ kind: "error", title: "Couldn't build that", message: res.message ?? res.error ?? "The build failed." });
+        return;
+      }
+      const cr = res.created ?? {};
+      const edited = (res.updated ?? []).filter((u) => u.ok);
+      const parts = [
+        cr.skill && `skill “${cr.skill.name}”`,
+        cr.agent && `agent “${cr.agent.name}”`,
+        cr.automation && `automation “${cr.automation.name}”`,
+        ...edited.map((u) => `updated ${u.kind} “${u.name ?? u.id}”`),
+      ].filter(Boolean);
+      commit((d) => {
+        const cc = d.conversations?.find((x) => x.id === conversationId); if (!cc) return;
+        const mm = cc.messages.find((x) => x.id === messageId);
+        if (mm) { mm.status = "built"; mm.builtIds = { skillId: cr.skill?.id, agentId: cr.agent?.id, triggerId: cr.automation?.id }; }
+        cc.messages.push({
+          id: uid("m"), role: "assistant", createdAt: nowISO(), status: "answered",
+          text: `Done — I set up ${parts.join(", ")}.${(res.notes && res.notes.length) ? "\n\n" + res.notes.map((n) => `• ${n}`).join("\n") : ""}`,
+        });
+        cc.updatedAt = nowISO();
+      });
+      // Pull the just-created entities into client state immediately — without this the
+      // new agent existed only in the server registry and never appeared in Helper
+      // Agents (the original "app claims it was created but it wasn't" bug).
+      try {
+        const serverAgents = await backend.agents();
+        commit((d) => mergeServerAgents(d, serverAgents, { connectors: get().connectors, providers: get().providers, actorId: get().session?.actorId }));
+      } catch { /* next hydrate catches up */ }
+      toast({ kind: "success", title: "Built", message: parts.join(", ") || "Created." });
     },
     runConversationPlan: async (conversationId, messageId) => {
       const c = get().data.conversations?.find((x) => x.id === conversationId);
@@ -906,6 +1126,9 @@ export const useStore = create<Store>((set, get) => {
     deleteConversation: (id) => {
       commit((d) => { if (d.conversations) d.conversations = d.conversations.filter((c) => c.id !== id); });
       if (get().route.screen === "assistant" && get().route.params?.id === id) get().navigate("assistant");
+      // The conversation is server-durable (P1.1) — without this, it silently
+      // reappears on the next hydrate because it was only ever removed locally.
+      void backend.deleteConversationRemote(id).then((r) => { if (!r.ok) toast({ kind: "warn", title: "Deleted locally only", message: "Couldn't reach the backend — it may reappear next time you load." }); });
     },
 
     /* ---------- evolution: learn from real run traces (Phase 2) ----------- */
@@ -999,8 +1222,8 @@ export const useStore = create<Store>((set, get) => {
     // from the server member registry (the client can render but never mint roles). If the
     // backend is offline this is a no-op and the local-first cache continues to render.
     hydrateFromServer: async () => {
-      const [events, tasks, members, conversations] = await Promise.all([
-        backend.events(), backend.tasks(), backend.members(), backend.conversations(),
+      const [events, tasks, members, conversations, memory, serverAgents] = await Promise.all([
+        backend.events(), backend.tasks(), backend.members(), backend.conversations(), backend.memory(), backend.agents(),
       ]);
       const mapEvent = (e: ServerEvent): CalendarEvent => ({
         id: e.id, serverId: e.id, title: e.title, startAt: e.startAt ?? "", endAt: e.endAt ?? undefined,
@@ -1017,12 +1240,23 @@ export const useStore = create<Store>((set, get) => {
         source: (t.source as Task["source"]) ?? "user", notes: t.notes || undefined,
         visibility: t.visibility, listName: t.listName, createdAt: t.createdAt, updatedAt: t.updatedAt,
       });
+      const MEMORY_TYPES: MemoryType[] = ["Fact", "Preference", "Routine", "Rule", "Contact", "Insight"];
+      const mapMemory = (m: ServerMemory): MemoryEntry => ({
+        id: m.id, serverId: m.id, agentId: "", spaceId: "sp-family",
+        type: (MEMORY_TYPES as string[]).includes(m.type) ? (m.type as MemoryType) : "Insight",
+        title: m.type ? `${m.type[0].toUpperCase()}${m.type.slice(1)}` : "Memory",
+        content: m.text, tags: [], source: "Learned from a run",
+        confidence: 1, userApproved: true, sensitive: m.scope === "personal",
+        createdAt: new Date(m.createdAt).toISOString(), updatedAt: new Date(m.createdAt).toISOString(),
+      });
       const mapConv = (c: ServerConversation): AssistantConversation => ({
         id: c.id, title: c.title, createdAt: c.createdAt, updatedAt: c.updatedAt,
         messages: (c.messages ?? []).map((m, i) => ({
           id: `${c.id}-m${i}`, role: m.role, text: m.text, createdAt: m.at,
-          plan: m.plan ?? undefined, model: m.model ?? undefined,
-          status: m.role === "assistant" ? (m.plan ? "planned" : "answered") : undefined,
+          plan: m.plan ?? undefined, build: m.build ?? undefined, builtIds: m.builtIds ?? undefined, model: m.model ?? undefined,
+          // Build proposals keep their card state across refreshes: the server marks the
+          // originating message `built` when the build materializes.
+          status: m.role === "assistant" ? (m.build ? (m.built ? "built" : "planned") : m.plan ? "planned" : "answered") : undefined,
         })),
       });
       commit((d) => {
@@ -1039,6 +1273,13 @@ export const useStore = create<Store>((set, get) => {
         const convIds = new Set(conversations.map((c) => c.id));
         const localConvs = (d.conversations ?? []).filter((c) => !convIds.has(c.id));
         d.conversations = [...conversations.map(mapConv), ...localConvs];
+        // Real memory, written by actual agent runs (homeops.write_memory) — previously
+        // never surfaced here at all, so "Activity & Memory" only ever showed whatever a
+        // human manually added. Server-wins by id; purely local entries are preserved.
+        const memIds = new Set(memory.map((m) => m.id));
+        d.memories = [...memory.map(mapMemory), ...d.memories.filter((m) => !memIds.has(m.serverId ?? m.id))];
+        // Server-registry agents (incl. chat-built ones that exist ONLY server-side).
+        mergeServerAgents(d, serverAgents, { connectors: get().connectors, providers: get().providers, actorId: get().session?.actorId });
       });
     },
     // One-time IndexedDB→server agent migration. Pushes local agents to the durable
@@ -1640,18 +1881,42 @@ export const useStore = create<Store>((set, get) => {
       // and move it to "Changes Requested" (approve/deny disabled until re-submitted).
       const existing = get().data.approvals.find((x) => x.id === id);
       if (existing?.backendApprovalId && existing.status === "Pending") await backend.decideApproval(existing.backendApprovalId, false);
-      // A server-managed run gate cannot be "sent back" — deciding false stops the
-      // durable run on the server. Mirror it as cancelled so the local run never hangs
-      // in "Waiting for Approval" forever; the user starts a fresh run with the changes.
+      // A server-managed run gate can't be edited in place, but "ask for changes" should
+      // be more than "start over": re-invoke the planner with the ORIGINAL plan + your
+      // feedback to produce a REVISED plan, stop the stale run, dispatch the revision, and
+      // jump to the live monitor (item 10b). Falls back to stop-and-tell if re-planning
+      // can't produce a plan (no AI provider, etc.).
       if (existing?.serverManaged && existing.relatedRunId) {
-        commit((d) => {
-          const a = d.approvals.find((x) => x.id === id);
-          if (a) { a.status = "Denied"; a.previewContent = `${a.previewContent}\n\n— You asked for changes: “${note}”. The run was stopped — start a new one with your changes.`; a.decisionByMemberId = get().session?.actorId; a.decisionAt = nowISO(); a.updatedAt = nowISO(); }
-          const run = d.runs.find((r) => r.id === existing.relatedRunId);
-          if (run) { run.status = "Cancelled"; run.outputSummary = "Stopped — you asked for changes. Start a new run."; }
-          pushActivity(d, { actorType: "user", actorId: get().session?.actorId ?? "user", actorName: get().session?.actorName ?? "You", actionType: "approval.changes_requested", description: `Asked for changes — run stopped`, entityType: "approval", entityId: id, spaceId: a?.spaceId, status: "info" });
-        });
-        toast({ kind: "info", title: "Run stopped", message: "Start a new run with your changes." });
+        const stopStale = (extra: string) => {
+          commit((d) => {
+            const a = d.approvals.find((x) => x.id === id);
+            if (a) { a.status = "Denied"; a.previewContent = `${a.previewContent}\n\n— You asked for changes: “${note}”. ${extra}`; a.decisionByMemberId = get().session?.actorId; a.decisionAt = nowISO(); a.updatedAt = nowISO(); }
+            const run = d.runs.find((r) => r.id === existing.relatedRunId);
+            if (run && run.status !== "Completed") { run.status = "Cancelled"; run.outputSummary = "Superseded — you asked for changes."; }
+            pushActivity(d, { actorType: "user", actorId: get().session?.actorId ?? "user", actorName: get().session?.actorName ?? "You", actionType: "approval.changes_requested", description: "Asked for changes — replanning", entityType: "approval", entityId: id, spaceId: a?.spaceId, status: "info" });
+          });
+        };
+        // Pull the ORIGINAL plan (full steps incl. toolId + input) from the server run.
+        const serverRun = await backend.getRun(existing.relatedRunId);
+        const originalSteps = (serverRun?.steps ?? []).map((s) => ({ toolId: s.toolId, title: s.title, detail: s.detail, input: s.input ?? {} }));
+        if (!originalSteps.length) { stopStale("Start a new run with your changes."); toast({ kind: "info", title: "Run stopped", message: "Start a new run with your changes." }); return; }
+        toast({ kind: "info", title: "Reworking the plan…", message: "Applying your feedback and drafting a revised plan." });
+        const msg = `Revise the following plan based on my feedback, keeping everything that still applies and changing only what my feedback asks for. Return a revised plan (kind:"plan").\n\nOriginal plan "${serverRun?.title ?? "Plan"}" steps (JSON): ${JSON.stringify(originalSteps).slice(0, 3000)}\n\nMy feedback: ${note}`;
+        const out = await backend.assistant(msg);
+        if (out.ok && out.kind === "plan" && out.plan) {
+          stopStale("I drafted a revised plan and started it below.");
+          const newRunId = await get().runPlan(
+            { title: out.plan.title || `Revised: ${serverRun?.title ?? "plan"}`, summary: out.plan.summary, steps: out.plan.steps },
+            { label: "Revised after feedback", agentId: existing.requestedByAgentId },
+          );
+          // Jump to the live run so the user sees the updated state immediately.
+          get().navigate("automations", { tab: "monitor", ...(newRunId ? { run: newRunId } : {}) });
+          toast({ kind: "success", title: "Revised plan started", message: "Opening the live run — gated steps still pause for approval." });
+          return;
+        }
+        // Re-planning didn't yield a plan — honest fallback.
+        stopStale("Start a new run with your changes.");
+        toast({ kind: out.ok ? "info" : "warn", title: "Run stopped", message: out.ok ? "I couldn't draft a revision automatically — start a new run with your changes." : "Couldn't reach the planner — start a new run with your changes." });
         return;
       }
       commit((d) => {
@@ -1940,11 +2205,15 @@ export const useStore = create<Store>((set, get) => {
         }
       }),
     deleteMemory: (id) => {
+      const serverId = get().data.memories.find((x) => x.id === id)?.serverId;
       commit((d) => {
         const m = d.memories.find((x) => x.id === id);
         d.memories = d.memories.filter((x) => x.id !== id);
         if (m) pushActivity(d, { actorType: "user", actorId: "user", actorName: "You", actionType: "memory.deleted", description: `Memory deleted: ${m.title}`, entityType: "memory", entityId: id, status: "warning" });
       });
+      // Real (server-owned) memory must actually be deleted server-side, or it reappears
+      // on the next hydrate — the exact bug this project already has for conversations.
+      if (serverId) void backend.deleteMemoryRemote(serverId).then((r) => { if (!r.ok) toast({ kind: "warn", title: "Deleted locally only", message: "Couldn't reach the backend — it may reappear next time you load." }); });
       toast({ kind: "info", title: "Memory deleted" });
     },
     approveMemory: (id) => {

@@ -565,11 +565,48 @@ function NewFunctionForm({ prefill, onCreate, onCancel }: {
   const [description, setDescription] = useState(prefill?.description ?? "");
   const [type, setType] = useState<FunctionType>(prefill?.type ?? "connector_api");
   const [busy, setBusy] = useState(false);
+  const [drafting, setDrafting] = useState(false);
+  // Item 13: an AI-drafted schema captured here and passed straight through on create,
+  // so the new function starts pre-populated (still a draft awaiting a real test), not blank.
+  const [draftedSchema, setDraftedSchema] = useState<{ input_schema?: unknown[]; output_schema?: unknown[]; action?: string; risk?: string; approval_required?: boolean } | null>(null);
+
+  // Auto-draft when opened from a missing-capability prompt (there's a real description).
+  useEffect(() => {
+    if (!prefill?.description) return;
+    let alive = true;
+    setDrafting(true);
+    void backend.draftFunction(prefill.description).then((r) => {
+      if (!alive) return;
+      if (r.ok && r.draft) {
+        setName((n) => n || r.draft!.name);
+        setDescription(r.draft.description);
+        setType(r.draft.type);
+        setDraftedSchema({ input_schema: r.draft.input_schema, output_schema: r.draft.output_schema, action: r.draft.action, risk: r.draft.risk, approval_required: r.draft.approval_required });
+      }
+      setDrafting(false);
+    });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const draftFromDescription = async () => {
+    if (!description.trim()) return;
+    setDrafting(true);
+    const r = await backend.draftFunction(description.trim());
+    setDrafting(false);
+    if (r.ok && r.draft) {
+      setName(r.draft.name);
+      setDescription(r.draft.description);
+      setType(r.draft.type);
+      setDraftedSchema({ input_schema: r.draft.input_schema, output_schema: r.draft.output_schema, action: r.draft.action, risk: r.draft.risk, approval_required: r.draft.approval_required });
+      toast({ kind: r.fallback ? "info" : "success", title: r.fallback ? "Skeleton drafted" : "Draft ready", message: r.fallback ? (r.message ?? "Refine it below.") : "Fields pre-filled — review, then create." });
+    } else toast({ kind: "error", title: "Couldn't draft", message: r.error ?? "Unknown error" });
+  };
 
   const create = async () => {
     if (!name.trim()) return;
     setBusy(true);
-    const r = await backend.createFunction({ name, description, type });
+    const r = await backend.createFunction({ name, description, type, ...(draftedSchema ?? {}) } as Parameters<typeof backend.createFunction>[0]);
     setBusy(false);
     if (r.function) onCreate(r.function);
     else toast({ kind: "error", title: "Create failed", message: r.error ?? "Unknown error" });
@@ -579,9 +616,17 @@ function NewFunctionForm({ prefill, onCreate, onCancel }: {
     <Modal open onClose={onCancel} title="New function" icon="FunctionSquare"
       footer={<><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button variant="ember" disabled={!name.trim() || busy} onClick={create}>{busy ? <><Icon name="Loader2" size={15} className="animate-spin" /> Creating…</> : <><Icon name="Plus" size={15} /> Create</>}</Button></>}>
       <div className="space-y-3">
-        {prefill?.description && <div className="rounded-xl bg-sky-50 border border-sky-200 px-3 py-2 text-xs text-sky-700"><Icon name="Sparkles" size={12} className="mr-1 inline" /> Pre-filled from a skill's missing capability. Pick a type and configure the handler, then test it to make it available.</div>}
+        {prefill?.description && <div className="rounded-xl bg-sky-50 border border-sky-200 px-3 py-2 text-xs text-sky-700"><Icon name="Sparkles" size={12} className="mr-1 inline" /> {drafting ? "Drafting a starting definition from the missing capability…" : "Pre-filled from a skill's missing capability. Review the drafted type + schema, then test it to make it available."}</div>}
         <Field label="Name"><TextInput value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="Recent inbox digest" /></Field>
-        <Field label="Description"><TextArea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this function does and what it calls." /></Field>
+        <Field label="Description"><TextArea value={description} onChange={(e) => { setDescription(e.target.value); setDraftedSchema(null); }} placeholder="What this function does and what it calls." /></Field>
+        <Button size="sm" variant="secondary" disabled={!description.trim() || drafting} onClick={draftFromDescription}>
+          {drafting ? <><Icon name="Loader2" size={13} className="animate-spin" /> Drafting…</> : <><Icon name="Sparkles" size={13} /> Draft schema with AI</>}
+        </Button>
+        {draftedSchema && (
+          <div className="rounded-xl border border-sage-200 bg-sage-50 px-3 py-2 text-xs text-sage-700">
+            <Icon name="CheckCircle2" size={12} className="mr-1 inline" /> Drafted: {draftedSchema.action} · {draftedSchema.risk} risk{draftedSchema.approval_required ? " · asks approval" : ""} · {(draftedSchema.input_schema ?? []).length} input field(s). You can adjust everything after creating.
+          </div>
+        )}
         <Field label="Type" hint={TYPE_META[type]?.blurb}>
           <Select value={type} onChange={(e) => setType(e.target.value as FunctionType)}>
             {(Object.keys(TYPE_META) as FunctionType[]).map((t) => <option key={t} value={t}>{TYPE_META[t].label}</option>)}

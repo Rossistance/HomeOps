@@ -6,6 +6,9 @@
 import "./loadEnv.mjs"; // must run before modules that read env at import time (auth.mjs)
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   getConnectorConfig, setConnectorConfig, revokeConnector, getSecret,
   appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings,
@@ -14,18 +17,26 @@ import {
   getPushTokens, addPushToken, removePushToken,
   getRun, listRuns, getSkill, listSkills,
   listEvolutions, getEvolution, patchEvolution, putEvolution,
-  getMember, listMembers, canApprove, isAdultRole,
+  getMember, listMembers, putMember, canApprove, isAdultRole,
   listEvents, getEvent, putEvent, patchEvent, deleteEventRec,
   listTasks, getTask, putTask, patchTask, deleteTaskRec,
+  listSubscriptions, getSubscription, putSubscription, patchSubscription, deleteSubscriptionRec,
+  listMeals, getMeal, putMeal, patchMeal, deleteMealRec,
   listConversations, getConversation, putConversation, appendConversationMessage, deleteConversationRec,
-  canSeeEntity, listMemory, listArtifacts,
+  canSeeEntity, listMemory, listArtifacts, getMemoryEntry, deleteMemoryEntry,
+  listRiskOverrides, putRiskOverride, deleteRiskOverrideRec, getRiskOverride,
+  listNotifications, markNotificationRead,
+  listFiles, getFileRec, putFileRec, writeFileBlob, readFileBlob, deleteFileRec,
+  listPlaybooks, getPlaybook, putPlaybook, deletePlaybookRec,
 } from "./store.mjs";
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns } from "./engine.mjs";
 import { runSkill, runAgent } from "./orchestrator.mjs";
 import { seedDefaults } from "./seed.mjs";
+import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits } from "./calendar.mjs";
 import {
   createAgent, replaceAgent, partialUpdateAgent, deleteAgent, duplicateAgent,
   rollbackAgent, listAgentVersions, agentContext, selectAgent, publicAgent, listPublicAgents,
+  deriveCapabilitiesFromSteps,
 } from "./agents.mjs";
 import { getAgent } from "./store.mjs";
 import {
@@ -35,7 +46,7 @@ import {
 import {
   createFunction, replaceFunction, partialUpdateFunction, deleteFunction, duplicateFunction,
   promoteFunction, deprecateFunction, rollbackFunction, testFunction,
-  listPublicFunctions, publicFunction, FUNCTION_TYPES, FUNCTION_STATES,
+  listPublicFunctions, publicFunction, FUNCTION_TYPES, FUNCTION_STATES, draftFunction,
 } from "./functions.mjs";
 import { getFunction, listFunctionVersions } from "./store.mjs";
 import {
@@ -43,7 +54,7 @@ import {
   publicTrigger, listPublicTriggers, getTriggerSecret, tick, TRIGGER_TYPES,
 } from "./triggers.mjs";
 import { getTrigger } from "./store.mjs";
-import { pushApprovalNotification } from "./notify.mjs";
+import { pushApprovalNotification, deliverNotification } from "./notify.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
 import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast } from "./auth.mjs";
 import { listProviders as listAIProviders, aiProviderById, setProviderConfig, revokeProvider, setActiveProvider, providerHealth, providerModels, providerChat } from "./ai.mjs";
@@ -55,9 +66,27 @@ import { planFromGoal, generateMiniApp, generatePlaybook, assistantRespond, assi
 const PORT = Number(process.env.PORT || 8787);
 const VERSION = "1.2.0";
 const APP_ORIGIN = ALLOWED_ORIGINS[0] || "http://localhost:5173";
+const ROOT_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
+const STATIC_DIR = process.env.HOMEOPS_STATIC_DIR || join(ROOT_DIR, "dist");
+const STATIC_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
+};
 // Single OAuth callback path; deployments register this exact URI per provider app.
+// HOMEOPS_PUBLIC_URL may be a comma-separated list (localhost + LAN IP for mobile);
+// the FIRST entry is the canonical one providers redirect back to.
 function oauthRedirectUri() {
-  const base = process.env.HOMEOPS_PUBLIC_URL || `http://localhost:${PORT}`;
+  const base = (process.env.HOMEOPS_PUBLIC_URL || `http://localhost:${PORT}`).split(",")[0].trim();
   return `${base.replace(/\/$/, "")}/api/oauth/callback`;
 }
 
@@ -70,6 +99,47 @@ function json(res, code, body, req, extraHeaders = {}) {
   const data = JSON.stringify(body);
   res.writeHead(code, { "content-type": "application/json", ...corsHeaders(req), ...extraHeaders });
   res.end(data);
+}
+function staticPathFor(path) {
+  let decoded;
+  try { decoded = decodeURIComponent(path); } catch { return null; }
+  const relativePath = decoded === "/" ? "index.html" : decoded.replace(/^\/+/, "");
+  const target = normalize(join(STATIC_DIR, relativePath));
+  const rel = relative(STATIC_DIR, target);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  return target;
+}
+function serveStatic(req, res, path) {
+  if (req.method !== "GET" && req.method !== "HEAD") return false;
+  if (path === "/api" || path.startsWith("/api/")) return false;
+
+  const target = staticPathFor(path);
+  if (target && fs.existsSync(target) && fs.statSync(target).isFile()) {
+    return sendStatic(req, res, target);
+  }
+
+  // SPA fallback: browser routes such as /settings should load the built shell.
+  if (!extname(path)) {
+    const indexFile = join(STATIC_DIR, "index.html");
+    if (fs.existsSync(indexFile) && fs.statSync(indexFile).isFile()) return sendStatic(req, res, indexFile);
+  }
+  return false;
+}
+function sendStatic(req, res, file) {
+  const ext = extname(file).toLowerCase();
+  const name = basename(file);
+  const isAsset = file.includes(`${sep}assets${sep}`);
+  const cacheControl = name === "index.html" || name === "sw.js" || name === "registerSW.js"
+    ? "public, max-age=0, must-revalidate"
+    : isAsset ? "public, max-age=31536000, immutable" : "public, max-age=3600";
+  res.writeHead(200, {
+    "content-type": STATIC_TYPES[ext] || "application/octet-stream",
+    "cache-control": cacheControl,
+    "x-content-type-options": "nosniff",
+  });
+  if (req.method === "HEAD") { res.end(); return true; }
+  fs.createReadStream(file).pipe(res);
+  return true;
 }
 function readRaw(req) {
   return new Promise((resolve) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => resolve(b)); });
@@ -264,7 +334,8 @@ const server = http.createServer(async (req, res) => {
         // child posting role:"Owner" resolves to their real Child View role. Unknown
         // actors are rejected (no implicit account creation here).
         const member = getMember(actorId);
-        if (!member) { audit({ type: "session.login", ok: false, error: "unknown_actor", actorId }, req); return json(res, 403, { error: "unknown_actor" }, req); }
+        if (!member) { audit({ type: "session.login", ok: false, error: "unknown_actor", actorId }, req); return json(res, 403, { error: "unknown_actor", message: "This profile isn't registered with the backend. Create your household (or ask an Owner to add you in Settings → Household)." }, req); }
+        if (member.archived) { audit({ type: "session.login", ok: false, error: "member_archived", actorId }, req); return json(res, 403, { error: "member_archived", message: "This profile was removed from the household." }, req); }
         const role = member.role;
         const actorName = member.displayName ?? body.actorName ?? actorId;
         // Optional owner PIN gate for elevated roles (gated on the RESOLVED role).
@@ -289,6 +360,50 @@ const server = http.createServer(async (req, res) => {
         audit({ type: "session.logout", ok: true }, req, g.session);
         return json(res, 200, { ok: true }, req, { "set-cookie": clearSessionCookie() });
       }
+    }
+
+    /* ---- Profile picker (pre-auth) + one-time household claim ----
+     * A family device must show who can sign in BEFORE anyone is signed in — same
+     * information the lock screen displays. Origin-gated; no secrets (names/roles only). */
+    const VALID_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member", "Child View", "Guest/Helper"];
+    const SEED_ACTOR_IDS = ["m-alex", "m-morgan", "m-lily", "m-noah", "m-elaine", "m-sam"];
+    if (path === "/api/profiles" && method === "GET") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const pinSet = !!getSettings().ownerPinHash;
+      const profiles = listMembers({ householdId: "local" }).filter((m) => !m.archived).map((m) => ({
+        actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null,
+        pinRequired: pinSet && (m.role === "Owner" || m.role === "Adult Admin"),
+      }));
+      return json(res, 200, { profiles, claimed: profiles.some((p) => !SEED_ACTOR_IDS.includes(p.actorId)) }, req);
+    }
+    // Claim the household: replace the demo Harper roster with YOUR owner profile.
+    // Unauthenticated by necessity (a new household has nobody to sign in as), but
+    // origin-gated and one-time: it only works while every non-archived member is
+    // still the demo seed. After the claim, membership changes require an Owner.
+    if (path === "/api/household/claim" && method === "POST") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const ownerName = String(body.ownerName ?? "").trim();
+      if (!ownerName) return json(res, 400, { error: "owner_name_required" }, req);
+      const actorId = String(body.actorId ?? "m-owner").trim();
+      if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(actorId)) return json(res, 400, { error: "bad_actor_id" }, req);
+      const live = listMembers({ householdId: "local" }).filter((m) => !m.archived);
+      if (live.some((m) => !SEED_ACTOR_IDS.includes(m.actorId))) {
+        audit({ type: "household.claim", ok: false, error: "already_claimed" }, req);
+        return json(res, 409, { error: "already_claimed", message: "This household already has its own members. Sign in as an Owner to manage them." }, req);
+      }
+      // Archive the demo roster (kept on disk so the boot seed can't resurrect it),
+      // then register the real owner.
+      for (const m of live) putMember({ actorId: m.actorId, archived: true });
+      const owner = putMember({ actorId, displayName: ownerName, role: "Owner", relationship: body.relationship ?? "Account owner", householdId: "local" });
+      const s = createSession({ actorId, actorName: ownerName, role: "Owner", householdId: "local" });
+      audit({ type: "household.claim", ok: true, actorId, archivedDemo: live.length }, req, s);
+      const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
+      const wantToken = req.headers["x-homeops-bearer"] === "1";
+      return json(res, 200, {
+        member: { actorId: owner.actorId, displayName: owner.displayName, role: owner.role },
+        session: sessionView, ...(wantToken ? { token: s.token } : {}),
+      }, req, { "set-cookie": sessionCookie(s.token) });
     }
 
     /* ---- Everything below requires an authenticated, allowed-origin session ---- */
@@ -352,11 +467,56 @@ const server = http.createServer(async (req, res) => {
     // renders it but cannot mint roles. No secrets — safe for any household member to read.
     if (path === "/api/members" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const members = listMembers({ householdId: g.session.householdId }).map((m) => ({
+      const members = listMembers({ householdId: g.session.householdId }).filter((m) => !m.archived).map((m) => ({
         actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null,
         spaceIds: m.spaceIds ?? [], isCurrentUser: m.actorId === g.session.actorId,
       }));
       return json(res, 200, { members }, req);
+    }
+    // Member management (post-claim): Owners/Adult Admins shape the roster. The last
+    // Owner can never be demoted or archived, and you can't archive yourself.
+    if (path === "/api/members" && method === "POST") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const displayName = String(body.displayName ?? "").trim();
+      if (!displayName) return json(res, 400, { error: "name_required" }, req);
+      if (!VALID_ROLES.includes(body.role)) return json(res, 400, { error: "bad_role", valid: VALID_ROLES }, req);
+      const actorId = String(body.actorId ?? ("m-" + crypto.randomBytes(4).toString("hex"))).trim();
+      if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(actorId)) return json(res, 400, { error: "bad_actor_id" }, req);
+      if (getMember(actorId)) return json(res, 409, { error: "actor_exists" }, req);
+      const m = putMember({ actorId, displayName, role: body.role, relationship: body.relationship ?? null, householdId: g.session.householdId });
+      audit({ type: "member.create", memberId: actorId, role: body.role, ok: true }, req, g.session);
+      return json(res, 200, { member: { actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null } }, req);
+    }
+    const memberOne = path.match(/^\/api\/members\/([^/]+)$/);
+    if (memberOne && method === "PATCH") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const m = getMember(memberOne[1]);
+      if (!m || m.archived) return json(res, 404, { error: "not_found" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const patch = {};
+      if (body.displayName != null) { const n = String(body.displayName).trim(); if (!n) return json(res, 400, { error: "name_required" }, req); patch.displayName = n; }
+      if (body.relationship !== undefined) patch.relationship = body.relationship;
+      if (body.role != null) {
+        if (!VALID_ROLES.includes(body.role)) return json(res, 400, { error: "bad_role", valid: VALID_ROLES }, req);
+        const owners = listMembers({ householdId: g.session.householdId }).filter((x) => !x.archived && x.role === "Owner");
+        if (m.role === "Owner" && body.role !== "Owner" && owners.length <= 1) return json(res, 409, { error: "last_owner", message: "The household needs at least one Owner." }, req);
+        patch.role = body.role;
+      }
+      const updated = putMember({ actorId: m.actorId, ...patch });
+      audit({ type: "member.update", memberId: m.actorId, fields: Object.keys(patch), ok: true }, req, g.session);
+      return json(res, 200, { member: { actorId: updated.actorId, displayName: updated.displayName, role: updated.role, relationship: updated.relationship ?? null } }, req);
+    }
+    if (memberOne && method === "DELETE") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const m = getMember(memberOne[1]);
+      if (!m || m.archived) return json(res, 404, { error: "not_found" }, req);
+      if (m.actorId === g.session.actorId) return json(res, 409, { error: "cannot_archive_self", message: "You can't remove the profile you're signed in as." }, req);
+      const owners = listMembers({ householdId: g.session.householdId }).filter((x) => !x.archived && x.role === "Owner");
+      if (m.role === "Owner" && owners.length <= 1) return json(res, 409, { error: "last_owner", message: "The household needs at least one Owner." }, req);
+      putMember({ actorId: m.actorId, archived: true });
+      audit({ type: "member.archive", memberId: m.actorId, ok: true }, req, g.session);
+      return json(res, 200, { ok: true }, req);
     }
     const acctHealth = path.match(/^\/api\/accounts\/([^/]+)\/health$/);
     if (acctHealth && method === "POST") {
@@ -517,6 +677,45 @@ const server = http.createServer(async (req, res) => {
       if (!r || r.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       return json(res, 200, { run: publicRun(r) }, req);
     }
+    // Interactive email review (item 3): correlate a completed run's gmail.search results
+    // (which carry subject/from per message) with its gmail.modifyLabels steps (which say
+    // what was added/removed to which messageIds), producing a per-message review list the
+    // chat can render with revert/relabel actions. Household-scoped; empty when the run
+    // never touched Gmail labels.
+    const runReview = path.match(/^\/api\/runs\/([^/]+)\/email-review$/);
+    if (runReview && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const r = getRun(runReview[1]);
+      if (!r || r.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      // 1) Metadata map: id -> {subject, from} from every gmail.search result.
+      const meta = {};
+      const labels = [];
+      const labelSeen = new Set();
+      for (const s of r.steps ?? []) {
+        if (s.toolId === "gmail.search" && s.result && Array.isArray(s.result.messages)) {
+          for (const m of s.result.messages) if (m?.id) meta[m.id] = { subject: m.subject ?? "", from: m.from ?? "", snippet: m.snippet ?? "" };
+        }
+        if (s.toolId === "gmail.listLabels" && s.result && Array.isArray(s.result.labels)) {
+          for (const l of s.result.labels) if (l?.name && !labelSeen.has(l.name)) { labelSeen.add(l.name); labels.push({ id: l.id, name: l.name, type: l.type }); }
+        }
+      }
+      // 2) Per-message applied changes from every SUCCEEDED gmail.modifyLabels step.
+      const byId = new Map();
+      for (const s of r.steps ?? []) {
+        if (s.toolId !== "gmail.modifyLabels" || s.status !== "succeeded") continue;
+        const ids = String(s.input?.messageIds ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+        const added = Array.isArray(s.result?.added) ? s.result.added : [];
+        const removed = Array.isArray(s.result?.removed) ? s.result.removed : [];
+        for (const id of ids) {
+          const cur = byId.get(id) ?? { id, subject: meta[id]?.subject ?? "", from: meta[id]?.from ?? "", snippet: meta[id]?.snippet ?? "", added: [], removed: [] };
+          for (const a of added) if (!cur.added.includes(a)) cur.added.push(a);
+          for (const rm of removed) if (!cur.removed.includes(rm)) cur.removed.push(rm);
+          byId.set(id, cur);
+        }
+      }
+      const messages = [...byId.values()];
+      return json(res, 200, { runId: r.id, messages, labels, touchedGmail: messages.length > 0 }, req);
+    }
     const runResume = path.match(/^\/api\/runs\/([^/]+)\/resume$/);
     if (runResume && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -663,6 +862,255 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true }, req);
     }
 
+    /* ---- Meal plan (family meals) — household/visibility scoped; Limited Member+ writes.
+     * Grocery items reuse tasks (type:"list", listName:"Groceries"). ---- */
+    if (path === "/api/meals" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const visible = listMeals((m) => m.householdId === g.session.householdId).filter((m) => canSeeEntity(m, g.session));
+      return json(res, 200, { meals: visible }, req);
+    }
+    if (path === "/api/meals" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      if (!String(body.title ?? "").trim()) return json(res, 400, { error: "title_required" }, req);
+      const ingredients = Array.isArray(body.ingredients) ? body.ingredients.map((i) => (typeof i === "string" ? { item: i, have: false } : { item: String(i.item ?? ""), have: !!i.have })).filter((i) => i.item) : [];
+      const meal = putMeal({
+        id: "meal_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        date: body.date ?? null, slot: ["breakfast", "lunch", "dinner", "snack"].includes(body.slot) ? body.slot : "dinner",
+        // Optional suggested time (HH:MM) — used when pushing the meal to the calendar;
+        // slot-default times apply when unset (item 5).
+        time: typeof body.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.time) ? body.time : null,
+        title: String(body.title).trim(), notes: body.notes ?? "", ingredients, visibility: body.visibility ?? "household",
+        // Recipe metadata (Phase 3): servings is a positive integer or null; recipeUrl free-form.
+        servings: Number.isFinite(+body.servings) && +body.servings > 0 ? Math.floor(+body.servings) : null,
+        recipeUrl: typeof body.recipeUrl === "string" ? body.recipeUrl.trim() : "",
+        source: "user", createdBy: g.session.actorId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      });
+      audit({ type: "meal.create", mealId: meal.id, ok: true }, req, g.session);
+      return json(res, 200, { meal }, req);
+    }
+    const mealOne = path.match(/^\/api\/meals\/([^/]+)$/);
+    if (mealOne && (method === "PATCH" || method === "POST")) {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const m = getMeal(mealOne[1]);
+      if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!canSeeEntity(m, g.session) || (!isAdultRole(g.session.role) && m.createdBy !== g.session.actorId)) return json(res, 403, { error: "forbidden" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const { id, householdId, createdBy, createdAt, ...patch } = body;
+      const updated = patchMeal(m.id, patch);
+      audit({ type: "meal.update", mealId: m.id, ok: true }, req, g.session);
+      return json(res, 200, { meal: updated }, req);
+    }
+    if (mealOne && method === "DELETE") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const m = getMeal(mealOne[1]);
+      if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!isAdultRole(g.session.role) && m.createdBy !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
+      deleteMealRec(m.id);
+      // Grocery items carry a real mealId back-reference (not just a note string) —
+      // unlink (never silently delete) so a still-wanted grocery item survives its
+      // source meal being removed, but the UI/data no longer claims a stale relationship.
+      const linked = listTasks((t) => t.householdId === g.session.householdId && t.mealId === m.id);
+      for (const t of linked) patchTask(t.id, { mealId: null, notes: t.notes === `For ${m.title}` ? "" : t.notes });
+      // Calendar events get the same treatment: keep the event (it may already be on
+      // Google), just drop the stale meal link (item 5).
+      const linkedEvents = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id);
+      for (const e of linkedEvents) patchEvent(e.id, { mealId: null });
+      audit({ type: "meal.delete", mealId: m.id, unlinkedGroceries: linked.length, unlinkedEvents: linkedEvents.length, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, unlinkedGroceries: linked.length, unlinkedEvents: linkedEvents.length }, req);
+    }
+    const mealGrocery = path.match(/^\/api\/meals\/([^/]+)\/to-grocery$/);
+    if (mealGrocery && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const m = getMeal(mealGrocery[1]);
+      if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      // Add each not-yet-have ingredient to the shared Groceries list (reusing list-tasks).
+      // mealId is a real back-reference (the notes string is just human-readable context).
+      const added = [];
+      for (const ing of (m.ingredients ?? []).filter((i) => !i.have && i.item)) {
+        const tk = putTask({
+          id: "tk_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+          title: ing.item, type: "list", status: "todo", listName: "Groceries", spaceId: "sp-family",
+          priority: "low", visibility: "household", source: "user", createdBy: g.session.actorId,
+          notes: `For ${m.title}`, mealId: m.id, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        });
+        added.push(tk.id);
+      }
+      audit({ type: "meal.to_grocery", mealId: m.id, added: added.length, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, added: added.length }, req);
+    }
+    // Push a meal onto the household calendar as a CANONICAL event (item 5). Linked by
+    // mealId (same back-reference pattern as groceries); idempotent — re-pushing updates
+    // the linked event instead of duplicating it. Once it exists as a canonical event,
+    // the existing approval-gated POST /api/calendar/push/:id sends it to Google.
+    const mealCal = path.match(/^\/api\/meals\/([^/]+)\/to-calendar$/);
+    if (mealCal && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const m = getMeal(mealCal[1]);
+      if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!m.date) return json(res, 400, { error: "date_required", message: "Give the meal a date before adding it to the calendar." }, req);
+      const SLOT_TIMES = { breakfast: "08:00", lunch: "12:00", dinner: "18:00", snack: "15:00" };
+      const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(m.time ?? "") ? m.time : (SLOT_TIMES[m.slot] ?? "18:00");
+      const startAt = `${m.date}T${time}:00`;
+      const slotLabel = m.slot ? m.slot.charAt(0).toUpperCase() + m.slot.slice(1) : "Dinner";
+      const title = `${slotLabel}: ${m.title}`;
+      const existing = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id)[0];
+      if (existing) {
+        const updated = patchEvent(existing.id, { title, startAt });
+        audit({ type: "meal.to_calendar", mealId: m.id, eventId: existing.id, action: "updated", ok: true }, req, g.session);
+        return json(res, 200, { ok: true, event: updated, action: "updated" }, req);
+      }
+      const ev = putEvent({
+        id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        title, startAt, endAt: null, location: "", spaceId: "sp-family",
+        participantIds: [], driverId: null, ownerId: g.session.actorId, backupOwnerId: null,
+        whatToBring: [], checklist: [], travel: null, reminders: [], attachments: [], comments: [],
+        mealImpact: null, mealId: m.id, visibility: m.visibility ?? "household", category: "Meal",
+        layer: "canonical", status: "confirmed", source: "HomeOps",
+        provenance: { via: "meal", actorId: g.session.actorId },
+        createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
+      });
+      audit({ type: "meal.to_calendar", mealId: m.id, eventId: ev.id, action: "created", ok: true }, req, g.session);
+      return json(res, 200, { ok: true, event: ev, action: "created" }, req);
+    }
+
+    /* ---- Calendar subscriptions (CAL): the read-only "linked" calendar layer ----
+     * Subscribe to an .ics feed (school/sports/holidays) or paste an .ics. Synced events
+     * are layer:"linked" (the events PATCH route already refuses edits — copy to edit).
+     * Creating a subscription is an Adult Member+ action; reads are household-scoped. */
+    if (path === "/api/calendar/subscriptions" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const subs = listSubscriptions((s) => s.householdId === g.session.householdId).map((s) => ({ id: s.id, name: s.name, url: s.url ?? null, source: s.source, lastSyncAt: s.lastSyncAt ?? null, lastResult: s.lastResult ?? null, eventCount: s.eventCount ?? 0, createdAt: s.createdAt }));
+      return json(res, 200, { subscriptions: subs }, req);
+    }
+    if (path === "/api/calendar/subscriptions" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      if (!String(body.url ?? "").trim()) return json(res, 400, { error: "url_required" }, req);
+      const sub = putSubscription({
+        id: "sub_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        name: String(body.name ?? "Subscribed calendar").slice(0, 80), url: String(body.url).trim(), source: "url",
+        createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
+      });
+      const r = await syncSubscription({ sub, session: g.session });
+      patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed } : { error: r.error }, eventCount: r.ok ? r.total : 0 });
+      audit({ type: "calendar.subscribe", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, req, g.session);
+      return json(res, r.ok ? 200 : 422, { subscription: getSubscription(sub.id), sync: r }, req);
+    }
+    // Push a HomeOps canonical event TO Google Calendar (the write half of two-way sync).
+    // Approval-first (writing to your real calendar needs sign-off) + deduped: a stored
+    // provenance.googleEventId turns re-pushes into updates. Linked (synced) events can't be
+    // pushed back. The live Google write goes through apiForAccount (auto-refresh).
+    const pushMatch = path.match(/^\/api\/calendar\/push\/([^/]+)$/);
+    if (pushMatch && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const body = (await readBody(req)) ?? {};
+      const ev = getEvent(pushMatch[1]);
+      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      if (ev.layer && ev.layer !== "canonical") return json(res, 400, { error: "not_pushable", message: "This event is synced from another calendar — only your own HomeOps events can be pushed to Google." }, req);
+      if (!ev.startAt) return json(res, 400, { error: "no_start", message: "Give the event a start time before pushing it." }, req);
+      const account = listAccountsFor(g.session.householdId, g.session.actorId).find((a) => a.provider === "google");
+      if (!account) return json(res, 422, { error: "connect_google_first", message: "Connect your Google account (with calendar access) in Connections first." }, req);
+      if (!(account.scopes ?? []).some((s) => /calendar/i.test(String(s)))) return json(res, 422, { error: "calendar_scope_missing", message: "Reconnect Google and grant calendar access." }, req);
+      const input = { summary: ev.title, start: ev.startAt, location: ev.location ?? "" };
+      const gid = ev.provenance?.googleEventId ?? null;
+      // Approval-first: no valid approval yet → create one and hand it back for sign-off.
+      if (!body.approvalId) {
+        const a = createApproval({ actorId: g.session.actorId, householdId: g.session.householdId, connectorId: "google", toolId: "calendar.create", input, risk: "Medium", category: "Calendar", preview: `${gid ? "Update" : "Add"} “${ev.title}” ${gid ? "on" : "to"} Google Calendar`, source: "executable" });
+        void notifyApproval(a);
+        return json(res, 200, { needsApproval: true, approval: publicApproval(a) }, req);
+      }
+      const c = consumeApproval({ id: body.approvalId, actorId: g.session.actorId, householdId: g.session.householdId, toolId: "calendar.create", input });
+      if (c.error) { audit({ type: "calendar.push", eventId: ev.id, ok: false, error: c.error }, req, g.session); return json(res, 422, { error: c.error, message: approvalErrorMessage(c.error) }, req); }
+      const api = apiForAccount(account);
+      const end = new Date(new Date(ev.startAt).getTime() + 3_600_000).toISOString();
+      const url = gid ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${gid}` : "https://www.googleapis.com/calendar/v3/calendars/primary/events";
+      const r = await api(url, { method: gid ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ summary: ev.title, start: { dateTime: ev.startAt }, end: { dateTime: end }, location: ev.location ?? "" }) });
+      if (!r.ok) { audit({ type: "calendar.push", eventId: ev.id, ok: false, error: "google_error", status: r.status }, req, g.session); return json(res, 422, { error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status, message: r.json?.error?.message ?? "Google rejected the write." }, req); }
+      patchEvent(ev.id, { provenance: { ...(ev.provenance ?? {}), via: ev.provenance?.via ?? "user", googleEventId: r.json.id, googleAccountId: account.id, pushedAt: Date.now() } });
+      audit({ type: "calendar.push", eventId: ev.id, googleEventId: r.json.id, action: gid ? "update" : "create", ok: true }, req, g.session);
+      return json(res, 200, { ok: true, googleEventId: r.json.id, action: gid ? "updated" : "created" }, req);
+    }
+    // Two-way sync, merge-back half (Phase 9): pull Google-side edits into pushed canonical
+    // events. Clean Google edits merge; both-sides-changed flags provenance.conflict for
+    // review (never silently overwritten); Google deletions unlink (HomeOps stays canonical).
+    if (path === "/api/calendar/pull-google-edits" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const r = await pullGoogleEdits({ session: g.session });
+      audit({ type: "calendar.pull_edits", ok: r.ok, ...(r.ok ? { checked: r.checked, merged: r.merged, conflicts: r.conflicts, unlinked: r.unlinked, errors: r.errors } : { error: r.error }) }, req, g.session);
+      if (!r.ok) return json(res, 422, { error: r.error, message: r.error === "no_account" ? "Connect your Google account (with calendar access) in Connections first." : undefined }, req);
+      return json(res, 200, r, req);
+    }
+    // Connect the actor's Google Calendar as a read-only linked source (pull sync). Needs a
+    // Google account connected in Connections with calendar access. One subscription per
+    // account — repeat calls just re-sync. Push (HomeOps → Google) is a separate build.
+    if (path === "/api/calendar/connect-google" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const account = listAccountsFor(g.session.householdId, g.session.actorId).find((a) => a.provider === "google");
+      if (!account) return json(res, 422, { error: "connect_google_first", message: "Connect your Google account (with calendar access) in Connections first." }, req);
+      if (!(account.scopes ?? []).some((s) => /calendar/i.test(String(s)))) return json(res, 422, { error: "calendar_scope_missing", message: "Your Google account isn't authorized for calendar. Reconnect it and grant calendar access." }, req);
+      let sub = listSubscriptions((s) => s.householdId === g.session.householdId && s.source === "google" && s.accountId === account.id)[0];
+      if (!sub) {
+        sub = putSubscription({
+          id: "sub_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+          name: `Google Calendar (${account.displayName ?? "primary"})`, url: null, source: "google", accountId: account.id,
+          createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
+        });
+      }
+      const r = await syncSubscription({ sub, session: g.session });
+      patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed } : { error: r.error }, eventCount: r.ok ? r.total : (sub.eventCount ?? 0) });
+      audit({ type: "calendar.connect_google", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, req, g.session);
+      return json(res, r.ok ? 200 : 422, { subscription: getSubscription(sub.id), sync: r }, req);
+    }
+    // Paste-import an .ics one-off (no URL); still grouped under a subscription so it's removable.
+    if (path === "/api/calendar/import-ics" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      if (!String(body.ics ?? "").trim()) return json(res, 400, { error: "ics_required" }, req);
+      const sub = putSubscription({
+        id: "sub_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        name: String(body.name ?? "Imported calendar").slice(0, 80), url: null, source: "import",
+        icsText: String(body.ics).slice(0, 200_000), // kept so a re-sync can re-parse the pasted feed
+        createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
+      });
+      const r = await syncSubscription({ sub, icsText: String(body.ics), session: g.session });
+      if (!r.ok) { deleteSubscriptionRec(sub.id); return json(res, 422, { error: r.error, message: "That didn't look like a valid calendar file." }, req); }
+      patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: { imported: r.imported, updated: r.updated }, eventCount: r.total });
+      audit({ type: "calendar.import", subscriptionId: sub.id, imported: r.imported, ok: true }, req, g.session);
+      return json(res, 200, { subscription: getSubscription(sub.id), sync: r }, req);
+    }
+    const subSync = path.match(/^\/api\/calendar\/subscriptions\/([^/]+)\/sync$/);
+    if (subSync && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const sub = getSubscription(subSync[1]);
+      if (!sub || sub.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      const r = await syncSubscription({ sub, session: g.session });
+      patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed } : { error: r.error }, eventCount: r.ok ? r.total : (sub.eventCount ?? 0) });
+      audit({ type: "calendar.sync", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, req, g.session);
+      return json(res, r.ok ? 200 : 422, { subscription: getSubscription(sub.id), sync: r }, req);
+    }
+    const subOne = path.match(/^\/api\/calendar\/subscriptions\/([^/]+)$/);
+    if (subOne && method === "DELETE") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const sub = getSubscription(subOne[1]);
+      if (!sub || sub.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      const removed = removeSubscriptionEvents(sub.id, g.session);
+      deleteSubscriptionRec(sub.id);
+      audit({ type: "calendar.unsubscribe", subscriptionId: sub.id, removedEvents: removed, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, removedEvents: removed }, req);
+    }
+
     /* ---- Server-durable assistant conversations (P1.1) ----
      * Threads/messages live server-side, scoped to the actor who owns them. */
     if (path === "/api/conversations" && method === "GET") {
@@ -704,10 +1152,180 @@ const server = http.createServer(async (req, res) => {
       const visible = all.filter((m) => m.scope !== "personal" || m.source?.actorId === g.session.actorId || isAdultRole(g.session.role));
       return json(res, 200, { memory: visible }, req);
     }
+    // Archive/delete a memory entry the actor can see (mirrors the GET visibility rule).
+    // Safe by construction: memory is a reference record, not a live dependency — see
+    // deleteMemoryEntry's comment in store.mjs for why this never breaks baked-in behavior.
+    const memOne = path.match(/^\/api\/memory\/([^/]+)$/);
+    if (memOne && method === "DELETE") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const m = getMemoryEntry(memOne[1]);
+      if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      const canSee = m.scope !== "personal" || m.source?.actorId === g.session.actorId || isAdultRole(g.session.role);
+      if (!canSee) return json(res, 404, { error: "not_found" }, req); // don't leak existence
+      deleteMemoryEntry(m.id);
+      audit({ type: "memory.delete", memoryId: m.id, ok: true }, req, g.session);
+      return json(res, 200, { ok: true }, req);
+    }
     if (path === "/api/artifacts" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const all = listArtifacts({ householdId: g.session.householdId, runId: url.searchParams.get("runId") || undefined, limit: 100 });
       return json(res, 200, { artifacts: all }, req);
+    }
+
+    /* ---- Notification delivery (item 16b) ----
+     * Real routing to a contact method's channel (in-app/dashboard now; email via the
+     * caller's connected Google; text via the sms connector). Honest about what needs
+     * setup. Email/text use the SESSION actor's own connected account — never someone
+     * else's. GET lists the actor's own in-app notifications. */
+    if (path === "/api/notify" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const methodType = String(body.methodType ?? body.channel ?? "In-App");
+      const out = await deliverNotification({ session: g.session, methodType, to: body.to ?? null, title: body.title, body: body.body });
+      audit({ type: "notify", channel: out.channel, ok: out.ok, needsSetup: out.needsSetup ?? undefined }, req, g.session);
+      return json(res, 200, out, req);
+    }
+    if (path === "/api/notifications" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const mine = listNotifications((n) => n.householdId === g.session.householdId && n.actorId === g.session.actorId)
+        .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)).slice(0, 100);
+      return json(res, 200, { notifications: mine }, req);
+    }
+    const notifRead = path.match(/^\/api\/notifications\/([^/]+)\/read$/);
+    if (notifRead && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const all = listNotifications((n) => n.id === notifRead[1] && n.householdId === g.session.householdId && n.actorId === g.session.actorId);
+      if (!all.length) return json(res, 404, { error: "not_found" }, req);
+      markNotificationRead(notifRead[1]);
+      return json(res, 200, { ok: true }, req);
+    }
+
+    /* ---- Risk-class overrides (item 9) ----
+     * An Owner/Adult Admin may re-class a tool/function's risk and skip its approval
+     * gate for their household. Server-enforced in the engine's resolveTool; every
+     * change is audited. GET returns the effective catalog + current overrides so
+     * clients render exactly what the engine will enforce. */
+    if (path === "/api/risk-overrides" && method === "GET") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const overrides = listRiskOverrides((o) => o.householdId === g.session.householdId);
+      return json(res, 200, { overrides, catalog: toolCatalog(g.session) }, req);
+    }
+    if (path === "/api/risk-overrides" && method === "PUT") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const toolId = String(body.toolId ?? "").trim();
+      const known = toolCatalog(g.session).find((t) => t.toolId === toolId);
+      if (!known) return json(res, 404, { error: "unknown_tool" }, req);
+      const RISKS = ["Low", "Medium", "High", "Sensitive"];
+      const riskClass = body.riskClass == null ? null : (RISKS.includes(body.riskClass) ? body.riskClass : undefined);
+      if (riskClass === undefined) return json(res, 400, { error: "invalid_risk_class" }, req);
+      const rec = putRiskOverride({
+        id: `${g.session.householdId}:${toolId}`, householdId: g.session.householdId, toolId,
+        riskClass, skipApproval: !!body.skipApproval,
+        setBy: g.session.actorId, setAt: new Date().toISOString(),
+      });
+      audit({ type: "risk_override.set", toolId, riskClass: rec.riskClass, skipApproval: rec.skipApproval, ok: true }, req, g.session);
+      return json(res, 200, { override: rec }, req);
+    }
+    const rovOne = path.match(/^\/api\/risk-overrides\/(.+)$/);
+    if (rovOne && method === "DELETE") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const toolId = decodeURIComponent(rovOne[1]);
+      const existing = getRiskOverride(g.session.householdId, toolId);
+      if (!existing) return json(res, 404, { error: "not_found" }, req);
+      deleteRiskOverrideRec(existing.id);
+      audit({ type: "risk_override.cleared", toolId, ok: true }, req, g.session);
+      return json(res, 200, { ok: true }, req);
+    }
+
+    /* ---- Playbooks (Phase 6): server-owned household workflow library ---- */
+    if (path === "/api/playbooks" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const all = listPlaybooks((p) => p.householdId === g.session.householdId || p.householdId === "local")
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      return json(res, 200, { playbooks: all }, req);
+    }
+    if (path === "/api/playbooks" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      if (!String(body.name ?? "").trim()) return json(res, 400, { error: "name_required" }, req);
+      const steps = (Array.isArray(body.steps) ? body.steps : []).map(String).filter(Boolean);
+      if (steps.length === 0) return json(res, 400, { error: "steps_required" }, req);
+      const pb = putPlaybook({
+        id: "pb_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        name: String(body.name).trim(), description: String(body.description ?? ""),
+        whenToUse: String(body.whenToUse ?? ""), category: String(body.category ?? "Custom"),
+        steps, requiredConnections: (Array.isArray(body.requiredConnections) ? body.requiredConnections : []).map(String),
+        outputFormat: String(body.outputFormat ?? ""), approvalRules: (Array.isArray(body.approvalRules) ? body.approvalRules : []).map(String),
+        archived: false, system: false, createdBy: g.session.actorId,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      });
+      audit({ type: "playbook.create", playbookId: pb.id, ok: true }, req, g.session);
+      return json(res, 200, { playbook: pb }, req);
+    }
+    const playbookOne = path.match(/^\/api\/playbooks\/([^/]+)$/);
+    if (playbookOne && method === "DELETE") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const pb = getPlaybook(playbookOne[1]);
+      if (!pb || (pb.householdId !== g.session.householdId && pb.householdId !== "local")) return json(res, 404, { error: "not_found" }, req);
+      if (!isAdultRole(g.session.role) && pb.createdBy !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
+      deletePlaybookRec(pb.id);
+      audit({ type: "playbook.delete", playbookId: pb.id, ok: true }, req, g.session);
+      return json(res, 200, { ok: true }, req);
+    }
+
+    /* ---- Household files (Phase 5): server-owned file library ----
+     * Metadata + bytes live server-side so every client (web/mobile) sees the same
+     * library. Upload is JSON base64 (no multipart dependency), capped at ~5 MB. */
+    if (path === "/api/files" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const visible = listFiles((f) => f.householdId === g.session.householdId).filter((f) => canSeeEntity(f, g.session))
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+      return json(res, 200, { files: visible }, req);
+    }
+    if (path === "/api/files" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const name = String(body.name ?? "").trim();
+      const b64 = String(body.contentBase64 ?? "");
+      if (!name) return json(res, 400, { error: "name_required" }, req);
+      if (!b64) return json(res, 400, { error: "content_required" }, req);
+      if (b64.length > 7_000_000) return json(res, 413, { error: "too_large", message: "Files are capped at ~5 MB." }, req);
+      let buf;
+      try { buf = Buffer.from(b64, "base64"); } catch { return json(res, 400, { error: "bad_base64" }, req); }
+      if (!buf || buf.length === 0) return json(res, 400, { error: "bad_base64" }, req);
+      const rec = putFileRec({
+        id: "file_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        name, mime: typeof body.mime === "string" ? body.mime : "application/octet-stream",
+        sizeBytes: buf.length, tags: Array.isArray(body.tags) ? body.tags.map(String).slice(0, 10) : [],
+        visibility: body.visibility ?? "household", spaceId: body.spaceId ?? "sp-family",
+        uploadedBy: g.session.actorId, source: body.source ?? "upload",
+        createdAt: new Date().toISOString(),
+      });
+      writeFileBlob(rec.id, buf);
+      audit({ type: "file.upload", fileId: rec.id, name, sizeBytes: buf.length, ok: true }, req, g.session);
+      return json(res, 200, { file: rec }, req);
+    }
+    const fileContent = path.match(/^\/api\/files\/([^/]+)\/content$/);
+    if (fileContent && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const f = getFileRec(fileContent[1]);
+      if (!f || f.householdId !== g.session.householdId || !canSeeEntity(f, g.session)) return json(res, 404, { error: "not_found" }, req);
+      const buf = readFileBlob(f.id);
+      if (!buf) return json(res, 410, { error: "content_missing" }, req);
+      return json(res, 200, { name: f.name, mime: f.mime, contentBase64: buf.toString("base64") }, req);
+    }
+    const fileOne = path.match(/^\/api\/files\/([^/]+)$/);
+    if (fileOne && method === "DELETE") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const f = getFileRec(fileOne[1]);
+      if (!f || f.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!isAdultRole(g.session.role) && f.uploadedBy !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
+      deleteFileRec(f.id);
+      audit({ type: "file.delete", fileId: f.id, ok: true }, req, g.session);
+      return json(res, 200, { ok: true }, req);
     }
 
     /* ---- Skill registry ---- */
@@ -823,6 +1441,15 @@ const server = http.createServer(async (req, res) => {
     }
 
     /* ---- Function registry (Slice 4) ---- */
+    // Draft a candidate function definition from a capability description (item 13) —
+    // must precede the /:id match. Drafting only; the human reviews + saves via POST.
+    if (path === "/api/functions/draft" && method === "POST") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const out = await draftFunction({ description: body.description, session: g.session, providerId: body.providerId });
+      audit({ type: "function.draft", ok: out.ok, fallback: !!out.fallback }, req, g.session);
+      return json(res, out.ok ? 200 : 400, out, req);
+    }
     if (path === "/api/functions" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const out = listPublicFunctions(g.session, { type: url.searchParams.get("type") || undefined, state: url.searchParams.get("state") || undefined });
@@ -1172,7 +1799,9 @@ const server = http.createServer(async (req, res) => {
         if (conv && conv.householdId === g.session.householdId && conv.actorId === g.session.actorId) {
           const at = new Date().toISOString();
           appendConversationMessage(conv.id, { role: "user", text: String(body.message), at });
-          appendConversationMessage(conv.id, { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, model: out.model ?? null, at });
+          // `build` persisted too — otherwise a build-proposal card vanished on refresh
+          // and the user had no durable evidence the assistant ever offered to build.
+          appendConversationMessage(conv.id, { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, model: out.model ?? null, at });
         }
       }
       audit({ type: "assistant.respond", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
@@ -1191,10 +1820,65 @@ const server = http.createServer(async (req, res) => {
           { message: body.message, context: body.context, session: g.session, providerId: body.providerId },
           (_tok) => { tokenCount++; if (tokenCount % 4 === 0) res.write(`data: ${JSON.stringify({ type: "progress", tokens: tokenCount })}\n\n`); },
         );
+        // Same server-durable persistence as POST /api/assistant — this was previously
+        // MISSING here, which is why every conversation created through the real chat UI
+        // (which always streams) stayed empty (messages: []) server-side forever: history
+        // never survived a refresh because it was never written past the client's memory.
+        if (out.ok && body.conversationId) {
+          const conv = getConversation(body.conversationId);
+          if (conv && conv.householdId === g.session.householdId && conv.actorId === g.session.actorId) {
+            const at = new Date().toISOString();
+            appendConversationMessage(conv.id, { role: "user", text: String(body.message), at });
+            appendConversationMessage(conv.id, { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, model: out.model ?? null, at });
+          }
+        }
         audit({ type: "assistant.stream", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
         res.write(`data: ${JSON.stringify({ type: "done", result: out })}\n\n`);
       } catch (e) {
         res.write(`data: ${JSON.stringify({ type: "done", result: { ok: false, error: "stream_error" } })}\n\n`);
+      }
+      res.end();
+      return;
+    }
+    // Unified chat-builder (UC.1): materialize a build spec proposed in chat into durable
+    // entities through the SAME registry create paths the builder screens use — so a
+    // conversation can stand up a skill + agent + automation in one approved step. Nothing
+    // is auto-activated: skills land as drafts (available only after their tools are
+    // available + a passing test), automations are created enabled but their gated steps
+    // still pause for approval at run time. Adult Admin only (creating agents/automations).
+    if (path === "/api/assistant/build" && method === "POST") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const spec = body.build ?? body;
+      const hasEdits = Array.isArray(spec?.edits) && spec.edits.length > 0;
+      if (!spec || (typeof spec !== "object") || (!spec.skill && !spec.agent && !spec.automation && !hasEdits)) {
+        return json(res, 400, { error: "empty_build", message: "Describe at least a skill, agent, automation, or edit to make." }, req);
+      }
+      try {
+        const out = materializeBuild(spec, { session: g.session, req });
+        persistBuildOutcome(body.conversationId, g.session, out);
+        return json(res, 200, { ok: true, ...out }, req);
+      } catch (e) {
+        return json(res, 422, { ok: false, error: "build_failed", message: String(e?.message ?? e) }, req);
+      }
+    }
+    // Streaming variant (UC.6): same materialize, but emits an SSE event per entity as it's
+    // created/updated, then a "done" event — so the chat can show the build happening live.
+    if (path === "/api/assistant/build/stream" && method === "POST") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const spec = body.build ?? body;
+      const hasEdits = Array.isArray(spec?.edits) && spec.edits.length > 0;
+      if (!spec || (typeof spec !== "object") || (!spec.skill && !spec.agent && !spec.automation && !hasEdits)) {
+        return json(res, 400, { error: "empty_build", message: "Describe at least a skill, agent, automation, or edit to make." }, req);
+      }
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", ...corsHeaders(req) });
+      try {
+        const out = materializeBuild(spec, { session: g.session, req, emit: (ev) => { try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch { /* client gone */ } } });
+        persistBuildOutcome(body.conversationId, g.session, out);
+        res.write(`data: ${JSON.stringify({ type: "done", result: { ok: true, ...out } })}\n\n`);
+      } catch (e) {
+        res.write(`data: ${JSON.stringify({ type: "done", result: { ok: false, error: "build_failed", message: String(e?.message ?? e) } })}\n\n`);
       }
       res.end();
       return;
@@ -1305,6 +1989,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true }, req);
     }
 
+    if (serveStatic(req, res, path)) return;
     return json(res, 404, { error: "not_found", path }, req);
   } catch (e) {
     return json(res, 500, { error: "server_error", message: String(e?.message ?? e) }, req);
@@ -1315,7 +2000,111 @@ function publicSkill(s) {
   // All fields are non-secret — expose the full skill record to authenticated same-household clients.
   return s;
 }
+// Shared by the unified chat-builder's JSON + SSE routes: create/edit durable entities
+// from a build spec via the real registry paths, calling emit(event) per entity so the
+// streaming route can surface live progress. Throws on a hard failure (caller maps to 422).
+function materializeBuild(spec, { session, req, emit = () => {} }) {
+  const created = {};
+  const updated = [];
+  if (spec.skill && typeof spec.skill === "object") {
+    const skill = createSkill(spec.skill, session);
+    created.skill = { id: skill.id, name: skill.name, status: skill.status };
+    audit({ type: "assistant.build", entity: "skill", skillId: skill.id, ok: true }, req, session);
+    emit({ type: "progress", entity: "skill", action: "created", id: skill.id, name: skill.name, status: skill.status });
+  }
+  if (spec.agent && typeof spec.agent === "object") {
+    const skillIds = [...(Array.isArray(spec.agent.skillIds) ? spec.agent.skillIds : []), ...(created.skill ? [created.skill.id] : [])];
+    // Intelligent preselection (item 8): the agent inherits the tools/functions its
+    // skill's steps reference — previously chat-built agents got empty allow-lists and
+    // permitted∩available rendered them inert despite the chat saying "created".
+    const stepToolIds = (spec.skill?.steps ?? []).map((s) => s?.tool_id).filter(Boolean);
+    const derived = deriveCapabilitiesFromSteps(stepToolIds, session);
+    const agent = createAgent({
+      ...spec.agent, skillIds,
+      allowedToolIds: [...new Set([...(Array.isArray(spec.agent.allowedToolIds) ? spec.agent.allowedToolIds : []), ...derived.allowedToolIds])],
+      allowedFunctionIds: [...new Set([...(Array.isArray(spec.agent.allowedFunctionIds) ? spec.agent.allowedFunctionIds : []), ...derived.allowedFunctionIds])],
+    }, session);
+    created.agent = { id: agent.id, name: agent.name, status: agent.status, allowedToolIds: agent.allowedToolIds, allowedFunctionIds: agent.allowedFunctionIds };
+    audit({ type: "assistant.build", entity: "agent", agentId: agent.id, ok: true, tools: agent.allowedToolIds.length }, req, session);
+    emit({ type: "progress", entity: "agent", action: "created", id: agent.id, name: agent.name, status: agent.status });
+  }
+  if (spec.automation && typeof spec.automation === "object") {
+    const a = spec.automation;
+    const target = a.target ?? (created.agent
+      ? { kind: "agent", agentId: created.agent.id, params: a.params ?? {} }
+      : created.skill
+        ? { kind: "skill", skillId: created.skill.id, params: a.params ?? {} }
+        : a.target);
+    const trig = createTrigger({ ...a, target }, session, Date.now());
+    created.automation = { id: trig.id, name: trig.name, type: trig.type, enabled: trig.enabled };
+    audit({ type: "assistant.build", entity: "automation", triggerId: trig.id, ok: true }, req, session);
+    emit({ type: "progress", entity: "automation", action: "created", id: trig.id, name: trig.name });
+  }
+  // Edits to EXISTING entities — versioned via partialUpdate (snapshots + rollback, P3).
+  // Household-scoped; unknown/foreign ids are reported, never fatal.
+  if (Array.isArray(spec.edits)) {
+    for (const e of spec.edits) {
+      if (e.kind === "skill") {
+        const s = getSkill(e.id);
+        if (!s || (s.householdId !== "local" && s.householdId !== session.householdId)) { updated.push({ kind: "skill", id: e.id, ok: false, error: "not_found" }); emit({ type: "progress", entity: "skill", action: "edit_skipped", id: e.id, ok: false }); continue; }
+        const r = partialUpdateSkill(e.id, e.patch ?? {});
+        updated.push({ kind: "skill", id: e.id, name: r?.name, version: r?.version, ok: !!r && !r.error });
+        audit({ type: "assistant.build", entity: "skill_edit", skillId: e.id, ok: !!r, version: r?.version }, req, session);
+        emit({ type: "progress", entity: "skill", action: "updated", id: e.id, name: r?.name, version: r?.version, ok: !!r });
+      } else if (e.kind === "agent") {
+        const a = getAgent(e.id);
+        if (!a || (a.householdId !== "local" && a.householdId !== session.householdId)) { updated.push({ kind: "agent", id: e.id, ok: false, error: "not_found" }); emit({ type: "progress", entity: "agent", action: "edit_skipped", id: e.id, ok: false }); continue; }
+        const r = partialUpdateAgent(e.id, e.patch ?? {});
+        updated.push({ kind: "agent", id: e.id, name: r?.name, version: r?.version, ok: !!r && !r.error });
+        audit({ type: "assistant.build", entity: "agent_edit", agentId: e.id, ok: !!r, version: r?.version }, req, session);
+        emit({ type: "progress", entity: "agent", action: "updated", id: e.id, name: r?.name, version: r?.version, ok: !!r });
+      }
+    }
+  }
+  const notes = [];
+  // Copy must not point users at builder dashboards hidden behind Advanced Mode —
+  // everything needed should be doable from the default surface (chat + Helper Agents).
+  if (created.agent && (created.agent.allowedToolIds?.length || created.agent.allowedFunctionIds?.length)) {
+    const n = (created.agent.allowedToolIds?.length ?? 0) + (created.agent.allowedFunctionIds?.length ?? 0);
+    notes.push(`I preselected ${n} capabilit${n === 1 ? "y" : "ies"} for the new helper from its skill steps — no manual tool wiring needed.`);
+  }
+  if (created.skill && created.skill.status !== "available") notes.push("The new skill starts as a draft — it becomes available automatically once its connected services are ready and a first run succeeds.");
+  if (created.agent && created.agent.status === "Draft") notes.push("The new helper is a draft — open Helper Agents to activate it.");
+  if (updated.some((u) => !u.ok)) notes.push("Some edits couldn't be applied (the target wasn't found in your household).");
+  return { created, updated, notes };
+}
+
+// After a chat build materializes, make the OUTCOME durable on the conversation:
+// mark the originating build-proposal message built (so the card survives refresh)
+// and append the confirmation as a real message. Ownership-checked like every other
+// conversation write; silently a no-op if the conversation isn't the caller's.
+function persistBuildOutcome(conversationId, session, out) {
+  if (!conversationId) return;
+  const conv = getConversation(conversationId);
+  if (!conv || conv.householdId !== session.householdId || conv.actorId !== session.actorId) return;
+  const builtIds = { skillId: out.created?.skill?.id, agentId: out.created?.agent?.id, triggerId: out.created?.automation?.id };
+  const msgs = [...(conv.messages ?? [])];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].kind === "build" && !msgs[i].built) { msgs[i] = { ...msgs[i], built: true, builtIds }; break; }
+  }
+  putConversation({ ...conv, messages: msgs, updatedAt: new Date().toISOString() });
+  const parts = [
+    out.created?.skill && `skill “${out.created.skill.name}”`,
+    out.created?.agent && `helper “${out.created.agent.name}”`,
+    out.created?.automation && `automation “${out.created.automation.name}”`,
+    ...(out.updated ?? []).filter((u) => u.ok).map((u) => `updated ${u.kind} “${u.name ?? u.id}”`),
+  ].filter(Boolean);
+  appendConversationMessage(conv.id, {
+    role: "assistant", kind: "build_result", builtIds,
+    text: `Done — I set up ${parts.join(", ")}.${out.notes?.length ? "\n\n" + out.notes.map((n) => `• ${n}`).join("\n") : ""}`,
+    at: new Date().toISOString(),
+  });
+}
 function publicApproval(a) {
+  // NOTE: the approval record deliberately never stores the raw input — only
+  // `inputHash` (the consume-once integrity check against whatever input is supplied
+  // at execution time). The real, human-readable content lives on the ORIGINATING RUN
+  // STEP (see publicRun below) — that's what the client renders for a rich preview.
   return { id: a.id, connectorId: a.connectorId, toolId: a.toolId, status: a.status, risk: a.risk, category: a.category, preview: a.preview, createdAt: a.createdAt, expiresAt: a.expiresAt, decidedBy: a.decidedBy, decidedAt: a.decidedAt,
     requestedBy: a.requestedBy, source: a.source ?? "executable", allowedApproverRoles: a.allowedApproverRoles ?? [], consumedBy: a.consumedBy ?? null };
 }
@@ -1330,7 +2119,7 @@ function publicRun(r) {
     steps: (r.steps ?? []).map((s) => ({
       index: s.index, toolId: s.toolId, functionId: s.functionId, title: s.title, detail: s.detail,
       requiresApproval: s.requiresApproval, risk: s.risk, connectorId: s.connectorId, connectorName: s.connectorName,
-      attribution: s.attribution, status: s.status, approvalId: s.approvalId, attempts: s.attempts,
+      attribution: s.attribution, status: s.status, approvalId: s.approvalId, attempts: s.attempts, input: s.input ?? {},
       result: s.result ?? null, toolCalls: s.toolCalls ?? [], startedAt: s.startedAt, finishedAt: s.finishedAt,
     })),
   };

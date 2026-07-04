@@ -2,7 +2,7 @@
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
-import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask } from "./store.mjs";
+import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal } from "./store.mjs";
 import crypto from "node:crypto";
 
 const eid = (p) => p + "_" + crypto.randomBytes(8).toString("hex");
@@ -227,6 +227,31 @@ export const INTERNAL_FUNCTIONS = {
       const attachment = { kind: input?.fileRef ? "file" : "note", text: String(input?.note ?? ""), fileRef: input?.fileRef ?? null, at: nowISO(), by: ctx.actorId };
       const rec = patchEvent(ev.id, { attachments: [...(ev.attachments ?? []), attachment] });
       return { ok: true, result: { id: rec.id, attachmentCount: rec.attachments.length } };
+    },
+  },
+
+  "homeops.plan_meal": {
+    id: "homeops.plan_meal",
+    name: "Plan a meal",
+    action: "Write",
+    risk: "Low",
+    requiresApproval: false,
+    connectorId: "homeops",
+    connectorName: "HomeOps",
+    // Add a meal to the family meal plan (a date + slot + optional ingredients).
+    async run(ctx, input) {
+      const title = String(input?.title ?? "").trim();
+      if (!title) return { ok: false, error: "empty_title", message: "A meal needs a title." };
+      const ingredients = Array.isArray(input?.ingredients)
+        ? input.ingredients.map((i) => (typeof i === "string" ? { item: i, have: false } : { item: String(i.item ?? ""), have: !!i.have })).filter((i) => i.item)
+        : [];
+      const rec = putMeal({
+        id: eid("meal"), householdId: ctx.householdId, date: input?.date ?? null,
+        slot: ["breakfast", "lunch", "dinner", "snack"].includes(input?.slot) ? input.slot : "dinner",
+        title, notes: input?.notes ?? "", ingredients, visibility: input?.visibility ?? "household",
+        source: "agent", createdBy: ctx.actorId, createdAt: nowISO(), updatedAt: nowISO(),
+      });
+      return { ok: true, result: { id: rec.id, title: rec.title, slot: rec.slot, date: rec.date } };
     },
   },
 

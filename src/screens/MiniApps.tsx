@@ -18,15 +18,38 @@ const ICONS: Record<string, string> = {
 };
 const TYPES: MiniAppType[] = ["Chore Board", "Trip Planner", "Budget Snapshot", "Subscription Tracker", "Grocery List", "Medical Tracker", "Research Comparison", "Custom"];
 
+// Item 6: blank starter templates that ship with every household — one tap instantiates a
+// real mini app. `liveData` flags the ones whose renderer syncs actual household data (so
+// the "cross-linked to real data" claim stays honest); the rest start as usable structures.
+interface StarterTemplate { type: MiniAppType; name: string; description: string; liveData?: string; seed: Record<string, unknown> }
+const STARTER_TEMPLATES: StarterTemplate[] = [
+  { type: "Chore Board", name: "Family Chore Board", description: "Kanban of who's doing what — To Do → In Progress → Done.", liveData: "your household chore tasks", seed: { columns: [{ key: "todo", title: "To Do" }, { key: "in-progress", title: "In Progress" }, { key: "done", title: "Done" }, { key: "needs-help", title: "Needs Help" }] } },
+  { type: "Budget Snapshot", name: "Monthly Budget Snapshot", description: "Bills and spending at a glance, with over-budget alerts.", liveData: "your bill & expense tasks", seed: { rows: [], categoryTotals: [], alerts: [] } },
+  { type: "Subscription Tracker", name: "Subscription Tracker", description: "Every recurring charge in one place — cancel the ones you forgot.", liveData: "recurring-charge tasks", seed: { subscriptions: [] } },
+  { type: "Grocery List", name: "Shared Grocery List", description: "The running list the whole family adds to; check off in the aisle.", liveData: "the Groceries task list", seed: { sections: [{ title: "To buy", items: [] }] } },
+  { type: "Trip Planner", name: "Trip Planner", description: "Itinerary, packing list, budget, and reservations for your next trip.", seed: { sections: [{ title: "Itinerary", items: [] }, { title: "Packing list", items: [] }, { title: "Reservations", items: [] }] } },
+  { type: "Medical Tracker", name: "Medical Tracker", description: "Appointments, medications, and follow-ups for the whole family.", seed: { sections: [{ title: "Upcoming appointments", items: [] }, { title: "Medications", items: [] }, { title: "Follow-ups", items: [] }] } },
+  { type: "Research Comparison", name: "Compare Options", description: "Side-by-side comparison for a purchase or big decision.", seed: { sections: [{ title: "Options", items: [] }, { title: "Criteria", items: [] }] } },
+  { type: "Custom", name: "Blank Board", description: "Start from nothing — add your own sections and items.", seed: { sections: [] } },
+];
+
 export function MiniApps() {
   const data = useStore((s) => s.data);
   const params = useStore((s) => s.route.params);
   const archive = useStore((s) => s.archiveMiniApp);
   const del = useStore((s) => s.deleteMiniApp);
   const duplicate = useStore((s) => s.duplicateMiniApp);
+  const createMiniApp = useStore((s) => s.createMiniApp);
+  const toast = useStore((s) => s.toast);
   const navigate = useStore((s) => s.navigate);
   const [openId, setOpenId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+
+  const addTemplate = (t: StarterTemplate) => {
+    const id = createMiniApp({ name: t.name, type: t.type, description: t.description, data: t.seed });
+    toast({ kind: "success", title: "Mini app added", message: t.liveData ? `“${t.name}” is live and synced to ${t.liveData}.` : `“${t.name}” created — open it to fill it in.` });
+    setOpenId(id);
+  };
 
   useEffect(() => { if (params?.id) setOpenId(params.id); if (params?.new) setCreating(true); }, [params?.id, params?.new]);
 
@@ -58,7 +81,12 @@ export function MiniApps() {
     <div className="animate-fade-in">
       <PageHeader title="Mini Apps" subtitle="Lightweight, interactive trackers that sync with your household data." icon="LayoutGrid"
         actions={<Button variant="ember" onClick={() => setCreating(true)}><Icon name="Plus" size={16} /> New mini app</Button>} />
-      {active.length === 0 ? <EmptyState icon="LayoutGrid" title="No mini apps" message="Create a chore board, trip planner, or budget snapshot." action={<Button variant="ember" onClick={() => setCreating(true)}>New mini app</Button>} /> : (
+      {active.length === 0 && (
+        <div className="mb-6 rounded-2xl border border-lavender-200/70 bg-lavender-50/50 px-4 py-3 text-sm text-ink-600">
+          <Icon name="Sparkles" size={14} className="mr-1.5 inline text-lavender-600" /> New here? Add a starter template below — they come blank and ready, and several sync straight to your real household data.
+        </div>
+      )}
+      {active.length > 0 && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {active.map((m) => (
             <Card key={m.id} className="card-pad flex flex-col" hover>
@@ -95,6 +123,30 @@ export function MiniApps() {
           </div>
         </div>
       )}
+      {/* Starter templates — always available so users can add more as they go (item 6). */}
+      <div className="mt-8">
+        <p className="section-title mb-2.5">Starter templates</p>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {STARTER_TEMPLATES.map((t) => (
+            <Card key={t.name} className="card-pad flex flex-col">
+              <div className="flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-surface-sunken text-ink-500"><Icon name={ICONS[t.type] ?? "LayoutGrid"} size={20} /></span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-display text-base font-semibold text-ink-900">{t.name}</p>
+                  <p className="line-clamp-2 text-xs text-ink-500">{t.description}</p>
+                </div>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <Badge color="lavender">{t.type}</Badge>
+                {t.liveData && <Badge color="sage"><Icon name="Link" size={10} /> syncs live data</Badge>}
+              </div>
+              <div className="mt-3 border-t border-ink-900/[0.06] pt-3">
+                <Button size="sm" variant="secondary" onClick={() => addTemplate(t)}><Icon name="Plus" size={13} /> Add to my mini apps</Button>
+              </div>
+            </Card>
+          ))}
+        </div>
+      </div>
       {creating && <CreateModal onClose={() => setCreating(false)} onCreate={(id) => { setCreating(false); setOpenId(id); }} types={TYPES} />}
     </div>
   );

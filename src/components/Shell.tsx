@@ -4,7 +4,7 @@ import { brand } from "@/brand";
 import { Icon } from "./Icon";
 import { cn } from "@/lib/cn";
 import { Avatar } from "./ui";
-import { useCalmMode } from "@/lib/prefs";
+import { useCalmMode, useAdvancedMode } from "@/lib/prefs";
 import type { ScreenId } from "@/types";
 
 /** Calm Mode — stills motion, flattens depth, softens color for lower sensory load. */
@@ -30,28 +30,33 @@ function CalmToggle() {
   );
 }
 
-interface NavItem { id: ScreenId; label: string; icon: string }
+interface NavItem { id: ScreenId; label: string; icon: string; advanced?: boolean }
 interface NavGroup { label: string; items: NavItem[] }
 
+// Skills/Functions are the low-level building blocks agents & automations compile down
+// to. They're hidden by default (Advanced Mode, off in Settings) so new households see
+// only Ask HomeOps, Agents, Automations, and Mini Apps. Playbooks folded into Skills as
+// a read-only "Recipes" tab rather than staying a separate top-level concept.
 export const NAV_GROUPS: NavGroup[] = [
   { label: "Command Center", items: [
     { id: "dashboard", label: "Home", icon: "LayoutDashboard" },
     { id: "assistant", label: "Ask HomeOps", icon: "Sparkles" },
+    { id: "calendar", label: "Calendar", icon: "CalendarDays" },
   ] },
   { label: "Agents & Workflows", items: [
     { id: "agents", label: "Helper Agents", icon: "Bot" },
     { id: "automations", label: "Automations", icon: "Workflow" },
-    { id: "skills", label: "Skills", icon: "Layers" },
-    { id: "functions", label: "Functions", icon: "FunctionSquare" },
+    { id: "skills", label: "Skills", icon: "Layers", advanced: true },
+    { id: "functions", label: "Functions", icon: "FunctionSquare", advanced: true },
   ] },
   { label: "Family Systems", items: [
     { id: "messages", label: "Messages & Approvals", icon: "MessageSquare" },
+    { id: "meals", label: "Meals", icon: "UtensilsCrossed" },
     { id: "spaces", label: "Household Spaces", icon: "Users" },
     { id: "miniapps", label: "Mini Apps", icon: "LayoutGrid" },
   ] },
   { label: "Knowledge & Files", items: [
     { id: "files", label: "Files & Knowledge", icon: "FolderOpen" },
-    { id: "playbooks", label: "Playbooks", icon: "ScrollText" },
     { id: "activity", label: "Activity & Memory", icon: "Activity" },
   ] },
   { label: "Connections & Settings", items: [
@@ -75,6 +80,8 @@ function NavList({ onNavigate, grouped = true }: { onNavigate?: () => void; grou
   const navigate = useStore((s) => s.navigate);
   const canAccess = useStore((s) => s.canAccess);
   const badges = useBadges();
+  const [advanced] = useAdvancedMode();
+  const visible = (it: NavItem) => canAccess(it.id) && (!it.advanced || advanced);
   const item = (it: NavItem) => {
     const active = route.screen === it.id;
     return (
@@ -86,11 +93,11 @@ function NavList({ onNavigate, grouped = true }: { onNavigate?: () => void; grou
       </button>
     );
   };
-  if (!grouped) return <nav className="flex flex-col gap-0.5">{NAV.filter((it) => canAccess(it.id)).map(item)}</nav>;
+  if (!grouped) return <nav className="flex flex-col gap-0.5">{NAV.filter(visible).map(item)}</nav>;
   return (
     <nav className="flex flex-col gap-4">
       {NAV_GROUPS.map((g) => {
-        const items = g.items.filter((it) => canAccess(it.id));
+        const items = g.items.filter(visible);
         if (!items.length) return null;
         return (
           <div key={g.label}>

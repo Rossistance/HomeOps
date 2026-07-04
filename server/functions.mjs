@@ -598,3 +598,57 @@ export function listPublicFunctions(session, { type, state } = {}) {
     .filter((f) => (!type || f.type === type) && (!state || f.state === state))
     .sort((a, b) => (b.updatedAt ?? 0) > (a.updatedAt ?? 0) ? 1 : -1);
 }
+
+/* ---- Draft a function definition from a capability description (item 13) ----
+ * When the planner / "infer capabilities" finds a missing tool, this drafts a candidate
+ * function definition (shape only — never created live) for the human to review + save
+ * in the Function Builder. A DRAFTING AID in front of the existing human-review gate:
+ * nothing executes, no secrets, no auto-save. Falls back to a sensible skeleton if no
+ * AI provider is configured so the builder still opens pre-filled rather than blank. */
+export async function draftFunction({ description, session, providerId }) {
+  const desc = String(description ?? "").trim();
+  if (!desc) return { ok: false, error: "description_required" };
+  // Skeleton used both as the no-provider fallback and as the shape the model fills.
+  const skeleton = {
+    name: desc.slice(0, 48), description: desc, type: "custom_http", action: "Read",
+    risk: "Medium", approval_required: false,
+    input_schema: [{ key: "query", label: "Query", type: "text", required: false }],
+    output_schema: [{ key: "result", label: "Result", type: "text" }],
+  };
+  const pid = providerId || getSettings().aiActiveProvider;
+  if (!pid) return { ok: true, draft: skeleton, fallback: true, message: "Drafted a skeleton (no AI provider configured). Refine it in the Function Builder." };
+  const prompt = `You design HomeOps "functions" — durable, executable capabilities. Draft ONE function definition for this capability. Never invent secrets or endpoints you're unsure of; a human will review and complete it.
+Capability needed: "${desc}"
+
+type MUST be one of: connector_api, internal, custom_http, ai_local, browser, sandbox_script, workflow_composed.
+action MUST be one of: Read, Write, Send, Other. Set approval_required true for anything that writes/sends externally, and set risk accordingly (Low/Medium/High/Sensitive).
+
+Return ONLY JSON (no fences):
+{"name": string, "description": string, "type": string, "action": "Read"|"Write"|"Send"|"Other", "risk": "Low"|"Medium"|"High"|"Sensitive", "approval_required": boolean, "input_schema": [{"key": string, "label": string, "type": "text"|"number"|"boolean", "required": boolean}], "output_schema": [{"key": string, "label": string, "type": string}]}`;
+  const out = await providerChat(pid, { messages: [{ role: "user", content: prompt }] });
+  if (!out.ok) return { ok: true, draft: skeleton, fallback: true, message: "Couldn't reach the AI — drafted a skeleton to refine." };
+  try {
+    const text = String(out.text ?? "");
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const raw = fence ? fence[1] : text;
+    const first = raw.indexOf("{"), last = raw.lastIndexOf("}");
+    const p = JSON.parse(raw.slice(first, last + 1));
+    const TYPES = FUNCTION_TYPES;
+    const ACTIONS = ["Read", "Write", "Send", "Other"];
+    const RISKS = ["Low", "Medium", "High", "Sensitive"];
+    const arr = (a, keys) => Array.isArray(a) ? a.filter((x) => x && x.key).map((x) => keys(x)) : [];
+    const draft = {
+      name: String(p.name ?? skeleton.name).slice(0, 80),
+      description: String(p.description ?? desc).slice(0, 400),
+      type: TYPES.includes(p.type) ? p.type : "custom_http",
+      action: ACTIONS.includes(p.action) ? p.action : "Read",
+      risk: RISKS.includes(p.risk) ? p.risk : "Medium",
+      approval_required: !!p.approval_required,
+      input_schema: arr(p.input_schema, (x) => ({ key: String(x.key).slice(0, 40), label: String(x.label ?? x.key).slice(0, 60), type: ["text", "number", "boolean"].includes(x.type) ? x.type : "text", required: !!x.required })),
+      output_schema: arr(p.output_schema, (x) => ({ key: String(x.key).slice(0, 40), label: String(x.label ?? x.key).slice(0, 60), type: String(x.type ?? "text").slice(0, 20) })),
+    };
+    return { ok: true, draft, model: out.model };
+  } catch {
+    return { ok: true, draft: skeleton, fallback: true, message: "AI returned an unparseable draft — using a skeleton to refine." };
+  }
+}

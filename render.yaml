@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: homeops-ai
+    runtime: node
+    region: oregon
+    # Persistent disks are not available on Render's Free web-service plan.
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    autoDeploy: true
+    healthCheckPath: /api/health
+    disk:
+      name: homeops-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOMEOPS_ENV
+        value: production
+      - key: HOMEOPS_DATA_DIR
+        value: /data
+      # Update these if Render assigns a different service URL or you add a custom domain.
+      - key: HOMEOPS_PUBLIC_URL
+        value: https://homeops-ai.onrender.com
+      - key: HOMEOPS_ALLOWED_ORIGINS
+        value: https://homeops-ai.onrender.com
+      - key: HOMEOPS_SECRET_KEY
+        generateValue: true
+      # Optional OAuth providers. Fill these in the Render dashboard.
+      - key: HOMEOPS_OAUTH_GOOGLE_CLIENT_ID
+        sync: false
+      - key: HOMEOPS_OAUTH_GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: HOMEOPS_OAUTH_MICROSOFT_CLIENT_ID
+        sync: false
+      - key: HOMEOPS_OAUTH_MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: HOMEOPS_OAUTH_SLACK_CLIENT_ID
+        sync: false
+      - key: HOMEOPS_OAUTH_SLACK_CLIENT_SECRET
+        sync: false
+      - key: HOMEOPS_OAUTH_DROPBOX_CLIENT_ID
+        sync: false
+      - key: HOMEOPS_OAUTH_DROPBOX_CLIENT_SECRET
+        sync: false
+      - key: HOMEOPS_OAUTH_NOTION_CLIENT_ID
+        sync: false
+      - key: HOMEOPS_OAUTH_NOTION_CLIENT_SECRET
+        sync: false
+      - key: HOMEOPS_OAUTH_TODOIST_CLIENT_ID
+        sync: false
+      - key: HOMEOPS_OAUTH_TODOIST_CLIENT_SECRET
+        sync: false
+      - key: HOMEOPS_OAUTH_TICKTICK_CLIENT_ID
+        sync: false
+      - key: HOMEOPS_OAUTH_TICKTICK_CLIENT_SECRET
+        sync: false

@@ -8,6 +8,7 @@ import { Icon } from "@/components/Icon";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/dates";
 import { useStore } from "@/store/useStore";
+import type { Playbook } from "@/types";
 
 /* ---- Status display ---- */
 const STATUS_COLOR: Record<string, "sage" | "amber" | "sky" | "coral" | "lavender"> = {
@@ -540,14 +541,101 @@ function NewSkillForm({ onCreate, onCancel }: { onCreate: (skill: ServerSkill) =
 }
 
 /* ============================================================
+   RECIPES PANEL (read-only Playbooks view, folded into Skills)
+   ============================================================ */
+function RecipeCard({ p, onOpen, running, onRun }: { p: Playbook; onOpen: () => void; running: boolean; onRun: () => void }) {
+  return (
+    <Card className="card-pad flex flex-col" hover>
+      <div className="flex flex-1 flex-col" onClick={onOpen} role="button">
+        <div className="mb-2 flex items-center justify-between"><Badge color="sky">{p.category}</Badge><span className="text-xs text-ink-400">{p.steps.length} steps</span></div>
+        <p className="font-display text-base font-semibold leading-snug text-ink-900">{p.name}</p>
+        <p className="mt-1 line-clamp-2 text-xs text-ink-500">{p.description}</p>
+      </div>
+      <div className="mt-3 flex items-center gap-1 border-t border-ink-900/[0.06] pt-3">
+        <Button size="sm" variant="ember" disabled={running} onClick={onRun}>{running ? <><Icon name="Loader2" size={13} className="animate-spin" /> Running</> : <><Icon name="Play" size={13} /> Run</>}</Button>
+        <Button size="sm" variant="ghost" className="ml-auto" onClick={onOpen}>View steps</Button>
+      </div>
+    </Card>
+  );
+}
+
+function RecipeDrawer({ playbook: p, onClose, onRun, running }: { playbook: Playbook; onClose: () => void; onRun: () => void; running: boolean }) {
+  const data = useStore((s) => s.data);
+  const navigate = useStore((s) => s.navigate);
+  const agents = data.agents.filter((a) => p.linkedAgentIds.includes(a.id));
+  const List = ({ title, items, icon }: { title: string; items: string[]; icon: string }) => items.length ? <div><p className="section-title mb-1.5 flex items-center gap-1.5"><Icon name={icon} size={12} />{title}</p><div className="flex flex-wrap gap-1.5">{items.map((i, k) => <span key={k} className="chip bg-surface-sunken text-ink-600">{i}</span>)}</div></div> : null;
+  return (
+    <Drawer open onClose={onClose} width="max-w-2xl" title={p.name} icon="ScrollText" footer={<><Button variant="ghost" onClick={onClose}>Close</Button><Button variant="primary" disabled={running} onClick={onRun}>{running ? <><Icon name="Loader2" size={15} className="animate-spin" /> Running…</> : <><Icon name="Play" size={15} /> Run recipe</>}</Button></>}>
+      <div className="space-y-4">
+        <Badge color="sky">{p.category}</Badge>
+        <p className="text-sm text-ink-600">{p.description}</p>
+        {p.whenToUse && <div className="well p-3.5"><p className="section-title">When to use</p><p className="mt-1 text-sm text-ink-700">{p.whenToUse}</p></div>}
+        <div>
+          <p className="section-title mb-2">Steps</p>
+          <ol className="space-y-2">{[...p.steps].sort((a, b) => a.order - b.order).map((s) => <li key={s.order} className="flex gap-3"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-ink-700 to-ink-900 text-xs font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">{s.order}</span><span className="pt-0.5 text-sm text-ink-700">{s.text}</span></li>)}</ol>
+        </div>
+        <List title="Required connections" items={p.requiredConnections} icon="Plug" />
+        <List title="Required file types" items={p.requiredFileTypes} icon="FileText" />
+        {p.outputFormat && <div><p className="section-title mb-1">Output format</p><p className="text-sm text-ink-700">{p.outputFormat}</p></div>}
+        <List title="Approval rules" items={p.approvalRules} icon="ShieldCheck" />
+        {agents.length > 0 && <div><p className="section-title mb-1.5">Linked agents</p><div className="flex flex-wrap gap-2">{agents.map((a) => <button key={a.id} onClick={() => navigate("agents", { id: a.id })} className="chip pressable bg-surface-sunken text-ink-600 transition-colors hover:bg-surface-overlay"><Icon name={a.icon} size={12} /> {a.name}</button>)}</div></div>}
+      </div>
+    </Drawer>
+  );
+}
+
+function RecipesPanel({ initialId }: { initialId?: string | null }) {
+  const data = useStore((s) => s.data);
+  const runPlaybook = useStore((s) => s.runPlaybook);
+  const [cat, setCat] = useState("All");
+  const [selected, setSelected] = useState<string | null>(initialId ?? null);
+  const [runningId, setRunningId] = useState<string | null>(null);
+
+  useEffect(() => { if (initialId) setSelected(initialId); }, [initialId]);
+
+  const run = async (id: string) => { setRunningId(id); await runPlaybook(id); setRunningId(null); };
+  const cats = ["All", ...Array.from(new Set(data.playbooks.map((p) => p.category)))];
+  const active = data.playbooks.filter((p) => !p.archived && (cat === "All" || p.category === cat));
+  const sel = data.playbooks.find((p) => p.id === selected) ?? null;
+
+  return (
+    <div>
+      <p className="mb-3 text-sm text-ink-500">Reusable, step-by-step instructions for recurring household workflows — a read-only reference view. Run one directly, or ask HomeOps to follow it.</p>
+      <div className="mb-4 flex flex-wrap gap-2">{cats.map((c) => <button key={c} onClick={() => setCat(c)} className={`chip pressable transition-colors ${cat === c ? "bg-ink-800 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]" : "border border-ink-900/10 bg-surface-raised text-ink-600 hover:bg-surface-overlay"}`}>{c}</button>)}</div>
+      {active.length === 0 ? <EmptyState icon="ScrollText" title="No recipes yet" message="Recipes are created by your agents and automations as they learn recurring workflows." /> : (
+        <div className="stagger grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {active.map((p) => <RecipeCard key={p.id} p={p} onOpen={() => setSelected(p.id)} running={runningId === p.id} onRun={() => run(p.id)} />)}
+        </div>
+      )}
+      {sel && <RecipeDrawer playbook={sel} onClose={() => setSelected(null)} onRun={() => run(sel.id)} running={runningId === sel.id} />}
+    </div>
+  );
+}
+
+/* ============================================================
    ROOT SCREEN
    ============================================================ */
+const TABS = [
+  { id: "skills", label: "Skills", icon: "Layers" },
+  { id: "recipes", label: "Recipes", icon: "ScrollText" },
+];
+
 export function SkillBuilder() {
   const navigate = useStore((s) => s.navigate);
+  const routeScreen = useStore((s) => s.route.screen);
+  const params = useStore((s) => s.route.params);
+  const [tab, setTab] = useState<string>(routeScreen === "playbooks" ? "recipes" : "skills");
+  const [recipeId, setRecipeId] = useState<string | null>(routeScreen === "playbooks" ? (params?.id ?? null) : null);
   const [skills, setSkills] = useState<ServerSkill[]>([]);
   const [loading, setLoading] = useState(true);
   const [selId, setSelId] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
+
+  // Old "playbooks" deep links (search results, agent detail chips) land here on the
+  // Recipes tab — Playbooks is no longer a separate top-level concept.
+  useEffect(() => {
+    if (routeScreen === "playbooks") { setTab("recipes"); if (params?.id) setRecipeId(params.id); }
+  }, [routeScreen, params?.id]);
 
   const load = useCallback(async () => {
     const list = await backend.skills();
@@ -574,15 +662,21 @@ export function SkillBuilder() {
   return (
     <div className="animate-fade-in">
       <PageHeader title="Skills" subtitle="Reusable, hybrid routines that the orchestrator selects and executes as durable server runs." icon="Layers" />
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,22rem)_1fr]">
-        <SkillList skills={skills} selId={selId} onSelect={setSelId} onNew={() => setShowNew(true)} loading={loading} />
-        <div>
-          {sel ? (
-            <SkillEditor skill={sel} onSaved={handleSaved} onDeleted={handleDeleted} onNavigateToRun={handleNavigateToRun} />
-          ) : (
-            <EmptyState icon="Layers" title="Select a skill" message="Pick a skill to view and edit it, or create a new one." />
-          )}
-        </div>
+      <Tabs tabs={TABS} active={tab} onChange={setTab} />
+      <div className="pt-5">
+        {tab === "skills" && (
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,22rem)_1fr]">
+            <SkillList skills={skills} selId={selId} onSelect={setSelId} onNew={() => setShowNew(true)} loading={loading} />
+            <div>
+              {sel ? (
+                <SkillEditor skill={sel} onSaved={handleSaved} onDeleted={handleDeleted} onNavigateToRun={handleNavigateToRun} />
+              ) : (
+                <EmptyState icon="Layers" title="Select a skill" message="Pick a skill to view and edit it, or create a new one." />
+              )}
+            </div>
+          </div>
+        )}
+        {tab === "recipes" && <RecipesPanel initialId={recipeId} />}
       </div>
       {showNew && <NewSkillForm onCreate={handleNew} onCancel={() => setShowNew(false)} />}
     </div>

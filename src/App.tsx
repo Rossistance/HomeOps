@@ -10,20 +10,39 @@ import { Onboarding } from "@/screens/Onboarding";
 import { Lock } from "@/screens/Lock";
 
 // Route-level code splitting — each screen is its own chunk (P3-BUILD-001).
-const Dashboard = lazy(() => import("@/screens/Dashboard").then((m) => ({ default: m.Dashboard })));
-const Assistant = lazy(() => import("@/screens/Assistant").then((m) => ({ default: m.Assistant })));
-const Agents = lazy(() => import("@/screens/Agents").then((m) => ({ default: m.Agents })));
-const Automations = lazy(() => import("@/screens/Automations").then((m) => ({ default: m.Automations })));
-const Connections = lazy(() => import("@/screens/Connections").then((m) => ({ default: m.Connections })));
-const Messages = lazy(() => import("@/screens/Messages").then((m) => ({ default: m.Messages })));
-const FilesKnowledge = lazy(() => import("@/screens/FilesKnowledge").then((m) => ({ default: m.FilesKnowledge })));
-const MiniApps = lazy(() => import("@/screens/MiniApps").then((m) => ({ default: m.MiniApps })));
-const HouseholdSpaces = lazy(() => import("@/screens/HouseholdSpaces").then((m) => ({ default: m.HouseholdSpaces })));
-const Playbooks = lazy(() => import("@/screens/Playbooks").then((m) => ({ default: m.Playbooks })));
-const ActivityMemory = lazy(() => import("@/screens/ActivityMemory").then((m) => ({ default: m.ActivityMemory })));
-const Settings = lazy(() => import("@/screens/Settings").then((m) => ({ default: m.Settings })));
-const SkillBuilder = lazy(() => import("@/screens/SkillBuilder").then((m) => ({ default: m.SkillBuilder })));
-const FunctionBuilder = lazy(() => import("@/screens/FunctionBuilder").then((m) => ({ default: m.FunctionBuilder })));
+// A dynamic import can FAIL when a new build is deployed (or HMR rebuilds in dev) while
+// a tab is open: the old chunk hash 404s and the screen would hang forever on the
+// Suspense fallback ("Loading…"). lazyWithReload recovers by reloading once to fetch the
+// current build, rate-limited so a genuinely-broken chunk can't cause a reload loop.
+const RELOAD_KEY = "homeops_chunk_reload_at";
+function lazyWithReload<T extends React.ComponentType<unknown>>(factory: () => Promise<{ default: T }>) {
+  return lazy(() =>
+    factory().catch((err) => {
+      const last = Number(sessionStorage.getItem(RELOAD_KEY) || 0);
+      if (Date.now() - last > 10_000) {
+        sessionStorage.setItem(RELOAD_KEY, String(Date.now()));
+        window.location.reload();
+        return new Promise<{ default: T }>(() => {}); // hold render until the reload takes over
+      }
+      throw err; // reloaded too recently — surface the real error instead of looping
+    }),
+  );
+}
+const Dashboard = lazyWithReload(() => import("@/screens/Dashboard").then((m) => ({ default: m.Dashboard })));
+const Assistant = lazyWithReload(() => import("@/screens/Assistant").then((m) => ({ default: m.Assistant })));
+const Agents = lazyWithReload(() => import("@/screens/Agents").then((m) => ({ default: m.Agents })));
+const Automations = lazyWithReload(() => import("@/screens/Automations").then((m) => ({ default: m.Automations })));
+const Connections = lazyWithReload(() => import("@/screens/Connections").then((m) => ({ default: m.Connections })));
+const Messages = lazyWithReload(() => import("@/screens/Messages").then((m) => ({ default: m.Messages })));
+const FilesKnowledge = lazyWithReload(() => import("@/screens/FilesKnowledge").then((m) => ({ default: m.FilesKnowledge })));
+const MiniApps = lazyWithReload(() => import("@/screens/MiniApps").then((m) => ({ default: m.MiniApps })));
+const HouseholdSpaces = lazyWithReload(() => import("@/screens/HouseholdSpaces").then((m) => ({ default: m.HouseholdSpaces })));
+const Meals = lazyWithReload(() => import("@/screens/Meals").then((m) => ({ default: m.Meals })));
+const Calendar = lazyWithReload(() => import("@/screens/Calendar").then((m) => ({ default: m.Calendar })));
+const ActivityMemory = lazyWithReload(() => import("@/screens/ActivityMemory").then((m) => ({ default: m.ActivityMemory })));
+const Settings = lazyWithReload(() => import("@/screens/Settings").then((m) => ({ default: m.Settings })));
+const SkillBuilder = lazyWithReload(() => import("@/screens/SkillBuilder").then((m) => ({ default: m.SkillBuilder })));
+const FunctionBuilder = lazyWithReload(() => import("@/screens/FunctionBuilder").then((m) => ({ default: m.FunctionBuilder })));
 
 const SCREENS: Record<ScreenId, React.ComponentType> = {
   dashboard: Dashboard,
@@ -37,7 +56,11 @@ const SCREENS: Record<ScreenId, React.ComponentType> = {
   files: FilesKnowledge,
   miniapps: MiniApps,
   spaces: HouseholdSpaces,
-  playbooks: Playbooks,
+  meals: Meals,
+  calendar: Calendar,
+  // Playbooks folded into Skills as a read-only "Recipes" tab — old deep links (search
+  // results, agent detail chips) that still navigate to "playbooks" land there.
+  playbooks: SkillBuilder,
   activity: ActivityMemory,
   settings: Settings,
 };

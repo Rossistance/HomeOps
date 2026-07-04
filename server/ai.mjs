@@ -100,13 +100,17 @@ export function setActiveProvider(id) {
   return id;
 }
 
-async function getJSON(url, opts, local) {
-  const r = await safeFetch(url, opts, { allowLoopback: !!local, timeoutMs: 12000, maxBytes: 2_000_000 });
+// Default 12s suits quick probes (health, model discovery). Chat completions pass a
+// much longer budget — capable/reasoning models routinely take >12s on a real
+// planning prompt, and aborting them surfaced as a bogus "fetch failed".
+async function getJSON(url, opts, local, timeoutMs = 12000) {
+  const r = await safeFetch(url, opts, { allowLoopback: !!local, timeoutMs, maxBytes: 2_000_000 });
   if (!r.ok) return { ok: false, error: r.error, message: r.message };
   let json = null;
   try { json = JSON.parse(r.text); } catch { json = null; }
   return { ok: true, status: r.status, httpOk: r.httpOk, json, raw: r.text };
 }
+const CHAT_TIMEOUT_MS = 120_000;
 
 // ---- Model discovery ----
 export async function providerModels(id) {
@@ -185,7 +189,7 @@ export async function providerChat(id, { messages = [], model } = {}) {
         method: "POST",
         headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
         body: JSON.stringify({ model: useModel, max_tokens: 2048, ...(system ? { system } : {}), messages: conv }),
-      }, p.local);
+      }, p.local, CHAT_TIMEOUT_MS);
       if (!r.ok) return { ok: false, error: r.error, message: r.message };
       if (!r.httpOk) return { ok: false, error: "provider_error", message: sanitizeProviderError(r.json), status: r.status };
       return { ok: true, model: useModel, text: (r.json?.content ?? []).map((c) => c.text).join("").trim() };
@@ -196,7 +200,7 @@ export async function providerChat(id, { messages = [], model } = {}) {
       const r = await getJSON(`${base}/models/${encodeURIComponent(useModel)}:generateContent?key=${encodeURIComponent(key)}`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ contents, ...(sys ? { systemInstruction: { parts: [{ text: sys }] } } : {}) }),
-      }, p.local);
+      }, p.local, CHAT_TIMEOUT_MS);
       if (!r.ok) return { ok: false, error: r.error, message: r.message };
       if (!r.httpOk) return { ok: false, error: "provider_error", message: sanitizeProviderError(r.json), status: r.status };
       const text = (r.json?.candidates?.[0]?.content?.parts ?? []).map((x) => x.text).join("").trim();
@@ -206,14 +210,14 @@ export async function providerChat(id, { messages = [], model } = {}) {
       const r = await getJSON(`${base}/api/chat`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ model: useModel, messages, stream: false }),
-      }, p.local);
+      }, p.local, CHAT_TIMEOUT_MS);
       if (!r.ok) return { ok: false, error: r.error, message: r.message };
       if (!r.httpOk) return { ok: false, error: "provider_error", message: sanitizeProviderError(r.json), status: r.status };
       return { ok: true, model: useModel, text: (r.json?.message?.content ?? "").trim() };
     }
     // openai style
     const headers = { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) };
-    const r = await getJSON(`${base}/chat/completions`, { method: "POST", headers, body: JSON.stringify({ model: useModel, messages }) }, p.local);
+    const r = await getJSON(`${base}/chat/completions`, { method: "POST", headers, body: JSON.stringify({ model: useModel, messages }) }, p.local, CHAT_TIMEOUT_MS);
     if (!r.ok) return { ok: false, error: r.error, message: r.message };
     if (!r.httpOk) return { ok: false, error: "provider_error", message: sanitizeProviderError(r.json), status: r.status };
     return { ok: true, model: useModel, text: (r.json?.choices?.[0]?.message?.content ?? "").trim() };

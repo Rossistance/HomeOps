@@ -3,7 +3,7 @@
 // to select and execute out of the box. The seeded skill uses only internal
 // functions (+ a gated sign-off step), so it runs end-to-end with no external
 // account — demonstrating the full approval→resume→execute→audit→memory loop.
-import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction, listMembers, putMember } from "./store.mjs";
+import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction, listMembers, putMember, listPlaybooks, putPlaybook } from "./store.mjs";
 
 // Canonical household roster — the server-owned source of truth for each actor's
 // role. Mirrors the frontend demo family (src/data/seed.ts) so the dev profile
@@ -137,4 +137,44 @@ export function seedDefaults() {
       updatedAt: nowISO,
     });
   }
+
+  // Starter playbooks (Phase 6) — server-owned so every client (web/mobile) reads the
+  // same library. Idempotent: seeded once, never clobbering household edits.
+  const havePlaybooks = new Set(listPlaybooks().map((p) => p.id));
+  const seedPlaybook = (p) => { if (!havePlaybooks.has(p.id)) putPlaybook({ householdId: "local", archived: false, system: true, createdBy: "system", createdAt: nowISO, updatedAt: nowISO, ...p }); };
+  seedPlaybook({
+    id: "pb_school_form",
+    name: "School form turnaround",
+    description: "From photo of a form to a signed, returned, calendared obligation.",
+    whenToUse: "A school sends home any form with a deadline — permission slips, picture day, fundraisers.",
+    category: "School",
+    steps: [
+      "Photograph the form and upload it to Files & Knowledge.",
+      "Extract the deadline and any payment amount.",
+      "Create a task assigned to a parent, due 2 days before the deadline.",
+      "Add a calendar event for the deadline day.",
+      "If payment is required, note the amount on the task.",
+      "Pause for sign-off before sending any reply to the school.",
+    ],
+    requiredConnections: ["Local Files"],
+    outputFormat: "A due task + calendar event linked to the uploaded form.",
+    approvalRules: ["Any outbound email or payment step pauses for an adult's approval."],
+  });
+  seedPlaybook({
+    id: "pb_weekly_reset",
+    name: "Sunday weekly reset",
+    description: "Close out last week and stage the next one in 15 minutes.",
+    whenToUse: "Every Sunday evening, or after any chaotic week.",
+    category: "Routines",
+    steps: [
+      "Review last week's incomplete tasks — reschedule or drop each one.",
+      "Skim the next 7 days of calendar events; confirm drivers and what-to-bring lists.",
+      "Plan the week's dinners in Meals and send ingredients to groceries.",
+      "Check pending approvals and clear the queue.",
+      "Ask HomeOps for a week-ahead briefing.",
+    ],
+    requiredConnections: [],
+    outputFormat: "A clean task list, staffed calendar, and a filled meal plan for the week.",
+    approvalRules: [],
+  });
 }

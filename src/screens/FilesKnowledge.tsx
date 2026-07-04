@@ -5,6 +5,7 @@ import {
 } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { relativeTime, fmtDate } from "@/lib/dates";
+import { backend, type ServerArtifact } from "@/connectors/api";
 import type { FileAsset, KnowledgeItem, KnowledgeType } from "@/types";
 
 function fmtSize(b: number) { return b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`; }
@@ -152,6 +153,36 @@ function Block({ label, children }: { label: string; children: React.ReactNode }
 
 const KTYPES: KnowledgeType[] = ["Custom Instruction", "Family Fact", "Preference", "Important Contact", "Template", "Rule", "Saved Answer", "Reference Note"];
 
+// Item 15: real generated artifacts (briefings/reports/run summaries) written by runs —
+// server-owned, read-only here. Previously backend.artifacts() existed but NOTHING
+// called it, which is why the knowledge library always looked empty.
+function GeneratedArtifacts() {
+  const [artifacts, setArtifacts] = useState<ServerArtifact[]>([]);
+  const [openId, setOpenId] = useState<string | null>(null);
+  useEffect(() => { void backend.artifacts().then(setArtifacts); }, []);
+  if (!artifacts.length) return null;
+  return (
+    <div>
+      <p className="section-title mb-2.5">Generated reports & briefings</p>
+      <div className="stagger grid grid-cols-1 gap-3 md:grid-cols-2">
+        {artifacts.map((a) => (
+          <Card key={a.id} className="card-pad">
+            <div className="flex items-start justify-between gap-2">
+              <p className="font-semibold text-ink-900">{a.title}</p>
+              <Badge color="sky">{a.kind.replace(/_/g, " ")}</Badge>
+            </div>
+            <p className={`mt-1 whitespace-pre-wrap text-sm text-ink-600 ${openId === a.id ? "" : "line-clamp-3"}`}>{a.body || "(no content)"}</p>
+            <div className="mt-2 flex items-center justify-between text-xs text-ink-400">
+              <span>{new Date(a.createdAt).toLocaleString()}{a.runId ? " · from a run" : ""}</span>
+              {(a.body?.length ?? 0) > 200 && <button className="font-medium text-ink-600 underline" onClick={() => setOpenId(openId === a.id ? null : a.id)}>{openId === a.id ? "Collapse" : "Read all"}</button>}
+            </div>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Knowledge() {
   const data = useStore((s) => s.data);
   const params = useStore((s) => s.route.params);
@@ -167,6 +198,7 @@ function Knowledge() {
         <Button variant="ember" onClick={() => setCreating(true)}><Icon name="Plus" size={16} /> New item</Button>
       </div>
       <div className="space-y-6">
+        <GeneratedArtifacts />
         {KTYPES.map((type) => {
           const items = data.knowledge.filter((k) => k.type === type);
           if (!items.length) return null;

@@ -5,7 +5,7 @@
  * local-first shape. Collections are stored as arrays inside `AppData` and
  * persisted to IndexedDB. UI/session state lives in the store, not here.
  */
-import type { AgentPlan } from "@/connectors/api";
+import type { AgentPlan, ChatBuild } from "@/connectors/api";
 
 /* ----------------------------------------------------------------------- */
 /* Enums / unions                                                          */
@@ -240,6 +240,8 @@ export interface AgentRunRef {
 
 export interface Agent {
   id: string;
+  /** Present when this agent exists in the durable server registry (hydrated or migrated). */
+  serverId?: string;
   name: string;
   icon: string; // lucide icon name
   purpose: string;
@@ -526,6 +528,7 @@ export interface MemoryEntry {
   sensitive: boolean;
   createdAt: string;
   updatedAt: string;
+  serverId?: string; // present when this entry is a real, server-owned memory record
 }
 
 export interface WebhookEvent {
@@ -785,7 +788,7 @@ export interface AppSettings {
 /* Assistant — the conversational NL → plan → approval → execution loop     */
 /* ----------------------------------------------------------------------- */
 
-export type AssistantMessageStatus = "thinking" | "streaming" | "answered" | "planned" | "running" | "done" | "error";
+export type AssistantMessageStatus = "thinking" | "streaming" | "answered" | "planned" | "running" | "done" | "error" | "built";
 
 export interface AssistantMessage {
   id: string;
@@ -794,6 +797,12 @@ export interface AssistantMessage {
   createdAt: string;
   /** Present when the assistant proposed an executable plan. */
   plan?: AgentPlan;
+  /** Present when the assistant proposed durable entities to build (unified chat-builder). */
+  build?: ChatBuild;
+  /** IDs created when a build proposal was approved (so the card can show "built"). */
+  builtIds?: { skillId?: string; agentId?: string; triggerId?: string };
+  /** Live per-entity progress while a build is materializing (entity keys done so far). */
+  buildProgress?: string[];
   /** Set once the plan has been dispatched — links to an AutomationRun in `runs`. */
   runId?: string;
   status?: AssistantMessageStatus;
@@ -882,6 +891,8 @@ export type ScreenId =
   | "files"
   | "miniapps"
   | "spaces"
+  | "meals"
+  | "calendar"
   | "playbooks"
   | "activity"
   | "settings";

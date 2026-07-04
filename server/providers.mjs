@@ -36,23 +36,105 @@ export const PROVIDERS = [
     scopes: [
       { key: "gmail.read", oauthScope: "https://www.googleapis.com/auth/gmail.readonly", label: "Read Gmail", risk: "Sensitive", enablesTools: ["gmail.search"] },
       { key: "gmail.send", oauthScope: "https://www.googleapis.com/auth/gmail.send", label: "Send email", risk: "High", enablesTools: ["gmail.send"] },
+      { key: "gmail.modify", oauthScope: "https://www.googleapis.com/auth/gmail.modify", label: "Organize inbox (labels, archive)", risk: "High", enablesTools: ["gmail.listLabels", "gmail.modifyLabels"] },
       { key: "calendar", oauthScope: "https://www.googleapis.com/auth/calendar.events", label: "Manage calendar events", risk: "Medium", enablesTools: ["calendar.list", "calendar.create"] },
       { key: "drive", oauthScope: "https://www.googleapis.com/auth/drive.readonly", label: "Read Google Drive", risk: "Medium", enablesTools: ["drive.list"] },
     ],
     identity: async (api) => { const r = await api("https://www.googleapis.com/oauth2/v2/userinfo"); return { externalAccountId: r.json?.id ?? r.json?.email, displayName: r.json?.email ?? "Google account" }; },
     health: async (api) => { const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/profile"); return { ok: r.ok, status: r.ok ? "healthy" : "error", detail: r.json?.emailAddress }; },
     tools: [
-      { id: "gmail.search", name: "Search inbox", action: "Read", risk: "Sensitive", requiresApproval: false, scopes: ["gmail.read"], inputs: [{ key: "query", label: "Search query", type: "text", default: "newer_than:7d" }],
+      { id: "gmail.search", name: "Search inbox", action: "Read", risk: "Sensitive", requiresApproval: false, scopes: ["gmail.read"], inputs: [{ key: "query", label: "Search query", type: "text", default: "newer_than:7d" }, { key: "maxResults", label: "Max results (≤250, paginates automatically)", type: "text", default: "50" }],
         run: async (api, input) => {
-          const q = encodeURIComponent(input.query || "newer_than:7d");
-          const list = (await api(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5&q=${q}`)).json;
-          const messages = [];
-          for (const m of (list.messages ?? []).slice(0, 5)) {
-            const mj = (await api(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`)).json;
-            const hdr = (n) => mj.payload?.headers?.find((h) => h.name === n)?.value;
-            messages.push({ id: m.id, subject: hdr("Subject"), from: hdr("From"), snippet: mj.snippet });
+          const query = input.query || "newer_than:7d";
+          const q = encodeURIComponent(query);
+          const max = Math.min(Math.max(parseInt(input.maxResults, 10) || 50, 1), 250);
+          // Paginate the id list until `max` or the query is exhausted (one run covers
+          // everything, not just the first page).
+          const ids = [];
+          let pageToken = null;
+          let totalMatched = 0;
+          while (ids.length < max) {
+            const page = Math.min(max - ids.length, 100);
+            const r = await api(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${page}&q=${q}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`);
+            if (!r.ok) throw new Error(r.json?.error?.message ?? "Gmail search failed");
+            totalMatched = r.json.resultSizeEstimate ?? totalMatched;
+            for (const m of r.json.messages ?? []) ids.push(m.id);
+            pageToken = r.json.nextPageToken ?? null;
+            if (!pageToken || (r.json.messages ?? []).length === 0) break;
           }
-          return { query: input.query || "newer_than:7d", count: messages.length, messages };
+          // Metadata fetched CONCURRENTLY in chunks, and kept compact (trimmed subject/
+          // from/snippet, category labels only) so a downstream reasoning step can hold
+          // the ENTIRE result set in context — completeness beats verbosity here.
+          const messages = [];
+          for (let i = 0; i < ids.length; i += 25) {
+            const chunk = ids.slice(i, i + 25);
+            const metas = await Promise.all(chunk.map((id) =>
+              api(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`).catch(() => null)));
+            for (let j = 0; j < chunk.length; j++) {
+              const mj = metas[j]?.json;
+              if (!mj) continue;
+              const hdr = (n) => mj.payload?.headers?.find((h) => h.name === n)?.value;
+              const labels = (mj.labelIds ?? []).filter((l) => l === "INBOX" || l === "UNREAD" || l.startsWith("CATEGORY_"));
+              messages.push({ id: chunk[j], subject: String(hdr("Subject") ?? "").slice(0, 90), from: String(hdr("From") ?? "").slice(0, 60), snippet: String(mj.snippet ?? "").slice(0, 90), labelIds: labels });
+            }
+          }
+          return { query, count: messages.length, totalMatched, complete: !pageToken, messages };
+        } },
+      { id: "gmail.listLabels", name: "List Gmail labels", action: "Read", risk: "Low", requiresApproval: false, scopes: ["gmail.modify"], inputs: [],
+        run: async (api) => {
+          const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/labels");
+          if (!r.ok) throw new Error(r.json?.error?.message ?? "Couldn't list labels — reconnect Google with the new inbox-organize permission.");
+          return { count: (r.json.labels ?? []).length, labels: (r.json.labels ?? []).map((l) => ({ id: l.id, name: l.name, type: l.type })) };
+        } },
+      { id: "gmail.modifyLabels", name: "Label / move messages", action: "Write", risk: "High", requiresApproval: true, scopes: ["gmail.modify"],
+        inputs: [
+          { key: "messageIds", label: "Message IDs (comma-separated, from Search inbox)", type: "text", required: true },
+          { key: "addLabels", label: "Add labels (names or IDs, comma-separated — e.g. Social or CATEGORY_SOCIAL)", type: "text" },
+          { key: "removeLabels", label: "Remove labels (e.g. INBOX to archive, UNREAD to mark read)", type: "text" },
+        ],
+        run: async (api, input) => {
+          const ids = String(input.messageIds ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+          if (ids.length === 0) throw new Error("Provide at least one message ID (use Search inbox first).");
+          if (ids.length > 500) throw new Error("Too many messages at once — cap is 500 per call.");
+          const wantAdd = String(input.addLabels ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+          const wantRemove = String(input.removeLabels ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+          if (wantAdd.length === 0 && wantRemove.length === 0) throw new Error("Provide addLabels and/or removeLabels.");
+          // Resolve label names → IDs (case-insensitive); auto-create missing USER labels
+          // on the add side only (never invent system labels on remove).
+          const lr = await api("https://gmail.googleapis.com/gmail/v1/users/me/labels");
+          if (!lr.ok) throw new Error(lr.json?.error?.message ?? "Couldn't read labels — reconnect Google with the new inbox-organize permission.");
+          const known = lr.json.labels ?? [];
+          const findId = (nameOrId) => known.find((l) => l.id === nameOrId || l.name.toLowerCase() === nameOrId.toLowerCase())?.id ?? null;
+          const addLabelIds = [];
+          const createdLabels = [];
+          for (const want of wantAdd) {
+            let id = findId(want);
+            if (!id) {
+              const cr = await api("https://gmail.googleapis.com/gmail/v1/users/me/labels", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: want, labelListVisibility: "labelShow", messageListVisibility: "show" }) });
+              if (!cr.ok) throw new Error(cr.json?.error?.message ?? `Couldn't create label "${want}".`);
+              id = cr.json.id; createdLabels.push(want);
+            }
+            addLabelIds.push(id);
+          }
+          // Removing a label that doesn't exist is a semantic no-op (e.g. "CATEGORY_PRIMARY"
+          // isn't a real Gmail label — Primary is the absence of other categories, and adding
+          // a category label recategorizes automatically). Skip-and-report, never fail the batch.
+          const removeLabelIds = [];
+          const skippedRemove = [];
+          for (const want of wantRemove) {
+            const id = findId(want);
+            if (id) removeLabelIds.push(id); else skippedRemove.push(want);
+          }
+          if (addLabelIds.length === 0 && removeLabelIds.length === 0) {
+            return { modified: 0, added: [], removed: [], createdLabels, skippedRemove, note: "Nothing to change — no resolvable labels." };
+          }
+          const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ ids, ...(addLabelIds.length ? { addLabelIds } : {}), ...(removeLabelIds.length ? { removeLabelIds } : {}) }),
+          });
+          if (!r.ok && r.status !== 204) throw new Error(r.json?.error?.message ?? "Gmail batch modify failed");
+          const removedApplied = wantRemove.filter((w) => !skippedRemove.includes(w));
+          return { modified: ids.length, added: wantAdd, removed: removedApplied, createdLabels, ...(skippedRemove.length ? { skippedRemove, note: `Skipped non-existent label(s) on remove: ${skippedRemove.join(", ")} (no-op).` } : {}) };
         } },
       { id: "gmail.send", name: "Send email", action: "Send", risk: "High", requiresApproval: true, scopes: ["gmail.send"], inputs: [{ key: "to", label: "To", type: "text", required: true }, { key: "subject", label: "Subject", type: "text", required: true }, { key: "body", label: "Message", type: "textarea" }],
         run: async (api, input) => {

@@ -102,7 +102,10 @@ export interface BackendApproval { id: string; connectorId: string; toolId: stri
 export interface AIProvider {
   id: string; name: string; kind: "cloud" | "local"; local: boolean; needsKey: boolean; needsBaseUrl: boolean;
   docs: string; defaultBaseUrl: string; defaultModel: string; baseUrl: string; model: string; keySet: boolean;
-  readiness: "not_configured" | "configured"; active: boolean; updatedAt: string | null;
+  // Truthful readiness vocabulary (P1.3): a default URL/key alone is not proof of reachability.
+  readiness: "not_configured" | "needs_health_check" | "configured" | "healthy" | "unreachable";
+  health?: { ok: boolean; status: string; at: number | null; latencyMs: number | null } | null;
+  active: boolean; updatedAt: string | null;
 }
 export interface AIHealth { ok: boolean; status?: string; message?: string; models?: string[]; modelCount?: number; latencyMs?: number }
 export interface AIChatResult { ok: boolean; model?: string; text?: string; error?: string; message?: string }
@@ -146,7 +149,7 @@ export interface RunToolCall { at: string; ok: boolean; error: string | null; du
 export interface RunStepView {
   index: number; toolId: string | null; functionId: string | null; title: string; detail: string;
   requiresApproval: boolean; risk: string; connectorId: string | null; connectorName: string | null;
-  attribution: string; status: string; approvalId: string | null; attempts: number;
+  attribution: string; status: string; approvalId: string | null; attempts: number; input: Record<string, unknown>;
   result: unknown; toolCalls: RunToolCall[]; startedAt: number | null; finishedAt: number | null;
 }
 export interface ServerRun {
@@ -239,6 +242,12 @@ export interface ServerFunction {
   executable: boolean;
 }
 export interface FunctionVersion extends Omit<ServerFunction, "state" | "stateReason" | "requiresApproval" | "effectiveAction" | "effectiveRisk" | "connectorId" | "connectorName" | "hasSecret" | "executable"> { snapshotAt: string }
+// Item 13: a drafted (not-yet-created) function definition for the builder to pre-fill.
+export interface DraftedFunction {
+  name: string; description: string; type: FunctionType; action: string;
+  risk: "Low" | "Medium" | "High" | "Sensitive"; approval_required: boolean;
+  input_schema: FunctionField[]; output_schema: FunctionField[];
+}
 export interface ToolCatalogEntry {
   toolId: string; name: string; action: string; risk: string; requiresApproval: boolean;
   connectorId: string; connectorName: string; source: "provider" | "connector"; connected: boolean;
@@ -318,7 +327,28 @@ export interface InferFunctionsResult {
 }
 
 /* ---- Assistant (conversational NL → answer | plan, executed via a server run) ---- */
-export interface AssistantResult { ok: boolean; kind?: "answer" | "plan"; answer?: string; plan?: AgentPlan; runId?: string | null; run?: ServerRun | null; model?: string; error?: string; message?: string }
+// Unified chat-builder: a proposed set of durable entities to stand up from one chat turn.
+export interface ChatBuildStep { step_id?: string; name: string; tool_id: string | null; approval_required: boolean }
+export interface ChatBuildEdit { kind: "agent" | "skill"; id: string; summary?: string; patch: Record<string, unknown> }
+export interface ChatBuild {
+  summary: string;
+  skill?: { name: string; description?: string; domain?: string; planner_guidance?: string; risk_level?: string; steps?: ChatBuildStep[] };
+  agent?: { name: string; purpose?: string; instructions?: string } | null;
+  automation?: { name: string; type: string; intervalMs?: number | null; runAt?: string | null } | null;
+  edits?: ChatBuildEdit[];
+}
+export interface BuildProgress { type: "progress"; entity: "skill" | "agent" | "automation"; action: string; id: string; name?: string; status?: string; version?: number; ok?: boolean }
+export interface BuildResult {
+  ok: boolean;
+  created?: {
+    skill?: { id: string; name: string; status: string };
+    agent?: { id: string; name: string; status: string };
+    automation?: { id: string; name: string; type: string; enabled: boolean };
+  };
+  updated?: { kind: string; id: string; name?: string; version?: number; ok: boolean; error?: string }[];
+  notes?: string[]; error?: string; message?: string;
+}
+export interface AssistantResult { ok: boolean; kind?: "answer" | "plan" | "build"; answer?: string; plan?: AgentPlan; build?: ChatBuild; runId?: string | null; run?: ServerRun | null; model?: string; error?: string; message?: string }
 /* ---- Evolution (LLM enrichment of a run-trace improvement proposal) ---- */
 export interface EvolutionProposalResult { ok: boolean; proposal?: { title: string; reason: string; summary: string; after?: string; risk: "Low" | "Medium" | "High" }; model?: string; error?: string; message?: string }
 export interface ServerEvolution {
@@ -360,13 +390,30 @@ export interface ServerTask {
   id: string; householdId: string; title: string; type: string; status: string; dueAt: string | null;
   assignedMemberId: string | null; spaceId: string; priority: string; amount: number | null;
   visibility: string; notes: string; listName?: string; source: string; createdBy: string;
-  createdAt: string; updatedAt: string;
+  createdAt: string; updatedAt: string; mealId?: string | null;
 }
 export interface ServerMember { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean }
-export interface ServerConversationMessage { role: "user" | "assistant"; text: string; kind?: string; plan?: AgentPlan | null; model?: string | null; at: string }
+export interface CalendarSubscription { id: string; name: string; url: string | null; source: string; lastSyncAt: number | null; lastResult: { imported?: number; updated?: number; removed?: number; error?: string } | null; eventCount: number; createdAt: number }
+export interface CalendarSync { ok: boolean; imported?: number; updated?: number; removed?: number; total?: number; error?: string }
+export interface MealIngredient { item: string; have?: boolean }
+export interface Meal { id: string; householdId: string; date: string | null; time?: string | null; slot: string; title: string; notes: string; ingredients: MealIngredient[]; servings?: number | null; recipeUrl?: string; visibility: string; source: string; createdBy: string; createdAt: string; updatedAt: string }
+export interface ServerConversationMessage { role: "user" | "assistant"; text: string; kind?: string; plan?: AgentPlan | null; build?: ChatBuild | null; built?: boolean; builtIds?: { skillId?: string; agentId?: string; triggerId?: string }; model?: string | null; at: string }
 export interface ServerConversation { id: string; householdId: string; actorId: string; title: string; messages: ServerConversationMessage[]; createdAt: string; updatedAt: string }
 export interface ServerMemory { id: string; householdId: string; scope: string; type: string; text: string; createdAt: number; source?: { runId?: string; actorId?: string } }
+/* ---- Risk-class overrides (item 9): household-set, server-enforced ---- */
+export interface RiskOverride { id: string; householdId: string; toolId: string; riskClass: string | null; skipApproval: boolean; setBy: string; setAt: string }
+export interface CatalogTool {
+  toolId: string; name: string; action: string; risk: string; requiresApproval: boolean;
+  connectorId: string; connectorName: string; source: string; connected: boolean;
+  riskOverridden?: boolean; defaultRisk?: string; defaultRequiresApproval?: boolean;
+}
 export interface ServerArtifact { id: string; householdId: string; runId?: string; kind: string; title: string; body?: string; createdAt: number }
+/* ---- Interactive email review (item 3): per-message label changes from a run ---- */
+export interface EmailReviewMessage { id: string; subject: string; from: string; snippet: string; added: string[]; removed: string[] }
+export interface EmailReviewLabel { id: string; name: string; type: string }
+export interface EmailReview { runId: string; messages: EmailReviewMessage[]; labels: EmailReviewLabel[]; touchedGmail: boolean }
+/* ---- Notifications (item 16b): delivered in-app records ---- */
+export interface ServerNotification { id: string; householdId: string; actorId: string; channel: string; title: string; body: string; to: string | null; read: boolean; createdAt: number }
 
 // CSRF token for the current session (set on login / session bootstrap). Never persisted.
 let csrfToken: string | null = null;
@@ -391,9 +438,9 @@ export const backend = {
       return null;
     }
   },
-  async login(input: { actorId: string; actorName: string; role: string; pin?: string }): Promise<{ session?: Session; error?: string }> {
+  async login(input: { actorId: string; actorName: string; role: string; pin?: string }): Promise<{ session?: Session; error?: string; message?: string }> {
     try {
-      const r = await req<{ session?: Session; error?: string }>("/session", { method: "POST", body: JSON.stringify(input) });
+      const r = await req<{ session?: Session; error?: string; message?: string }>("/session", { method: "POST", body: JSON.stringify(input) });
       if (r.session) setCsrf(r.session.csrf);
       return r;
     } catch { return { error: "backend_unreachable" }; }
@@ -569,6 +616,11 @@ export const backend = {
   async deleteEvent(id: string): Promise<{ ok: boolean; error?: string }> {
     try { return await req(`/events/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
   },
+  // Push a HomeOps canonical event to Google. With no approvalId it returns {needsApproval,
+  // approval} (writing to your real calendar needs sign-off); pass the approved id to execute.
+  async pushEventToGoogle(id: string, approvalId?: string): Promise<{ ok?: boolean; needsApproval?: boolean; approval?: BackendApproval; googleEventId?: string; action?: string; error?: string; message?: string }> {
+    try { return await req(`/calendar/push/${id}`, { method: "POST", body: JSON.stringify(approvalId ? { approvalId } : {}), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
   async tasks(): Promise<ServerTask[]> {
     try { return (await req<{ tasks: ServerTask[] }>("/tasks")).tasks ?? []; } catch { return []; }
   },
@@ -581,9 +633,118 @@ export const backend = {
   async deleteTaskRemote(id: string): Promise<{ ok: boolean; error?: string }> {
     try { return await req(`/tasks/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
   },
+  /* ---- unified chat-builder: materialize a proposed build into durable entities ---- */
+  // conversationId (optional) lets the server durably mark the originating build message
+  // built and append the confirmation — so the card's state survives a refresh.
+  async buildFromChat(build: ChatBuild, conversationId?: string): Promise<BuildResult> {
+    try { return await req("/assistant/build", { method: "POST", body: JSON.stringify({ build, conversationId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  // Streaming build — fires onProgress per entity as it's created/updated, then resolves
+  // with the final BuildResult. Falls back to a non-streaming error shape on transport failure.
+  streamBuild(build: ChatBuild, onProgress?: (ev: BuildProgress) => void, conversationId?: string): Promise<BuildResult> {
+    return new Promise((resolve) => {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (csrfToken) headers["x-homeops-csrf"] = csrfToken;
+      fetch("/api/assistant/build/stream", { method: "POST", credentials: "same-origin", headers, body: JSON.stringify({ build, conversationId }) })
+        .then(async (res) => {
+          if (!res.ok || !res.body) { resolve({ ok: false, error: res.status === 403 ? "insufficient_role" : "backend_unreachable" }); return; }
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const lines = buf.split("\n");
+            buf = lines.pop() ?? "";
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              try {
+                const ev = JSON.parse(line.slice(6));
+                if (ev.type === "progress" && onProgress) onProgress(ev as BuildProgress);
+                if (ev.type === "done") { resolve(ev.result as BuildResult); return; }
+              } catch { /* partial line */ }
+            }
+          }
+          resolve({ ok: false, error: "stream_incomplete" });
+        })
+        .catch(() => resolve({ ok: false, error: "backend_unreachable" }));
+    });
+  },
+  /* ---- risk-class overrides (item 9) — admin-only; server enforces in the engine ---- */
+  async riskOverrides(): Promise<{ overrides: RiskOverride[]; catalog: CatalogTool[] } | null> {
+    try { return await req("/risk-overrides"); } catch { return null; }
+  },
+  async setRiskOverride(toolId: string, patch: { riskClass?: string | null; skipApproval?: boolean }): Promise<{ override?: RiskOverride; error?: string }> {
+    try { return await req("/risk-overrides", { method: "PUT", body: JSON.stringify({ toolId, ...patch }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async clearRiskOverride(toolId: string): Promise<{ ok: boolean; error?: string }> {
+    try { return await req(`/risk-overrides/${encodeURIComponent(toolId)}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
   /* ---- household graph (server-owned member roster) ---- */
   async members(): Promise<ServerMember[]> {
     try { return (await req<{ members: ServerMember[] }>("/members")).members ?? []; } catch { return []; }
+  },
+  // Pre-auth profile picker + one-time household claim (demo roster → your family).
+  async profiles(): Promise<{ profiles: { actorId: string; displayName: string; role: string; relationship: string | null; pinRequired: boolean }[]; claimed: boolean } | null> {
+    try { return await req("/profiles"); } catch { return null; }
+  },
+  async claimHousehold(body: { ownerName: string; actorId?: string }): Promise<{ member?: { actorId: string; displayName: string; role: string }; session?: Session; error?: string; message?: string }> {
+    try {
+      const r = await req<{ member?: { actorId: string; displayName: string; role: string }; session?: Session; error?: string; message?: string }>("/household/claim", { method: "POST", body: JSON.stringify(body) });
+      if (r.session) setCsrf(r.session.csrf);
+      return r;
+    } catch { return { error: "backend_unreachable" }; }
+  },
+  async createMemberRemote(body: { displayName: string; role: string; relationship?: string | null; actorId?: string }): Promise<{ member?: { actorId: string; displayName: string; role: string; relationship: string | null }; error?: string; message?: string }> {
+    try { return await req("/members", { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async updateMemberRemote(actorId: string, patch: { displayName?: string; role?: string; relationship?: string | null }): Promise<{ member?: { actorId: string; displayName: string; role: string; relationship: string | null }; error?: string; message?: string }> {
+    try { return await req(`/members/${encodeURIComponent(actorId)}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async archiveMemberRemote(actorId: string): Promise<{ ok?: boolean; error?: string; message?: string }> {
+    try { return await req(`/members/${encodeURIComponent(actorId)}`, { method: "DELETE", mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  /* ---- meal plan ---- */
+  async meals(): Promise<Meal[]> {
+    try { return (await req<{ meals: Meal[] }>("/meals")).meals ?? []; } catch { return []; }
+  },
+  async createMeal(body: Omit<Partial<Meal>, "ingredients"> & { title: string; ingredients?: (string | MealIngredient)[] }): Promise<{ meal?: Meal; error?: string }> {
+    try { return await req("/meals", { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async updateMeal(id: string, patch: Partial<Meal>): Promise<{ meal?: Meal; error?: string }> {
+    try { return await req(`/meals/${id}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async deleteMeal(id: string): Promise<{ ok: boolean; unlinkedGroceries?: number; unlinkedEvents?: number; error?: string }> {
+    try { return await req(`/meals/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  async mealToGrocery(id: string): Promise<{ ok: boolean; added?: number; error?: string }> {
+    try { return await req(`/meals/${id}/to-grocery`, { method: "POST", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  // Item 5: put the meal on the household calendar as a canonical, mealId-linked event
+  // (idempotent — re-pushing updates). Google push then goes through the existing
+  // approval-gated calendar push route from the Calendar screen.
+  async mealToCalendar(id: string): Promise<{ ok: boolean; event?: ServerEvent; action?: "created" | "updated"; error?: string; message?: string }> {
+    try { return await req(`/meals/${id}/to-calendar`, { method: "POST", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  /* ---- calendar subscriptions (the read-only "linked" calendar layer) ---- */
+  async calendarSubscriptions(): Promise<CalendarSubscription[]> {
+    try { return (await req<{ subscriptions: CalendarSubscription[] }>("/calendar/subscriptions")).subscriptions ?? []; } catch { return []; }
+  },
+  async subscribeCalendar(body: { name?: string; url: string }): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string }> {
+    try { return await req("/calendar/subscriptions", { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async connectGoogleCalendar(): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string; message?: string }> {
+    try { return await req("/calendar/connect-google", { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async importIcs(body: { name?: string; ics: string }): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string; message?: string }> {
+    try { return await req("/calendar/import-ics", { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async syncCalendar(id: string): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string }> {
+    try { return await req(`/calendar/subscriptions/${id}/sync`, { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async deleteCalendarSubscription(id: string): Promise<{ ok: boolean; removedEvents?: number; error?: string }> {
+    try { return await req(`/calendar/subscriptions/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
   },
   /* ---- server-durable assistant conversations (P1.1) ---- */
   async conversations(): Promise<ServerConversation[]> {
@@ -602,6 +763,9 @@ export const backend = {
   async memory(): Promise<ServerMemory[]> {
     try { return (await req<{ memory: ServerMemory[] }>("/memory")).memory ?? []; } catch { return []; }
   },
+  async deleteMemoryRemote(id: string): Promise<{ ok: boolean; error?: string }> {
+    try { return await req(`/memory/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
   async artifacts(query = ""): Promise<ServerArtifact[]> {
     try { return (await req<{ artifacts: ServerArtifact[] }>(`/artifacts${query}`)).artifacts ?? []; } catch { return []; }
   },
@@ -612,6 +776,20 @@ export const backend = {
   },
   async getRun(id: string): Promise<ServerRun | null> {
     try { return (await req<{ run: ServerRun }>(`/runs/${id}`)).run ?? null; } catch { return null; }
+  },
+  // Item 3: correlated per-message label changes for a completed run (for the chat review card).
+  async emailReview(runId: string): Promise<EmailReview | null> {
+    try { return await req<EmailReview>(`/runs/${runId}/email-review`); } catch { return null; }
+  },
+  // Item 16b: deliver a notification to a contact method's channel (honest availability).
+  async notify(input: { methodType: string; to?: string | null; title: string; body: string }): Promise<{ ok: boolean; channel?: string; delivered?: boolean; needsSetup?: string; message?: string; error?: string }> {
+    try { return await req(`/notify`, { method: "POST", body: JSON.stringify(input), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  async notifications(): Promise<ServerNotification[]> {
+    try { return (await req<{ notifications: ServerNotification[] }>(`/notifications`)).notifications ?? []; } catch { return []; }
+  },
+  async markNotificationRead(id: string): Promise<{ ok: boolean }> {
+    try { return await req(`/notifications/${id}/read`, { method: "POST", mutation: true }); } catch { return { ok: false }; }
   },
   async runs(query = ""): Promise<ServerRun[]> {
     try { return (await req<{ runs: ServerRun[] }>(`/runs${query}`)).runs ?? []; } catch { return []; }
@@ -671,6 +849,11 @@ export const backend = {
   },
   async inferFunctions(description: string, providerId?: string): Promise<InferFunctionsResult> {
     try { return await req(`/skills/infer-functions`, { method: "POST", body: JSON.stringify({ description, providerId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  // Item 13: draft a candidate function definition from a capability description (shape
+  // only — nothing is created). Always returns a usable draft (skeleton fallback).
+  async draftFunction(description: string, providerId?: string): Promise<{ ok: boolean; draft?: DraftedFunction; fallback?: boolean; message?: string; error?: string }> {
+    try { return await req(`/functions/draft`, { method: "POST", body: JSON.stringify({ description, providerId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
   },
 
   /* ---- function/tool registry ---- */

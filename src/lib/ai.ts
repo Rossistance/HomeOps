@@ -15,6 +15,7 @@ import type {
   WorkflowPlan,
   WorkflowStep,
   AppData,
+  Member,
 } from "@/types";
 
 export interface IntentProfile {
@@ -439,6 +440,60 @@ export function suggestNextActions(data: AppData): SuggestedAction[] {
     icon: "Sparkles",
   });
   return out.slice(0, 5);
+}
+
+/** Bubbled prompt suggestions under the "Ask HomeOps" input — household/member-context-
+ *  aware, unlike the generic hardcoded examples this replaces. Real signals (pending
+ *  approvals, overdue tasks, today's calendar, unread messages) surface first, gated by
+ *  what the CURRENT member's role can act on; a fresh/quiet household falls back to a
+ *  short set of genuinely useful starter prompts rather than showing nothing. */
+export interface AskSuggestion { icon: string; text: string }
+const ADULT_ROLES = new Set(["Owner", "Adult Admin", "Adult Member"]);
+export function suggestAskPrompts(data: AppData, member?: Member): AskSuggestion[] {
+  const isAdult = ADULT_ROLES.has(member?.role ?? "");
+  const firstName = (name?: string) => (name ?? "").split(" ")[0];
+  const out: AskSuggestion[] = [];
+
+  const pending = data.approvals.filter((a) => a.status === "Pending");
+  if (isAdult && pending.length) {
+    out.push({ icon: "ShieldCheck", text: pending.length === 1 ? `Tell me about the "${pending[0].title}" approval waiting on me` : `What are the ${pending.length} things waiting on my approval?` });
+  }
+
+  const now = Date.now();
+  const todayEvents = data.events.filter((e) => e.startAt && new Date(e.startAt).getTime() >= now - 3600_000 && new Date(e.startAt).toDateString() === new Date().toDateString());
+  if (todayEvents.length) {
+    out.push({ icon: "CalendarDays", text: "What's on the family calendar today, and who's driving?" });
+  }
+
+  const overdue = data.tasks.filter((t) => t.status !== "done" && t.dueAt && new Date(t.dueAt).getTime() < now);
+  const mine = member ? overdue.filter((t) => t.assignedMemberId === member.id) : [];
+  if (overdue.length) {
+    out.push({ icon: "AlertCircle", text: mine.length ? `What's overdue that's assigned to ${firstName(member?.displayName) || "me"}?` : "What tasks are overdue for the household?" });
+  }
+
+  const unread = data.threads.filter((t) => t.unread);
+  if (unread.length) {
+    out.push({ icon: "MessageSquare", text: `Summarize what I missed in "${unread[0].title}"` });
+  }
+
+  const drafts = isAdult ? data.agents.filter((a) => a.status === "Draft") : [];
+  if (drafts.length) {
+    out.push({ icon: "Bot", text: `Help me finish setting up "${drafts[0].name}"` });
+  }
+
+  // Fallback starters — real household actions, not generic filler, for a quiet or
+  // brand-new household with no signals above yet.
+  const fallback: AskSuggestion[] = [
+    { icon: "UtensilsCrossed", text: "Plan three dinners for this week and start a grocery list" },
+    { icon: "BellPlus", text: "Remind me about something tomorrow" },
+    { icon: "Mail", text: "Draft an email I can review before it sends" },
+    { icon: "Sparkles", text: "What can you help our household with?" },
+  ];
+  for (const f of fallback) {
+    if (out.length >= 4) break;
+    out.push(f);
+  }
+  return out.slice(0, 4);
 }
 
 /** Provider router — local resolves everything today; cloud adapters are

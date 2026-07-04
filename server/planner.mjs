@@ -8,7 +8,7 @@ import { PROVIDERS } from "./providers.mjs";
 import { CONNECTORS, readinessOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { providerChat, providerChatStream } from "./ai.mjs";
-import { getSettings, listEvents, listTasks, listMemory, listMembers, canSeeEntity } from "./store.mjs";
+import { getSettings, listEvents, listTasks, listMemory, listMembers, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride } from "./store.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
 
 // Input hints for the internal family-data tools, so the planner knows how to fill them.
@@ -19,6 +19,7 @@ const INTERNAL_INPUTS = {
   "homeops.assign_what_to_bring": [{ key: "eventId", required: true }, { key: "items", required: true }],
   "homeops.create_task": [{ key: "title", required: true }, { key: "dueAt" }, { key: "assignedMemberId" }, { key: "priority" }],
   "homeops.create_list_item": [{ key: "text", required: true }, { key: "listName" }],
+  "homeops.plan_meal": [{ key: "title", required: true }, { key: "date" }, { key: "slot" }, { key: "ingredients" }],
   "homeops.attach_note_or_file_reference": [{ key: "eventId", required: true }, { key: "note" }, { key: "fileRef" }],
   "homeops.send_notification_draft": [{ key: "to" }, { key: "body", required: true }, { key: "subject" }, { key: "channel" }],
   "homeops.write_memory": [{ key: "text", required: true }, { key: "scope" }],
@@ -62,6 +63,20 @@ export function toolCatalog(session) {
   // reaching for unconnected external apps.
   for (const f of listInternalFunctions()) {
     out.push({ toolId: f.id, name: f.name, action: f.action, risk: f.risk, requiresApproval: !!f.requiresApproval, connectorId: f.connectorId, connectorName: f.connectorName, source: "internal", connected: true, inputs: mapInputs(INTERNAL_INPUTS[f.id] ?? []) });
+  }
+  // Household risk overrides (item 9): the catalog reports EFFECTIVE values so the
+  // planner and every UI reflect the same reality the engine enforces. Defaults are
+  // preserved alongside so the override is visible (and reversible), never silent.
+  if (session?.householdId) {
+    for (const t of out) {
+      const ov = getRiskOverride(session.householdId, t.toolId);
+      if (!ov) continue;
+      t.defaultRisk = t.risk;
+      t.defaultRequiresApproval = t.requiresApproval;
+      t.risk = ov.riskClass ?? t.risk;
+      t.requiresApproval = ov.skipApproval ? false : t.requiresApproval;
+      t.riskOverridden = true;
+    }
   }
   return out;
 }
@@ -166,17 +181,27 @@ const ASSISTANT_SYS = `You are HomeOps, a warm, capable assistant for a family's
 
 Choose:
 - ANSWER when the user wants information, a summary, status, or advice. Ground every claim in the provided context; if needed data isn't connected or present, say so plainly — never invent events, counts, or results.
-- PLAN when the user wants something done (send, schedule, create, find-and-do, remind, automate, pay). Build the smallest plan that achieves it.
+- PLAN when the user wants a ONE-OFF thing done now (send this, find-and-do, remind me once). Build the smallest plan that achieves it.
+- BUILD when the user wants a DURABLE or RECURRING capability — phrases like "every week / each morning", "always", "set up", "create a helper/agent that…", "automate", "from now on". Propose the reusable pieces to stand up: a skill (the recipe), optionally an agent to own it, and optionally an automation (the schedule/trigger).
 
 Plan rules:
 - Use tools ONLY from the catalog, matched by exact "id". For a reasoning/notify/summarize step with no matching tool, set "toolId" to null.
 - Fill each tool step's "input" using ONLY that tool's listed input keys, with concrete values from the request (unknown values = empty string).
 - Set "requiresApproval" true for any step that sends, writes, deletes, posts, downloads, or pays.
+- NEVER refuse an action request outright. If the catalog can't cover part of it, plan the steps that ARE achievable with real tools, use toolId:null reasoning steps for the gap, and say in "answer" exactly what's missing and how to unlock it (connect an account, reconnect for a new permission, add a connector). A partial, honest plan always beats "I can't".
+
+Build rules:
+- skill.steps[].tool_id must be an exact catalog id (or null for a reasoning step); set approval_required true for any send/write/pay step.
+- Prefer internal "homeops.*" tools (always available) for family data; only reference external tools (gmail/sms/etc.) the user clearly asked for.
+- automation.type is one of "recurring" (set intervalMs in ms), "schedule" (set runAt ISO), "webhook", or "manual".
+- Keep it minimal: a skill alone is fine; add an agent only if it should be owned/long-lived; add an automation only if it should run on a schedule/event.
+- To CHANGE an EXISTING helper/recipe instead of creating a new one ("add a step to…", "make X also…", "change the instructions for…"), DO NOT create a duplicate — use "edits" referencing the exact id from the context's existingAgents / existingSkills, with only the fields that change.
 
 Respond with ONLY a JSON object (no prose, no markdown fences), one of:
 { "kind": "answer", "answer": string }
 { "kind": "plan", "answer": string, "plan": { "title": string, "summary": string, "icon": string, "spaceType": string, "instructions": string, "trigger": { "type": string, "detail": string }, "steps": [ { "toolId": string|null, "title": string, "detail": string, "input": object, "requiresApproval": boolean } ], "approvalGates": [string], "risk": "Low"|"Medium"|"High"|"Sensitive" } }
-For a plan, "answer" is one friendly sentence summarizing what you'll do.`;
+{ "kind": "build", "answer": string, "build": { "summary": string, "skill": { "name": string, "description": string, "domain": string, "planner_guidance": string, "steps": [ { "name": string, "tool_id": string|null, "approval_required": boolean } ], "risk_level": "Low"|"Medium"|"High"|"Sensitive" } | null, "agent": { "name": string, "purpose": string, "instructions": string } | null, "automation": { "name": string, "type": "recurring"|"schedule"|"webhook"|"manual", "intervalMs": number | null, "runAt": string | null } | null, "edits": [ { "kind": "agent"|"skill", "id": string, "summary": string, "patch": object } ] } }
+For a plan or build, "answer" is one friendly sentence summarizing what you'll set up or change.`;
 
 /**
  * Build the assistant's grounding context from SERVER-OWNED data (events, tasks,
@@ -204,9 +229,16 @@ export function buildServerContext(session, clientContext) {
     .filter((m) => m.scope !== "personal" || m.source?.actorId === session.actorId)
     .map((m) => ({ text: m.text, scope: m.scope }));
   const members = listMembers({ householdId: hh }).map((m) => ({ id: m.actorId, name: m.displayName, role: m.role }));
+  // Existing helpers/recipes/automations — so the assistant can EDIT/extend them by id
+  // instead of creating duplicates, and answer "what helpers do I have?".
+  const inHh = (x) => x.householdId === hh || x.householdId === "local";
+  const existingAgents = listAgents(inHh).map((a) => ({ id: a.id, name: a.name, purpose: a.purpose, status: a.status }));
+  const existingSkills = listSkills(inHh).map((s) => ({ id: s.id, name: s.name, description: s.description, status: s.status }));
+  const existingAutomations = listTriggers(inHh).map((t) => ({ id: t.id, name: t.name, type: t.type, enabled: t.enabled }));
   return {
     now, asActor: { id: session.actorId, role: session.role },
     members, upcomingEvents: events, openTasks: tasks, recentMemory: memory,
+    existingAgents, existingSkills, existingAutomations,
     clientHints: clientContext ?? undefined,
   };
 }
@@ -229,7 +261,53 @@ export async function assistantRespond({ message, context, session, providerId }
     const plan = normalizePlan(parsed.plan, catalog, String(message).trim());
     return { ok: true, kind: "plan", answer: String(parsed.answer ?? plan.summary ?? "Here's my plan."), plan, model: out.model };
   }
+  if (parsed.kind === "build" && parsed.build && typeof parsed.build === "object") {
+    return { ok: true, kind: "build", answer: String(parsed.answer ?? parsed.build.summary ?? "Here's what I'll set up."), build: normalizeBuild(parsed.build), model: out.model };
+  }
   return { ok: true, kind: "answer", answer: String(parsed.answer ?? out.text ?? "").trim() || "I'm not sure how to help with that yet.", model: out.model };
+}
+
+/** Clamp a model-proposed build spec to safe, expected shapes before it reaches the
+ *  materialize endpoint (which re-validates + role-gates). Defensive, not trusting. */
+function normalizeBuild(b) {
+  const out = { summary: String(b.summary ?? "").slice(0, 280) };
+  if (b.skill && typeof b.skill === "object") {
+    out.skill = {
+      name: String(b.skill.name ?? "New skill").slice(0, 80),
+      description: String(b.skill.description ?? "").slice(0, 400),
+      domain: String(b.skill.domain ?? "Family"),
+      planner_guidance: String(b.skill.planner_guidance ?? "").slice(0, 800),
+      risk_level: ["Low", "Medium", "High", "Sensitive"].includes(b.skill.risk_level) ? b.skill.risk_level : "Low",
+      steps: Array.isArray(b.skill.steps) ? b.skill.steps.slice(0, 12).map((s, i) => ({
+        step_id: `s${i + 1}`, name: String(s?.name ?? `Step ${i + 1}`).slice(0, 80),
+        tool_id: s?.tool_id ?? null, approval_required: !!s?.approval_required, input_mapping: {},
+      })) : [],
+    };
+  }
+  if (b.agent && typeof b.agent === "object") {
+    out.agent = { name: String(b.agent.name ?? "New helper").slice(0, 80), purpose: String(b.agent.purpose ?? "").slice(0, 200), instructions: String(b.agent.instructions ?? "").slice(0, 800) };
+  }
+  if (b.automation && typeof b.automation === "object") {
+    const type = ["recurring", "schedule", "webhook", "manual"].includes(b.automation.type) ? b.automation.type : "manual";
+    out.automation = { name: String(b.automation.name ?? "New automation").slice(0, 80), type, intervalMs: Number(b.automation.intervalMs) > 0 ? Number(b.automation.intervalMs) : null, runAt: b.automation.runAt ?? null };
+  }
+  // Edits to existing entities — only safe, declared fields are forwarded (the
+  // materialize endpoint re-validates + versions via partialUpdate).
+  const SKILL_FIELDS = ["name", "description", "domain", "planner_guidance", "risk_level", "steps", "input_schema", "approval_policy"];
+  const AGENT_FIELDS = ["name", "purpose", "instructions", "status", "skillIds", "allowedToolIds", "allowedFunctionIds", "spaceType"];
+  if (Array.isArray(b.edits)) {
+    out.edits = b.edits
+      .filter((e) => e && (e.kind === "agent" || e.kind === "skill") && typeof e.id === "string" && e.patch && typeof e.patch === "object")
+      .slice(0, 8)
+      .map((e) => {
+        const allow = e.kind === "skill" ? SKILL_FIELDS : AGENT_FIELDS;
+        const patch = {};
+        for (const k of allow) if (k in e.patch) patch[k] = e.patch[k];
+        return { kind: e.kind, id: e.id, summary: String(e.summary ?? "").slice(0, 160), patch };
+      })
+      .filter((e) => Object.keys(e.patch).length > 0);
+  }
+  return out;
 }
 
 /**
@@ -254,6 +332,9 @@ export async function assistantStream({ message, context, session, providerId } 
   if (parsed.kind === "plan" && parsed.plan && typeof parsed.plan === "object") {
     const plan = normalizePlan(parsed.plan, catalog, String(message).trim());
     return { ok: true, kind: "plan", answer: String(parsed.answer ?? plan.summary ?? "Here's my plan."), plan, model: out.model };
+  }
+  if (parsed.kind === "build" && parsed.build && typeof parsed.build === "object") {
+    return { ok: true, kind: "build", answer: String(parsed.answer ?? parsed.build.summary ?? "Here's what I'll set up."), build: normalizeBuild(parsed.build), model: out.model };
   }
   return { ok: true, kind: "answer", answer: String(parsed.answer ?? out.text ?? "").trim() || "I'm not sure how to help with that yet.", model: out.model };
 }

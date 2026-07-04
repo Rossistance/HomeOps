@@ -9,6 +9,15 @@ import type { RiskLevel, AccentColor } from "@/types";
  */
 function useDialogFocus(open: boolean, onClose: () => void) {
   const ref = useRef<HTMLDivElement>(null);
+  // Callers almost always pass an inline `onClose` (a fresh function identity every
+  // render). Keep it in a ref so this effect depends ONLY on `open` — otherwise, any
+  // state update in the component that owns the dialog (e.g. an input's value living
+  // in the parent, not the dialog) re-runs this effect on every keystroke, which calls
+  // `first?.focus()` again and steals focus back to the dialog's first focusable
+  // element (typically its "close" button, rendered before the body) — the exact
+  // "type one character, then have to click back in" bug.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     if (!open) return;
     const opener = document.activeElement as HTMLElement | null;
@@ -17,7 +26,7 @@ function useDialogFocus(open: boolean, onClose: () => void) {
     const first = node?.querySelector<HTMLElement>(sel);
     (first ?? node)?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.stopPropagation(); onClose(); return; }
+      if (e.key === "Escape") { e.stopPropagation(); onCloseRef.current(); return; }
       if (e.key !== "Tab" || !node) return;
       const items = Array.from(node.querySelectorAll<HTMLElement>(sel)).filter((el) => el.offsetParent !== null);
       if (!items.length) return;
@@ -27,7 +36,8 @@ function useDialogFocus(open: boolean, onClose: () => void) {
     };
     document.addEventListener("keydown", onKey, true);
     return () => { document.removeEventListener("keydown", onKey, true); opener?.focus?.(); };
-  }, [open, onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onClose intentionally excluded; see onCloseRef above
+  }, [open]);
   return ref;
 }
 

@@ -1,12 +1,12 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "@/store/useStore";
 import { brand } from "@/brand";
 import { exportBackup, importBackup } from "@/storage/backup";
 import { PageHeader, Card, SectionTitle, Button, Toggle, Select, Badge, Modal, HealthDot, Field, TextInput, Avatar } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { AIProvidersPanel } from "@/screens/AIProviders";
-import { backend } from "@/connectors/api";
-import { useCalmMode } from "@/lib/prefs";
+import { backend, type CatalogTool, type RiskOverride } from "@/connectors/api";
+import { useCalmMode, useAdvancedMode } from "@/lib/prefs";
 
 export function Settings() {
   const data = useStore((s) => s.data);
@@ -33,6 +33,7 @@ export function Settings() {
   const [pin, setPin] = useState("");
   const me = data.members.find((m) => m.id === session?.actorId) ?? data.members.find((m) => m.isCurrentUser);
   const [calm, setCalm] = useCalmMode();
+  const [advanced, setAdvanced] = useAdvancedMode();
   const setOwnerPin = async () => { if (!pin) return; await backend.setSettings({ ownerPin: pin }); setPin(""); toast({ kind: "success", title: "Owner PIN set", message: "Elevated profiles now require this PIN to sign in." }); };
 
   const onImport = async (file?: File | null) => {
@@ -132,6 +133,17 @@ export function Settings() {
           </p>
         </Card>
 
+        {/* Advanced */}
+        <Card className="card-pad">
+          <SectionTitle icon="FlaskConical">Advanced</SectionTitle>
+          <Row label="Advanced Mode" desc="Show the Skills and Functions builders — the low-level building blocks agents and automations run on. Most households never need to open these directly.">
+            <Toggle checked={advanced} onChange={(v) => setAdvanced(v)} ariaLabel="Advanced Mode" />
+          </Row>
+        </Card>
+
+        {/* Risk & approvals (item 9) */}
+        <RiskOverridesCard />
+
         {/* Data & backup */}
         <Card className="card-pad">
           <SectionTitle icon="Database">Local data & backup</SectionTitle>
@@ -176,5 +188,82 @@ function Row({ label, desc, children }: { label: string; desc?: string; children
       <div><p className="text-sm font-medium text-ink-800">{label}</p>{desc && <p className="text-xs text-ink-500">{desc}</p>}</div>
       <div className="shrink-0">{children}</div>
     </div>
+  );
+}
+
+/* ---- Risk & approvals (item 9) ----
+ * Per-tool risk-class + skip-approval overrides. Server-enforced (the engine's
+ * resolveTool applies them); this card only edits the household's override records.
+ * The whole Settings screen is already Adult Admin-gated. */
+const RISK_CLASSES = ["Low", "Medium", "High", "Sensitive"];
+function RiskOverridesCard() {
+  const toast = useStore((s) => s.toast);
+  const [catalog, setCatalog] = useState<CatalogTool[]>([]);
+  const [overrides, setOverrides] = useState<RiskOverride[]>([]);
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const load = async () => {
+    const r = await backend.riskOverrides();
+    if (r) { setCatalog(r.catalog); setOverrides(r.overrides); }
+    setLoaded(true);
+  };
+  useEffect(() => { if (open && !loaded) void load(); }, [open, loaded]);
+
+  const ovFor = (toolId: string) => overrides.find((o) => o.toolId === toolId);
+  const apply = async (t: CatalogTool, patch: { riskClass?: string | null; skipApproval?: boolean }) => {
+    const current = ovFor(t.toolId);
+    const next = { riskClass: patch.riskClass !== undefined ? patch.riskClass : (current?.riskClass ?? null), skipApproval: patch.skipApproval !== undefined ? patch.skipApproval : (current?.skipApproval ?? false) };
+    // Both back to defaults → clear the override entirely rather than storing a no-op.
+    if (next.riskClass == null && !next.skipApproval) {
+      const r = await backend.clearRiskOverride(t.toolId);
+      if (!r.ok && current) { toast({ kind: "error", title: "Couldn't reset", message: r.error }); return; }
+    } else {
+      const r = await backend.setRiskOverride(t.toolId, next);
+      if (!r.override) { toast({ kind: "error", title: "Couldn't save", message: r.error }); return; }
+      if (patch.skipApproval) toast({ kind: "warn", title: "Approval skipped for this tool", message: `${t.name} will now run without asking. Every use is still audited. Undo here anytime.` });
+    }
+    await load();
+  };
+
+  const groups = catalog.reduce<Record<string, CatalogTool[]>>((acc, t) => { (acc[t.connectorName] ??= []).push(t); return acc; }, {});
+  return (
+    <Card className="card-pad">
+      <SectionTitle icon="ShieldCheck" action={<Button size="sm" variant="ghost" onClick={() => setOpen((v) => !v)}>{open ? "Hide" : "Configure"}</Button>}>Risk & approvals</SectionTitle>
+      <p className="text-sm text-ink-500">Re-class any tool's risk or let it run without a human approval. Changes apply to this household only, are enforced server-side, and every skipped gate is still logged in the audit trail.</p>
+      {open && !loaded && <p className="mt-3 flex items-center gap-2 text-sm text-ink-400"><Icon name="Loader2" size={14} className="animate-spin" /> Loading tool catalog…</p>}
+      {open && loaded && (
+        <div className="mt-3 space-y-4">
+          {Object.entries(groups).map(([conn, tools]) => (
+            <div key={conn}>
+              <p className="section-title mb-1.5">{conn}</p>
+              <div className="space-y-1.5">
+                {tools.map((t) => {
+                  const ov = ovFor(t.toolId);
+                  return (
+                    <div key={t.toolId} className="flex flex-wrap items-center gap-2 rounded-xl border border-ink-900/[0.06] bg-surface-rim px-3 py-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm text-ink-800">{t.name} {t.riskOverridden && <Badge color="amber">custom</Badge>}</p>
+                        <p className="text-[11px] text-ink-400">{t.action} · default {t.defaultRisk ?? t.risk}{(t.defaultRequiresApproval ?? t.requiresApproval) ? " · asks approval" : ""}</p>
+                      </div>
+                      <Select value={ov?.riskClass ?? ""} onChange={(e) => apply(t, { riskClass: e.target.value || null })} className="!w-32" aria-label={`Risk class for ${t.name}`}>
+                        <option value="">Default</option>
+                        {RISK_CLASSES.map((r) => <option key={r} value={r}>{r}</option>)}
+                      </Select>
+                      {(t.defaultRequiresApproval ?? t.requiresApproval) && (
+                        <label className="flex items-center gap-1.5 text-xs text-ink-600">
+                          <Toggle checked={!!ov?.skipApproval} onChange={(v) => apply(t, { skipApproval: v })} ariaLabel={`Skip approval for ${t.name}`} />
+                          Skip approval
+                        </label>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }

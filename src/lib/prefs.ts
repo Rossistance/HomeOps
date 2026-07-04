@@ -71,3 +71,46 @@ export function prefersReducedMotion(): boolean {
     return false;
   }
 }
+
+/**
+ * Advanced Mode — reveals the low-level Skills/Functions builders. Hidden by default
+ * so new households see just Ask HomeOps, Agents, Automations, and Mini Apps; power
+ * users who want to hand-edit the underlying building blocks opt in from Settings.
+ */
+const ADVANCED_STORAGE_KEY = "homeops:advanced-mode";
+
+function readAdvanced(): boolean {
+  try {
+    return localStorage.getItem(ADVANCED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+let advanced = readAdvanced();
+const advancedListeners = new Set<() => void>();
+
+export function getAdvancedMode(): boolean {
+  return advanced;
+}
+
+export function setAdvancedMode(value: boolean): void {
+  advanced = value;
+  try {
+    localStorage.setItem(ADVANCED_STORAGE_KEY, value ? "1" : "0");
+  } catch {
+    /* storage may be unavailable; state still holds for the session */
+  }
+  advancedListeners.forEach((l) => l());
+}
+
+function subscribeAdvanced(cb: () => void): () => void {
+  advancedListeners.add(cb);
+  return () => advancedListeners.delete(cb);
+}
+
+/** React hook — re-renders when Advanced Mode changes anywhere in the app. */
+export function useAdvancedMode(): [boolean, (value: boolean) => void] {
+  const value = useSyncExternalStore(subscribeAdvanced, getAdvancedMode, () => false);
+  return [value, setAdvancedMode];
+}
