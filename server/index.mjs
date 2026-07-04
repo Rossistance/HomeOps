@@ -35,6 +35,7 @@ import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEm
 import { runSkill, runAgent } from "./orchestrator.mjs";
 import { seedDefaults } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch } from "./calendar.mjs";
+import { twilioAuthToken, twilioSignatureValid, handleInboundSms, twiml } from "./sms.mjs";
 import {
   createAgent, replaceAgent, partialUpdateAgent, deleteAgent, duplicateAgent,
   rollbackAgent, listAgentVersions, agentContext, selectAgent, publicAgent, listPublicAgents,
@@ -274,6 +275,40 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { "content-type": "text/html" });
         return res.end(htmlMessage("Connection failed", "Something went wrong completing the connection."));
       }
+    }
+
+    /* ---- Two-way SMS gateway (Twilio inbound; signature-gated, not session) ----
+     * Family members text the household's Twilio number and the assistant answers
+     * in the SAME thread (TwiML reply). Only VERIFIED + OPTED-IN Phone/Text contact
+     * methods get a response — unknown senders receive empty TwiML (silence, so the
+     * endpoint never confirms a number exists). Twilio signs every webhook with the
+     * account auth token: configured token → signature required; no token → refused
+     * in production (fail closed), accepted in dev for local testing. */
+    if (path === "/api/webhooks/sms" && method === "POST") {
+      const raw = await readRaw(req);
+      const params = Object.fromEntries(new URLSearchParams(raw));
+      const token = twilioAuthToken();
+      const xml = (body) => { res.writeHead(200, { "content-type": "text/xml", ...corsHeaders(req) }); res.end(body); };
+      if (token) {
+        const base = (process.env.HOMEOPS_PUBLIC_URL || `http://localhost:${PORT}`).split(",")[0].trim().replace(/\/$/, "");
+        if (!twilioSignatureValid({ url: `${base}/api/webhooks/sms`, params, authToken: token, signature: req.headers["x-twilio-signature"] })) {
+          audit({ type: "sms.inbound", ok: false, error: "bad_signature" }, req);
+          return json(res, 403, { ok: false, error: "signature_failed" }, req);
+        }
+      } else if (IS_PROD) {
+        audit({ type: "sms.inbound", ok: false, error: "no_auth_token" }, req);
+        return json(res, 403, { ok: false, error: "sms_not_configured" }, req);
+      }
+      const from = String(params.From ?? "");
+      const smsBody = String(params.Body ?? "").trim();
+      if (!from || !smsBody) { audit({ type: "sms.inbound", ok: false, error: "empty" }, req); return xml(twiml(null)); }
+      const r = await handleInboundSms({ from, body: smsBody });
+      if (r.unknownSender) {
+        audit({ type: "sms.inbound", ok: false, error: "unknown_or_unverified_sender" }, req);
+        return xml(twiml(null));
+      }
+      audit({ type: "sms.inbound", ok: true, actorId: r.actorId, conversationId: r.conversationId, kind: r.kind }, req);
+      return xml(twiml(r.replyText));
     }
 
     /* ---- Webhook receiver (external inbound; signature-gated, not session) ---- */
