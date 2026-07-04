@@ -28,6 +28,20 @@ backend.on("exit", (code) => console.log(`[backend] exited with ${code}`));
 const web = spawn(isWin ? "npx.cmd" : "npx", ["vite"], { cwd: root, stdio: "inherit", shell: isWin });
 web.on("exit", (code) => console.log(`[web] exited with ${code}`));
 
-const shutdown = () => { try { backend.kill(); } catch {} try { web.kill(); } catch {} };
+// Browser Automation runtime: opt-in by installation. If server/browser-runtime has its
+// deps installed (npm install + npm run setup there), spawn it alongside so the Browser
+// connector is actually connected instead of "Runtime not connected". Not installed → skip
+// silently (the connector stays honestly unavailable).
+let browserRt = null;
+const rtDir = join(root, "server", "browser-runtime");
+if (fs.existsSync(join(rtDir, "node_modules", "playwright"))) {
+  browserRt = spawn(process.execPath, [join(rtDir, "index.mjs")], {
+    cwd: rtDir, stdio: "inherit",
+    env: { ...process.env, ...(extraCa ? { NODE_EXTRA_CA_CERTS: extraCa } : {}) },
+  });
+  browserRt.on("exit", (code) => console.log(`[browser-runtime] exited with ${code}`));
+}
+
+const shutdown = () => { try { backend.kill(); } catch {} try { web.kill(); } catch {} try { browserRt?.kill(); } catch {} };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

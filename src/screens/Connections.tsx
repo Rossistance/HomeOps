@@ -365,6 +365,24 @@ function ConnectorDrawer({ connector: c, onClose }: { connector: BackendConnecto
   useEffect(() => { if (c.id === "webhook") backend.webhookEvents("webhook").then(setEvents); }, [c.id]);
 
   const save = async () => { setBusy(true); await configure(c.id, form); setBusy(false); };
+  // Weather: real device location instead of hand-typed coordinates. Geolocation is
+  // browser-permission-gated (the user approves the prompt); coordinates are stored
+  // only in this household's connector config.
+  const [locating, setLocating] = useState(false);
+  const [locError, setLocError] = useState<string | null>(null);
+  const useMyLocation = () => {
+    if (!("geolocation" in navigator)) { setLocError("This browser doesn't expose location."); return; }
+    setLocating(true); setLocError(null);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const next = { ...form, latitude: pos.coords.latitude.toFixed(4), longitude: pos.coords.longitude.toFixed(4), label: form.label || "My location" };
+        setForm(next);
+        setBusy(true); await configure(c.id, next); setBusy(false); setLocating(false);
+      },
+      (err) => { setLocating(false); setLocError(err.code === err.PERMISSION_DENIED ? "Location permission was denied — allow it in the browser and try again." : "Couldn't read the device location."); },
+      { enableHighAccuracy: false, timeout: 15_000, maximumAge: 300_000 },
+    );
+  };
   const doHealth = async () => { const h = await checkHealth(c.id); setHealthResult(h.ok ? `Healthy · ${h.latencyMs ?? 0}ms` : `Failed · ${h.error ?? h.status ?? "error"}`); };
   const backendBase = health?.webhookBaseUrl ?? "http://localhost:8787";
   const webhookUrl = `${backendBase}${c.endpoint ?? ""}`;
@@ -394,9 +412,15 @@ function ConnectorDrawer({ connector: c, onClose }: { connector: BackendConnecto
                 );
               })}
             </div>
-            <div className="mt-3 flex gap-2">
+            <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button variant="primary" onClick={save} disabled={busy}><Icon name="Save" size={15} /> Save configuration</Button>
+              {c.id === "weather" && (
+                <Button variant="secondary" onClick={useMyLocation} disabled={busy || locating}>
+                  <Icon name={locating ? "Loader2" : "MapPin"} size={15} className={locating ? "animate-spin" : ""} /> {locating ? "Locating…" : "Use my location"}
+                </Button>
+              )}
             </div>
+            {locError && <p className="mt-2 text-xs text-coral-600">{locError}</p>}
           </section>
         )}
 
