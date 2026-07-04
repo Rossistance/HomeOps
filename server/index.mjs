@@ -32,7 +32,7 @@ import {
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns } from "./engine.mjs";
 import { runSkill, runAgent } from "./orchestrator.mjs";
 import { seedDefaults } from "./seed.mjs";
-import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits } from "./calendar.mjs";
+import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch } from "./calendar.mjs";
 import {
   createAgent, replaceAgent, partialUpdateAgent, deleteAgent, duplicateAgent,
   rollbackAgent, listAgentVersions, agentContext, selectAgent, publicAgent, listPublicAgents,
@@ -1047,6 +1047,24 @@ const server = http.createServer(async (req, res) => {
       audit({ type: "calendar.pull_edits", ok: r.ok, ...(r.ok ? { checked: r.checked, merged: r.merged, conflicts: r.conflicts, unlinked: r.unlinked, errors: r.errors } : { error: r.error }) }, req, g.session);
       if (!r.ok) return json(res, 422, { error: r.error, message: r.error === "no_account" ? "Connect your Google account (with calendar access) in Connections first." : undefined }, req);
       return json(res, 200, r, req);
+    }
+    // Resolve a flagged pull conflict (provenance.conflict) — the human decision the
+    // merge-back engine defers to. choice:"google" adopts Google's version; choice:"local"
+    // keeps HomeOps' fields (re-push to sync Google). Either way the flag clears and the
+    // merge baseline resets so the next pull doesn't re-flag the same difference.
+    const resolveMatch = path.match(/^\/api\/events\/([^/]+)\/resolve-conflict$/);
+    if (resolveMatch && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const body = (await readBody(req)) ?? {};
+      const ev = getEvent(resolveMatch[1]);
+      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      const patch = resolveConflictPatch(ev, body.choice);
+      if (!patch) return json(res, 400, { error: ev.provenance?.conflict ? "bad_choice" : "no_conflict", message: ev.provenance?.conflict ? 'choice must be "google" or "local".' : "This event has no pending sync conflict." }, req);
+      const updated = patchEvent(ev.id, patch);
+      audit({ type: "calendar.resolve_conflict", eventId: ev.id, choice: body.choice, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, event: updated }, req);
     }
     // Connect the actor's Google Calendar as a read-only linked source (pull sync). Needs a
     // Google account connected in Connections with calendar access. One subscription per
@@ -2156,6 +2174,22 @@ server.listen(PORT, () => {
   recoverRuns().catch(() => {}); // re-drive any runs that were mid-flight at shutdown
   setInterval(() => { try { expireStaleRuns(); } catch { /* non-fatal */ } }, 60_000); // sweep stale parked runs
   setInterval(() => { tick().catch(() => {}); }, 10_000); // fire due schedule/recurring triggers (no browser needed)
+  // Calendar auto-sync: re-pull url/google subscriptions that have gone stale so linked
+  // events stay fresh without a manual "Sync now". Pasted imports are static — skipped.
+  // Staleness window via HOMEOPS_CAL_SYNC_MINUTES (default 6h); swept every 15 minutes.
+  const calSyncMs = Math.max(5, parseInt(process.env.HOMEOPS_CAL_SYNC_MINUTES ?? "360", 10) || 360) * 60_000;
+  setInterval(async () => {
+    const due = listSubscriptions((s) => s.source !== "import" && (Date.now() - (s.lastSyncAt ?? 0)) > calSyncMs);
+    for (const sub of due) {
+      try {
+        // The subscription's creator is the acting identity (their Google account, their household).
+        const session = { householdId: sub.householdId, actorId: sub.createdBy };
+        const r = await syncSubscription({ sub, session });
+        patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed, auto: true } : { error: r.error, auto: true }, eventCount: r.ok ? r.total : (sub.eventCount ?? 0) });
+        audit({ type: "calendar.auto_sync", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, null, session);
+      } catch { /* one bad feed must not stop the sweep */ }
+    }
+  }, 15 * 60_000);
   startScheduler();
   // If a browser runtime URL is configured, probe it once so the connector's
   // readiness reflects reality (connected vs. runtime_unavailable) from the start.

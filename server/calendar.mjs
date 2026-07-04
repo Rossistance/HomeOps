@@ -6,7 +6,7 @@
 // events into Google is a separate, approval-gated build.
 import crypto from "node:crypto";
 import { safeFetch } from "./net.mjs";
-import { parseICS } from "./ics.mjs";
+import { parseICS, expandRecurring } from "./ics.mjs";
 import { listEvents, putEvent, patchEvent, deleteEventRec } from "./store.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
@@ -61,7 +61,10 @@ export async function syncSubscription({ sub, icsText, session }) {
       text = r.text;
     }
     if (!/BEGIN:VCALENDAR|BEGIN:VEVENT/i.test(String(text))) return { ok: false, error: "not_ics" };
-    parsed = parseICS(text);
+    // Recurring VEVENTs expand into concrete instances (30 days back / 90 days ahead —
+    // matching the Google pull window). Google's own path is already expanded
+    // (singleEvents=true), so only the ICS path needs this.
+    parsed = expandRecurring(parseICS(text), { horizonStart: Date.now() - 30 * 864e5, horizonEnd: Date.now() + 90 * 864e5 });
   }
   const hh = session.householdId;
   const subId = sub?.id ?? null;
@@ -162,6 +165,25 @@ export async function pullGoogleEdits({ session }) {
     }
   }
   return { ok: true, checked, merged, conflicts, unlinked, errors };
+}
+
+/* ---- Conflict resolution (the human half of merge-back) ----
+ * A flagged event (provenance.conflict) holds Google's version alongside the local one.
+ * Resolving is a pure decision → patch:
+ *   choice:"google" → adopt Google's fields; baseline resets so the next pull is clean.
+ *   choice:"local"  → keep HomeOps' fields; baseline resets so the pull stops re-flagging
+ *                     (Google still differs until the user re-pushes — that's explicit). */
+export function resolveConflictPatch(ev, choice) {
+  const conflict = ev?.provenance?.conflict;
+  if (!conflict) return null;
+  if (choice !== "google" && choice !== "local") return null;
+  const provenance = {
+    ...(ev.provenance ?? {}),
+    conflict: null,
+    lastMergeAt: Date.now(),
+    lastGoogleUpdated: conflict.googleUpdated ?? ev.provenance?.lastGoogleUpdated ?? null,
+  };
+  return choice === "google" ? { ...(conflict.google ?? {}), provenance } : { provenance };
 }
 
 /** Remove every linked event belonging to a subscription (used when it's deleted). */

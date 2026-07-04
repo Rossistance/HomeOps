@@ -621,6 +621,15 @@ export const backend = {
   async pushEventToGoogle(id: string, approvalId?: string): Promise<{ ok?: boolean; needsApproval?: boolean; approval?: BackendApproval; googleEventId?: string; action?: string; error?: string; message?: string }> {
     try { return await req(`/calendar/push/${id}`, { method: "POST", body: JSON.stringify(approvalId ? { approvalId } : {}), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
+  // Pull Google-side edits back into pushed events. Clean edits merge; both-sides-changed
+  // flags provenance.conflict for review; Google deletions unlink (HomeOps stays canonical).
+  async pullGoogleEdits(): Promise<{ ok?: boolean; checked?: number; merged?: number; conflicts?: number; unlinked?: number; errors?: number; error?: string; message?: string }> {
+    try { return await req("/calendar/pull-google-edits", { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  // Resolve a flagged pull conflict: adopt Google's version or keep the HomeOps one.
+  async resolveEventConflict(id: string, choice: "google" | "local"): Promise<{ ok?: boolean; event?: ServerEvent; error?: string; message?: string }> {
+    try { return await req(`/events/${id}/resolve-conflict`, { method: "POST", body: JSON.stringify({ choice }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
   async tasks(): Promise<ServerTask[]> {
     try { return (await req<{ tasks: ServerTask[] }>("/tasks")).tasks ?? []; } catch { return []; }
   },

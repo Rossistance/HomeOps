@@ -7,6 +7,10 @@ import { backend, type ServerEvent, type BackendApproval } from "@/connectors/ap
 const dayKey = (iso: string) => new Date(iso).toISOString().slice(0, 10);
 const toLocalInput = (iso?: string | null) => { if (!iso) return ""; const d = new Date(iso); if (isNaN(+d)) return ""; const p = (n: number) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
 
+/** A pull flagged this event: both HomeOps and Google changed it since the last push/merge. */
+type SyncConflict = { at: number; googleUpdated: string | null; google: { title?: string; startAt?: string | null; endAt?: string | null; location?: string } };
+const conflictOf = (ev: ServerEvent): SyncConflict | null => ((ev.provenance as { conflict?: SyncConflict } | undefined)?.conflict ?? null);
+
 /** Calendar — the home for the rich family-event model (P4.1) and the three-layer
  *  calendar (P4.2): HomeOps-owned "canonical" events are editable + pushable to Google;
  *  "linked" events (Google/ICS subscriptions) are read-only (copy to edit).
@@ -27,8 +31,24 @@ export function Calendar() {
   const [start, setStart] = useState(toLocalInput(new Date().toISOString()));
   const [location, setLocation] = useState("");
 
+  const [pulling, setPulling] = useState(false);
+
   const load = async () => setEvents(await backend.events());
   useEffect(() => { void load(); }, []);
+
+  const conflictCount = useMemo(() => events.filter((e) => conflictOf(e)).length, [events]);
+  const pullEdits = async () => {
+    setPulling(true);
+    const r = await backend.pullGoogleEdits();
+    setPulling(false);
+    if (r.ok) {
+      await load();
+      const bits = [r.merged ? `${r.merged} merged` : null, r.conflicts ? `${r.conflicts} conflict${r.conflicts === 1 ? "" : "s"} to review` : null, r.unlinked ? `${r.unlinked} unlinked (deleted on Google)` : null].filter(Boolean);
+      toast({ kind: r.conflicts ? "warn" : "success", title: `Checked ${r.checked ?? 0} pushed event${(r.checked ?? 0) === 1 ? "" : "s"}`, message: bits.length ? bits.join(" · ") : "Everything already matches Google." });
+    } else {
+      toast({ kind: "warn", title: "Couldn't pull Google edits", message: r.message ?? (r.error === "no_account" ? "Connect your Google account (with calendar access) in Connections first." : r.error) });
+    }
+  };
 
   const upcoming = useMemo(() => events
     .filter((e) => !e.startAt || new Date(e.startAt).getTime() >= Date.now() - 12 * 3600e3)
@@ -60,13 +80,21 @@ export function Calendar() {
     <div className="animate-fade-in">
       <PageHeader title="Calendar" subtitle="Your household's events. HomeOps events are yours to edit and push to Google; synced feeds are read-only." icon="CalendarDays" />
 
-      <div className="mb-4 inline-flex rounded-xl border border-ink-900/[0.08] bg-surface-sunken/60 p-0.5" role="tablist" aria-label="Calendar view">
-        {(["list", "month"] as const).map((v) => (
-          <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}
-            className={`rounded-[10px] px-3.5 py-1.5 text-sm font-semibold capitalize transition-colors ${view === v ? "bg-surface text-ink-900 shadow-sm" : "text-ink-500 hover:text-ink-700"}`}>
-            <Icon name={v === "list" ? "List" : "LayoutGrid"} size={13} className="mr-1 inline" />{v}
-          </button>
-        ))}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <div className="inline-flex rounded-xl border border-ink-900/[0.08] bg-surface-sunken/60 p-0.5" role="tablist" aria-label="Calendar view">
+          {(["list", "month"] as const).map((v) => (
+            <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}
+              className={`rounded-[10px] px-3.5 py-1.5 text-sm font-semibold capitalize transition-colors ${view === v ? "bg-surface text-ink-900 shadow-sm" : "text-ink-500 hover:text-ink-700"}`}>
+              <Icon name={v === "list" ? "List" : "LayoutGrid"} size={13} className="mr-1 inline" />{v}
+            </button>
+          ))}
+        </div>
+        {canManage && (
+          <Button size="sm" variant="secondary" disabled={pulling} onClick={pullEdits} title="Check your pushed events for edits made on the Google side">
+            <Icon name={pulling ? "Loader2" : "Download"} size={13} className={pulling ? "animate-spin" : ""} /> Pull Google edits
+          </Button>
+        )}
+        {conflictCount > 0 && <Badge color="coral"><Icon name="AlertTriangle" size={10} /> {conflictCount} conflict{conflictCount === 1 ? "" : "s"} to review</Badge>}
       </div>
 
       {canManage && (
@@ -96,7 +124,9 @@ export function Calendar() {
         </div>
       )}
 
-      {selected && <EventDrawer ev={selected} canManage={canManage} members={members.map((m) => ({ id: m.id, name: m.displayName }))} nameOf={nameOf} onClose={() => setSelected(null)} onChanged={refreshSelected} onGone={async () => { setSelected(null); await load(); }} />}
+      {/* key: remount when the server copy changes (save / conflict-resolve) so the drawer's
+          edit fields re-seed — otherwise a post-resolve Save would clobber the chosen version. */}
+      {selected && <EventDrawer key={`${selected.id}:${selected.updatedAt}`} ev={selected} canManage={canManage} members={members.map((m) => ({ id: m.id, name: m.displayName }))} nameOf={nameOf} onClose={() => setSelected(null)} onChanged={refreshSelected} onGone={async () => { setSelected(null); await load(); }} />}
     </div>
   );
 }
@@ -170,7 +200,7 @@ function EventRow({ ev, driver, onOpen }: { ev: ServerEvent; driver: string | nu
       <button onClick={onOpen} className="flex w-full items-start gap-2.5 rounded-xl border border-ink-900/[0.05] bg-surface-sunken/50 px-3 py-2 text-left transition-colors hover:border-ember-200" aria-label={`Open ${ev.title}`}>
         <Icon name="Calendar" size={14} className="mt-0.5 shrink-0 text-ink-400" />
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-ink-800">{ev.title} {layerBadge(ev)}</p>
+          <p className="text-sm font-medium text-ink-800">{ev.title} {layerBadge(ev)} {conflictOf(ev) && <Badge color="coral"><Icon name="AlertTriangle" size={10} /> Sync conflict</Badge>}</p>
           <p className="truncate text-xs text-ink-500">{time ?? "All day"}{ev.location ? ` · ${ev.location}` : ""}{driver ? ` · Driver: ${driver}` : ""}{ev.source && ev.layer === "linked" ? ` · ${ev.source}` : ""}</p>
         </div>
         <Icon name="ChevronRight" size={15} className="shrink-0 text-ink-300" />
@@ -238,6 +268,17 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
     setPushApproval(null);
     toast({ kind: "info", title: "Push cancelled" });
   };
+  // Conflict review: both sides changed since the last push/merge — the user picks.
+  const conflict = conflictOf(ev);
+  const resolve = async (choice: "google" | "local") => {
+    setBusy(true);
+    const r = await backend.resolveEventConflict(ev.id, choice);
+    setBusy(false);
+    if (r.ok) {
+      await onChanged(ev.id);
+      toast({ kind: "success", title: choice === "google" ? "Google's version applied" : "Kept your HomeOps version", message: choice === "local" ? "Google still has its own version — push the event to update it." : undefined });
+    } else toast({ kind: "error", title: "Couldn't resolve", message: r.message ?? r.error });
+  };
 
   return (
     <Drawer open onClose={onClose} icon="Calendar" title={ev.title}
@@ -250,6 +291,29 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
       ) : canManage && linked ? <Button variant="ember" disabled={busy} onClick={copy}><Icon name="Copy" size={14} /> Copy to a HomeOps event</Button> : undefined}>
       <div className="space-y-4">
         {linked && <p className="rounded-2xl border border-sky-200/70 bg-sky-50 px-3.5 py-2.5 text-sm text-sky-800"><Icon name="RefreshCw" size={13} className="mr-1 inline" /> Synced from {ev.source || "an external calendar"} — read-only here. Copy it to make an editable HomeOps event.</p>}
+
+        {conflict && (
+          <div className="rounded-xl border border-coral-200/80 bg-coral-50/70 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
+            <p className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-ink-800"><Icon name="AlertTriangle" size={14} className="text-coral-600" /> This event changed in two places</p>
+            <p className="mb-2 text-xs text-ink-600">It was edited both here and in Google Calendar since the last sync. Pick the version to keep — nothing is overwritten until you choose.</p>
+            <div className="mb-2.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div className="rounded-lg border border-ink-900/[0.06] bg-surface px-2.5 py-2">
+                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-400">HomeOps version</p>
+                <p className="text-sm font-medium text-ink-800">{ev.title}</p>
+                <p className="text-xs text-ink-500">{ev.startAt ? new Date(ev.startAt).toLocaleString() : "No date"}{ev.location ? ` · ${ev.location}` : ""}</p>
+              </div>
+              <div className="rounded-lg border border-ink-900/[0.06] bg-surface px-2.5 py-2">
+                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-400">Google version</p>
+                <p className="text-sm font-medium text-ink-800">{conflict.google.title ?? ev.title}</p>
+                <p className="text-xs text-ink-500">{conflict.google.startAt ? new Date(conflict.google.startAt).toLocaleString() : "No date"}{conflict.google.location ? ` · ${conflict.google.location}` : ""}</p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="primary" disabled={busy} onClick={() => resolve("local")}><Icon name="Home" size={13} /> Keep HomeOps version</Button>
+              <Button size="sm" variant="secondary" disabled={busy} onClick={() => resolve("google")}><Icon name="Download" size={13} /> Use Google version</Button>
+            </div>
+          </div>
+        )}
 
         {pushApproval && (
           <div className="rounded-xl border border-amber-200/70 bg-amber-50/70 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">

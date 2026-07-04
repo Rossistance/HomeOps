@@ -628,6 +628,13 @@ export interface CalendarEvent {
   driverId?: string | null;
   whatToBring?: { item: string; memberId: string | null }[];
   checklist?: { text: string; done: boolean }[];
+  /** Sync provenance (Google push/merge state). `conflict` present = both sides changed
+   *  since the last push/merge and a human must pick a version (Calendar drawer). */
+  provenance?: {
+    googleEventId?: string | null;
+    conflict?: { at: number; googleUpdated: string | null; google: { title?: string; startAt?: string | null; endAt?: string | null; location?: string } } | null;
+    [k: string]: unknown;
+  } | null;
 }
 
 export interface Task {

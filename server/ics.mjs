@@ -1,7 +1,10 @@
 // Minimal, dependency-free iCalendar (RFC 5545) parser — just enough to import events
 // from a school / sports / holiday .ics feed into HomeOps' read-only "linked" calendar
 // layer. Not a full implementation: we read VEVENT SUMMARY / DTSTART / DTEND / LOCATION /
-// UID and normalize dates to ISO. Recurrence (RRULE) is out of scope for now.
+// UID / RRULE / EXDATE and normalize dates to ISO. Recurrence covers the common shapes
+// (FREQ daily/weekly/monthly/yearly, INTERVAL, COUNT, UNTIL, weekly BYDAY, monthly
+// BYMONTHDAY / nth-weekday BYDAY, EXDATE); anything more exotic falls back to the first
+// occurrence rather than guessing.
 
 // Unfold RFC 5545 folded lines: a CRLF followed by a space/tab continues the previous line.
 function unfold(text) {
@@ -65,6 +68,8 @@ export function parseICS(text) {
           endAt: cur.endAt ?? null,
           location: cur.location ?? "",
           allDay: !!cur.allDay,
+          ...(cur.rrule ? { rrule: cur.rrule } : {}),
+          ...(cur.exdates ? { exdates: cur.exdates } : {}),
         });
       }
       cur = null;
@@ -79,8 +84,196 @@ export function parseICS(text) {
       case "UID": cur.uid = p.value.trim(); break;
       case "DTSTART": { const r = toISO(p.value, (p.params.VALUE ?? "").toUpperCase() === "DATE"); cur.startAt = r.iso; cur.allDay = r.allDay; break; }
       case "DTEND": { const r = toISO(p.value, (p.params.VALUE ?? "").toUpperCase() === "DATE"); cur.endAt = r.iso; break; }
+      case "RRULE": cur.rrule = p.value.trim(); break;
+      case "EXDATE": {
+        // EXDATE may carry a comma-separated list and appear multiple times.
+        const isDate = (p.params.VALUE ?? "").toUpperCase() === "DATE";
+        cur.exdates = cur.exdates ?? [];
+        for (const v of p.value.split(",")) { const r = toISO(v, isDate); if (r.iso) cur.exdates.push(r.iso); }
+        break;
+      }
       default: break;
     }
   }
   return events;
+}
+
+/* ---------------- Recurrence (RRULE) expansion ----------------
+ * All date math is done on NAIVE components (year/month/day/h/m/s stepped via Date.UTC
+ * regardless of the value's original form) and re-emitted in the SAME form the event
+ * came in with (date-only / floating / UTC "Z"). That keeps a floating 09:00 school
+ * practice at 09:00 through the whole series instead of drifting with server timezone. */
+
+// ISO (any of our three forms) → naive components + which form it was.
+function parseNaive(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z)?)?$/.exec(String(iso));
+  if (!m) return null;
+  return {
+    y: +m[1], mo: +m[2], d: +m[3], hh: +(m[4] ?? 0), mi: +(m[5] ?? 0), ss: +(m[6] ?? 0),
+    form: m[4] == null ? "date" : m[7] ? "utc" : "floating",
+  };
+}
+const naiveMs = (c) => Date.UTC(c.y, c.mo - 1, c.d, c.hh, c.mi, c.ss);
+function fromNaiveMs(ms, form) {
+  const d = new Date(ms);
+  const p2 = (n) => String(n).padStart(2, "0");
+  const date = `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}`;
+  if (form === "date") return date;
+  const time = `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}`;
+  return form === "utc" ? `${date}T${time}.000Z` : `${date}T${time}`;
+}
+
+const WEEKDAYS = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
+
+function parseRRule(rrule) {
+  const out = {};
+  for (const part of String(rrule).split(";")) {
+    const eq = part.indexOf("=");
+    if (eq > 0) out[part.slice(0, eq).toUpperCase()] = part.slice(eq + 1).toUpperCase();
+  }
+  return out;
+}
+
+// UNTIL is an iCal date/datetime; compare naively against instance start.
+function untilMs(raw) {
+  const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})Z?)?$/.exec(String(raw));
+  if (!m) return null;
+  return Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] ?? 23), +(m[5] ?? 59), +(m[6] ?? 59));
+}
+
+/**
+ * Expand one recurring event into concrete instances inside [horizonStart, horizonEnd].
+ * Returns a list of { startAt, endAt } naive-ISO pairs (same form as the source event).
+ * Unsupported/exotic rules return null so the caller can fall back to the single event.
+ */
+export function expandRRule({ startAt, endAt, rrule, exdates }, { horizonStart, horizonEnd, maxInstances = 500 } = {}) {
+  const start = parseNaive(startAt);
+  if (!start) return null;
+  const rule = parseRRule(rrule);
+  const freq = rule.FREQ;
+  if (!["DAILY", "WEEKLY", "MONTHLY", "YEARLY"].includes(freq ?? "")) return null;
+  const interval = Math.max(1, parseInt(rule.INTERVAL ?? "1", 10) || 1);
+  const count = rule.COUNT ? Math.max(1, parseInt(rule.COUNT, 10) || 1) : null;
+  const until = rule.UNTIL ? untilMs(rule.UNTIL) : null;
+
+  const hStart = horizonStart instanceof Date ? horizonStart.getTime() : (horizonStart ?? Date.now() - 30 * 864e5);
+  const hEnd = horizonEnd instanceof Date ? horizonEnd.getTime() : (horizonEnd ?? Date.now() + 90 * 864e5);
+  const startMs = naiveMs(start);
+  const end = endAt ? parseNaive(endAt) : null;
+  const durMs = end ? Math.max(0, naiveMs(end) - startMs) : 0;
+  const excluded = new Set((exdates ?? []).map((x) => { const c = parseNaive(x); return c ? naiveMs(c) : null; }).filter((x) => x != null));
+
+  // Weekly BYDAY → the weekdays this series fires on (default: DTSTART's weekday).
+  let weeklyDays = null;
+  // Monthly: either BYMONTHDAY=n, or BYDAY=2TU / -1FR (nth weekday of the month).
+  let monthDay = null, monthNthDay = null;
+  if (freq === "WEEKLY") {
+    weeklyDays = rule.BYDAY
+      ? rule.BYDAY.split(",").map((d) => WEEKDAYS[d.trim()]).filter((n) => n != null)
+      : [new Date(startMs).getUTCDay()];
+    if (weeklyDays.length === 0) return null;
+  } else if (freq === "MONTHLY") {
+    if (rule.BYMONTHDAY) {
+      monthDay = parseInt(rule.BYMONTHDAY, 10);
+      if (!monthDay || monthDay < 1 || monthDay > 31) return null; // negative BYMONTHDAY unsupported
+    } else if (rule.BYDAY) {
+      const m = /^(-?\d)([A-Z]{2})$/.exec(rule.BYDAY.trim());
+      if (!m || WEEKDAYS[m[2]] == null) return null; // multi-BYDAY monthly unsupported
+      monthNthDay = { nth: parseInt(m[1], 10), day: WEEKDAYS[m[2]] };
+    } else {
+      monthDay = start.d;
+    }
+  } else if (rule.BYDAY || rule.BYMONTHDAY) {
+    return null; // BYDAY/BYMONTHDAY on daily/yearly — out of scope
+  }
+
+  // nth weekday of a month (nth: 1..5 or -1 for last) → naive ms, or null if absent.
+  const nthWeekdayMs = (y, mo0, nth, day, hh, mi, ss) => {
+    if (nth > 0) {
+      const first = new Date(Date.UTC(y, mo0, 1)).getUTCDay();
+      const d = 1 + ((day - first + 7) % 7) + (nth - 1) * 7;
+      const lastDay = new Date(Date.UTC(y, mo0 + 1, 0)).getUTCDate();
+      return d <= lastDay ? Date.UTC(y, mo0, d, hh, mi, ss) : null;
+    }
+    const lastDay = new Date(Date.UTC(y, mo0 + 1, 0)).getUTCDate();
+    const lastDow = new Date(Date.UTC(y, mo0, lastDay)).getUTCDay();
+    return Date.UTC(y, mo0, lastDay - ((lastDow - day + 7) % 7), hh, mi, ss);
+  };
+
+  const instances = [];
+  let emitted = 0, occurrences = 0;
+  const CAP = 5000; // hard stop for runaway series
+  let iter = 0;
+
+  const push = (ms) => {
+    occurrences++;
+    if (excluded.has(ms)) return true;
+    if (until != null && ms > until) return false;
+    if (count != null && occurrences > count) return false;
+    if (ms >= hStart && ms <= hEnd) {
+      instances.push({ startAt: fromNaiveMs(ms, start.form), endAt: endAt ? fromNaiveMs(ms + durMs, start.form) : null });
+      emitted++;
+    }
+    return ms <= hEnd && emitted < maxInstances;
+  };
+
+  if (freq === "DAILY") {
+    for (let ms = startMs; iter++ < CAP; ms += interval * 864e5) if (!push(ms)) break;
+  } else if (freq === "WEEKLY") {
+    // Step week-by-week from DTSTART's week; within each active week emit matching weekdays ≥ DTSTART.
+    const dow = new Date(startMs).getUTCDay();
+    const weekAnchor = startMs - dow * 864e5; // Sunday of DTSTART's week
+    outer: for (let w = 0; iter++ < CAP; w += interval) {
+      const base = weekAnchor + w * 7 * 864e5;
+      if (until != null && base > until + 7 * 864e5) break;
+      if (base > hEnd + 7 * 864e5 && count == null) break;
+      for (const d of [...weeklyDays].sort((a, b) => a - b)) {
+        const ms = base + d * 864e5;
+        if (ms < startMs) continue;
+        if (!push(ms)) break outer;
+      }
+    }
+  } else if (freq === "MONTHLY") {
+    outer: for (let k = 0; iter++ < CAP; k += interval) {
+      const y = start.y + Math.floor((start.mo - 1 + k) / 12);
+      const mo0 = (start.mo - 1 + k) % 12;
+      let ms = null;
+      if (monthNthDay) ms = nthWeekdayMs(y, mo0, monthNthDay.nth, monthNthDay.day, start.hh, start.mi, start.ss);
+      else {
+        const lastDay = new Date(Date.UTC(y, mo0 + 1, 0)).getUTCDate();
+        ms = monthDay <= lastDay ? Date.UTC(y, mo0, monthDay, start.hh, start.mi, start.ss) : null; // skip short months
+      }
+      if (ms == null) continue;
+      if (ms < startMs) continue;
+      if (ms > hEnd && count == null) break outer;
+      if (!push(ms)) break outer;
+    }
+  } else { // YEARLY
+    for (let k = 0; iter++ < CAP; k += interval) {
+      const ms = Date.UTC(start.y + k, start.mo - 1, start.d, start.hh, start.mi, start.ss);
+      if (ms > hEnd && count == null) break;
+      if (!push(ms)) break;
+    }
+  }
+  return instances;
+}
+
+/**
+ * Flatten parsed ICS events: non-recurring pass through untouched; recurring events
+ * become one entry per instance inside the horizon, with a per-instance uid
+ * (`<uid>#<compact-start>`) so the shared upsert path dedupes each occurrence.
+ * An unsupported RRULE falls back to the single base event (honest, never guessed).
+ */
+export function expandRecurring(events, { horizonStart, horizonEnd } = {}) {
+  const out = [];
+  for (const ev of events ?? []) {
+    if (!ev.rrule || !ev.startAt) { out.push(ev); continue; }
+    const instances = expandRRule(ev, { horizonStart, horizonEnd });
+    if (instances == null) { out.push({ ...ev, rrule: undefined }); continue; }
+    for (const inst of instances) {
+      const compact = String(inst.startAt).replace(/[-:.]/g, "");
+      out.push({ ...ev, rrule: undefined, exdates: undefined, startAt: inst.startAt, endAt: inst.endAt ?? ev.endAt ?? null, uid: `${ev.uid ?? "noduid"}#${compact}`, recurring: true });
+    }
+  }
+  return out;
 }
