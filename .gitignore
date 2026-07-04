@@ -6,3 +6,6 @@ server/.data/
 
 .env
 .env.local
+
+# Legacy build archives — kept on disk, never in git
+*.zip
