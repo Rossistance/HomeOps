@@ -340,10 +340,12 @@ function AddContactModal({ memberId, onClose, onAdd }: { memberId: string; onClo
   const [label, setLabel] = useState("");
   const [value, setValue] = useState("");
   const [type, setType] = useState<"Email" | "Phone/Text" | "In-App" | "Family Dashboard">("Email");
-  const meta = CONTACT_TYPE_META[type];
+  // Guard the lookup: a select can surface an out-of-set value (autofill, extensions,
+  // scripted input) and an unguarded index would crash the whole modal.
+  const meta = CONTACT_TYPE_META[type] ?? CONTACT_TYPE_META["Email"];
   const effectiveValue = meta.fixedValue ?? value;
   const valueValid = meta.fixedValue != null || (value.trim() !== "" && meta.validate(value.trim()));
-  const changeType = (t: typeof type) => { setType(t); if (CONTACT_TYPE_META[t].fixedValue == null) setValue(""); };
+  const changeType = (t: typeof type) => { if (!CONTACT_TYPE_META[t]) return; setType(t); if (CONTACT_TYPE_META[t].fixedValue == null) setValue(""); };
   return (
     <Modal open onClose={onClose} title="Add contact method" icon="Plus" footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!label.trim() || !valueValid} onClick={() => { onAdd(memberId, { label, value: effectiveValue, type }); onClose(); }}>Add</Button></>}>
       <div className="space-y-3">

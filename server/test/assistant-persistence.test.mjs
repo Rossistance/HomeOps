@@ -68,6 +68,29 @@ test("a streamed assistant turn persists both messages to the server-owned conve
   assert.ok(msgs[1].text.includes("household summary"));
 });
 
+test("a FAILED assistant turn still persists the exchange (user turn + honest error)", async () => {
+  // Regression test for a real bug found 2026-07-04: persistence was gated on out.ok,
+  // so when the assistant failed (e.g. no provider) neither the user's question nor the
+  // honest error reply was written — the thread looked fine until refresh, then emptied.
+  const conv = await adult.req("/api/conversations", { method: "POST", body: JSON.stringify({ title: "Failing chat" }) });
+  assert.equal(conv.status, 200);
+  const convId = conv.data.conversation.id;
+
+  // "anthropic" has no key configured in this test env → assistantRespond fails honestly.
+  const res = await adult.req("/api/assistant", { method: "POST", body: JSON.stringify({ message: "Will this survive a refresh?", conversationId: convId, providerId: "anthropic" }) });
+  assert.equal(res.status, 422);
+  assert.equal(res.data.ok, false);
+
+  const after1 = await adult.req(`/api/conversations/${convId}`);
+  const msgs = after1.data.conversation.messages;
+  assert.equal(msgs.length, 2, "failed turn persisted both the question and the error reply");
+  assert.equal(msgs[0].role, "user");
+  assert.equal(msgs[0].text, "Will this survive a refresh?");
+  assert.equal(msgs[1].role, "assistant");
+  assert.equal(msgs[1].kind, "error");
+  assert.ok(msgs[1].text.length > 0, "error reply has honest, human-readable text");
+});
+
 test("a message is never attributed to a conversation owned by someone else", async () => {
   const child = await makeSession(ctx, "m-noah");
   const conv = await adult.req("/api/conversations", { method: "POST", body: JSON.stringify({ title: "Adult's private chat" }) });

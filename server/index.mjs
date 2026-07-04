@@ -1793,15 +1793,19 @@ const server = http.createServer(async (req, res) => {
       // POST /api/runs/start — so the browser never orchestrates, and nothing runs
       // before the user approves the plan itself.
       // Server-durable thread: if a conversation is named, persist the turn so history
-      // survives refresh and is owned by the server, not the client.
-      if (out.ok && body.conversationId) {
+      // survives refresh and is owned by the server, not the client. Failed turns are
+      // persisted too — the user saw their question and the honest error, so a refresh
+      // must not erase the exchange (that was the "history gone after refresh" bug).
+      if (body.conversationId) {
         const conv = getConversation(body.conversationId);
         if (conv && conv.householdId === g.session.householdId && conv.actorId === g.session.actorId) {
           const at = new Date().toISOString();
           appendConversationMessage(conv.id, { role: "user", text: String(body.message), at });
           // `build` persisted too — otherwise a build-proposal card vanished on refresh
           // and the user had no durable evidence the assistant ever offered to build.
-          appendConversationMessage(conv.id, { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, model: out.model ?? null, at });
+          appendConversationMessage(conv.id, out.ok
+            ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, model: out.model ?? null, at }
+            : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at });
         }
       }
       audit({ type: "assistant.respond", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
@@ -1824,12 +1828,15 @@ const server = http.createServer(async (req, res) => {
         // MISSING here, which is why every conversation created through the real chat UI
         // (which always streams) stayed empty (messages: []) server-side forever: history
         // never survived a refresh because it was never written past the client's memory.
-        if (out.ok && body.conversationId) {
+        // Failed turns persist as well (see POST /api/assistant).
+        if (body.conversationId) {
           const conv = getConversation(body.conversationId);
           if (conv && conv.householdId === g.session.householdId && conv.actorId === g.session.actorId) {
             const at = new Date().toISOString();
             appendConversationMessage(conv.id, { role: "user", text: String(body.message), at });
-            appendConversationMessage(conv.id, { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, model: out.model ?? null, at });
+            appendConversationMessage(conv.id, out.ok
+              ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, model: out.model ?? null, at }
+              : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at });
           }
         }
         audit({ type: "assistant.stream", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
