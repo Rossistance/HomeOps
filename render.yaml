@@ -5,7 +5,10 @@ services:
     region: oregon
     # Persistent disks are not available on Render's Free web-service plan.
     plan: starter
-    buildCommand: npm ci && npm run build
+    # --include=dev is required: NODE_ENV=production (set below) also applies at
+    # build time on Render, and a bare `npm ci` would omit the devDependencies
+    # that the build itself needs (vite, tsc, tailwind).
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     autoDeploy: true
     healthCheckPath: /api/health
