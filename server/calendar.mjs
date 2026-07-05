@@ -7,7 +7,7 @@
 import crypto from "node:crypto";
 import { safeFetch } from "./net.mjs";
 import { parseICS, expandRecurring } from "./ics.mjs";
-import { listEvents, putEvent, patchEvent, deleteEventRec } from "./store.mjs";
+import { listEvents, putEvent, patchEvent, deleteEventRec, getAccountRaw } from "./store.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 
@@ -117,11 +117,15 @@ export function mergeGoogleEdit({ ev, gev }) {
     startAt: gev.start?.dateTime ?? gev.start?.date ?? null,
     endAt: gev.end?.dateTime ?? gev.end?.date ?? null,
     location: gev.location ?? "",
+    // Event body: Google `description` ↔ HomeOps `notes`. Both directions carry the
+    // full context text (recipe links, ingredient lists, mini-app references).
+    notes: gev.description ?? "",
   };
   const differs = fields.title !== ev.title
     || String(fields.startAt ?? "") !== String(ev.startAt ?? "")
     || String(fields.endAt ?? "") !== String(ev.endAt ?? "")
-    || (fields.location ?? "") !== (ev.location ?? "");
+    || (fields.location ?? "") !== (ev.location ?? "")
+    || (fields.notes ?? "") !== (ev.notes ?? "");
   if (!differs) return { action: "none" };
   // Baseline = the last moment we know both sides agreed (push or previous merge).
   const baseline = Math.max(prov.pushedAt ?? 0, prov.lastMergeAt ?? 0);
@@ -184,6 +188,74 @@ export function resolveConflictPatch(ev, choice) {
     lastGoogleUpdated: conflict.googleUpdated ?? ev.provenance?.lastGoogleUpdated ?? null,
   };
   return choice === "google" ? { ...(conflict.google ?? {}), provenance } : { provenance };
+}
+
+/* ---- Meal → calendar event body ----
+ * Composes the event `notes` (and therefore the Google Calendar description) from
+ * a meal: source recipe URL, full ingredient list, step-by-step instructions, and
+ * a pointer to the linked HomeOps mini apps. Pure + unit-testable. */
+export function mealEventNotes(meal) {
+  const lines = [];
+  if (meal.recipeUrl) lines.push(`Recipe: ${meal.recipeUrl}`);
+  if (meal.servings) lines.push(`Servings: ${meal.servings}`);
+  const ingredients = (meal.ingredients ?? []).map((i) => (typeof i === "string" ? i : i.item)).filter(Boolean);
+  if (ingredients.length) lines.push("", "Ingredients:", ...ingredients.map((i) => `• ${i}`));
+  const steps = (meal.instructions ?? []).filter(Boolean);
+  if (steps.length) lines.push("", "Instructions:", ...steps.map((s, i) => `${i + 1}. ${s}`));
+  lines.push("", "Linked in HomeOps: Meal planner + Groceries list (ingredients synced).");
+  return lines.join("\n").trim();
+}
+
+/* ---- Push half of two-way sync (shared executor) ----
+ * One real Google write used by: the approval-gated push route, the auto-sync
+ * PATCH hook (local edit → Google), the server sweep, and meal planning. Sends
+ * the FULL event body — title, times, location, and `notes` as the Google
+ * `description` (recipe links, ingredients, instructions, mini-app context). */
+export async function pushEventToGoogle({ ev, householdId, actorId }) {
+  if (!ev || !ev.startAt) return { ok: false, error: "no_start" };
+  if (ev.layer && ev.layer !== "canonical") return { ok: false, error: "not_pushable" };
+  // Prefer the account this event was originally pushed with (stable pairing even
+  // when a different family member edits); fall back to the actor's own account.
+  let account = ev.provenance?.googleAccountId ? getAccountRaw(ev.provenance.googleAccountId) : null;
+  if (!account || account.provider !== "google" || account.householdId !== householdId) {
+    account = listAccountsFor(householdId, actorId).find((a) => a.provider === "google" && (a.scopes ?? []).some((s) => /calendar/i.test(String(s)))) ?? null;
+  }
+  if (!account) return { ok: false, error: "no_account" };
+  const api = apiForAccount(account);
+  const gid = ev.provenance?.googleEventId ?? null;
+  const end = ev.endAt ?? new Date(new Date(ev.startAt).getTime() + 3_600_000).toISOString();
+  const url = gid
+    ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(gid)}`
+    : "https://www.googleapis.com/calendar/v3/calendars/primary/events";
+  const r = await api(url, {
+    method: gid ? "PATCH" : "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ summary: ev.title, description: ev.notes ?? "", start: { dateTime: ev.startAt }, end: { dateTime: end }, location: ev.location ?? "" }),
+  });
+  if (!r.ok) return { ok: false, error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status, message: r.json?.error?.message ?? "Google rejected the write." };
+  patchEvent(ev.id, { provenance: { ...(ev.provenance ?? {}), via: ev.provenance?.via ?? "user", googleEventId: r.json.id, googleAccountId: account.id, pushedAt: Date.now() } });
+  return { ok: true, googleEventId: r.json.id, action: gid ? "updated" : "created" };
+}
+
+/**
+ * Server-triggered two-way sync pass for one household+actor pairing (used by the
+ * background sweep when calendar auto-sync is enabled — no session, no approvals):
+ *   1. pull Google-side edits into pushed events (conflicts still flag for review),
+ *   2. push local edits that happened after the last push/merge back to Google.
+ */
+export async function autoSyncGoogle({ householdId, actorId }) {
+  const pull = await pullGoogleEdits({ session: { householdId, actorId } });
+  let pushed = 0, pushErrors = 0;
+  const dirty = listEvents((e) => e.householdId === householdId
+    && (e.layer ?? "canonical") === "canonical"
+    && e.provenance?.googleEventId
+    && !e.provenance?.conflict
+    && Date.parse(e.updatedAt ?? 0) > Math.max(e.provenance?.pushedAt ?? 0, e.provenance?.lastMergeAt ?? 0) + 2000);
+  for (const ev of dirty) {
+    const r = await pushEventToGoogle({ ev, householdId, actorId });
+    if (r.ok) pushed++; else pushErrors++;
+  }
+  return { ok: true, pull, pushed, pushErrors };
 }
 
 /** Remove every linked event belonging to a subscription (used when it's deleted). */

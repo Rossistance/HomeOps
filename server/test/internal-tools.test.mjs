@@ -56,3 +56,31 @@ test("empty inputs are rejected (no junk writes)", async () => {
   assert.equal((await run("homeops.create_event_draft", { title: "" })).error, "empty_title");
   assert.equal((await run("homeops.create_task", {})).error, "empty_title");
 });
+
+test("plan_meal wires one approved meal end-to-end: planner + groceries + calendar body", async () => {
+  const r = await run("homeops.plan_meal", {
+    title: "Weeknight Chili", date: "2026-07-09", slot: "dinner", servings: 4,
+    recipeUrl: "https://example.com/chili",
+    ingredients: ["ground beef", { item: "beans", have: false }, { item: "salt", have: true }],
+    instructions: ["Brown the beef.", "Simmer 30 minutes."],
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.result.groceryItems, 2, "only the not-yet-have ingredients hit the grocery list");
+  // Meal is durable with instructions.
+  const meal = store.getMeal(r.result.mealId);
+  assert.deepEqual(meal.instructions, ["Brown the beef.", "Simmer 30 minutes."]);
+  // Calendar event exists, is linked by mealId, and its notes carry the full recipe body.
+  const ev = store.getEvent(r.result.eventId);
+  assert.equal(ev.mealId, meal.id);
+  assert.equal(ev.title, "Dinner: Weeknight Chili");
+  assert.ok(ev.notes.includes("Recipe: https://example.com/chili"));
+  assert.ok(ev.notes.includes("• ground beef"));
+  assert.ok(ev.notes.includes("2. Simmer 30 minutes."));
+  // No Google account in this test env → push reports honestly, never fabricates.
+  assert.equal(r.result.google.pushed, false);
+  // Idempotent: planning the same meal id again via to-calendar semantics — a second
+  // plan_meal call creates a NEW meal (new suggestion), so instead re-run and confirm
+  // each meal gets its own linked event (no cross-meal clobbering).
+  const r2 = await run("homeops.plan_meal", { title: "Taco Tuesday", date: "2026-07-10", slot: "dinner", ingredients: ["tortillas"] });
+  assert.notEqual(store.getEvent(r2.result.eventId).mealId, meal.id);
+});

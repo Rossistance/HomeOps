@@ -34,7 +34,7 @@ import {
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns } from "./engine.mjs";
 import { runSkill, runAgent } from "./orchestrator.mjs";
 import { seedDefaults } from "./seed.mjs";
-import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch } from "./calendar.mjs";
+import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes } from "./calendar.mjs";
 import { twilioAuthToken, twilioSignatureValid, handleInboundSms, twiml } from "./sms.mjs";
 import {
   createAgent, replaceAgent, partialUpdateAgent, deleteAgent, duplicateAgent,
@@ -835,7 +835,7 @@ const server = http.createServer(async (req, res) => {
       const ev = putEvent({
         id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         title: String(body.title).trim(), startAt: body.startAt ?? null, endAt: body.endAt ?? null,
-        location: body.location ?? "", spaceId: body.spaceId ?? "sp-family",
+        location: body.location ?? "", notes: typeof body.notes === "string" ? body.notes : "", spaceId: body.spaceId ?? "sp-family",
         participantIds: Array.isArray(body.participantIds) ? body.participantIds : [],
         driverId: body.driverId ?? null, ownerId: body.ownerId ?? g.session.actorId, backupOwnerId: body.backupOwnerId ?? null,
         whatToBring: body.whatToBring ?? [], checklist: body.checklist ?? [], travel: body.travel ?? null,
@@ -863,6 +863,13 @@ const server = http.createServer(async (req, res) => {
       const { id, householdId, createdBy, createdAt, ...patch } = body; // never reassign identity/ownership-of-record
       const updated = patchEvent(ev.id, patch);
       audit({ type: "event.update", eventId: ev.id, ok: true }, req, g.session);
+      // Auto-sync: a local edit to a Google-linked event mirrors to Google immediately
+      // (server-triggered, no approval) when the household enabled calendar auto-sync.
+      if (getSettings().calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled()) {
+        void pushEventToGoogle({ ev: updated, householdId: g.session.householdId, actorId: g.session.actorId })
+          .then((r) => appendAudit({ type: "calendar.autopush", eventId: updated.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) }))
+          .catch(() => {});
+      }
       return json(res, 200, { event: updated }, req);
     }
     if (eventOne && method === "DELETE") {
@@ -944,6 +951,8 @@ const server = http.createServer(async (req, res) => {
         // Recipe metadata (Phase 3): servings is a positive integer or null; recipeUrl free-form.
         servings: Number.isFinite(+body.servings) && +body.servings > 0 ? Math.floor(+body.servings) : null,
         recipeUrl: typeof body.recipeUrl === "string" ? body.recipeUrl.trim() : "",
+        // Step-by-step instructions (extracted from the recipe source by web.recipe, or typed).
+        instructions: Array.isArray(body.instructions) ? body.instructions.map((s) => String(s).trim()).filter(Boolean).slice(0, 60) : [],
         source: "user", createdBy: g.session.actorId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
       audit({ type: "meal.create", mealId: meal.id, ok: true }, req, g.session);
@@ -1016,15 +1025,22 @@ const server = http.createServer(async (req, res) => {
       const startAt = `${m.date}T${time}:00`;
       const slotLabel = m.slot ? m.slot.charAt(0).toUpperCase() + m.slot.slice(1) : "Dinner";
       const title = `${slotLabel}: ${m.title}`;
+      // The event body mirrors the full meal context (recipe link, ingredients,
+      // instructions) so the SAME details land in Google Calendar's description.
+      const notes = mealEventNotes(m);
       const existing = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id)[0];
       if (existing) {
-        const updated = patchEvent(existing.id, { title, startAt });
+        const updated = patchEvent(existing.id, { title, startAt, notes });
+        if (getSettings().calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled()) {
+          void pushEventToGoogle({ ev: updated, householdId: g.session.householdId, actorId: g.session.actorId })
+            .then((r) => appendAudit({ type: "calendar.autopush", eventId: updated.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) })).catch(() => {});
+        }
         audit({ type: "meal.to_calendar", mealId: m.id, eventId: existing.id, action: "updated", ok: true }, req, g.session);
         return json(res, 200, { ok: true, event: updated, action: "updated" }, req);
       }
       const ev = putEvent({
         id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        title, startAt, endAt: null, location: "", spaceId: "sp-family",
+        title, startAt, endAt: null, location: "", notes, spaceId: "sp-family",
         participantIds: [], driverId: null, ownerId: g.session.actorId, backupOwnerId: null,
         whatToBring: [], checklist: [], travel: null, reminders: [], attachments: [], comments: [],
         mealImpact: null, mealId: m.id, visibility: m.visibility ?? "household", category: "Meal",
@@ -1079,22 +1095,23 @@ const server = http.createServer(async (req, res) => {
       if (!(account.scopes ?? []).some((s) => /calendar/i.test(String(s)))) return json(res, 422, { error: "calendar_scope_missing", message: "Reconnect Google and grant calendar access." }, req);
       const input = { summary: ev.title, start: ev.startAt, location: ev.location ?? "" };
       const gid = ev.provenance?.googleEventId ?? null;
-      // Approval-first: no valid approval yet → create one and hand it back for sign-off.
-      if (!body.approvalId) {
-        const a = createApproval({ actorId: g.session.actorId, householdId: g.session.householdId, connectorId: "google", toolId: "calendar.create", input, risk: "Medium", category: "Calendar", preview: `${gid ? "Update" : "Add"} “${ev.title}” ${gid ? "on" : "to"} Google Calendar`, source: "executable" });
-        void notifyApproval(a);
-        return json(res, 200, { needsApproval: true, approval: publicApproval(a) }, req);
+      // Approval-first by default. When the household turned on calendar auto-sync,
+      // Google pushes are pre-authorized (an explicit Adult Admin setting) and the
+      // gate is skipped — the audit log still records every write.
+      const autoSync = getSettings().calendarAutoSync === true;
+      if (!autoSync) {
+        if (!body.approvalId) {
+          const a = createApproval({ actorId: g.session.actorId, householdId: g.session.householdId, connectorId: "google", toolId: "calendar.create", input, risk: "Medium", category: "Calendar", preview: `${gid ? "Update" : "Add"} “${ev.title}” ${gid ? "on" : "to"} Google Calendar`, source: "executable" });
+          void notifyApproval(a);
+          return json(res, 200, { needsApproval: true, approval: publicApproval(a) }, req);
+        }
+        const c = consumeApproval({ id: body.approvalId, actorId: g.session.actorId, householdId: g.session.householdId, toolId: "calendar.create", input });
+        if (c.error) { audit({ type: "calendar.push", eventId: ev.id, ok: false, error: c.error }, req, g.session); return json(res, 422, { error: c.error, message: approvalErrorMessage(c.error) }, req); }
       }
-      const c = consumeApproval({ id: body.approvalId, actorId: g.session.actorId, householdId: g.session.householdId, toolId: "calendar.create", input });
-      if (c.error) { audit({ type: "calendar.push", eventId: ev.id, ok: false, error: c.error }, req, g.session); return json(res, 422, { error: c.error, message: approvalErrorMessage(c.error) }, req); }
-      const api = apiForAccount(account);
-      const end = new Date(new Date(ev.startAt).getTime() + 3_600_000).toISOString();
-      const url = gid ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${gid}` : "https://www.googleapis.com/calendar/v3/calendars/primary/events";
-      const r = await api(url, { method: gid ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ summary: ev.title, start: { dateTime: ev.startAt }, end: { dateTime: end }, location: ev.location ?? "" }) });
-      if (!r.ok) { audit({ type: "calendar.push", eventId: ev.id, ok: false, error: "google_error", status: r.status }, req, g.session); return json(res, 422, { error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status, message: r.json?.error?.message ?? "Google rejected the write." }, req); }
-      patchEvent(ev.id, { provenance: { ...(ev.provenance ?? {}), via: ev.provenance?.via ?? "user", googleEventId: r.json.id, googleAccountId: account.id, pushedAt: Date.now() } });
-      audit({ type: "calendar.push", eventId: ev.id, googleEventId: r.json.id, action: gid ? "update" : "create", ok: true }, req, g.session);
-      return json(res, 200, { ok: true, googleEventId: r.json.id, action: gid ? "updated" : "created" }, req);
+      const r = await pushEventToGoogle({ ev, householdId: g.session.householdId, actorId: g.session.actorId });
+      if (!r.ok) { audit({ type: "calendar.push", eventId: ev.id, ok: false, error: r.error, status: r.status }, req, g.session); return json(res, 422, { error: r.error, status: r.status, message: r.message ?? "Google rejected the write." }, req); }
+      audit({ type: "calendar.push", eventId: ev.id, googleEventId: r.googleEventId, action: r.action, autoSync, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, googleEventId: r.googleEventId, action: r.action }, req);
     }
     // Two-way sync, merge-back half (Phase 9): pull Google-side edits into pushed canonical
     // events. Clean Google edits merge; both-sides-changed flags provenance.conflict for
@@ -1967,7 +1984,7 @@ const server = http.createServer(async (req, res) => {
     if (path === "/api/settings" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const s = getSettings();
-      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, aiActiveProvider: s.aiActiveProvider ?? null } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true } }, req);
     }
     if (path === "/api/settings" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -1975,10 +1992,13 @@ const server = http.createServer(async (req, res) => {
       const prev = getSettings();
       const patch = {};
       if (typeof body.externalActionsEnabled === "boolean") patch.externalActionsEnabled = body.externalActionsEnabled;
+      // Calendar auto-sync: Adult Admin opt-in that pre-authorizes Google Calendar
+      // pushes (no per-event approvals) and turns on the server-triggered two-way sweep.
+      if (typeof body.calendarAutoSync === "boolean") patch.calendarAutoSync = body.calendarAutoSync;
       if (typeof body.ownerPin === "string" && body.ownerPin) patch.ownerPinHash = crypto.createHash("sha256").update(body.ownerPin).digest("hex");
       const next = setSettings(patch);
       audit({ type: "settings.update", ok: true, changed: Object.keys(patch), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
-      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, aiActiveProvider: next.aiActiveProvider ?? null } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true } }, req);
     }
 
     /* ---- AI providers ---- */
@@ -2429,6 +2449,22 @@ server.listen(PORT, () => {
         patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed, auto: true } : { error: r.error, auto: true }, eventCount: r.ok ? r.total : (sub.eventCount ?? 0) });
         audit({ type: "calendar.auto_sync", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, null, session);
       } catch { /* one bad feed must not stop the sweep */ }
+    }
+    // Two-way Google sweep (opt-in via Settings → calendar auto-sync): server-triggered,
+    // no approvals — pull Google-side edits into pushed events AND push local edits back,
+    // so both calendars mirror each other without anyone opening the app. Conflicts
+    // (both sides changed) still flag for human review — auto-sync never clobbers.
+    if (getSettings().calendarAutoSync === true && externalActionsEnabled()) {
+      const googleSubs = listSubscriptions((s) => s.source === "google");
+      const seen = new Set();
+      for (const sub of googleSubs) {
+        const key = `${sub.householdId}:${sub.createdBy}`;
+        if (seen.has(key)) continue; seen.add(key);
+        try {
+          const r = await autoSyncGoogle({ householdId: sub.householdId, actorId: sub.createdBy });
+          appendAudit({ type: "calendar.auto_two_way", householdId: sub.householdId, ok: true, merged: r.pull?.merged ?? 0, conflicts: r.pull?.conflicts ?? 0, pushed: r.pushed, pushErrors: r.pushErrors });
+        } catch { /* one account must not stop the sweep */ }
+      }
     }
   }, 15 * 60_000);
   startScheduler();

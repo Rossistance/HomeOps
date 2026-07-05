@@ -143,16 +143,43 @@ export function Meals() {
 }
 
 function MealRow({ meal, canManage, busy, onGrocery, onCalendar, onRemove }: { meal: Meal; canManage: boolean; busy: boolean; onGrocery: () => void; onCalendar: () => void; onRemove: () => void }) {
+  // Each meal is selectable: expanding reveals the full ingredient list, extracted
+  // step-by-step instructions, and the recipe source link.
+  const [open, setOpen] = useState(false);
+  const instructions = meal.instructions ?? [];
+  const hasDetails = meal.ingredients.length > 0 || instructions.length > 0 || !!meal.recipeUrl;
   return (
-    <li className="flex items-start gap-2.5 rounded-xl border border-ink-900/[0.05] bg-surface-sunken/50 px-3 py-2">
-      <Icon name="UtensilsCrossed" size={14} className="mt-0.5 shrink-0 text-ink-400" />
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-ink-800">
-          {meal.title} <Badge color="gray">{meal.slot}{meal.time ? ` · ${meal.time}` : ""}</Badge>
-          {meal.servings ? <Badge color="sage" className="ml-1"><Icon name="Users" size={10} /> {meal.servings}</Badge> : null}
-        </p>
-        {meal.ingredients.length > 0 && <p className="mt-0.5 truncate text-xs text-ink-500">{meal.ingredients.map((i) => i.item).join(", ")}</p>}
-        {meal.recipeUrl ? <a href={meal.recipeUrl} target="_blank" rel="noreferrer" className="mt-0.5 inline-flex items-center gap-1 text-xs font-semibold text-sky-700 hover:underline"><Icon name="ExternalLink" size={11} /> Recipe</a> : null}
+    <li className="rounded-xl border border-ink-900/[0.05] bg-surface-sunken/50 px-3 py-2">
+      <button className="flex w-full items-start gap-2.5 text-left" onClick={() => hasDetails && setOpen((o) => !o)} aria-expanded={open} aria-label={`${open ? "Collapse" : "Expand"} ${meal.title}`}>
+        <Icon name="UtensilsCrossed" size={14} className="mt-0.5 shrink-0 text-ink-400" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-ink-800">
+            {meal.title} <Badge color="gray">{meal.slot}{meal.time ? ` · ${meal.time}` : ""}</Badge>
+            {meal.servings ? <Badge color="sage" className="ml-1"><Icon name="Users" size={10} /> {meal.servings}</Badge> : null}
+          </p>
+          {!open && meal.ingredients.length > 0 && <p className="mt-0.5 truncate text-xs text-ink-500">{meal.ingredients.map((i) => i.item).join(", ")}</p>}
+        </div>
+        {hasDetails && <Icon name={open ? "ChevronUp" : "ChevronDown"} size={14} className="mt-1 shrink-0 text-ink-400" />}
+      </button>
+      {open && (
+        <div className="ml-6 mt-1.5 space-y-2 text-xs">
+          {meal.ingredients.length > 0 && (
+            <div>
+              <p className="font-semibold text-ink-700">Ingredients</p>
+              <ul className="mt-0.5 list-disc space-y-0.5 pl-4 text-ink-600">{meal.ingredients.map((i, idx) => <li key={idx}>{i.item}{i.have ? " (have)" : ""}</li>)}</ul>
+            </div>
+          )}
+          {instructions.length > 0 && (
+            <div>
+              <p className="font-semibold text-ink-700">Instructions</p>
+              <ol className="mt-0.5 list-decimal space-y-0.5 pl-4 text-ink-600">{instructions.map((s, idx) => <li key={idx}>{s}</li>)}</ol>
+            </div>
+          )}
+          {meal.recipeUrl ? <a href={meal.recipeUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold text-sky-700 hover:underline"><Icon name="ExternalLink" size={11} /> Recipe source</a> : null}
+        </div>
+      )}
+      <div className="ml-6">
+        {!open && meal.recipeUrl ? <a href={meal.recipeUrl} target="_blank" rel="noreferrer" className="mt-0.5 inline-flex items-center gap-1 text-xs font-semibold text-sky-700 hover:underline"><Icon name="ExternalLink" size={11} /> Recipe</a> : null}
         {canManage && (
           <div className="mt-1.5 flex flex-wrap gap-2">
             {meal.ingredients.some((i) => !i.have) && <Button size="sm" variant="secondary" disabled={busy} onClick={onGrocery}><Icon name="ShoppingCart" size={12} /> Send to groceries</Button>}

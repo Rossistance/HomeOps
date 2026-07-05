@@ -1238,6 +1238,7 @@ export const useStore = create<Store>((set, get) => {
         category: e.category ?? "General", movable: e.layer === "canonical", source: e.source ?? "HomeOps",
         layer: e.layer, visibility: e.visibility, ownerId: e.ownerId, driverId: e.driverId,
         whatToBring: e.whatToBring, checklist: e.checklist,
+        notes: (e as { notes?: string }).notes || undefined,
         provenance: (e as { provenance?: CalendarEvent["provenance"] }).provenance ?? null,
       });
       const mapTask = (t: ServerTask): Task => ({

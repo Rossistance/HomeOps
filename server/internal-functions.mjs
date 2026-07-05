@@ -2,7 +2,8 @@
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
-import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal } from "./store.mjs";
+import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listEvents, getSettings } from "./store.mjs";
+import { mealEventNotes, pushEventToGoogle } from "./calendar.mjs";
 import crypto from "node:crypto";
 
 const eid = (p) => p + "_" + crypto.randomBytes(8).toString("hex");
@@ -190,6 +191,84 @@ export const INTERNAL_FUNCTIONS = {
     },
   },
 
+  "homeops.plan_meal": {
+    id: "homeops.plan_meal",
+    name: "Plan a meal (planner + groceries + calendar)",
+    action: "Write",
+    risk: "Low",
+    requiresApproval: false,
+    connectorId: "homeops",
+    connectorName: "HomeOps",
+    // One approved meal → everything wired in a single real action:
+    //   1. meal in the Meal Planner (title, date, slot, recipe URL, ingredients, instructions)
+    //   2. missing ingredients onto the shared Groceries list (mealId back-reference,
+    //      so the grocery mini app shows them linked to this meal)
+    //   3. a canonical calendar event whose `notes` body carries the recipe URL,
+    //      full ingredient list, and step-by-step instructions
+    //   4. when the household enabled calendar auto-sync, the event is pushed to
+    //      Google Calendar immediately (description = the same notes body).
+    // This is what the assistant calls per approved meal in the "plan my week" flow.
+    async run(ctx, input) {
+      const title = String(input?.title ?? "").trim();
+      if (!title) return { ok: false, error: "empty_title", message: "A meal needs a title." };
+      const now = nowISO();
+      const ingredients = (Array.isArray(input?.ingredients) ? input.ingredients : [])
+        .map((i) => (typeof i === "string" ? { item: i.trim(), have: false } : { item: String(i.item ?? "").trim(), have: !!i.have }))
+        .filter((i) => i.item).slice(0, 60);
+      const instructions = (Array.isArray(input?.instructions) ? input.instructions : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 60);
+      const slot = ["breakfast", "lunch", "dinner", "snack"].includes(input?.slot) ? input.slot : "dinner";
+      const date = typeof input?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.date) ? input.date : null;
+      const meal = putMeal({
+        id: eid("meal"), householdId: ctx.householdId, title, date, slot,
+        time: typeof input?.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(input.time) ? input.time : null,
+        notes: String(input?.notes ?? ""), ingredients, instructions,
+        servings: Number.isFinite(+input?.servings) && +input.servings > 0 ? Math.floor(+input.servings) : null,
+        recipeUrl: typeof input?.recipeUrl === "string" ? input.recipeUrl.trim() : "",
+        visibility: input?.visibility ?? "household", source: "assistant", createdBy: ctx.actorId, createdAt: now, updatedAt: now,
+      });
+      // 2) Groceries — every not-yet-have ingredient, linked by mealId.
+      const groceryIds = [];
+      for (const ing of ingredients.filter((i) => !i.have)) {
+        const tk = putTask({
+          id: eid("tk"), householdId: ctx.householdId, title: ing.item, type: "list", status: "todo",
+          listName: "Groceries", spaceId: "sp-family", priority: "low", visibility: "household",
+          source: "assistant", createdBy: ctx.actorId, notes: `For ${meal.title}`, mealId: meal.id,
+          createdAt: now, updatedAt: now,
+        });
+        groceryIds.push(tk.id);
+      }
+      // 3) Calendar event (idempotent by mealId) with the full recipe body in notes.
+      let event = null;
+      if (date) {
+        const SLOT_TIMES = { breakfast: "08:00", lunch: "12:00", dinner: "18:00", snack: "15:00" };
+        const time = meal.time ?? SLOT_TIMES[slot] ?? "18:00";
+        const slotLabel = slot.charAt(0).toUpperCase() + slot.slice(1);
+        const evTitle = `${slotLabel}: ${meal.title}`;
+        const startAt = `${date}T${time}:00`;
+        const notes = mealEventNotes(meal);
+        const existing = listEvents((e) => e.householdId === ctx.householdId && e.mealId === meal.id)[0];
+        event = existing
+          ? patchEvent(existing.id, { title: evTitle, startAt, notes })
+          : putEvent({
+              id: eid("ev"), householdId: ctx.householdId, title: evTitle, startAt, endAt: null,
+              location: "", notes, spaceId: "sp-family", participantIds: [], driverId: null,
+              ownerId: ctx.actorId, backupOwnerId: null, whatToBring: [], checklist: [], travel: null,
+              reminders: [], attachments: [], comments: [], mealImpact: null, mealId: meal.id,
+              visibility: "household", category: "Meal", layer: "canonical", status: "confirmed",
+              source: "HomeOps Assistant", provenance: { via: "meal", runId: ctx.runId, actorId: ctx.actorId },
+              createdBy: ctx.actorId, createdAt: Date.now(), updatedAt: now,
+            });
+      }
+      // 4) Google push — only when the household pre-authorized it (calendar auto-sync).
+      let google = { pushed: false };
+      if (event && getSettings().calendarAutoSync === true) {
+        const r = await pushEventToGoogle({ ev: event, householdId: ctx.householdId, actorId: ctx.actorId });
+        google = r.ok ? { pushed: true, googleEventId: r.googleEventId, action: r.action } : { pushed: false, error: r.error };
+      }
+      return { ok: true, result: { id: meal.id, mealId: meal.id, title: meal.title, date, slot, groceryItems: groceryIds.length, eventId: event?.id ?? null, google } };
+    },
+  },
+
   "homeops.create_list_item": {
     id: "homeops.create_list_item",
     name: "Add a list item",
@@ -227,31 +306,6 @@ export const INTERNAL_FUNCTIONS = {
       const attachment = { kind: input?.fileRef ? "file" : "note", text: String(input?.note ?? ""), fileRef: input?.fileRef ?? null, at: nowISO(), by: ctx.actorId };
       const rec = patchEvent(ev.id, { attachments: [...(ev.attachments ?? []), attachment] });
       return { ok: true, result: { id: rec.id, attachmentCount: rec.attachments.length } };
-    },
-  },
-
-  "homeops.plan_meal": {
-    id: "homeops.plan_meal",
-    name: "Plan a meal",
-    action: "Write",
-    risk: "Low",
-    requiresApproval: false,
-    connectorId: "homeops",
-    connectorName: "HomeOps",
-    // Add a meal to the family meal plan (a date + slot + optional ingredients).
-    async run(ctx, input) {
-      const title = String(input?.title ?? "").trim();
-      if (!title) return { ok: false, error: "empty_title", message: "A meal needs a title." };
-      const ingredients = Array.isArray(input?.ingredients)
-        ? input.ingredients.map((i) => (typeof i === "string" ? { item: i, have: false } : { item: String(i.item ?? ""), have: !!i.have })).filter((i) => i.item)
-        : [];
-      const rec = putMeal({
-        id: eid("meal"), householdId: ctx.householdId, date: input?.date ?? null,
-        slot: ["breakfast", "lunch", "dinner", "snack"].includes(input?.slot) ? input.slot : "dinner",
-        title, notes: input?.notes ?? "", ingredients, visibility: input?.visibility ?? "household",
-        source: "agent", createdBy: ctx.actorId, createdAt: nowISO(), updatedAt: nowISO(),
-      });
-      return { ok: true, result: { id: rec.id, title: rec.title, slot: rec.slot, date: rec.date } };
     },
   },
 

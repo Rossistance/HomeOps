@@ -379,7 +379,7 @@ export interface ServerEvolution {
 /* ---- server-owned family data (P1/P4) ---- */
 export interface ServerEvent {
   id: string; householdId: string; title: string; startAt: string | null; endAt: string | null;
-  location: string; spaceId: string; participantIds: string[]; driverId: string | null;
+  location: string; notes?: string; spaceId: string; participantIds: string[]; driverId: string | null;
   ownerId: string | null; backupOwnerId: string | null;
   whatToBring: { item: string; memberId: string | null }[]; checklist: { text: string; done: boolean }[];
   travel: unknown; reminders: unknown[]; attachments: unknown[]; comments: unknown[]; mealImpact: unknown;
@@ -396,7 +396,7 @@ export interface ServerMember { actorId: string; displayName: string; role: stri
 export interface CalendarSubscription { id: string; name: string; url: string | null; source: string; lastSyncAt: number | null; lastResult: { imported?: number; updated?: number; removed?: number; error?: string } | null; eventCount: number; createdAt: number }
 export interface CalendarSync { ok: boolean; imported?: number; updated?: number; removed?: number; total?: number; error?: string }
 export interface MealIngredient { item: string; have?: boolean }
-export interface Meal { id: string; householdId: string; date: string | null; time?: string | null; slot: string; title: string; notes: string; ingredients: MealIngredient[]; servings?: number | null; recipeUrl?: string; visibility: string; source: string; createdBy: string; createdAt: string; updatedAt: string }
+export interface Meal { id: string; householdId: string; date: string | null; time?: string | null; slot: string; title: string; notes: string; ingredients: MealIngredient[]; instructions?: string[]; servings?: number | null; recipeUrl?: string; visibility: string; source: string; createdBy: string; createdAt: string; updatedAt: string }
 export interface ServerConversationMessage { role: "user" | "assistant"; text: string; kind?: string; plan?: AgentPlan | null; build?: ChatBuild | null; built?: boolean; builtIds?: { skillId?: string; agentId?: string; triggerId?: string }; model?: string | null; at: string }
 export interface ServerConversation { id: string; householdId: string; actorId: string; title: string; messages: ServerConversationMessage[]; createdAt: string; updatedAt: string }
 export interface ServerMemory { id: string; householdId: string; scope: string; type: string; text: string; createdAt: number; source?: { runId?: string; actorId?: string } }
@@ -523,11 +523,11 @@ export const backend = {
   async audit(limit = 50): Promise<AuditEvent[]> {
     try { return (await req<{ events: AuditEvent[] }>(`/audit?limit=${limit}`)).events ?? []; } catch { return []; }
   },
-  async getSettings(): Promise<{ externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null }> {
-    try { return (await req<{ settings: { externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null } }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
+  async getSettings(): Promise<{ externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean }> {
+    try { return (await req<{ settings: { externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean } }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
   },
-  async setSettings(patch: Record<string, unknown>): Promise<{ externalActionsEnabled: boolean }> {
-    try { return (await req<{ settings: { externalActionsEnabled: boolean } }>("/settings", { method: "POST", body: JSON.stringify(patch), mutation: true })).settings; } catch { return { externalActionsEnabled: true }; }
+  async setSettings(patch: Record<string, unknown>): Promise<{ externalActionsEnabled: boolean; calendarAutoSync?: boolean }> {
+    try { return (await req<{ settings: { externalActionsEnabled: boolean; calendarAutoSync?: boolean } }>("/settings", { method: "POST", body: JSON.stringify(patch), mutation: true })).settings; } catch { return { externalActionsEnabled: true }; }
   },
 
   /* ---- AI providers ---- */

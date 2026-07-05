@@ -35,6 +35,15 @@ export function Settings() {
   const [calm, setCalm] = useCalmMode();
   const [advanced, setAdvanced] = useAdvancedMode();
   const setOwnerPin = async () => { if (!pin) return; await backend.setSettings({ ownerPin: pin }); setPin(""); toast({ kind: "success", title: "Owner PIN set", message: "Elevated profiles now require this PIN to sign in." }); };
+  // Calendar auto-sync (server-owned, Adult Admin): pre-authorized Google pushes + two-way sweep.
+  const [calendarAutoSync, setCalendarAutoSync] = useState(false);
+  useEffect(() => { void backend.getSettings().then((s) => setCalendarAutoSync(s.calendarAutoSync === true)); }, []);
+  const toggleCalendarAutoSync = async (v: boolean) => {
+    setCalendarAutoSync(v);
+    const s = await backend.setSettings({ calendarAutoSync: v });
+    setCalendarAutoSync(s.calendarAutoSync === true);
+    toast({ kind: v ? "success" : "info", title: v ? "Calendar auto-sync on" : "Calendar auto-sync off", message: v ? "Google pushes are pre-authorized and both calendars mirror automatically." : "Google pushes ask for approval again." });
+  };
 
   const onImport = async (file?: File | null) => {
     if (!file) return;
@@ -83,6 +92,9 @@ export function Settings() {
           {!backendOnline && <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-600">The runtime is offline. Run <code className="rounded bg-sand-200 px-1">npm run dev</code> (it starts the backend + web together).</p>}
           <Row label="External actions" desc="Master kill switch — when off, the backend blocks every write/send tool.">
             <Toggle checked={externalActionsEnabled} onChange={(v) => setKillSwitch(v)} />
+          </Row>
+          <Row label="Calendar auto-sync" desc="Pre-authorize Google Calendar: pushes skip per-event approvals, local edits mirror to Google instantly, and the server sweeps both directions automatically. Conflicts still ask a human.">
+            <Toggle checked={calendarAutoSync} onChange={(v) => void toggleCalendarAutoSync(v)} ariaLabel="Calendar auto-sync" />
           </Row>
         </Card>
 

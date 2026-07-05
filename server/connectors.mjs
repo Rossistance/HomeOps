@@ -4,6 +4,7 @@
 // fail honestly with a typed reason and never fabricate success.
 import { getConnectorConfig, setConnectorConfig, getSecret, getSettings, appendAudit, setHealth, getHealth } from "./store.mjs";
 import { safeFetch, assertSafeUrl } from "./net.mjs";
+import { searchWeb, readPage, extractRecipe } from "./web.mjs";
 
 /**
  * Readiness levels (per the no-mocks mandate):
@@ -102,6 +103,23 @@ export const CONNECTORS = [
     tools: [
       { id: "browser.open", name: "Open & extract", action: "Browser Action", risk: "Medium", requiresApproval: false, description: "Open a page and read its content.", inputs: [{ key: "url", label: "Page URL", type: "text", required: true, placeholder: "https://example.com/orders" }, { key: "extract", label: "What to extract (optional)", type: "text", placeholder: "order totals" }] },
       { id: "browser.download", name: "Download document", action: "Download", risk: "High", requiresApproval: true, description: "Open a page and download a file (requires approval).", inputs: [{ key: "url", label: "Page URL", type: "text", required: true }, { key: "selector", label: "Download link selector (optional)", type: "text", placeholder: "a.download-pdf" }] },
+    ],
+    triggers: [],
+  },
+  {
+    id: "web",
+    name: "Web Search & Reading",
+    provider: "HomeOps backend",
+    category: "Information & Feeds",
+    authType: "none",
+    runtime: "backend",
+    risk: "Medium",
+    description: "Search the web in plain English and read pages — runs on the backend so it works on any deployment (web + mobile) with no local runtime. When the headless Browser Automation runtime is connected it is used automatically for JS-heavy pages.",
+    configSchema: [],
+    tools: [
+      { id: "web.search", name: "Search the web", action: "Read", risk: "Low", requiresApproval: false, description: "Plain-English web search (no API key). Returns result titles, URLs, and snippets to pick pages worth reading.", inputs: [{ key: "query", label: "Search query", type: "text", required: true, placeholder: "easy weeknight dinner recipes" }] },
+      { id: "web.read", name: "Read a page", action: "Read", risk: "Medium", requiresApproval: false, description: "Fetch a page and return its readable text and links.", inputs: [{ key: "url", label: "Page URL", type: "text", required: true, placeholder: "https://example.com/article" }] },
+      { id: "web.recipe", name: "Extract recipe", action: "Read", risk: "Low", requiresApproval: false, description: "Extract a structured recipe (name, ingredients, step-by-step instructions, source URL) from a recipe page.", inputs: [{ key: "url", label: "Recipe URL", type: "text", required: true, placeholder: "https://example.com/best-chili" }] },
     ],
     triggers: [],
   },
@@ -430,6 +448,22 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
       const j = await r.json();
       if (!r.ok) return { ok: false, error: "provider_error", message: j.message ?? "Twilio send failed" };
       result = { sent: true, sid: j.sid, to: input.to };
+    } else if (toolId === "web.search") {
+      if (!String(input.query ?? "").trim()) return { ok: false, error: "invalid_input", message: "Provide a search `query`." };
+      const out = await searchWeb(input.query, { maxResults: Number(input.maxResults) || 8 });
+      if (!out.ok) { appendAudit({ type: "tool.execute", ...base, ok: false, error: out.error }); return out; }
+      result = { engine: out.engine, query: out.query, results: out.results };
+    } else if (toolId === "web.read") {
+      if (!input.url) return { ok: false, error: "invalid_input", message: "Provide a page `url`." };
+      const out = await readPage(input.url);
+      if (!out.ok) { appendAudit({ type: "tool.execute", ...base, ok: false, error: out.error }); return out; }
+      // Raw HTML stays server-side; callers get the readable projection.
+      result = { title: out.title, url: out.url, text: out.text, links: out.links, rendered: out.rendered };
+    } else if (toolId === "web.recipe") {
+      if (!input.url) return { ok: false, error: "invalid_input", message: "Provide a recipe `url`." };
+      const out = await extractRecipe(input.url);
+      if (!out.ok) { appendAudit({ type: "tool.execute", ...base, ok: false, error: out.error }); return out; }
+      result = { source: out.source, recipe: out.recipe };
     } else if (toolId === "browser.open" || toolId === "browser.download") {
       if (!input.url) return { ok: false, error: "invalid_input", message: "Provide a page `url`." };
       const out = await callBrowserRuntime(toolId === "browser.open" ? "/open" : "/download", toolId === "browser.open" ? { url: input.url, extract: input.extract } : { url: input.url, selector: input.selector });

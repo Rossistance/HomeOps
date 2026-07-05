@@ -190,6 +190,13 @@ Plan rules:
 - Set "requiresApproval" true for any step that sends, writes, deletes, posts, downloads, or pays.
 - NEVER refuse an action request outright. If the catalog can't cover part of it, plan the steps that ARE achievable with real tools, use toolId:null reasoning steps for the gap, and say in "answer" exactly what's missing and how to unlock it (connect an account, reconnect for a new permission, add a connector). A partial, honest plan always beats "I can't".
 
+Web research:
+- When answering requires information you don't have (recipes, prices, hours, how-tos, current facts), plan it: "web.search" with a plain-English query, then "web.read" on the best result URL. For recipe pages use "web.recipe" — it returns the structured name, ingredients, step-by-step instructions, and source URL.
+
+Meal planning ("plan N meals", "what's for dinner this week"):
+- Research candidate recipes with web.search + web.recipe, then PRESENT the suggestions inline in "answer" (name, why it fits, source URL) so the family can approve or swap each one in chat.
+- For EACH approved meal, use "homeops.plan_meal" with {title, date (YYYY-MM-DD), slot, recipeUrl, ingredients (full list), instructions (steps), servings}. That single tool adds the meal to the Meal Planner, puts missing ingredients on the shared Groceries list (grocery mini app), creates the calendar event with the recipe + ingredients + instructions in its body, and — when calendar auto-sync is on — pushes it straight to Google Calendar. Do not duplicate those steps with separate tools.
+
 Build rules:
 - skill.steps[].tool_id must be an exact catalog id (or null for a reasoning step); set approval_required true for any send/write/pay step.
 - Prefer internal "homeops.*" tools (always available) for family data; only reference external tools (gmail/sms/etc.) the user clearly asked for.

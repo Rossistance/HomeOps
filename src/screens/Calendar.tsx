@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "@/store/useStore";
-import { PageHeader, Card, Button, Badge, Drawer, Field, TextInput, Select } from "@/components/ui";
+import { PageHeader, Card, Button, Badge, Drawer, Field, TextInput, TextArea, Select } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { backend, type ServerEvent, type BackendApproval } from "@/connectors/api";
 
 const dayKey = (iso: string) => new Date(iso).toISOString().slice(0, 10);
+/** Render event notes with clickable links (recipe URLs, mini-app references). */
+function linkifyNotes(text: string) {
+  return text.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
+    /^https?:\/\//.test(part)
+      ? <a key={i} href={part} target="_blank" rel="noreferrer" className="font-semibold text-sky-700 underline break-all">{part}</a>
+      : <span key={i}>{part}</span>,
+  );
+}
 const toLocalInput = (iso?: string | null) => { if (!iso) return ""; const d = new Date(iso); if (isNaN(+d)) return ""; const p = (n: number) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
 
 /** A pull flagged this event: both HomeOps and Google changed it since the last push/merge. */
@@ -214,6 +222,7 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
   const linked = ev.layer === "linked" || ev.layer === "public";
   const [title, setTitle] = useState(ev.title);
   const [location, setLocation] = useState(ev.location ?? "");
+  const [notes, setNotes] = useState(ev.notes ?? "");
   const [start, setStart] = useState(toLocalInput(ev.startAt));
   // Phase 3: the rich model is editable, not just displayed.
   const [participantIds, setParticipantIds] = useState<string[]>(ev.participantIds ?? []);
@@ -232,7 +241,7 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
   const save = async () => {
     setBusy(true);
     const r = await backend.updateEvent(ev.id, {
-      title, location, startAt: start ? new Date(start).toISOString() : null,
+      title, location, notes, startAt: start ? new Date(start).toISOString() : null,
       participantIds, driverId: driverId || null, whatToBring: bring, checklist,
     });
     setBusy(false);
@@ -334,11 +343,13 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
             <Field label="Title"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
             <Field label="When"><TextInput type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></Field>
             <Field label="Location"><TextInput value={location} onChange={(e) => setLocation(e.target.value)} /></Field>
+            <Field label="Details" hint="Synced as the event description on Google Calendar"><TextArea rows={5} value={notes} placeholder="Context, links, ingredients, instructions…" onChange={(e) => setNotes(e.target.value)} /></Field>
           </div>
         ) : (
           <div className="text-sm text-ink-600">
             <p><span className="text-ink-400">When:</span> {ev.startAt ? new Date(ev.startAt).toLocaleString() : "No date set"}</p>
             {ev.location && <p><span className="text-ink-400">Where:</span> {ev.location}</p>}
+            {ev.notes && <div className="mt-1.5 whitespace-pre-wrap rounded-lg bg-surface-sunken/50 p-2 text-xs text-ink-600">{linkifyNotes(ev.notes)}</div>}
           </div>
         )}
 
