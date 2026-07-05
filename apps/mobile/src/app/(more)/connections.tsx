@@ -8,8 +8,8 @@ import { api, type CalendarSubscription } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, type HearthColors } from "@/theme";
 import {
-  Badge, Button, Card, EmptyState, HScreen, Notice, Rise, Row,
-  SectionHeader, SkeletonCards, SymTile, T,
+  Badge, BrandIcon, Button, Card, EmptyState, HScreen, Notice, Rise, Row,
+  SectionHeader, SkeletonCards, Sym, SymTile, T,
 } from "@/components/ui";
 
 // Allow ASWebAuthenticationSession to complete and hand back to the app.
@@ -41,7 +41,8 @@ function providerIcon(id: string): string {
   return "globe";
 }
 
-interface ProviderRow { id: string; name: string; readiness: string; accounts: unknown[] }
+interface ProviderAccount { id: string; displayName?: string | null }
+interface ProviderRow { id: string; name: string; readiness: string; accounts: ProviderAccount[] }
 
 export default function ConnectionsScreen() {
   const { session } = useSession();
@@ -82,7 +83,10 @@ export default function ConnectionsScreen() {
       // homeops:// redirect that the server issues after the code exchange completes.
       // The server reports failures through the same deep link (ok=0&message=...), so
       // the user always lands back here instead of being stranded in the browser.
-      const result = await WebBrowser.openAuthSessionAsync(start.url, "homeops://");
+      // Ephemeral = private context: the PWA's service worker / Safari cookies can
+      // never intercept the /api/oauth/callback navigation (a stale worker used to
+      // swallow it and render the cached web app instead of finishing the exchange).
+      const result = await WebBrowser.openAuthSessionAsync(start.url, "homeops://", { preferEphemeralSession: true });
       if (result.type === "success") {
         const u = new URL(result.url);
         if (u.searchParams.get("ok") === "0") {
@@ -189,17 +193,30 @@ export default function ConnectionsScreen() {
               <Rise key={p.id} index={Math.min(i + 1, 8)}>
                 <Card style={{ gap: spacing.md }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-                    <SymTile name={providerIcon(p.id)} color={m.fg} bg={m.bg} />
+                    <BrandIcon provider={p.id} />
                     <View style={{ flex: 1, gap: 2 }}>
                       <T kind="bodyMedium" color={colors.text}>{p.name}</T>
                       <T kind="sub">
                         {connected
-                          ? `${(p.accounts as unknown[]).length} account${(p.accounts as unknown[]).length === 1 ? "" : "s"} connected`
+                          ? `${p.accounts.length} account${p.accounts.length === 1 ? "" : "s"} connected`
                           : needsAuth ? "Authorize to let plans act on this account" : "Server-side setup required first"}
                       </T>
                     </View>
-                    <Badge label={connected ? `${(p.accounts as unknown[]).length} connected` : m.label} fg={m.fg} bg={m.bg} />
+                    <Badge label={connected ? `${p.accounts.length} connected` : m.label} fg={m.fg} bg={m.bg} />
                   </View>
+                  {connected ? (
+                    <View style={{ gap: 6 }}>
+                      {p.accounts.map((a) => (
+                        <View key={a.id} style={{ flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.surfaceSunken, borderRadius: 10, borderCurve: "continuous", paddingHorizontal: 10, paddingVertical: 8 }}>
+                          <BrandIcon provider={p.id} size={22} />
+                          <T kind="subMedium" color={colors.textSecondary} numberOfLines={1} style={{ flex: 1 }}>
+                            {a.displayName || "Connected account"}
+                          </T>
+                          <Sym name="checkmark.circle.fill" size={14} color={colors.sage} />
+                        </View>
+                      ))}
+                    </View>
+                  ) : null}
                   {needsAuth ? (
                     <Button
                       title={connecting === p.id ? "Opening…" : `Connect ${p.name}`}

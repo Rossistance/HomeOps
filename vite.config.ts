@@ -41,6 +41,11 @@ export default defineConfig({
       workbox: {
         // Pre-cache all build output + icon.
         globPatterns: ["**/*.{js,css,html,svg,woff2,ico}"],
+        // NEVER serve the SPA shell for backend navigations. Without this, the
+        // service worker (shared with Safari's storage on iOS) intercepts the
+        // OAuth redirect to /api/oauth/callback inside ASWebAuthenticationSession
+        // and renders the dashboard instead — the code exchange never happens.
+        navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
           {
             // API calls: network first, fall back to cache so offline shows last data.

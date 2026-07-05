@@ -484,6 +484,19 @@ export const api = {
     return r.data ?? { error: "network" };
   },
 
+  /* ---- Durable server runs (canonical runtime; resolves step inputs itself) ---- */
+  async startRunPlan(plan: AgentPlan): Promise<{ run?: RunRec; error?: string; message?: string }> {
+    const r = await req<{ run?: RunRec; error?: string; message?: string }>("/runs/start", {
+      method: "POST", body: JSON.stringify({ plan, source: "manual" }),
+    });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async getRun(id: string): Promise<{ run?: RunRec; error?: string }> {
+    const r = await req<{ run?: RunRec; error?: string }>(`/runs/${encodeURIComponent(id)}`);
+    return r.data ?? { error: "network" };
+  },
+
   /* ---- Tasks (create/edit come to mobile with the redesign) ---- */
   async createTask(body: { title: string; type?: string; dueAt?: string | null; assignedMemberId?: string | null; priority?: string; listName?: string }): Promise<{ task?: TaskRec; error?: string }> {
     const r = await req<{ task?: TaskRec; error?: string }>("/tasks", { method: "POST", body: JSON.stringify(body) });

@@ -1,5 +1,10 @@
-import React, { createContext, useCallback, useContext, useRef, useState } from "react";
-import { api, type AgentPlan } from "@/lib/api";
+// Plan execution now dispatches to the SERVER run engine (POST /api/runs/start)
+// — the same durable runtime the web client uses. The server resolves each
+// step's real tool input (the old on-device runner sent empty inputs, so every
+// web.search/web.read step instantly blocked with "Provide a search `query`").
+// This provider just starts the run and polls it for live progress.
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { api, type AgentPlan, type RunRec } from "@/lib/api";
 
 export interface RunStepState {
   toolId: string | null;
@@ -29,73 +34,114 @@ interface RunCtx {
 const Ctx = createContext<RunCtx>({ activeRun: null, startRun: async () => {}, clearRun: () => {} });
 export function useRun() { return useContext(Ctx); }
 
+function mapStepStatus(s: string, approvalId: string | null): RunStepState["status"] {
+  switch (s) {
+    case "done": case "completed": case "succeeded": return "done";
+    case "running": case "in_progress": return "running";
+    case "blocked": case "waiting_approval": case "waiting_for_approval": case "failed": case "error": return "blocked";
+    default: return approvalId ? "blocked" : "pending";
+  }
+}
+
+function mapRunStatus(s: string): ActiveRun["status"] {
+  switch (s) {
+    case "completed": case "succeeded": return "completed";
+    case "failed": case "error": case "cancelled": return "failed";
+    case "waiting_approval": case "waiting_for_approval": case "paused": return "waiting";
+    default: return "running";
+  }
+}
+
+function toActiveRun(run: RunRec, startedAt: string): ActiveRun {
+  const status = mapRunStatus(run.status);
+  return {
+    id: run.id,
+    planTitle: run.title,
+    status,
+    steps: (run.steps ?? []).map((st) => ({
+      toolId: st.toolId,
+      title: st.title,
+      detail: st.detail,
+      requiresApproval: !!st.approvalId,
+      status: mapStepStatus(st.status, st.approvalId),
+      approvalId: st.approvalId ?? undefined,
+      output: st.status === "waiting_approval" || st.approvalId ? "Waiting for your approval in the Inbox." : undefined,
+    })),
+    startedAt,
+    completedAt: status === "completed" || status === "failed" ? new Date().toISOString() : undefined,
+  };
+}
+
+const POLL_MS = 2500;
+const POLL_MAX_MS = 5 * 60 * 1000;
+
 export function RunProvider({ children }: { children: React.ReactNode }) {
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
-  const runningRef = useRef(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startingRef = useRef(false);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }, []);
+  useEffect(() => stopPolling, [stopPolling]);
 
   const startRun = useCallback(async (plan: AgentPlan) => {
-    if (runningRef.current) return;
-    runningRef.current = true;
+    if (startingRef.current) return;
+    startingRef.current = true;
+    stopPolling();
+    const startedAt = new Date().toISOString();
 
-    const run: ActiveRun = {
-      id: `run-${Date.now()}`,
+    // Optimistic shell so the Activity screen shows the run immediately.
+    setActiveRun({
+      id: "pending",
       planTitle: plan.title,
       status: "running",
       steps: plan.steps.map((s) => ({
-        toolId: s.toolId,
-        title: s.title,
-        detail: s.detail,
-        requiresApproval: s.requiresApproval,
-        status: "pending" as const,
+        toolId: s.toolId, title: s.title, detail: s.detail,
+        requiresApproval: s.requiresApproval, status: "pending" as const,
       })),
-      startedAt: new Date().toISOString(),
-    };
+      startedAt,
+    });
 
-    const snapshot = () => setActiveRun({ ...run, steps: [...run.steps] });
-    snapshot();
-
-    let anyApproval = false, anyFail = false, ran = 0;
-
-    for (let i = 0; i < run.steps.length; i++) {
-      const step = run.steps[i];
-
-      if (!step.toolId) {
-        run.steps[i] = { ...step, status: "done", detail: step.detail || "Reasoning step." };
-        snapshot(); continue;
-      }
-
-      run.steps[i] = { ...step, status: "running" };
-      snapshot();
-
-      if (step.requiresApproval) {
-        const apr = await api.createApproval(step.toolId, {}, { category: "plan", preview: step.title });
-        anyApproval = true;
-        run.steps[i] = { ...run.steps[i], status: "blocked", output: apr.error ? `Approval error: ${apr.error}` : "Waiting for your approval in the Approvals tab.", approvalId: apr.approval?.id };
-        snapshot(); continue;
-      }
-
-      const res = await api.runStep(step.toolId, {});
-      if (res.ok) {
-        ran++;
-        const out = res.result ? (typeof res.result === "string" ? res.result : JSON.stringify(res.result)) : "ok";
-        run.steps[i] = { ...run.steps[i], status: "done", output: out.slice(0, 200) };
-      } else {
-        anyFail = true;
-        run.steps[i] = { ...run.steps[i], status: "blocked", output: res.message ?? res.error ?? "Step failed." };
-      }
-      snapshot();
+    const res = await api.startRunPlan(plan);
+    startingRef.current = false;
+    if (!res.run) {
+      setActiveRun((prev) => prev ? {
+        ...prev,
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        steps: prev.steps.map((s, i) => i === 0 ? {
+          ...s, status: "blocked",
+          output: res.error === "insufficient_role"
+            ? "Running plans needs a Limited Member role or higher."
+            : res.message ?? res.error ?? "The server couldn't start this run.",
+        } : s),
+      } : prev);
+      return;
     }
 
-    run.status = anyApproval ? "waiting" : anyFail ? "failed" : "completed";
-    run.completedAt = new Date().toISOString();
-    setActiveRun({ ...run, steps: [...run.steps] });
-    runningRef.current = false;
-  }, []);
+    setActiveRun(toActiveRun(res.run, startedAt));
+    const runId = res.run.id;
+    const deadline = Date.now() + POLL_MAX_MS;
+    pollRef.current = setInterval(async () => {
+      const r = await api.getRun(runId);
+      if (r.run) {
+        const mapped = toActiveRun(r.run, startedAt);
+        setActiveRun(mapped);
+        if (mapped.status === "completed" || mapped.status === "failed" || mapped.status === "waiting") {
+          // "waiting" resumes server-side after the approval decision; keep polling
+          // only while the run can still move on its own.
+          if (mapped.status !== "waiting") stopPolling();
+        }
+      }
+      if (Date.now() > deadline) stopPolling();
+    }, POLL_MS);
+  }, [stopPolling]);
 
   const clearRun = useCallback(() => {
-    if (runningRef.current) return;
+    stopPolling();
     setActiveRun(null);
-  }, []);
+  }, [stopPolling]);
 
   return <Ctx.Provider value={{ activeRun, startRun, clearRun }}>{children}</Ctx.Provider>;
 }

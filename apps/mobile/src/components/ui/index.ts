@@ -1,6 +1,7 @@
 export { PressableScale } from "./pressable-scale";
 export { T } from "./text";
 export { Sym, SymTile } from "./symbol";
+export { BrandIcon } from "./brand-icon";
 export { Card, PressableCard, Well, cardStyle } from "./card";
 export { Button } from "./button";
 export { Badge, Chip, ChipRow } from "./badge";
