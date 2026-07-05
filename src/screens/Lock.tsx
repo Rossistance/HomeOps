@@ -71,6 +71,11 @@ export function Lock() {
         )}
 
         <p className="mt-8 text-center text-xs text-ink-400">{owner ? `Owner: ${owner.displayName}. ` : ""}A profile session is required to use connectors and approve actions.</p>
+        <p className="mt-2 text-center text-xs text-ink-400">
+          <a href="/privacy.html" className="underline hover:text-ink-600">Privacy Policy</a>
+          <span aria-hidden="true"> · </span>
+          <a href="/terms.html" className="underline hover:text-ink-600">SMS Terms &amp; Conditions</a>
+        </p>
       </div>
     </div>
   );
