@@ -1,52 +1,51 @@
 import { useEffect, useRef } from "react";
 import * as Notifications from "expo-notifications";
-import { ActivityIndicator, StyleSheet, View, type ColorValue } from "react-native";
-import { Tabs } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
+import * as SplashScreen from "expo-splash-screen";
+import { ActivityIndicator, StyleSheet, View, useColorScheme } from "react-native";
+import { NativeTabs } from "expo-router/unstable-native-tabs";
+import { ThemeProvider, DarkTheme, DefaultTheme } from "expo-router/react-navigation";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
+import { useFonts } from "expo-font";
+import { Fraunces_600SemiBold, Fraunces_700Bold } from "@expo-google-fonts/fraunces";
+import { Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } from "@expo-google-fonts/inter";
 import { SessionProvider, useSession } from "@/lib/session";
 import { RunProvider } from "@/lib/run-context";
 import { Lock } from "@/components/Lock";
-import { Hearth } from "@/constants/hearth";
+import { lightColors, darkColors } from "@/theme";
 import { api } from "@/lib/api";
+
+void SplashScreen.preventAutoHideAsync();
 
 // Show notifications when the app is foregrounded.
 Notifications.setNotificationHandler({
   handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: true, shouldShowBanner: true, shouldShowList: true }),
 });
 
-function tabIcon(name: keyof typeof Ionicons.glyphMap) {
-  const Icon = ({ color, size }: { color: ColorValue; size: number }) => <Ionicons name={name} color={color} size={size} />;
-  Icon.displayName = `TabIcon(${name})`;
-  return Icon;
-}
-
 function TabsNav() {
   return (
-    <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarActiveTintColor: Hearth.ember600,
-        tabBarInactiveTintColor: Hearth.ink400,
-        tabBarStyle: { backgroundColor: Hearth.surface, borderTopColor: Hearth.border },
-      }}>
-      <Tabs.Screen name="index" options={{ title: "Home", tabBarIcon: tabIcon("home-outline") }} />
-      <Tabs.Screen name="assistant" options={{ title: "Ask", tabBarIcon: tabIcon("sparkles-outline") }} />
-      <Tabs.Screen name="calendar" options={{ title: "Calendar", tabBarIcon: tabIcon("calendar-outline") }} />
-      <Tabs.Screen name="approvals" options={{ title: "Approvals", tabBarIcon: tabIcon("shield-checkmark-outline") }} />
-      <Tabs.Screen name="more" options={{ title: "More", tabBarIcon: tabIcon("grid-outline") }} />
-      {/* Reachable from the More hub (and deep links), not the tab bar. */}
-      <Tabs.Screen name="activity" options={{ href: null }} />
-      <Tabs.Screen name="notifications" options={{ href: null }} />
-      <Tabs.Screen name="connections" options={{ href: null }} />
-      <Tabs.Screen name="settings" options={{ href: null }} />
-      <Tabs.Screen name="meals" options={{ href: null }} />
-      <Tabs.Screen name="files" options={{ href: null }} />
-      <Tabs.Screen name="playbooks" options={{ href: null }} />
-      <Tabs.Screen name="household" options={{ href: null }} />
-      <Tabs.Screen name="contacts" options={{ href: null }} />
-    </Tabs>
+    <NativeTabs>
+      <NativeTabs.Trigger name="(home)">
+        <NativeTabs.Trigger.Icon sf="house.fill" md="home" />
+        <NativeTabs.Trigger.Label>Home</NativeTabs.Trigger.Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="(calendar)">
+        <NativeTabs.Trigger.Icon sf="calendar" md="calendar_month" />
+        <NativeTabs.Trigger.Label>Calendar</NativeTabs.Trigger.Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="(ask)">
+        <NativeTabs.Trigger.Icon sf="sparkles" md="auto_awesome" />
+        <NativeTabs.Trigger.Label>Ask</NativeTabs.Trigger.Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="(inbox)">
+        <NativeTabs.Trigger.Icon sf="tray.fill" md="inbox" />
+        <NativeTabs.Trigger.Label>Inbox</NativeTabs.Trigger.Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="(more)">
+        <NativeTabs.Trigger.Icon sf="ellipsis" md="more_horiz" />
+        <NativeTabs.Trigger.Label>More</NativeTabs.Trigger.Label>
+      </NativeTabs.Trigger>
+    </NativeTabs>
   );
 }
 
@@ -73,36 +72,57 @@ function PushRegistrar() {
 
 function Gate() {
   const { loading, session } = useSession();
+  const scheme = useColorScheme();
+  const c = scheme === "dark" ? darkColors : lightColors;
+  if (loading) {
+    return <View style={[st.splash, { backgroundColor: c.bg }]}><ActivityIndicator color={c.ember} size="large" /></View>;
+  }
+  if (!session) return <Lock />;
   return (
-    <View style={{ flex: 1, backgroundColor: Hearth.paper }}>
+    <>
       <TabsNav />
       <PushRegistrar />
-      {(loading || !session) && (
-        <View style={StyleSheet.absoluteFill}>
-          {loading ? (
-            <View style={st.splash}><ActivityIndicator color={Hearth.ember500} size="large" /></View>
-          ) : (
-            <Lock />
-          )}
-        </View>
-      )}
-    </View>
+    </>
   );
 }
 
 export default function RootLayout() {
+  const scheme = useColorScheme();
+  const dark = scheme === "dark";
+  const c = dark ? darkColors : lightColors;
+  const [fontsLoaded] = useFonts({
+    Fraunces_600SemiBold, Fraunces_700Bold,
+    Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold,
+  });
+  useEffect(() => { if (fontsLoaded) void SplashScreen.hideAsync(); }, [fontsLoaded]);
+  if (!fontsLoaded) return null;
+
+  const navTheme = {
+    ...(dark ? DarkTheme : DefaultTheme),
+    colors: {
+      ...(dark ? DarkTheme : DefaultTheme).colors,
+      background: c.bg,
+      card: c.surface,
+      text: c.text,
+      primary: c.ember,
+      border: c.border,
+    },
+  };
+
   return (
     <SafeAreaProvider>
-      <StatusBar style="dark" />
-      <SessionProvider>
-        <RunProvider>
-          <Gate />
-        </RunProvider>
-      </SessionProvider>
+      <ThemeProvider value={navTheme}>
+        <StatusBar style={dark ? "light" : "dark"} />
+        <SessionProvider>
+          <RunProvider>
+            <Gate />
+          </RunProvider>
+        </SessionProvider>
+      </ThemeProvider>
     </SafeAreaProvider>
   );
 }
 
 const st = StyleSheet.create({
-  splash: { flex: 1, backgroundColor: Hearth.paper, alignItems: "center", justifyContent: "center" },
+  splash: { flex: 1, alignItems: "center", justifyContent: "center" },
 });

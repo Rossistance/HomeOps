@@ -483,4 +483,81 @@ export const api = {
     });
     return r.data ?? { error: "network" };
   },
+
+  /* ---- Tasks (create/edit come to mobile with the redesign) ---- */
+  async createTask(body: { title: string; type?: string; dueAt?: string | null; assignedMemberId?: string | null; priority?: string; listName?: string }): Promise<{ task?: TaskRec; error?: string }> {
+    const r = await req<{ task?: TaskRec; error?: string }>("/tasks", { method: "POST", body: JSON.stringify(body) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+
+  /* ---- Events (edit/delete) ---- */
+  async updateEvent(id: string, patch: Record<string, unknown>): Promise<{ event?: EventRec; error?: string }> {
+    const r = await req<{ event?: EventRec; error?: string }>(`/events/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async deleteEvent(id: string): Promise<{ ok?: boolean; error?: string }> {
+    const r = await req<{ ok?: boolean; error?: string }>(`/events/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+
+  /* ---- Agents (list / run / pause / duplicate / delete) ---- */
+  async agents(): Promise<AgentRec[]> {
+    const r = await req<{ agents: AgentRec[] }>("/agents");
+    return r.data?.agents ?? [];
+  },
+  async patchAgent(id: string, patch: Record<string, unknown>): Promise<{ agent?: AgentRec; error?: string }> {
+    const r = await req<{ agent?: AgentRec; error?: string }>(`/agents/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async runAgent(id: string): Promise<{ ok?: boolean; run?: RunRec; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; run?: RunRec; error?: string; message?: string }>(`/agents/${encodeURIComponent(id)}/run`, { method: "POST", body: "{}" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async duplicateAgent(id: string): Promise<{ agent?: AgentRec; error?: string }> {
+    const r = await req<{ agent?: AgentRec; error?: string }>(`/agents/${encodeURIComponent(id)}/duplicate`, { method: "POST", body: "{}" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async deleteAgent(id: string): Promise<{ ok?: boolean; error?: string }> {
+    const r = await req<{ ok?: boolean; error?: string }>(`/agents/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+
+  /* ---- Automations (server "triggers": schedules, webhooks, watchers) ---- */
+  async triggers(): Promise<TriggerRec[]> {
+    const r = await req<{ triggers: TriggerRec[] }>("/triggers");
+    return r.data?.triggers ?? [];
+  },
+  async patchTrigger(id: string, patch: Record<string, unknown>): Promise<{ trigger?: TriggerRec; error?: string }> {
+    const r = await req<{ trigger?: TriggerRec; error?: string }>(`/triggers/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async fireTrigger(id: string): Promise<{ ok?: boolean; runId?: string; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; runId?: string; error?: string; message?: string }>(`/triggers/${encodeURIComponent(id)}/fire`, { method: "POST", body: "{}" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async deleteTrigger(id: string): Promise<{ ok?: boolean; error?: string }> {
+    const r = await req<{ ok?: boolean; error?: string }>(`/triggers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
 };
+
+/* ---- Records for the agents/automations surfaces (mirrors server publicAgent/publicTrigger) ---- */
+export interface AgentRec {
+  id: string; name: string; purpose?: string; status: string; instructions?: string;
+  lastRunAt?: string | null; runCount?: number; toolIds?: string[]; createdAt?: string; updatedAt?: string;
+}
+export interface TriggerRec {
+  id: string; name: string; type: string; enabled: boolean; agentId?: string | null;
+  intervalMs?: number | null; runAt?: string | null; lastFiredAt?: string | null;
+  lastResult?: { ok?: boolean; error?: string } | null; createdAt?: string; updatedAt?: string;
+}

@@ -241,13 +241,28 @@ const server = http.createServer(async (req, res) => {
     if (path === "/api/oauth/callback" && method === "GET") {
       const code = url.searchParams.get("code"); const state = url.searchParams.get("state") || "";
       const st = takeOAuthState(state);
+      // Mobile detection works even when the state record is gone: mobile starts
+      // mint states shaped `<provider>.m.<nonce>` (see /api/oauth/:provider/start).
+      const isMobileFlow = (st && st.from === "mobile") || /^[^.]+\.m\./.test(state);
+      // ASWebAuthenticationSession intercepts any navigation to the app scheme, but a
+      // bare 302 to a custom scheme is dropped by some iOS versions. Serve a tiny page
+      // that navigates via JS immediately AND offers a tap-through link, so the user
+      // is never stranded looking at a web page inside the auth browser.
+      const finishMobile = (params) => {
+        const deepLink = `homeops://oauth-callback?${new URLSearchParams(params).toString()}`;
+        const ok = params.ok === "1";
+        res.writeHead(200, { "content-type": "text/html" });
+        return res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:system-ui;background:#f4f0e9;color:#1f2535;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center;max-width:28rem;padding:1rem"><div style="font-size:40px">${ok ? "✓" : "✕"}</div><h2>${ok ? `${escapeHtml(params.provider ?? "Account")} connected` : "Connection failed"}</h2><p style="color:#4a5568">${escapeHtml(params.message ?? (ok ? "Returning to HomeOps…" : "Return to HomeOps and try again."))}</p><p><a href="${deepLink}" style="display:inline-block;padding:12px 22px;border-radius:12px;background:#d26420;color:#fff;text-decoration:none;font-weight:600">Return to HomeOps</a></p></div><script>location.replace(${JSON.stringify(deepLink)})</script></body>`);
+      };
       if (!st || !code) {
         audit({ type: "oauth.callback", ok: false, error: "invalid_state" }, req);
+        if (isMobileFlow) return finishMobile({ ok: "0", error: "expired", message: "This authorization expired. Please try connecting again." });
         res.writeHead(200, { "content-type": "text/html" });
         return res.end(htmlMessage("Connection failed", "This authorization link is invalid or expired. Please start again from HomeOps."));
       }
       const provider = connectorProviderById(st.provider);
       if (!provider) {
+        if (isMobileFlow) return finishMobile({ ok: "0", error: "unknown_provider", message: "Unknown provider." });
         res.writeHead(200, { "content-type": "text/html" });
         return res.end(htmlMessage("Connection failed", "Unknown provider."));
       }
@@ -255,23 +270,23 @@ const server = http.createServer(async (req, res) => {
         const ex = await exchangeCode(provider, { code, codeVerifier: st.codeVerifier, redirectUri: oauthRedirectUri() });
         if (!ex.ok) {
           audit({ type: "oauth.callback", provider: st.provider, ok: false, error: "token_exchange_failed" }, req);
+          if (isMobileFlow) return finishMobile({ ok: "0", provider: provider.name, error: "exchange_failed", message: "The provider did not return an access token. Please try connecting again." });
           res.writeHead(200, { "content-type": "text/html" });
           return res.end(htmlMessage("Authorization error", "The provider did not return an access token. Please try connecting again."));
         }
         const acct = await upsertAccount({ provider: st.provider, householdId: st.householdId, actorId: st.actorId, tokens: ex.tokens });
         appendAudit({ type: "oauth.callback", provider: st.provider, ok: true, actorId: st.actorId, accountId: acct.id });
-        // Mobile-initiated flows: redirect to the homeops:// scheme so ASWebAuthenticationSession
-        // hands control back to the app. Web flows: postMessage to the opener window.
-        if (st.from === "mobile") {
-          const mobileUri = `homeops://oauth-callback?ok=1&provider=${encodeURIComponent(st.provider)}&displayName=${encodeURIComponent(acct.displayName ?? "")}`;
-          res.writeHead(302, { location: mobileUri });
-          return res.end();
+        // Mobile-initiated flows: hand control back to the app via the homeops:// scheme.
+        // Web flows: postMessage to the opener window.
+        if (isMobileFlow) {
+          return finishMobile({ ok: "1", provider: provider.name, displayName: acct.displayName ?? "" });
         }
         const target = st.appOrigin && isAllowedOrigin(st.appOrigin) ? st.appOrigin : APP_ORIGIN;
         res.writeHead(200, { "content-type": "text/html" });
         return res.end(`<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;background:#f4f0e9;color:#1f2535;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:40px">✓</div><h2>${escapeHtml(provider.name)} connected</h2><p style="color:#4a5568">Signed in as ${escapeHtml(acct.displayName)} — returning to HomeOps…</p></div><script>try{window.opener&&window.opener.postMessage({type:"homeops-oauth",provider:${JSON.stringify(st.provider)},ok:true},${JSON.stringify(target)})}catch(e){}setTimeout(()=>window.close(),900)</script></body>`);
       } catch (e) {
         appendAudit({ type: "oauth.callback", provider: st.provider, ok: false, error: "exception" });
+        if (isMobileFlow) return finishMobile({ ok: "0", provider: provider.name, error: "server_error", message: "Something went wrong completing the connection." });
         res.writeHead(200, { "content-type": "text/html" });
         return res.end(htmlMessage("Connection failed", "Something went wrong completing the connection."));
       }
@@ -896,6 +911,7 @@ const server = http.createServer(async (req, res) => {
         title: String(body.title).trim(), type: body.type ?? "task", status: body.status ?? "todo",
         dueAt: body.dueAt ?? null, assignedMemberId: body.assignedMemberId ?? null, spaceId: body.spaceId ?? "sp-family",
         priority: body.priority ?? "medium", amount: body.amount ?? null, visibility: body.visibility ?? "household",
+        listName: body.listName ?? undefined,
         notes: body.notes ?? "", source: "user", createdBy: g.session.actorId,
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
@@ -1948,7 +1964,11 @@ const server = http.createServer(async (req, res) => {
       if (!providerConfigured(provider)) return json(res, 422, { ok: false, error: "not_configured_by_deployment", message: `This deployment has not set ${provider.clientIdEnv} / ${provider.clientSecretEnv}.` }, req);
       const codeVerifier = crypto.randomBytes(32).toString("base64url");
       const codeChallenge = provider.usePKCE ? crypto.createHash("sha256").update(codeVerifier).digest("base64url") : undefined;
-      const state = `${provider.id}.${crypto.randomBytes(16).toString("hex")}`;
+      // Mobile flows mark the state string itself (`<provider>.m.<nonce>`) so the
+      // callback can hand control back to the app even if the persisted state
+      // record is lost or expired (otherwise the user is stranded in the browser).
+      const isMobileStart = req.headers["x-homeops-mobile"] === "1";
+      const state = `${provider.id}.${isMobileStart ? "m." : ""}${crypto.randomBytes(16).toString("hex")}`;
       const urlOut = buildAuthUrl(provider, oauthRedirectUri(), state, codeChallenge);
       putOAuthState(state, { provider: provider.id, actorId: g.session.actorId, householdId: g.session.householdId, codeVerifier, appOrigin: req.headers.origin, from: req.headers["x-homeops-mobile"] === "1" ? "mobile" : "web" });
       audit({ type: "oauth.start", provider: provider.id, ok: true }, req, g.session);
