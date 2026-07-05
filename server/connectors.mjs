@@ -136,6 +136,7 @@ export const CONNECTORS = [
       { key: "accountSid", label: "Account SID", type: "text", env: "TWILIO_ACCOUNT_SID", required: true },
       { key: "authToken", label: "Auth Token", type: "secret", env: "TWILIO_AUTH_TOKEN", required: true },
       { key: "fromNumber", label: "From number", type: "text", env: "TWILIO_FROM_NUMBER", required: true },
+      { key: "messagingServiceSid", label: "Messaging Service SID (A2P 10DLC)", type: "text", env: "TWILIO_MESSAGING_SERVICE_SID", required: false },
     ],
     tools: [{ id: "sms.send", name: "Send text", action: "Send", risk: "High", requiresApproval: true, description: "Send a text message (requires approval).", inputs: [{ key: "to", label: "To number", type: "text", placeholder: "+15551234567", required: true }, { key: "body", label: "Message", type: "textarea", placeholder: "Your text…", required: true }] }],
     triggers: [],
@@ -439,11 +440,15 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
       const sid = process.env.TWILIO_ACCOUNT_SID || cfg.fields?.accountSid;
       const token = process.env.TWILIO_AUTH_TOKEN || getSecret("sms", "authToken");
       const from = cfg.fields?.fromNumber || process.env.TWILIO_FROM_NUMBER;
+      // US carriers require A2P 10DLC: sending via the Messaging Service (whose
+      // sender pool holds the campaign-registered number) instead of a bare From
+      // avoids error 30034 once the campaign is approved.
+      const msgService = cfg.fields?.messagingServiceSid || process.env.TWILIO_MESSAGING_SERVICE_SID;
       if (!input.to || !input.body) return { ok: false, error: "invalid_input", message: "Provide `to` and `body` to send a text." };
       const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
         method: "POST",
         headers: { authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}`, "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ From: from, To: input.to, Body: input.body }),
+        body: new URLSearchParams(msgService ? { MessagingServiceSid: msgService, To: input.to, Body: input.body } : { From: from, To: input.to, Body: input.body }),
       });
       const j = await r.json();
       if (!r.ok) return { ok: false, error: "provider_error", message: j.message ?? "Twilio send failed" };

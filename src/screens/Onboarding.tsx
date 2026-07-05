@@ -61,6 +61,11 @@ export function Onboarding() {
 
         <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void onImport(f); e.target.value = ""; }} />
         <p className="mt-8 text-center text-xs text-ink-400">Your household data is stored locally in this browser. Connectors and secrets are managed by the backend vault — never in the browser.</p>
+        <p className="mt-2 text-center text-xs text-ink-400">
+          <a href="/privacy.html" className="underline hover:text-ink-600">Privacy Policy</a>
+          <span aria-hidden="true"> · </span>
+          <a href="/terms.html" className="underline hover:text-ink-600">SMS Terms &amp; Conditions</a>
+        </p>
       </div>
     </div>
   );
