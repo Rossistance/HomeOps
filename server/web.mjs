@@ -54,9 +54,73 @@ function extractLinks(html, baseUrl, limit = 30) {
 }
 
 /* -------------------------------- Search --------------------------------- */
-// Plain-English web search with no API key. DuckDuckGo's HTML endpoint is the
-// primary (scrape-tolerant, no JS); Bing HTML is the fallback. Results carry
-// title + url + snippet so the planner can pick pages to read.
+// Search provider chain. Hosted deployments (Render etc.) sit on datacenter IPs
+// that DuckDuckGo resets and Bing serves bot-walls to, so a real search API is
+// used FIRST when a key is configured:
+//   BRAVE_SEARCH_API_KEY  — https://api.search.brave.com (free tier)
+//   TAVILY_API_KEY        — https://tavily.com (free tier)
+// Without a key the scrape chain (DDG html → DDG lite → Bing html) still works
+// from residential/dev IPs and degrades honestly elsewhere.
+
+async function searchBrave(q, maxResults) {
+  const key = (process.env.BRAVE_SEARCH_API_KEY || "").trim();
+  if (!key) return null;
+  const r = await safeFetch(
+    `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=${Math.min(maxResults, 20)}`,
+    { headers: { accept: "application/json", "x-subscription-token": key } },
+    { timeoutMs: 10_000, maxBytes: 2_000_000 },
+  );
+  if (!r.ok || !r.httpOk) return { error: `brave: ${r.error ?? r.status}` };
+  try {
+    const j = JSON.parse(r.text);
+    const results = (j.web?.results ?? []).map((x) => ({
+      title: String(x.title ?? "").slice(0, 160),
+      url: String(x.url ?? ""),
+      snippet: htmlToText(String(x.description ?? "")).slice(0, 240),
+    })).filter((x) => /^https?:\/\//.test(x.url));
+    return results.length ? { results } : { error: "brave: no results" };
+  } catch { return { error: "brave: bad_json" }; }
+}
+
+async function searchTavily(q, maxResults) {
+  const key = (process.env.TAVILY_API_KEY || "").trim();
+  if (!key) return null;
+  const r = await safeFetch(
+    "https://api.tavily.com/search",
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ api_key: key, query: q, max_results: Math.min(maxResults, 10) }) },
+    { timeoutMs: 12_000, maxBytes: 2_000_000 },
+  );
+  if (!r.ok || !r.httpOk) return { error: `tavily: ${r.error ?? r.status}` };
+  try {
+    const j = JSON.parse(r.text);
+    const results = (j.results ?? []).map((x) => ({
+      title: String(x.title ?? "").slice(0, 160),
+      url: String(x.url ?? ""),
+      snippet: String(x.content ?? "").slice(0, 240),
+    })).filter((x) => /^https?:\/\//.test(x.url));
+    return results.length ? { results } : { error: "tavily: no results" };
+  } catch { return { error: "tavily: bad_json" }; }
+}
+
+// DDG "lite" endpoint: plain table markup on separate infra — sometimes
+// reachable when html.duckduckgo.com tarpits a hosted IP.
+function parseDuckDuckGoLite(html) {
+  const results = [];
+  const re = /<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) && results.length < 10) {
+    let href = decodeEntities(m[1]);
+    const uddg = href.match(/[?&]uddg=([^&]+)/);
+    if (uddg) { try { href = decodeURIComponent(uddg[1]); } catch { /* keep */ } }
+    if (!/^https?:\/\//.test(href)) continue;
+    results.push({ title: htmlToText(m[2]).slice(0, 160), url: href, snippet: "" });
+  }
+  const snips = [];
+  const sre = /class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi;
+  while ((m = sre.exec(html)) && snips.length < results.length + 4) snips.push(htmlToText(m[1]).slice(0, 240));
+  for (let i = 0; i < results.length; i++) results[i].snippet = snips[i] ?? "";
+  return results;
+}
 
 function parseDuckDuckGo(html) {
   const results = [];
@@ -94,21 +158,40 @@ export async function searchWeb(query, { maxResults = 8 } = {}) {
   const q = String(query ?? "").trim();
   if (!q) return { ok: false, error: "invalid_input", message: "Provide a search query." };
   const attempts = [];
-  // 1) DuckDuckGo HTML
+
+  // 1) Keyed APIs first — the only reliable path from hosted/datacenter IPs.
+  for (const [engine, fn] of [["brave", searchBrave], ["tavily", searchTavily]]) {
+    const r = await fn(q, maxResults);
+    if (r === null) continue; // key not configured
+    if (r.results) return { ok: true, engine, query: q, results: r.results.slice(0, maxResults) };
+    attempts.push(r.error);
+  }
+  const anyKey = !!(process.env.BRAVE_SEARCH_API_KEY || process.env.TAVILY_API_KEY);
+
+  // 2) DuckDuckGo HTML
   const ddg = await safeFetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, { headers: FETCH_HEADERS }, { timeoutMs: 10_000, maxBytes: 2_000_000 });
   if (ddg.ok && ddg.httpOk) {
     const results = parseDuckDuckGo(ddg.text);
     if (results.length) return { ok: true, engine: "duckduckgo", query: q, results: results.slice(0, maxResults) };
     attempts.push("duckduckgo: no results parsed");
   } else attempts.push(`duckduckgo: ${ddg.error ?? ddg.status}`);
-  // 2) Bing HTML fallback
+  // 3) DuckDuckGo lite (separate infra; sometimes survives when html.* is blocked)
+  const lite = await safeFetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}`, { headers: FETCH_HEADERS }, { timeoutMs: 10_000, maxBytes: 2_000_000 });
+  if (lite.ok && lite.httpOk) {
+    const results = parseDuckDuckGoLite(lite.text);
+    if (results.length) return { ok: true, engine: "duckduckgo-lite", query: q, results: results.slice(0, maxResults) };
+    attempts.push("ddg-lite: no results parsed");
+  } else attempts.push(`ddg-lite: ${lite.error ?? lite.status}`);
+  // 4) Bing HTML fallback
   const bing = await safeFetch(`https://www.bing.com/search?q=${encodeURIComponent(q)}`, { headers: FETCH_HEADERS }, { timeoutMs: 10_000, maxBytes: 2_000_000 });
   if (bing.ok && bing.httpOk) {
     const results = parseBing(bing.text);
     if (results.length) return { ok: true, engine: "bing", query: q, results: results.slice(0, maxResults) };
     attempts.push("bing: no results parsed");
   } else attempts.push(`bing: ${bing.error ?? bing.status}`);
-  return { ok: false, error: "search_failed", message: `Web search failed (${attempts.join("; ")}).` };
+
+  const hint = anyKey ? "" : " Hosted deployments are often bot-walled by search engines — set BRAVE_SEARCH_API_KEY or TAVILY_API_KEY (both have free tiers) for reliable search.";
+  return { ok: false, error: "search_failed", message: `Web search failed (${attempts.join("; ")}).${hint}` };
 }
 
 /* --------------------------------- Read ---------------------------------- */
