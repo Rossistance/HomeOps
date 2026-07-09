@@ -40,7 +40,7 @@ test("meal → calendar composes the full recipe body into the event notes", asy
   assert.ok(ev.notes.includes("Recipe: https://example.com/fajitas"), "notes carry the source URL");
   assert.ok(ev.notes.includes("• chicken"), "notes carry the ingredient list");
   assert.ok(ev.notes.includes("2. Roast at 425°F for 20 minutes."), "notes carry numbered instructions");
-  assert.ok(ev.notes.includes("Linked in HomeOps"), "notes point back to the mini apps");
+  assert.ok(ev.notes.includes("Linked in FamiliOS"), "notes point back to the mini apps");
 });
 
 test("events accept and round-trip a notes body via PATCH", async () => {

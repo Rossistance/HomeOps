@@ -1,4 +1,4 @@
-// HomeOps AI — orchestrator: turns an entry point (skill run, agent run, chat plan)
+// FamiliOS AI — orchestrator: turns an entry point (skill run, agent run, chat plan)
 // into a concrete plan, records the routing decision, and starts a durable run.
 // Slice 1 implements deterministic skill→plan expansion + routing; agent/skill
 // SELECTION from a free-text goal is fleshed out in later slices.

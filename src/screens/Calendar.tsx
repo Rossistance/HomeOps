@@ -15,12 +15,12 @@ function linkifyNotes(text: string) {
 }
 const toLocalInput = (iso?: string | null) => { if (!iso) return ""; const d = new Date(iso); if (isNaN(+d)) return ""; const p = (n: number) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
 
-/** A pull flagged this event: both HomeOps and Google changed it since the last push/merge. */
+/** A pull flagged this event: both FamiliOS and Google changed it since the last push/merge. */
 type SyncConflict = { at: number; googleUpdated: string | null; google: { title?: string; startAt?: string | null; endAt?: string | null; location?: string } };
 const conflictOf = (ev: ServerEvent): SyncConflict | null => ((ev.provenance as { conflict?: SyncConflict } | undefined)?.conflict ?? null);
 
 /** Calendar — the home for the rich family-event model (P4.1) and the three-layer
- *  calendar (P4.2): HomeOps-owned "canonical" events are editable + pushable to Google;
+ *  calendar (P4.2): FamiliOS-owned "canonical" events are editable + pushable to Google;
  *  "linked" events (Google/ICS subscriptions) are read-only (copy to edit).
  *  Phase 3 polish: list ⇄ month grid toggle, editable participants/driver/what-to-bring/
  *  checklist in the drawer, and one-step inline approval for Google push. */
@@ -86,7 +86,7 @@ export function Calendar() {
 
   return (
     <div className="animate-fade-in">
-      <PageHeader title="Calendar" subtitle="Your household's events. HomeOps events are yours to edit and push to Google; synced feeds are read-only." icon="CalendarDays" />
+      <PageHeader title="Calendar" subtitle="Your household's events. FamiliOS events are yours to edit and push to Google; synced feeds are read-only." icon="CalendarDays" />
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="inline-flex rounded-xl border border-ink-900/[0.08] bg-surface-sunken/60 p-0.5" role="tablist" aria-label="Calendar view">
@@ -182,7 +182,7 @@ function MonthGrid({ byDay, nameOf, onOpen }: { byDay: Record<string, ServerEven
             </button>
           ))}
         </div>
-        <p className="mt-2 text-[11px] text-ink-400"><span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-ember-500 align-middle" /> HomeOps <span className="mx-1 inline-block h-1.5 w-1.5 rounded-full bg-sky-400 align-middle" /> Synced</p>
+        <p className="mt-2 text-[11px] text-ink-400"><span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-ember-500 align-middle" /> FamiliOS <span className="mx-1 inline-block h-1.5 w-1.5 rounded-full bg-sky-400 align-middle" /> Synced</p>
       </Card>
       {selDay && (
         <Card className="card-pad">
@@ -249,7 +249,7 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
     else toast({ kind: "error", title: "Couldn't save", message: r.error });
   };
   const del = async () => { setBusy(true); await backend.deleteEvent(ev.id); setBusy(false); await onGone(); toast({ kind: "info", title: "Event removed" }); };
-  const copy = async () => { setBusy(true); const r = await backend.createEvent({ title: ev.title, startAt: ev.startAt, endAt: ev.endAt, location: ev.location, participantIds: ev.participantIds, visibility: "household" }); setBusy(false); if (r.event) { await onGone(); toast({ kind: "success", title: "Copied to a HomeOps event", message: "Now editable." }); } };
+  const copy = async () => { setBusy(true); const r = await backend.createEvent({ title: ev.title, startAt: ev.startAt, endAt: ev.endAt, location: ev.location, participantIds: ev.participantIds, visibility: "household" }); setBusy(false); if (r.event) { await onGone(); toast({ kind: "success", title: "Copied to a FamiliOS event", message: "Now editable." }); } };
 
   const push = async (approvalId?: string) => {
     setBusy(true);
@@ -285,7 +285,7 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
     setBusy(false);
     if (r.ok) {
       await onChanged(ev.id);
-      toast({ kind: "success", title: choice === "google" ? "Google's version applied" : "Kept your HomeOps version", message: choice === "local" ? "Google still has its own version — push the event to update it." : undefined });
+      toast({ kind: "success", title: choice === "google" ? "Google's version applied" : "Kept your FamiliOS version", message: choice === "local" ? "Google still has its own version — push the event to update it." : undefined });
     } else toast({ kind: "error", title: "Couldn't resolve", message: r.message ?? r.error });
   };
 
@@ -297,9 +297,9 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
           <Button variant="secondary" disabled={busy || !!pushApproval} onClick={() => push()}><Icon name="Upload" size={14} /> {ev.provenance?.googleEventId ? "Update in Google" : "Push to Google"}</Button>
           <Button variant="ghost" disabled={busy} onClick={del}><Icon name="Trash2" size={14} /> Delete</Button>
         </div>
-      ) : canManage && linked ? <Button variant="ember" disabled={busy} onClick={copy}><Icon name="Copy" size={14} /> Copy to a HomeOps event</Button> : undefined}>
+      ) : canManage && linked ? <Button variant="ember" disabled={busy} onClick={copy}><Icon name="Copy" size={14} /> Copy to a FamiliOS event</Button> : undefined}>
       <div className="space-y-4">
-        {linked && <p className="rounded-2xl border border-sky-200/70 bg-sky-50 px-3.5 py-2.5 text-sm text-sky-800"><Icon name="RefreshCw" size={13} className="mr-1 inline" /> Synced from {ev.source || "an external calendar"} — read-only here. Copy it to make an editable HomeOps event.</p>}
+        {linked && <p className="rounded-2xl border border-sky-200/70 bg-sky-50 px-3.5 py-2.5 text-sm text-sky-800"><Icon name="RefreshCw" size={13} className="mr-1 inline" /> Synced from {ev.source || "an external calendar"} — read-only here. Copy it to make an editable FamiliOS event.</p>}
 
         {conflict && (
           <div className="rounded-xl border border-coral-200/80 bg-coral-50/70 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
@@ -307,7 +307,7 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
             <p className="mb-2 text-xs text-ink-600">It was edited both here and in Google Calendar since the last sync. Pick the version to keep — nothing is overwritten until you choose.</p>
             <div className="mb-2.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
               <div className="rounded-lg border border-ink-900/[0.06] bg-surface px-2.5 py-2">
-                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-400">HomeOps version</p>
+                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-400">FamiliOS version</p>
                 <p className="text-sm font-medium text-ink-800">{ev.title}</p>
                 <p className="text-xs text-ink-500">{ev.startAt ? new Date(ev.startAt).toLocaleString() : "No date"}{ev.location ? ` · ${ev.location}` : ""}</p>
               </div>
@@ -318,7 +318,7 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Button size="sm" variant="primary" disabled={busy} onClick={() => resolve("local")}><Icon name="Home" size={13} /> Keep HomeOps version</Button>
+              <Button size="sm" variant="primary" disabled={busy} onClick={() => resolve("local")}><Icon name="Home" size={13} /> Keep FamiliOS version</Button>
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => resolve("google")}><Icon name="Download" size={13} /> Use Google version</Button>
             </div>
           </div>
@@ -435,7 +435,7 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
           </>
         )}
         <div className="flex flex-wrap items-center gap-2 border-t border-ink-900/[0.06] pt-3 text-xs text-ink-400">
-          <span>Source: {ev.source || "HomeOps"}</span>
+          <span>Source: {ev.source || "FamiliOS"}</span>
           {!!ev.provenance?.googleEventId && <Badge color="sage"><Icon name="Check" size={10} /> In Google</Badge>}
           {ev.layer && <span>· {ev.layer} layer</span>}
         </div>

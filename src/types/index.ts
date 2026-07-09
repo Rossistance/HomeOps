@@ -1,5 +1,5 @@
 /**
- * HomeOps AI — entity model.
+ * FamiliOS AI — entity model.
  *
  * Mirrors 04_ARCHITECTURE_AND_DATA_MODEL.md, adapted into a normalized,
  * local-first shape. Collections are stored as arrays inside `AppData` and

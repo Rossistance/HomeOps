@@ -1,4 +1,4 @@
-// MERGE-BACK (Phase 9) — Google → HomeOps edits for pushed canonical events.
+// MERGE-BACK (Phase 9) — Google → FamiliOS edits for pushed canonical events.
 // The decision logic is pure (mergeGoogleEdit) and fully covered by fixtures; the
 // route is covered for role gating + the no-account guard (a live Google account
 // is required to exercise the network half and isn't available in this env).
@@ -51,7 +51,7 @@ test("local-only edit (Google unchanged since push) → none — pull never clob
   assert.equal(mergeGoogleEdit({ ev, gev: gev({ summary: "Dentist" }) }).action, "none");
 });
 
-test("Google deletion/cancellation → unlink (HomeOps event survives as canonical)", () => {
+test("Google deletion/cancellation → unlink (FamiliOS event survives as canonical)", () => {
   assert.equal(mergeGoogleEdit({ ev: baseEv, gev: null }).action, "unlinked");
   assert.equal(mergeGoogleEdit({ ev: baseEv, gev: gev({ status: "cancelled" }) }).action, "unlinked");
 });

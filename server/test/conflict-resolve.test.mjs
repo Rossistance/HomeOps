@@ -1,6 +1,6 @@
 // CONFLICT RESOLUTION — the human half of two-way Google sync. When a pull flags
 // provenance.conflict (both sides changed), POST /api/events/:id/resolve-conflict
-// applies the user's choice: adopt Google's version or keep the HomeOps one. Either
+// applies the user's choice: adopt Google's version or keep the FamiliOS one. Either
 // way the flag clears and the baseline resets so the next pull doesn't re-flag.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -31,7 +31,7 @@ test("pure: choice=google adopts Google's fields and clears the flag", () => {
   assert.ok(p.provenance.lastMergeAt > 0, "baseline reset so the next pull is clean");
 });
 
-test("pure: choice=local keeps HomeOps fields, clears the flag, resets the baseline", () => {
+test("pure: choice=local keeps FamiliOS fields, clears the flag, resets the baseline", () => {
   const ev = { title: "Dentist for Noah", provenance: { googleEventId: "g1", conflict: CONFLICT } };
   const p = resolveConflictPatch(ev, "local");
   assert.equal(p.title, undefined, "no field changes — local version stands");

@@ -1,4 +1,4 @@
-// HomeOps AI — backend control plane (Node built-in http; no extra dependencies).
+// FamiliOS AI — backend control plane (Node built-in http; no extra dependencies).
 // Deny-by-default authority: origin allowlist, authenticated sessions, CSRF on
 // mutations, role checks, server-side approval records (consume-once), PKCE OAuth,
 // HMAC webhooks, SSRF-guarded egress, a real job scheduler, AI provider adapters,
@@ -252,13 +252,13 @@ const server = http.createServer(async (req, res) => {
         const deepLink = `homeops://oauth-callback?${new URLSearchParams(params).toString()}`;
         const ok = params.ok === "1";
         res.writeHead(200, { "content-type": "text/html" });
-        return res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:system-ui;background:#f4f0e9;color:#1f2535;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center;max-width:28rem;padding:1rem"><div style="font-size:40px">${ok ? "✓" : "✕"}</div><h2>${ok ? `${escapeHtml(params.provider ?? "Account")} connected` : "Connection failed"}</h2><p style="color:#4a5568">${escapeHtml(params.message ?? (ok ? "Returning to HomeOps…" : "Return to HomeOps and try again."))}</p><p><a href="${deepLink}" style="display:inline-block;padding:12px 22px;border-radius:12px;background:#d26420;color:#fff;text-decoration:none;font-weight:600">Return to HomeOps</a></p></div><script>location.replace(${JSON.stringify(deepLink)})</script></body>`);
+        return res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:system-ui;background:#f4f0e9;color:#1f2535;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center;max-width:28rem;padding:1rem"><div style="font-size:40px">${ok ? "✓" : "✕"}</div><h2>${ok ? `${escapeHtml(params.provider ?? "Account")} connected` : "Connection failed"}</h2><p style="color:#4a5568">${escapeHtml(params.message ?? (ok ? "Returning to FamiliOS…" : "Return to FamiliOS and try again."))}</p><p><a href="${deepLink}" style="display:inline-block;padding:12px 22px;border-radius:12px;background:#d26420;color:#fff;text-decoration:none;font-weight:600">Return to FamiliOS</a></p></div><script>location.replace(${JSON.stringify(deepLink)})</script></body>`);
       };
       if (!st || !code) {
         audit({ type: "oauth.callback", ok: false, error: "invalid_state" }, req);
         if (isMobileFlow) return finishMobile({ ok: "0", error: "expired", message: "This authorization expired. Please try connecting again." });
         res.writeHead(200, { "content-type": "text/html" });
-        return res.end(htmlMessage("Connection failed", "This authorization link is invalid or expired. Please start again from HomeOps."));
+        return res.end(htmlMessage("Connection failed", "This authorization link is invalid or expired. Please start again from FamiliOS."));
       }
       const provider = connectorProviderById(st.provider);
       if (!provider) {
@@ -283,7 +283,7 @@ const server = http.createServer(async (req, res) => {
         }
         const target = st.appOrigin && isAllowedOrigin(st.appOrigin) ? st.appOrigin : APP_ORIGIN;
         res.writeHead(200, { "content-type": "text/html" });
-        return res.end(`<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;background:#f4f0e9;color:#1f2535;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:40px">✓</div><h2>${escapeHtml(provider.name)} connected</h2><p style="color:#4a5568">Signed in as ${escapeHtml(acct.displayName)} — returning to HomeOps…</p></div><script>try{window.opener&&window.opener.postMessage({type:"homeops-oauth",provider:${JSON.stringify(st.provider)},ok:true},${JSON.stringify(target)})}catch(e){}setTimeout(()=>window.close(),900)</script></body>`);
+        return res.end(`<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;background:#f4f0e9;color:#1f2535;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:40px">✓</div><h2>${escapeHtml(provider.name)} connected</h2><p style="color:#4a5568">Signed in as ${escapeHtml(acct.displayName)} — returning to FamiliOS…</p></div><script>try{window.opener&&window.opener.postMessage({type:"homeops-oauth",provider:${JSON.stringify(st.provider)},ok:true},${JSON.stringify(target)})}catch(e){}setTimeout(()=>window.close(),900)</script></body>`);
       } catch (e) {
         appendAudit({ type: "oauth.callback", provider: st.provider, ok: false, error: "exception" });
         if (isMobileFlow) return finishMobile({ ok: "0", provider: provider.name, error: "server_error", message: "Something went wrong completing the connection." });
@@ -857,7 +857,7 @@ const server = http.createServer(async (req, res) => {
         reminders: body.reminders ?? [], attachments: [], comments: [], mealImpact: body.mealImpact ?? null,
         visibility: body.visibility ?? "household", category: body.category ?? "Family",
         layer: body.layer ?? "canonical", status: body.status ?? "confirmed",
-        source: body.source ?? "HomeOps", provenance: { via: "user", actorId: g.session.actorId },
+        source: body.source ?? "FamiliOS", provenance: { via: "user", actorId: g.session.actorId },
         createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
       });
       audit({ type: "event.create", eventId: ev.id, ok: true }, req, g.session);
@@ -870,10 +870,10 @@ const server = http.createServer(async (req, res) => {
       if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       // Only an adult, the owner, or a participant may edit; others can't even see it.
       if (!canSeeEntity(ev, g.session) || (!isAdultRole(g.session.role) && ev.ownerId !== g.session.actorId)) return json(res, 403, { error: "forbidden" }, req);
-      // Three-layer calendar: only canonical (HomeOps-owned) events are editable. Linked
+      // Three-layer calendar: only canonical (FamiliOS-owned) events are editable. Linked
       // (read-only synced) and public (ICS subscription) events are externally owned —
       // editing them would blur source-of-truth, so we refuse and tell the client to copy.
-      if (ev.layer && ev.layer !== "canonical") return json(res, 409, { error: "read_only_layer", message: "This event is synced from an external calendar and can't be edited here — copy it to a HomeOps event first." }, req);
+      if (ev.layer && ev.layer !== "canonical") return json(res, 409, { error: "read_only_layer", message: "This event is synced from an external calendar and can't be edited here — copy it to a FamiliOS event first." }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const { id, householdId, createdBy, createdAt, ...patch } = body; // never reassign identity/ownership-of-record
       const updated = patchEvent(ev.id, patch);
@@ -1060,7 +1060,7 @@ const server = http.createServer(async (req, res) => {
         participantIds: [], driverId: null, ownerId: g.session.actorId, backupOwnerId: null,
         whatToBring: [], checklist: [], travel: null, reminders: [], attachments: [], comments: [],
         mealImpact: null, mealId: m.id, visibility: m.visibility ?? "household", category: "Meal",
-        layer: "canonical", status: "confirmed", source: "HomeOps",
+        layer: "canonical", status: "confirmed", source: "FamiliOS",
         provenance: { via: "meal", actorId: g.session.actorId },
         createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
       });
@@ -1092,7 +1092,7 @@ const server = http.createServer(async (req, res) => {
       audit({ type: "calendar.subscribe", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, req, g.session);
       return json(res, r.ok ? 200 : 422, { subscription: getSubscription(sub.id), sync: r }, req);
     }
-    // Push a HomeOps canonical event TO Google Calendar (the write half of two-way sync).
+    // Push a FamiliOS canonical event TO Google Calendar (the write half of two-way sync).
     // Approval-first (writing to your real calendar needs sign-off) + deduped: a stored
     // provenance.googleEventId turns re-pushes into updates. Linked (synced) events can't be
     // pushed back. The live Google write goes through apiForAccount (auto-refresh).
@@ -1104,7 +1104,7 @@ const server = http.createServer(async (req, res) => {
       const ev = getEvent(pushMatch[1]);
       if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
-      if (ev.layer && ev.layer !== "canonical") return json(res, 400, { error: "not_pushable", message: "This event is synced from another calendar — only your own HomeOps events can be pushed to Google." }, req);
+      if (ev.layer && ev.layer !== "canonical") return json(res, 400, { error: "not_pushable", message: "This event is synced from another calendar — only your own FamiliOS events can be pushed to Google." }, req);
       if (!ev.startAt) return json(res, 400, { error: "no_start", message: "Give the event a start time before pushing it." }, req);
       const account = listAccountsFor(g.session.householdId, g.session.actorId).find((a) => a.provider === "google");
       if (!account) return json(res, 422, { error: "connect_google_first", message: "Connect your Google account (with calendar access) in Connections first." }, req);
@@ -1131,7 +1131,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Two-way sync, merge-back half (Phase 9): pull Google-side edits into pushed canonical
     // events. Clean Google edits merge; both-sides-changed flags provenance.conflict for
-    // review (never silently overwritten); Google deletions unlink (HomeOps stays canonical).
+    // review (never silently overwritten); Google deletions unlink (FamiliOS stays canonical).
     if (path === "/api/calendar/pull-google-edits" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
@@ -1142,7 +1142,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Resolve a flagged pull conflict (provenance.conflict) — the human decision the
     // merge-back engine defers to. choice:"google" adopts Google's version; choice:"local"
-    // keeps HomeOps' fields (re-push to sync Google). Either way the flag clears and the
+    // keeps FamiliOS' fields (re-push to sync Google). Either way the flag clears and the
     // merge baseline resets so the next pull doesn't re-flag the same difference.
     const resolveMatch = path.match(/^\/api\/events\/([^/]+)\/resolve-conflict$/);
     if (resolveMatch && method === "POST") {
@@ -1160,7 +1160,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Connect the actor's Google Calendar as a read-only linked source (pull sync). Needs a
     // Google account connected in Connections with calendar access. One subscription per
-    // account — repeat calls just re-sync. Push (HomeOps → Google) is a separate build.
+    // account — repeat calls just re-sync. Push (FamiliOS → Google) is a separate build.
     if (path === "/api/calendar/connect-google" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
@@ -2444,7 +2444,7 @@ function approvalErrorMessage(err) {
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function htmlMessage(title, body) {
-  return `<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;background:#f4f0e9;color:#1f2535;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center;max-width:28rem;padding:1rem"><h2>HomeOps — ${escapeHtml(title)}</h2><p style="color:#4a5568">${escapeHtml(body)}</p></div></body>`;
+  return `<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;background:#f4f0e9;color:#1f2535;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center;max-width:28rem;padding:1rem"><h2>FamiliOS — ${escapeHtml(title)}</h2><p style="color:#4a5568">${escapeHtml(body)}</p></div></body>`;
 }
 
 server.listen(PORT, () => {
@@ -2492,5 +2492,5 @@ server.listen(PORT, () => {
   // readiness reflects reality (connected vs. runtime_unavailable) from the start.
   if (process.env.BROWSER_RUNTIME_URL) healthCheck("browser").catch(() => {});
   // eslint-disable-next-line no-console
-  console.log(`HomeOps backend (control plane v${VERSION}) listening on http://localhost:${PORT} — env=${IS_PROD ? "production" : "development"}, origins=${ALLOWED_ORIGINS.join(",") || "(none)"}`);
+  console.log(`FamiliOS backend (control plane v${VERSION}) listening on http://localhost:${PORT} — env=${IS_PROD ? "production" : "development"}, origins=${ALLOWED_ORIGINS.join(",") || "(none)"}`);
 });

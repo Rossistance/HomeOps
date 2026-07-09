@@ -1,4 +1,4 @@
-// HomeOps AI — internal functions: real, server-side handlers that mutate HomeOps'
+// FamiliOS AI — internal functions: real, server-side handlers that mutate FamiliOS'
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
@@ -17,7 +17,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     // Persist a household/personal memory entry the assistant can recall later.
     async run(ctx, input) {
       const text = String(input?.text ?? "").trim();
@@ -40,7 +40,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     // Produce a durable artifact (briefing / report / checklist) tied to the run.
     async run(ctx, input) {
       const title = String(input?.title ?? "Untitled").trim();
@@ -63,7 +63,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "High",
     requiresApproval: true,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     // Gated on a real human approval. The handler runs ONLY after the household
     // approved the step, and records the approved decision as a durable artifact so
     // the sign-off has an auditable, persistent outcome.
@@ -93,7 +93,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     async run(ctx, input) {
       const title = String(input?.title ?? "").trim();
       if (!title) return { ok: false, error: "empty_title", message: "An event needs a title." };
@@ -108,7 +108,7 @@ export const INTERNAL_FUNCTIONS = {
         attachments: [], comments: [], mealImpact: input?.mealImpact ?? null,
         visibility: input?.visibility ?? "household", category: input?.category ?? "Family",
         layer: "canonical", status: "draft",
-        source: "HomeOps Assistant", provenance: { via: "agent", runId: ctx.runId, actorId: ctx.actorId },
+        source: "FamiliOS Assistant", provenance: { via: "agent", runId: ctx.runId, actorId: ctx.actorId },
         createdBy: ctx.actorId, createdAt: Date.now(), updatedAt: nowISO(),
       });
       return { ok: true, result: { id: rec.id, title: rec.title, status: rec.status } };
@@ -122,7 +122,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     async run(ctx, input) {
       const ev = getEvent(input?.eventId);
       if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
@@ -140,7 +140,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     async run(ctx, input) {
       const ev = getEvent(input?.eventId);
       if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
@@ -156,7 +156,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     async run(ctx, input) {
       const ev = getEvent(input?.eventId);
       if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
@@ -174,7 +174,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     async run(ctx, input) {
       const title = String(input?.title ?? "").trim();
       if (!title) return { ok: false, error: "empty_title", message: "A task needs a title." };
@@ -198,7 +198,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     // One approved meal → everything wired in a single real action:
     //   1. meal in the Meal Planner (title, date, slot, recipe URL, ingredients, instructions)
     //   2. missing ingredients onto the shared Groceries list (mealId back-reference,
@@ -255,7 +255,7 @@ export const INTERNAL_FUNCTIONS = {
               ownerId: ctx.actorId, backupOwnerId: null, whatToBring: [], checklist: [], travel: null,
               reminders: [], attachments: [], comments: [], mealImpact: null, mealId: meal.id,
               visibility: "household", category: "Meal", layer: "canonical", status: "confirmed",
-              source: "HomeOps Assistant", provenance: { via: "meal", runId: ctx.runId, actorId: ctx.actorId },
+              source: "FamiliOS Assistant", provenance: { via: "meal", runId: ctx.runId, actorId: ctx.actorId },
               createdBy: ctx.actorId, createdAt: Date.now(), updatedAt: now,
             });
       }
@@ -276,7 +276,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     // List items (groceries, packing) are modeled as lightweight tasks of type "list".
     async run(ctx, input) {
       const title = String(input?.text ?? input?.title ?? "").trim();
@@ -299,7 +299,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     async run(ctx, input) {
       const ev = getEvent(input?.eventId);
       if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
@@ -316,7 +316,7 @@ export const INTERNAL_FUNCTIONS = {
     risk: "Low",
     requiresApproval: false,
     connectorId: "homeops",
-    connectorName: "HomeOps",
+    connectorName: "FamiliOS",
     // Review-first: produces a DRAFT artifact for a human to review, never sends.
     // Actually sending goes through a gated connector tool (sms/gmail) + approval.
     async run(ctx, input) {

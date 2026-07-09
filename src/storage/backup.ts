@@ -5,7 +5,7 @@ import { defaultSettings } from "@/data/seed";
 /** Serialize the entire household to a downloadable JSON backup. */
 export function exportBackup(data: AppData): void {
   const payload = {
-    app: "HomeOps AI",
+    app: "FamiliOS AI",
     schemaVersion: SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
     data,
@@ -51,7 +51,7 @@ export async function importBackup(file: File): Promise<ImportResult> {
     ? (parsed as { data: unknown }).data
     : parsed) as Partial<AppData> | undefined;
 
-  if (!raw || typeof raw !== "object") return { ok: false, error: "This file does not contain HomeOps data." };
+  if (!raw || typeof raw !== "object") return { ok: false, error: "This file does not contain FamiliOS data." };
   if (!raw.household || typeof raw.household !== "object" || !(raw.household as { id?: string }).id) {
     return { ok: false, error: "Backup is missing a valid household record." };
   }
@@ -63,7 +63,7 @@ export async function importBackup(file: File): Promise<ImportResult> {
     return { ok: false, error: "Backup must contain at least one household member." };
   }
   if (typeof raw.schemaVersion === "number" && raw.schemaVersion > SCHEMA_VERSION) {
-    return { ok: false, error: `Backup is from a newer version (schema ${raw.schemaVersion}). Update HomeOps before importing.` };
+    return { ok: false, error: `Backup is from a newer version (schema ${raw.schemaVersion}). Update FamiliOS before importing.` };
   }
 
   // Fill safe defaults / migrate so the imported state is internally complete.

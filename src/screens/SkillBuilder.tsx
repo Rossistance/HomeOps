@@ -600,7 +600,7 @@ function RecipesPanel({ initialId }: { initialId?: string | null }) {
 
   return (
     <div>
-      <p className="mb-3 text-sm text-ink-500">Reusable, step-by-step instructions for recurring household workflows — a read-only reference view. Run one directly, or ask HomeOps to follow it.</p>
+      <p className="mb-3 text-sm text-ink-500">Reusable, step-by-step instructions for recurring household workflows — a read-only reference view. Run one directly, or ask FamiliOS to follow it.</p>
       <div className="mb-4 flex flex-wrap gap-2">{cats.map((c) => <button key={c} onClick={() => setCat(c)} className={`chip pressable transition-colors ${cat === c ? "bg-ink-800 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]" : "border border-ink-900/10 bg-surface-raised text-ink-600 hover:bg-surface-overlay"}`}>{c}</button>)}</div>
       {active.length === 0 ? <EmptyState icon="ScrollText" title="No recipes yet" message="Recipes are created by your agents and automations as they learn recurring workflows." /> : (
         <div className="stagger grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">

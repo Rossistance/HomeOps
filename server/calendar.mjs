@@ -1,8 +1,8 @@
 // Calendar subscription sync: turn a calendar source — a Google Calendar (OAuth), an .ics
-// feed URL, or pasted .ics — into HomeOps' read-only "linked" calendar-layer events. The
+// feed URL, or pasted .ics — into FamiliOS' read-only "linked" calendar-layer events. The
 // source is the source of truth: re-syncing updates matched events (by UID) and drops ones
 // that left it. These events are layer:"linked", so the events PATCH route refuses edits
-// (copy-to-edit). Only the READ direction is implemented (Google → HomeOps); pushing HomeOps
+// (copy-to-edit). Only the READ direction is implemented (Google → FamiliOS); pushing FamiliOS
 // events into Google is a separate, approval-gated build.
 import crypto from "node:crypto";
 import { safeFetch } from "./net.mjs";
@@ -99,16 +99,16 @@ export async function syncSubscription({ sub, icsText, session }) {
   return { ok: true, imported, updated, removed, total: parsed.length };
 }
 
-/* ---- Two-way sync, merge-back half (Phase 9): Google edits → pushed HomeOps events ----
+/* ---- Two-way sync, merge-back half (Phase 9): Google edits → pushed FamiliOS events ----
  * For canonical events previously pushed to Google (provenance.googleEventId), detect edits
  * made on the Google side and merge them back. Conflict policy (decided at design time):
  * if BOTH sides changed since the last push/merge, we FLAG the event for review
- * (provenance.conflict) instead of silently overwriting — HomeOps never clobbers a family's
+ * (provenance.conflict) instead of silently overwriting — FamiliOS never clobbers a family's
  * canonical event without a human seeing it. A Google-side delete/cancel UNLINKS the event
- * (HomeOps stays canonical; the next push would re-create it) rather than deleting it. */
+ * (FamiliOS stays canonical; the next push would re-create it) rather than deleting it. */
 
 // Pure decision function — unit-testable with fixtures, no network.
-// ev: HomeOps canonical event; gev: raw Google event resource (null if 404/cancelled).
+// ev: FamiliOS canonical event; gev: raw Google event resource (null if 404/cancelled).
 export function mergeGoogleEdit({ ev, gev }) {
   const prov = ev.provenance ?? {};
   if (!gev || gev.status === "cancelled") return { action: "unlinked" };
@@ -117,7 +117,7 @@ export function mergeGoogleEdit({ ev, gev }) {
     startAt: gev.start?.dateTime ?? gev.start?.date ?? null,
     endAt: gev.end?.dateTime ?? gev.end?.date ?? null,
     location: gev.location ?? "",
-    // Event body: Google `description` ↔ HomeOps `notes`. Both directions carry the
+    // Event body: Google `description` ↔ FamiliOS `notes`. Both directions carry the
     // full context text (recipe links, ingredient lists, mini-app references).
     notes: gev.description ?? "",
   };
@@ -131,7 +131,7 @@ export function mergeGoogleEdit({ ev, gev }) {
   const baseline = Math.max(prov.pushedAt ?? 0, prov.lastMergeAt ?? 0);
   // Google's `updated` within ~5s of our own write is just our push echoing back.
   const googleChanged = gev.updated ? Date.parse(gev.updated) > baseline + 5000 : true;
-  if (!googleChanged) return { action: "none" }; // difference is a local HomeOps edit awaiting push — never pull over it
+  if (!googleChanged) return { action: "none" }; // difference is a local FamiliOS edit awaiting push — never pull over it
   const localChanged = Date.parse(ev.updatedAt ?? 0) > baseline + 2000;
   if (localChanged) return { action: "conflict", fields, googleUpdated: gev.updated ?? null };
   return { action: "merge", fields, googleUpdated: gev.updated ?? null };
@@ -175,7 +175,7 @@ export async function pullGoogleEdits({ session }) {
  * A flagged event (provenance.conflict) holds Google's version alongside the local one.
  * Resolving is a pure decision → patch:
  *   choice:"google" → adopt Google's fields; baseline resets so the next pull is clean.
- *   choice:"local"  → keep HomeOps' fields; baseline resets so the pull stops re-flagging
+ *   choice:"local"  → keep FamiliOS' fields; baseline resets so the pull stops re-flagging
  *                     (Google still differs until the user re-pushes — that's explicit). */
 export function resolveConflictPatch(ev, choice) {
   const conflict = ev?.provenance?.conflict;
@@ -193,7 +193,7 @@ export function resolveConflictPatch(ev, choice) {
 /* ---- Meal → calendar event body ----
  * Composes the event `notes` (and therefore the Google Calendar description) from
  * a meal: source recipe URL, full ingredient list, step-by-step instructions, and
- * a pointer to the linked HomeOps mini apps. Pure + unit-testable. */
+ * a pointer to the linked FamiliOS mini apps. Pure + unit-testable. */
 export function mealEventNotes(meal) {
   const lines = [];
   if (meal.recipeUrl) lines.push(`Recipe: ${meal.recipeUrl}`);
@@ -202,7 +202,7 @@ export function mealEventNotes(meal) {
   if (ingredients.length) lines.push("", "Ingredients:", ...ingredients.map((i) => `• ${i}`));
   const steps = (meal.instructions ?? []).filter(Boolean);
   if (steps.length) lines.push("", "Instructions:", ...steps.map((s, i) => `${i + 1}. ${s}`));
-  lines.push("", "Linked in HomeOps: Meal planner + Groceries list (ingredients synced).");
+  lines.push("", "Linked in FamiliOS: Meal planner + Groceries list (ingredients synced).");
   return lines.join("\n").trim();
 }
 

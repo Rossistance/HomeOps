@@ -1,4 +1,4 @@
-// HomeOps AI — push notifications (Expo). Shared by the run engine (so a run that
+// FamiliOS AI — push notifications (Expo). Shared by the run engine (so a run that
 // parks for approval notifies the household even with NO browser open) and by the
 // HTTP layer (API-created approvals). Fire-and-forget; never throws.
 import { getPushTokens, addNotification, appendAudit, getContactMethod } from "./store.mjs";
@@ -78,15 +78,15 @@ export async function sendVerificationCode({ session, method, code }) {
     session,
     channel: CHANNEL_FOR[method.type] ?? method.type,
     to: EXTERNAL_TYPES.includes(method.type) ? method.value : null,
-    subject: "Your HomeOps verification code",
-    body: `Your HomeOps verification code for “${method.label}” is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore it.`,
+    subject: "Your FamiliOS verification code",
+    body: `Your FamiliOS verification code for “${method.label}” is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore it.`,
     recipientActorId: method.memberId,
   });
 }
 
 async function deliverViaChannel({ session, channel, to, subject: rawSubject, body, recipientActorId }) {
   const text = String(body ?? "").slice(0, 2000);
-  const subject = String(rawSubject ?? "HomeOps").slice(0, 140);
+  const subject = String(rawSubject ?? "FamiliOS").slice(0, 140);
   try {
     if (channel === "in_app" || channel === "dashboard") {
       const rec = addNotification({ householdId: session.householdId, actorId: recipientActorId ?? session.actorId, channel, title: subject, body: text, to: to ?? null });

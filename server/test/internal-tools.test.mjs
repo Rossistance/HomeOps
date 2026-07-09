@@ -1,4 +1,4 @@
-// P1.2 — internal HomeOps data tools do real, durable writes (run-engine handlers).
+// P1.2 — internal FamiliOS data tools do real, durable writes (run-engine handlers).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

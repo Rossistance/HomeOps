@@ -1,5 +1,5 @@
 // Minimal, dependency-free iCalendar (RFC 5545) parser — just enough to import events
-// from a school / sports / holiday .ics feed into HomeOps' read-only "linked" calendar
+// from a school / sports / holiday .ics feed into FamiliOS' read-only "linked" calendar
 // layer. Not a full implementation: we read VEVENT SUMMARY / DTSTART / DTEND / LOCATION /
 // UID / RRULE / EXDATE and normalize dates to ISO. Recurrence covers the common shapes
 // (FREQ daily/weekly/monthly/yearly, INTERVAL, COUNT, UNTIL, weekly BYDAY, monthly

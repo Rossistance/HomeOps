@@ -1,4 +1,4 @@
-// HomeOps — production web capability (search / read / recipe extraction).
+// FamiliOS — production web capability (search / read / recipe extraction).
 //
 // Zero-dependency: works on any host (Render, local, CI) with plain fetch, so
 // web + iOS clients get real web access WITHOUT the local Playwright runtime.

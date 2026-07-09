@@ -1,4 +1,4 @@
-// HomeOps AI — backend persistence + secrets vault (local development boundary).
+// FamiliOS AI — backend persistence + secrets vault (local development boundary).
 // Real, file-backed storage with AES-256-GCM encryption for secret config values.
 // Secrets are only ever decrypted inside this backend process and are redacted in
 // every API response. No secrets are stored in the frontend or browser.

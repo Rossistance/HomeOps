@@ -1,5 +1,5 @@
 /**
- * Built-in agent templates seeded into HomeOps AI.
+ * Built-in agent templates seeded into FamiliOS AI.
  *
  * Each template describes a specialized helper agent a household can start from:
  * its purpose, the triggers/connections/playbooks it suggests, the kinds of

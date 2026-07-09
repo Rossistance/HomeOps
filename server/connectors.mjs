@@ -1,4 +1,4 @@
-// HomeOps AI — connector registry, tool/trigger manifests, and REAL executors.
+// FamiliOS AI — connector registry, tool/trigger manifests, and REAL executors.
 // Readiness is computed from actual configuration. Nothing is simulated:
 // configured read connectors perform real network calls; unconfigured connectors
 // fail honestly with a typed reason and never fabricate success.
@@ -66,7 +66,7 @@ export const CONNECTORS = [
   {
     id: "webhook",
     name: "Webhook Receiver",
-    provider: "HomeOps backend",
+    provider: "FamiliOS backend",
     category: "Developer",
     authType: "signature",
     runtime: "backend",
@@ -109,7 +109,7 @@ export const CONNECTORS = [
   {
     id: "web",
     name: "Web Search & Reading",
-    provider: "HomeOps backend",
+    provider: "FamiliOS backend",
     category: "Information & Feeds",
     authType: "none",
     runtime: "backend",
@@ -247,7 +247,7 @@ export async function healthCheck(id) {
     if (c.id === "rss") {
       const cfg = getConnectorConfig(c.id);
       if (!cfg.fields?.feedUrl) return persist({ ok: false, status: "not_configured", error: "feed_url_missing" });
-      const r = await safeFetch(cfg.fields.feedUrl, { headers: { "user-agent": "HomeOps/1.0" } }, { allowLoopback: false });
+      const r = await safeFetch(cfg.fields.feedUrl, { headers: { "user-agent": "FamiliOS/1.0" } }, { allowLoopback: false });
       return persist({ ok: r.ok && r.httpOk, status: r.ok && r.httpOk ? "healthy" : "unreachable", latencyMs: Date.now() - t0, code: r.status, error: r.ok ? undefined : r.error });
     }
     if (c.id === "http") {
@@ -378,7 +378,7 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
       result = { location: cfg.fields?.label ?? "Home", temperatureC: j?.current?.temperature_2m, windKph: j?.current?.wind_speed_10m, weatherCode: j?.current?.weather_code, fetchedAt: new Date().toISOString() };
     } else if (toolId === "rss.latest") {
       const cfg = getConnectorConfig("rss");
-      const r = await safeFetch(cfg.fields.feedUrl, { headers: { "user-agent": "HomeOps/1.0" } }, { allowLoopback: false });
+      const r = await safeFetch(cfg.fields.feedUrl, { headers: { "user-agent": "FamiliOS/1.0" } }, { allowLoopback: false });
       if (!r.ok) { appendAudit({ type: "tool.execute", ...base, ok: false, error: r.error, host: r.host }); return { ok: false, error: r.policyBlocked ? "egress_blocked" : "provider_error", message: `Feed fetch blocked or failed: ${r.error}` }; }
       const xml = r.text;
       const items = [...xml.matchAll(/<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/gi)].slice(1, 8).map((m) => m[1].trim());

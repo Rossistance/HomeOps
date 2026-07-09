@@ -301,7 +301,7 @@ function Contacts() {
   // opt-in gate, which is enforced there, not here.
   const sendTest = async (c: { id: string; type: string; value: string; label: string }) => {
     setTestingId(c.id);
-    const r = await backend.notify({ methodId: c.id, title: "HomeOps test", body: `This is a test notification to your "${c.label}" contact method.` });
+    const r = await backend.notify({ methodId: c.id, title: "FamiliOS test", body: `This is a test notification to your "${c.label}" contact method.` });
     setTestingId(null);
     if (r.delivered) toast({ kind: "success", title: "Test sent", message: r.message ?? "Delivered." });
     else if (r.needsSetup) toast({ kind: "warn", title: "Channel needs setup", message: r.message ?? "Connect the required service in Connections." });
@@ -379,14 +379,14 @@ function Contacts() {
 // Per-type shape for the "Value" field — this is the bug fix: the field used to be
 // hardcoded to phone formatting regardless of which type was selected. In-App and
 // Family Dashboard aren't external addresses at all (there's nothing to type — the
-// notification is just "shown inside HomeOps" / "shown on the shared dashboard"), so
+// notification is just "shown inside FamiliOS" / "shown on the shared dashboard"), so
 // they get a fixed, non-editable value instead of an address field.
 const CONTACT_TYPE_META: Record<"Email" | "Phone/Text" | "In-App" | "Family Dashboard", {
   inputType: string; placeholder: string; hint: string; fixedValue: string | null; validate: (v: string) => boolean;
 }> = {
   "Email": { inputType: "email", placeholder: "you@example.com", hint: "Used for email notifications.", fixedValue: null, validate: (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) },
   "Phone/Text": { inputType: "tel", placeholder: "(555) 000-0000", hint: "Used for text message notifications.", fixedValue: null, validate: (v) => v.replace(/\D/g, "").length >= 7 },
-  "In-App": { inputType: "text", placeholder: "", hint: "Notifications appear in HomeOps when this profile is signed in — no address needed.", fixedValue: "in-app", validate: () => true },
+  "In-App": { inputType: "text", placeholder: "", hint: "Notifications appear in FamiliOS when this profile is signed in — no address needed.", fixedValue: "in-app", validate: () => true },
   "Family Dashboard": { inputType: "text", placeholder: "", hint: "Shown on the shared household dashboard display — no address needed.", fixedValue: "dashboard", validate: () => true },
 };
 

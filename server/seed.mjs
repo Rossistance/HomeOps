@@ -1,4 +1,4 @@
-// HomeOps AI — idempotent boot seed. Ensures the household has at least one real
+// FamiliOS AI — idempotent boot seed. Ensures the household has at least one real
 // agent and one real, runnable hybrid skill so the canonical runtime has something
 // to select and execute out of the box. The seeded skill uses only internal
 // functions (+ a gated sign-off step), so it runs end-to-end with no external
@@ -189,7 +189,7 @@ export function seedDefaults() {
       "Skim the next 7 days of calendar events; confirm drivers and what-to-bring lists.",
       "Plan the week's dinners in Meals and send ingredients to groceries.",
       "Check pending approvals and clear the queue.",
-      "Ask HomeOps for a week-ahead briefing.",
+      "Ask FamiliOS for a week-ahead briefing.",
     ],
     requiredConnections: [],
     outputFormat: "A clean task list, staffed calendar, and a filled meal plan for the week.",

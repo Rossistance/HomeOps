@@ -1,4 +1,4 @@
-// HomeOps backend test harness.
+// FamiliOS backend test harness.
 //
 // Boots the REAL server (server/index.mjs) as a child process on an ephemeral port,
 // pointed at an isolated temp data dir (HOMEOPS_DATA_DIR), so tests exercise the true

@@ -1,4 +1,4 @@
-// HomeOps connector platform — connected accounts, scoped PER HOUSEHOLD USER.
+// FamiliOS connector platform — connected accounts, scoped PER HOUSEHOLD USER.
 // Each household member signs in to their OWN provider accounts; tokens are
 // isolated per account in the vault and an account is only usable by the actor
 // who connected it (or surfaced to that actor). Health is a real provider call.

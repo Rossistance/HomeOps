@@ -1,4 +1,4 @@
-// TWO-WAY SMS GATEWAY — texting HomeOps runs the real assistant and replies in the
+// TWO-WAY SMS GATEWAY — texting FamiliOS runs the real assistant and replies in the
 // same thread. Invariants: only VERIFIED + OPTED-IN phone contact methods get any
 // response (unknown senders get empty TwiML — silence, never a probe signal); the
 // exchange persists to the member's durable SMS conversation; Twilio's webhook

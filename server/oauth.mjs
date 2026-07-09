@@ -1,4 +1,4 @@
-// HomeOps connector platform — generalized OAuth engine.
+// FamiliOS connector platform — generalized OAuth engine.
 // Builds consent URLs (PKCE where supported), exchanges codes, refreshes tokens,
 // and produces a per-account `api()` that calls real providers with auto-refresh.
 // Client secrets are used only here (server-side) and never returned to clients.

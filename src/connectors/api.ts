@@ -1,5 +1,5 @@
 /**
- * Frontend client for the HomeOps backend control plane (server/index.mjs,
+ * Frontend client for the FamiliOS backend control plane (server/index.mjs,
  * proxied at /api). The backend owns sessions, secrets, OAuth, approvals, tool
  * execution, webhooks, jobs, AI providers, and audit. The frontend holds no
  * credentials, never bypasses approvals, and reflects exactly what the backend
@@ -623,17 +623,17 @@ export const backend = {
   async deleteEvent(id: string): Promise<{ ok: boolean; error?: string }> {
     try { return await req(`/events/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
   },
-  // Push a HomeOps canonical event to Google. With no approvalId it returns {needsApproval,
+  // Push a FamiliOS canonical event to Google. With no approvalId it returns {needsApproval,
   // approval} (writing to your real calendar needs sign-off); pass the approved id to execute.
   async pushEventToGoogle(id: string, approvalId?: string): Promise<{ ok?: boolean; needsApproval?: boolean; approval?: BackendApproval; googleEventId?: string; action?: string; error?: string; message?: string }> {
     try { return await req(`/calendar/push/${id}`, { method: "POST", body: JSON.stringify(approvalId ? { approvalId } : {}), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
   // Pull Google-side edits back into pushed events. Clean edits merge; both-sides-changed
-  // flags provenance.conflict for review; Google deletions unlink (HomeOps stays canonical).
+  // flags provenance.conflict for review; Google deletions unlink (FamiliOS stays canonical).
   async pullGoogleEdits(): Promise<{ ok?: boolean; checked?: number; merged?: number; conflicts?: number; unlinked?: number; errors?: number; error?: string; message?: string }> {
     try { return await req("/calendar/pull-google-edits", { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
-  // Resolve a flagged pull conflict: adopt Google's version or keep the HomeOps one.
+  // Resolve a flagged pull conflict: adopt Google's version or keep the FamiliOS one.
   async resolveEventConflict(id: string, choice: "google" | "local"): Promise<{ ok?: boolean; event?: ServerEvent; error?: string; message?: string }> {
     try { return await req(`/events/${id}/resolve-conflict`, { method: "POST", body: JSON.stringify({ choice }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },

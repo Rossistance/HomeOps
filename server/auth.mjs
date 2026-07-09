@@ -1,4 +1,4 @@
-// HomeOps AI — backend authority: origin allowlist, sessions, CSRF, and roles.
+// FamiliOS AI — backend authority: origin allowlist, sessions, CSRF, and roles.
 // The control plane is deny-by-default: mutations require a valid session cookie,
 // a matching CSRF token, and an allowed Origin. Reads of sensitive state
 // (audit, settings, connector config, webhook history) require a session too.

@@ -116,7 +116,7 @@ test("a child cannot connect Google Calendar", async () => {
   assert.equal(r.status, 403);
 });
 
-/* ---- GC.3: push (HomeOps → Google), approval-gated + deduped ---- */
+/* ---- GC.3: push (FamiliOS → Google), approval-gated + deduped ---- */
 test("pushing a synced (linked) event is refused", async () => {
   // Import creates linked events; those can't be pushed back to Google.
   const imp = (await adult.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ ics: ICS }) })).data;

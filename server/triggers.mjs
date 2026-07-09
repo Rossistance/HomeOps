@@ -1,4 +1,4 @@
-// HomeOps AI — real server-side triggers. A trigger fires a durable run through the
+// FamiliOS AI — real server-side triggers. A trigger fires a durable run through the
 // ONE canonical runtime (orchestrator → engine), with NO browser involved:
 //   • schedule     — fire once at a time
 //   • recurring    — fire every intervalMs

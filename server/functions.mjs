@@ -1,4 +1,4 @@
-// HomeOps AI — server-side tool/function registry + REAL executable handlers.
+// FamiliOS AI — server-side tool/function registry + REAL executable handlers.
 // A "function" is a user-authored, durable, executable capability that wraps one of
 // several handler kinds. Every handler does real work — no mock/dry-run success:
 //   • connector_api   — wraps a real provider/connector tool (Gmail/Calendar/Drive/…)
@@ -617,7 +617,7 @@ export async function draftFunction({ description, session, providerId }) {
   };
   const pid = providerId || getSettings().aiActiveProvider;
   if (!pid) return { ok: true, draft: skeleton, fallback: true, message: "Drafted a skeleton (no AI provider configured). Refine it in the Function Builder." };
-  const prompt = `You design HomeOps "functions" — durable, executable capabilities. Draft ONE function definition for this capability. Never invent secrets or endpoints you're unsure of; a human will review and complete it.
+  const prompt = `You design FamiliOS "functions" — durable, executable capabilities. Draft ONE function definition for this capability. Never invent secrets or endpoints you're unsure of; a human will review and complete it.
 Capability needed: "${desc}"
 
 type MUST be one of: connector_api, internal, custom_http, ai_local, browser, sandbox_script, workflow_composed.

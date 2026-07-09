@@ -29,7 +29,7 @@ export function pushActivity(
     timestamp: new Date().toISOString(),
     actorType: entry.actorType ?? "system",
     actorId: entry.actorId ?? "system",
-    actorName: entry.actorName ?? "HomeOps",
+    actorName: entry.actorName ?? "FamiliOS",
     actionType: entry.actionType,
     description: entry.description,
     entityType: entry.entityType,

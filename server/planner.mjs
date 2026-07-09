@@ -1,4 +1,4 @@
-// HomeOps AI — the planning brain. Turns a plain-English goal into a concrete,
+// FamiliOS AI — the planning brain. Turns a plain-English goal into a concrete,
 // executable plan by giving the connected AI provider the LIVE tool catalog (real
 // provider + connector tools, annotated with whether THIS actor has connected the
 // account each needs) and asking it to select tools, fill inputs, and decide which
@@ -59,7 +59,7 @@ export function toolCatalog(session) {
       out.push({ toolId: t.id, name: t.name, action: t.action, risk: t.risk, requiresApproval: !!t.requiresApproval, connectorId: c.id, connectorName: c.name, source: "connector", connected, readiness, inputs: mapInputs(t.inputs) });
     }
   }
-  // Internal HomeOps data tools — always available (no external account needed), so the
+  // Internal FamiliOS data tools — always available (no external account needed), so the
   // planner grounds family work on real server-owned events/tasks/memory rather than
   // reaching for unconnected external apps.
   for (const f of listInternalFunctions()) {
@@ -136,7 +136,7 @@ function normalizePlan(p, catalog, goal) {
   };
 }
 
-const PLAN_SYS = `You are HomeOps' planning engine for a family operating system. Turn the user's plain-English goal into a single concrete plan that a helper agent will run.
+const PLAN_SYS = `You are FamiliOS' planning engine for a family operating system. Turn the user's plain-English goal into a single concrete plan that a helper agent will run.
 
 Rules:
 - Select tools ONLY from the provided catalog (match the exact "id"). If a step is reasoning/notify/summarize with no matching tool, set "toolId" to null.
@@ -178,7 +178,7 @@ export async function planFromGoal({ goal, session, providerId } = {}) {
  * context (sent by the client; household data stays local-first), it decides
  * whether to ANSWER (grounded in context) or propose an ACTION PLAN (same real
  * AgentPlan the planner produces, executed through the server approval gate).   */
-const ASSISTANT_SYS = `You are HomeOps, a warm, capable assistant for a family's household operations. You either ANSWER with information grounded in the provided household context, or you propose an ACTION PLAN using the available tools.
+const ASSISTANT_SYS = `You are FamiliOS, a warm, capable assistant for a family's household operations. You either ANSWER with information grounded in the provided household context, or you propose an ACTION PLAN using the available tools.
 
 Choose:
 - ANSWER when the user wants information, a summary, status, or advice. Ground every claim in the provided context; if needed data isn't connected or present, say so plainly — never invent events, counts, or results.
@@ -352,7 +352,7 @@ export async function assistantStream({ message, context, session, providerId } 
  * propose ONE concrete, low-risk improvement. The client computes a deterministic
  * evidence baseline first; this LLM pass refines the wording + the suggested
  * "after" instructions. Grounded in the trace — never invents failures.          */
-const EVOLVE_SYS = `You are HomeOps' improvement engine. Given a run trace, propose ONE concrete, low-risk improvement grounded ONLY in what the trace shows. Never invent failures or capabilities. Respond with ONLY a JSON object (no prose, no fences):
+const EVOLVE_SYS = `You are FamiliOS' improvement engine. Given a run trace, propose ONE concrete, low-risk improvement grounded ONLY in what the trace shows. Never invent failures or capabilities. Respond with ONLY a JSON object (no prose, no fences):
 { "title": string, "reason": string, "summary": string, "after": string, "risk": "Low"|"Medium"|"High" }
 - "reason": cite the specific step/error from the trace.
 - "summary": the improvement in one or two plain sentences.
@@ -370,7 +370,7 @@ export async function proposeEvolution({ trace, session, providerId } = {}) {
   return { ok: true, proposal: { title: String(parsed.title ?? "Improvement"), reason: String(parsed.reason ?? ""), summary: String(parsed.summary ?? ""), after: parsed.after != null ? String(parsed.after) : undefined, risk }, model: out.model };
 }
 
-const MINIAPP_SYS = `You generate the seed DATA for a HomeOps "mini app" (a small interactive household tracker) from a plain-English request. Respond with ONLY a JSON object — no prose, no markdown fences:
+const MINIAPP_SYS = `You generate the seed DATA for a FamiliOS "mini app" (a small interactive household tracker) from a plain-English request. Respond with ONLY a JSON object — no prose, no markdown fences:
 { "type": <one of the allowed types>, "name": string, "description": string, "data": object }
 
 Use the data shape that matches the chosen type:
@@ -394,7 +394,7 @@ export async function generateMiniApp({ goal, type, session, providerId } = {}) 
   return { ok: true, app: { type: t, name: String(parsed.name ?? String(goal).slice(0, 40)), description: String(parsed.description ?? ""), data: parsed.data && typeof parsed.data === "object" ? parsed.data : {} }, model: out.model };
 }
 
-const PLAYBOOK_SYS = `You write a reusable HomeOps "playbook" — step-by-step instructions a helper agent follows for a recurring household workflow — from a plain-English request. Respond with ONLY a JSON object — no prose, no markdown fences:
+const PLAYBOOK_SYS = `You write a reusable FamiliOS "playbook" — step-by-step instructions a helper agent follows for a recurring household workflow — from a plain-English request. Respond with ONLY a JSON object — no prose, no markdown fences:
 { "name": string, "description": string, "whenToUse": string, "category": string, "steps": [string], "requiredConnections": [string], "outputFormat": string, "approvalRules": [string] }
 Write 4-8 concrete, ordered steps. requiredConnections name real services (e.g. "Gmail", "Google Calendar", "Local Files"). approvalRules list any step that should pause for human approval.`;
 

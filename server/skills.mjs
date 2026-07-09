@@ -1,4 +1,4 @@
-// HomeOps AI — server-side skill registry.
+// FamiliOS AI — server-side skill registry.
 // CRUD, versioning, duplicate, test, promote, rollback, and LLM-assisted function inference.
 // The store.mjs accessors (listSkills / getSkill / putSkill / patchSkill / deleteSkillRec)
 // handle raw persistence; this module adds the business logic layer.
@@ -163,7 +163,7 @@ export async function inferFunctions({ description, session, providerId }) {
     .map((t) => `${t.toolId} — "${t.name}" (${t.action}${t.connected ? "" : ", not connected"})`)
     .join("\n");
 
-  const prompt = `You are a HomeOps skill designer. Given a skill description, suggest which tools are needed and provide a sequence of steps.
+  const prompt = `You are a FamiliOS skill designer. Given a skill description, suggest which tools are needed and provide a sequence of steps.
 
 Skill description: "${description}"
 

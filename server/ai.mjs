@@ -1,4 +1,4 @@
-// HomeOps AI — real AI provider adapters. Cloud keys live only in the backend
+// FamiliOS AI — real AI provider adapters. Cloud keys live only in the backend
 // vault; local providers (Ollama / LM Studio) are discovered over their documented
 // localhost APIs. Health means an actually reachable/configured provider, and chat
 // performs a real provider call. Nothing here is simulated.

@@ -80,7 +80,7 @@ export function Dashboard() {
             )}
             <div className="mt-5 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/10 p-1.5 shadow-[inset_0_2px_6px_rgba(0,0,0,0.25)] backdrop-blur">
               <Icon name="Sparkles" size={18} className="ml-2 text-ember-200" />
-              <input value={ask} onChange={(e) => setAsk(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAsk()} placeholder="Ask HomeOps to do something…" aria-label="Ask HomeOps to do something" className="flex-1 bg-transparent py-2 text-sm text-white placeholder:text-white/50 focus:outline-none" />
+              <input value={ask} onChange={(e) => setAsk(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAsk()} placeholder="Ask FamiliOS to do something…" aria-label="Ask FamiliOS to do something" className="flex-1 bg-transparent py-2 text-sm text-white placeholder:text-white/50 focus:outline-none" />
               <button onClick={runAsk} className="rounded-xl bg-ember-400 px-3.5 py-2 text-sm font-semibold text-ink-900 shadow-ember transition-transform active:scale-95 hover:bg-ember-300">Go</button>
             </div>
           </div>

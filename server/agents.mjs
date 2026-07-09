@@ -1,4 +1,4 @@
-// HomeOps AI — server-side agent registry.
+// FamiliOS AI — server-side agent registry.
 // The server is the source of truth for which agents exist, what each is permitted
 // to do, and which skills it owns. CRUD + versioning + duplicate + rollback follow
 // the skills.mjs pattern. The security-critical piece is the CAPABILITY CONTEXT:

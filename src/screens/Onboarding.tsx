@@ -39,7 +39,7 @@ export function Onboarding() {
         {mode === "choose" ? (
           <div className="stagger grid grid-cols-1 gap-4 sm:grid-cols-3">
             <ChoiceCard index={0} icon="HousePlus" title="Create household" body="Start fresh with your own household and an owner profile." action="Create" onClick={() => setMode("create")} primary />
-            <ChoiceCard index={1} icon="Upload" title="Restore a backup" body="Import a HomeOps backup file you exported earlier." action={busy ? "Importing…" : "Choose file"} onClick={() => fileRef.current?.click()} />
+            <ChoiceCard index={1} icon="Upload" title="Restore a backup" body="Import a FamiliOS backup file you exported earlier." action={busy ? "Importing…" : "Choose file"} onClick={() => fileRef.current?.click()} />
             <ChoiceCard index={2} icon="Sparkles" title="Explore the sample" body="Load the Harper family — clearly-labelled sample data to explore features." action="Load sample" onClick={() => complete("sample")} />
           </div>
         ) : (

@@ -74,7 +74,7 @@ export function prefersReducedMotion(): boolean {
 
 /**
  * Advanced Mode — reveals the low-level Skills/Functions builders. Hidden by default
- * so new households see just Ask HomeOps, Agents, Automations, and Mini Apps; power
+ * so new households see just Ask FamiliOS, Agents, Automations, and Mini Apps; power
  * users who want to hand-edit the underlying building blocks opt in from Settings.
  */
 const ADVANCED_STORAGE_KEY = "homeops:advanced-mode";

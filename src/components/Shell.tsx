@@ -35,12 +35,12 @@ interface NavGroup { label: string; items: NavItem[] }
 
 // Skills/Functions are the low-level building blocks agents & automations compile down
 // to. They're hidden by default (Advanced Mode, off in Settings) so new households see
-// only Ask HomeOps, Agents, Automations, and Mini Apps. Playbooks folded into Skills as
+// only Ask FamiliOS, Agents, Automations, and Mini Apps. Playbooks folded into Skills as
 // a read-only "Recipes" tab rather than staying a separate top-level concept.
 export const NAV_GROUPS: NavGroup[] = [
   { label: "Command Center", items: [
     { id: "dashboard", label: "Home", icon: "LayoutDashboard" },
-    { id: "assistant", label: "Ask HomeOps", icon: "Sparkles" },
+    { id: "assistant", label: "Ask FamiliOS", icon: "Sparkles" },
     { id: "calendar", label: "Calendar", icon: "CalendarDays" },
   ] },
   { label: "Agents & Workflows", items: [
@@ -189,7 +189,7 @@ function Topbar() {
         </button>
         <button onClick={() => setCommandOpen(true)} aria-label="Open command palette and search" className="flex flex-1 items-center gap-2 rounded-2xl border border-ink-900/10 bg-surface-rim px-3.5 py-2.5 text-sm text-ink-500 shadow-well transition-colors hover:border-ember-300 sm:max-w-md">
           <Icon name="Sparkles" size={16} className="text-ember-500" />
-          <span className="flex-1 text-left">Ask HomeOps, search, or run a command…</span>
+          <span className="flex-1 text-left">Ask FamiliOS, search, or run a command…</span>
           <kbd className="hidden rounded-md border border-ink-900/10 bg-surface-sunken px-1.5 py-0.5 text-[10px] font-semibold text-ink-400 sm:block">⌘K</kbd>
         </button>
         <div className="ml-auto flex items-center gap-2">

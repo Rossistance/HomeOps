@@ -4,8 +4,8 @@
  * copy read from here.
  */
 export const brand = {
-  name: "HomeOps AI",
-  shortName: "HomeOps",
+  name: "FamiliOS",
+  shortName: "FamiliOS",
   tagline:
     "Personal agent teams for family life, household admin, caregiving, errands, documents, reminders, and recurring life workflows.",
   oneLiner: "Your family operating system.",

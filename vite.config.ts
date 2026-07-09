@@ -17,8 +17,8 @@ export default defineConfig({
       // Cache the SVG icon alongside the build output.
       includeAssets: ["icons/icon.svg"],
       manifest: {
-        name: "HomeOps AI",
-        short_name: "HomeOps",
+        name: "FamiliOS",
+        short_name: "FamiliOS",
         description: "Personal agent teams for family life and household admin",
         // Warm paper — a dark navy here painted visible dark bands around the app
         // in iOS standalone mode (the "doesn't fit the screen" letterbox effect).

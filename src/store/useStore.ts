@@ -922,7 +922,7 @@ export const useStore = create<Store>((set, get) => {
         sourceRef: { agentId: agentId || undefined, automationId: opts.automationId },
       });
       if (!started.run) {
-        toast({ kind: "error", title: "Couldn't start run", message: started.error === "backend_unreachable" ? "The HomeOps runtime isn't reachable. Start it with `npm run dev`." : started.error ?? "Run could not start." });
+        toast({ kind: "error", title: "Couldn't start run", message: started.error === "backend_unreachable" ? "The FamiliOS runtime isn't reachable. Start it with `npm run dev`." : started.error ?? "Run could not start." });
         return "";
       }
       const ctx = { agentId, automationId: opts.automationId, label: opts.label, startedAt };
@@ -978,8 +978,8 @@ export const useStore = create<Store>((set, get) => {
             riskLevel: (gated.risk as ApprovalRequest["riskLevel"]) ?? "High",
             category: gated.connectorId === "homeops" ? "Form" : "Message",
             agentId: ctx.agentId || undefined,
-            dataUsedSummary: gated.connectorName ?? "HomeOps",
-            previewContent: [gated.detail || gated.title, inputPreview].filter(Boolean).join("\n\n") || `${gated.title}\n\nApprove to let HomeOps run this step.`,
+            dataUsedSummary: gated.connectorName ?? "FamiliOS",
+            previewContent: [gated.detail || gated.title, inputPreview].filter(Boolean).join("\n\n") || `${gated.title}\n\nApprove to let FamiliOS run this step.`,
             toolId: gated.toolId ?? undefined,
             connectorId: gated.connectorId ?? undefined,
             backendApprovalId: gated.approvalId,
@@ -1061,7 +1061,7 @@ export const useStore = create<Store>((set, get) => {
           m.text = r.error === "no_provider"
             ? "I need an AI provider to think. Connect one in Settings → AI Providers, then ask me again."
             : r.error === "backend_unreachable"
-              ? "I can't reach the HomeOps runtime. Make sure it's running (npm run dev), then try again."
+              ? "I can't reach the FamiliOS runtime. Make sure it's running (npm run dev), then try again."
               : "I couldn't reach the AI provider just now. Check it's configured and reachable in Settings → AI Providers, then ask me again.";
         } else if (r.kind === "plan" && r.plan) {
           m.status = "planned"; m.text = r.answer || r.plan.summary || "Here's my plan."; m.plan = r.plan; m.model = r.model;
@@ -1126,7 +1126,7 @@ export const useStore = create<Store>((set, get) => {
       const m = c?.messages.find((x) => x.id === messageId);
       if (!m?.plan) return;
       commit((d) => { const cc = d.conversations?.find((x) => x.id === conversationId); const mm = cc?.messages.find((x) => x.id === messageId); if (mm) mm.status = "running"; });
-      const runId = await get().runPlan({ title: m.plan.title, summary: m.plan.summary, steps: m.plan.steps }, { label: "Ask HomeOps" });
+      const runId = await get().runPlan({ title: m.plan.title, summary: m.plan.summary, steps: m.plan.steps }, { label: "Ask FamiliOS" });
       commit((d) => { const cc = d.conversations?.find((x) => x.id === conversationId); const mm = cc?.messages.find((x) => x.id === messageId); if (mm) { mm.runId = runId; mm.status = "done"; } });
     },
     deleteConversation: (id) => {
@@ -1182,7 +1182,7 @@ export const useStore = create<Store>((set, get) => {
         }
       } catch { /* keep the deterministic baseline */ }
       commit((d) => { (d.evolutions ??= []).unshift(proposal); });
-      toast({ kind: "info", title: "New improvement suggestion", message: "HomeOps learned from a failed run — review it in Activity → Improvements." });
+      toast({ kind: "info", title: "New improvement suggestion", message: "FamiliOS learned from a failed run — review it in Activity → Improvements." });
     },
     reviewEvolution: async (id, accept) => {
       // Optimistically mark reviewed locally (instant UI feedback)
@@ -1235,7 +1235,7 @@ export const useStore = create<Store>((set, get) => {
       const mapEvent = (e: ServerEvent): CalendarEvent => ({
         id: e.id, serverId: e.id, title: e.title, startAt: e.startAt ?? "", endAt: e.endAt ?? undefined,
         location: e.location || undefined, spaceId: e.spaceId, memberIds: e.participantIds ?? [],
-        category: e.category ?? "General", movable: e.layer === "canonical", source: e.source ?? "HomeOps",
+        category: e.category ?? "General", movable: e.layer === "canonical", source: e.source ?? "FamiliOS",
         layer: e.layer, visibility: e.visibility, ownerId: e.ownerId, driverId: e.driverId,
         whatToBring: e.whatToBring, checklist: e.checklist,
         notes: (e as { notes?: string }).notes || undefined,
@@ -1359,7 +1359,7 @@ export const useStore = create<Store>((set, get) => {
         commit((d) => pushActivity(d, { actorType: "user", actorId: get().session?.actorId ?? "user", actorName: get().session?.actorName ?? "You", actionType: "connection.added", description: `Configured ${updated.name} (${updated.readiness.replace(/_/g, " ")})`, entityType: "connector", entityId: id, status: "success" }));
         toast({ kind: "success", title: "Connector configured", message: `${updated.name} — ${updated.readiness.replace(/_/g, " ")}` });
       } else {
-        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not save", message: r.error === "insufficient_role" ? "Only an Adult Admin or Owner can configure connectors." : r.error === "authentication_required" ? "Sign in to configure connectors." : "Start the HomeOps runtime to configure connectors." });
+        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not save", message: r.error === "insufficient_role" ? "Only an Adult Admin or Owner can configure connectors." : r.error === "authentication_required" ? "Sign in to configure connectors." : "Start the FamiliOS runtime to configure connectors." });
       }
     },
     revokeConnector: async (id) => {
@@ -1778,7 +1778,7 @@ export const useStore = create<Store>((set, get) => {
       });
       const cm = r.contactMethod;
       if (!cm) {
-        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not add contact method", message: r.error === "insufficient_role" ? "You can only add contact methods for yourself." : r.message ?? (r.error === "backend_unreachable" ? "Start the HomeOps runtime to manage contacts." : "The server rejected this contact method.") });
+        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not add contact method", message: r.error === "insufficient_role" ? "You can only add contact methods for yourself." : r.message ?? (r.error === "backend_unreachable" ? "Start the FamiliOS runtime to manage contacts." : "The server rejected this contact method.") });
         return;
       }
       commit((d) => {
@@ -1792,7 +1792,7 @@ export const useStore = create<Store>((set, get) => {
       if (r.ok) toast({ kind: "success", title: "Code sent", message: r.message ?? "Enter the 6-digit code to verify." });
       else if (r.needsSetup) toast({ kind: "warn", title: "Channel needs setup", message: r.message ?? "Connect the required service in Connections first." });
       else if (r.error === "resend_too_soon") toast({ kind: "warn", title: "Code already sent", message: r.message ?? "Wait a moment before requesting another." });
-      else toast({ kind: "error", title: "Couldn't send code", message: r.message ?? (r.error === "backend_unreachable" ? "Start the HomeOps runtime to manage contacts." : r.error) });
+      else toast({ kind: "error", title: "Couldn't send code", message: r.message ?? (r.error === "backend_unreachable" ? "Start the FamiliOS runtime to manage contacts." : r.error) });
       return { ok: !!r.ok, needsSetup: r.needsSetup, message: r.message };
     },
     // …and confirm it. Entering the code is the proof of address control.
@@ -1816,7 +1816,7 @@ export const useStore = create<Store>((set, get) => {
       const r = await backend.patchContactMethod(id, { verified: true, optInStatus: "Opted In" });
       const cm = r.contactMethod;
       if (!cm) {
-        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not verify", message: r.message ?? (r.error === "insufficient_role" ? "Verify with the code sent to this method, or ask an adult to override." : "Start the HomeOps runtime to manage contacts.") });
+        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not verify", message: r.message ?? (r.error === "insufficient_role" ? "Verify with the code sent to this method, or ask an adult to override." : "Start the FamiliOS runtime to manage contacts.") });
         return;
       }
       commit((d) => {
@@ -1829,7 +1829,7 @@ export const useStore = create<Store>((set, get) => {
       const r = await backend.patchContactMethod(id, { allowedAgentIds: agentIds });
       const cm = r.contactMethod;
       if (!cm) {
-        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not update", message: r.error === "insufficient_role" ? "Only adults can change another member's agent allowlist." : "Start the HomeOps runtime to manage contacts." });
+        toast({ kind: "error", title: r.error === "insufficient_role" ? "Not allowed" : "Could not update", message: r.error === "insufficient_role" ? "Only adults can change another member's agent allowlist." : "Start the FamiliOS runtime to manage contacts." });
         return;
       }
       commit((d) => {

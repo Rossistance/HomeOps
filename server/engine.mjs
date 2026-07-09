@@ -1,4 +1,4 @@
-// HomeOps AI — durable, server-side run executor (the canonical runtime).
+// FamiliOS AI — durable, server-side run executor (the canonical runtime).
 // Every meaningful task (chat, command, manual agent/skill run, schedule, webhook)
 // flows through startRun → driveRun, producing a durable run + run steps that:
 //   • execute REAL internal/connector/provider tools (no simulation),

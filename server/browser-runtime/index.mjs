@@ -1,4 +1,4 @@
-// HomeOps — optional Playwright headless-browser runtime.
+// FamiliOS — optional Playwright headless-browser runtime.
 //
 // A small, dependency-isolated HTTP service the main backend calls when the
 // "Browser Automation" connector runs `browser.open` / `browser.download`. It is

@@ -11,7 +11,7 @@ let staticDir;
 before(async () => {
   staticDir = fs.mkdtempSync(join(os.tmpdir(), "homeops-static-"));
   fs.mkdirSync(join(staticDir, "assets"), { recursive: true });
-  fs.writeFileSync(join(staticDir, "index.html"), "<!doctype html><div id=\"root\">HomeOps shell</div>", "utf8");
+  fs.writeFileSync(join(staticDir, "index.html"), "<!doctype html><div id=\"root\">FamiliOS shell</div>", "utf8");
   fs.writeFileSync(join(staticDir, "assets", "app.js"), "console.log('homeops');", "utf8");
   ctx = await startServer({ env: { HOMEOPS_STATIC_DIR: staticDir } });
 });
@@ -38,11 +38,11 @@ test("serves the built frontend shell and static assets", async () => {
   const home = await fetch(ctx.base + "/");
   assert.equal(home.status, 200);
   assert.match(home.headers.get("content-type") ?? "", /text\/html/);
-  assert.match(await home.text(), /HomeOps shell/);
+  assert.match(await home.text(), /FamiliOS shell/);
 
   const route = await fetch(ctx.base + "/settings");
   assert.equal(route.status, 200);
-  assert.match(await route.text(), /HomeOps shell/);
+  assert.match(await route.text(), /FamiliOS shell/);
 
   const asset = await fetch(ctx.base + "/assets/app.js");
   assert.equal(asset.status, 200);

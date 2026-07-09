@@ -1,5 +1,5 @@
 /**
- * HomeOps AI — seeded workflow templates.
+ * FamiliOS AI — seeded workflow templates.
  *
  * These are the 20 templates the app ships with, surfaced in the Workflow
  * Builder / Automations area. Content is drawn from

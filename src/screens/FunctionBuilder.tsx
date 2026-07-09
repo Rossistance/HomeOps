@@ -32,7 +32,7 @@ const STATE_META: Record<FunctionState, { label: string; color: "sage" | "amber"
 
 const TYPE_META: Record<FunctionType, { label: string; icon: string; blurb: string }> = {
   connector_api:     { label: "Connector API",   icon: "Plug",          blurb: "Wrap a real provider/connector tool (Gmail, Calendar, Drive, Slack…)." },
-  internal:          { label: "Internal",        icon: "House",         blurb: "Wrap a first-class HomeOps handler (memory, artifact, sign-off)." },
+  internal:          { label: "Internal",        icon: "House",         blurb: "Wrap a first-class FamiliOS handler (memory, artifact, sign-off)." },
   custom_http:       { label: "Custom HTTP",     icon: "Globe",         blurb: "Call an allowlisted HTTP API. Auth secret stays server-side." },
   ai_local:          { label: "Local AI",        icon: "Cpu",           blurb: "Ollama / LM Studio health, model discovery, or chat over loopback." },
   browser:           { label: "Browser",         icon: "MousePointer2", blurb: "Drive the real browser-automation runtime (only when healthy)." },
@@ -193,7 +193,7 @@ function ConfigEditor({
   }
   if (type === "internal") {
     return (
-      <Field label="Internal handler" hint="A first-class HomeOps function. create_approval is gated by a real human approval.">
+      <Field label="Internal handler" hint="A first-class FamiliOS function. create_approval is gated by a real human approval.">
         <Select value={String(config.functionId ?? "")} onChange={(e) => set("functionId", e.target.value)}>
           <option value="">— choose a handler —</option>
           {INTERNAL_FUNCTIONS.map((f) => <option key={f.id} value={f.id}>{f.label} — {f.id}</option>)}

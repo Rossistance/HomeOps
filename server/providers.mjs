@@ -1,4 +1,4 @@
-// HomeOps connector platform — first-party provider registry + scope catalog +
+// FamiliOS connector platform — first-party provider registry + scope catalog +
 // declarative tool manifests. No managed connector provider is used.
 //
 // Client credentials are read from deployment ENVIRONMENT VARIABLES only and are
@@ -240,7 +240,7 @@ export const PROVIDERS = [
     tools: [
       { id: "dropbox.list", name: "List files", action: "Read", risk: "Medium", requiresApproval: false, scopes: ["read"], inputs: [{ key: "path", label: "Folder path", type: "text", default: "" }],
         run: async (api, input) => { const r = await api("https://api.dropboxapi.com/2/files/list_folder", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: input.path || "" }) }); if (!r.ok) throw new Error(r.json?.error_summary ?? "Dropbox error"); return { count: (r.json.entries ?? []).length, entries: (r.json.entries ?? []).map((e) => ({ name: e.name, type: e[".tag"] })) }; } },
-      { id: "dropbox.createFolder", name: "Create folder", action: "Write", risk: "High", requiresApproval: true, scopes: ["write"], inputs: [{ key: "path", label: "Folder path", type: "text", required: true, placeholder: "/HomeOps/Receipts" }],
+      { id: "dropbox.createFolder", name: "Create folder", action: "Write", risk: "High", requiresApproval: true, scopes: ["write"], inputs: [{ key: "path", label: "Folder path", type: "text", required: true, placeholder: "/FamiliOS/Receipts" }],
         run: async (api, input) => { if (!input.path) throw new Error("Provide a folder `path`."); const r = await api("https://api.dropboxapi.com/2/files/create_folder_v2", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: input.path }) }); if (!r.ok) throw new Error(r.json?.error_summary ?? "Create failed"); return { created: true, path: r.json.metadata?.path_display }; } },
     ],
   },

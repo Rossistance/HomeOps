@@ -216,7 +216,7 @@ function ProviderDrawer({ provider: p, onClose }: { provider: ConnectorProvider;
   return (
     <Drawer open onClose={onClose} width="max-w-2xl" title={<span className="flex items-center gap-2"><Icon name={PROVIDER_ICON[p.id] ?? "Plug"} size={20} /> {p.name}</span>}>
       <div className="space-y-5">
-        <p className="text-sm text-ink-600">{p.category}. Connect your own {p.name} account — sign-in happens on {p.name}'s site; HomeOps only receives a token, stored in the backend vault.</p>
+        <p className="text-sm text-ink-600">{p.category}. Connect your own {p.name} account — sign-in happens on {p.name}'s site; FamiliOS only receives a token, stored in the backend vault.</p>
 
         {!configured ? (
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">

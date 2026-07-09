@@ -1,8 +1,8 @@
-// Two-way SMS gateway: family members TEXT HomeOps and get the assistant's answer
+// Two-way SMS gateway: family members TEXT FamiliOS and get the assistant's answer
 // back in the same message thread. Twilio delivers inbound texts to
 // POST /api/webhooks/sms; we validate Twilio's signature, match the sender against
 // the contact-methods registry (VERIFIED + OPTED-IN phone methods only — strangers
-// get silence), run the message through the same assistant brain as Ask HomeOps,
+// get silence), run the message through the same assistant brain as Ask FamiliOS,
 // persist the exchange to a durable per-member SMS conversation, and reply via
 // TwiML. Approval-gated actions never execute from a text: the reply says the plan
 // is drafted and waiting in the app — same approval-first model as everywhere else.
@@ -73,15 +73,15 @@ const SMS_MAX = 1500; // ~10 segments; Twilio splits long bodies automatically
 export function smsReplyText(out) {
   if (!out.ok) {
     return out.error === "no_provider"
-      ? "HomeOps here — I can't think right now (no AI provider is connected). An adult can add one in Settings → AI Providers."
-      : "HomeOps here — something went wrong on my end. Try again in a bit, or use the app.";
+      ? "FamiliOS here — I can't think right now (no AI provider is connected). An adult can add one in Settings → AI Providers."
+      : "FamiliOS here — something went wrong on my end. Try again in a bit, or use the app.";
   }
   if (out.kind === "plan" && out.plan) {
     const title = out.plan.title ?? "a plan";
-    return `I drafted “${title}” for you. Actions that touch the outside world need sign-off, so open HomeOps → Messages & Approvals to review and run it.`;
+    return `I drafted “${title}” for you. Actions that touch the outside world need sign-off, so open FamiliOS → Messages & Approvals to review and run it.`;
   }
   if (out.kind === "build" && out.build) {
-    return "I can build that! Open HomeOps → Ask to review what I proposed and confirm — I don't create new helpers from text alone.";
+    return "I can build that! Open FamiliOS → Ask to review what I proposed and confirm — I don't create new helpers from text alone.";
   }
   const text = String(out.answer ?? "").trim() || "I didn't have anything useful to say — try rephrasing?";
   return text.length > SMS_MAX ? text.slice(0, SMS_MAX - 1) + "…" : text;

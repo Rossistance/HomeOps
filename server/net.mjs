@@ -1,4 +1,4 @@
-// HomeOps AI — egress safety. Prevents the backend from being used as an SSRF
+// FamiliOS AI — egress safety. Prevents the backend from being used as an SSRF
 // primitive: blocks private/loopback/link-local/metadata targets, validates every
 // redirect hop, and caps timeout + response size. Loopback is permitted ONLY for
 // connectors that are explicitly local by design (Ollama / LM Studio).

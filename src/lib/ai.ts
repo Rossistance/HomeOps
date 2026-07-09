@@ -442,7 +442,7 @@ export function suggestNextActions(data: AppData): SuggestedAction[] {
   return out.slice(0, 5);
 }
 
-/** Bubbled prompt suggestions under the "Ask HomeOps" input — household/member-context-
+/** Bubbled prompt suggestions under the "Ask FamiliOS" input — household/member-context-
  *  aware, unlike the generic hardcoded examples this replaces. Real signals (pending
  *  approvals, overdue tasks, today's calendar, unread messages) surface first, gated by
  *  what the CURRENT member's role can act on; a fresh/quiet household falls back to a

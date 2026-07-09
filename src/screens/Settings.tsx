@@ -131,7 +131,7 @@ export function Settings() {
           <SectionTitle icon="Palette">Appearance & branding</SectionTitle>
           <Row label="Theme"><Select value={settings.theme} onChange={(e) => updateSettings({ theme: e.target.value as "warm" | "warm-contrast" })} className="!w-44"><option value="warm">Warm</option><option value="warm-contrast">Warm (higher contrast)</option></Select></Row>
           <p className="mt-2 rounded-lg bg-sand-50 px-3 py-2 text-sm text-ink-500">Rename the whole product in <code className="rounded bg-sand-200 px-1">src/brand.ts</code> — currently “{brand.name}”.</p>
-          <Row label="Solo Professional Mode" desc="Optionally surfaces side-business workflows. Off by default — HomeOps is family-first."><Toggle checked={settings.soloProfessionalMode} onChange={() => toggleSoloMode()} /></Row>
+          <Row label="Solo Professional Mode" desc="Optionally surfaces side-business workflows. Off by default — FamiliOS is family-first."><Toggle checked={settings.soloProfessionalMode} onChange={() => toggleSoloMode()} /></Row>
         </Card>
 
         {/* Comfort & accessibility — inclusive, neurodivergent-friendly controls */}

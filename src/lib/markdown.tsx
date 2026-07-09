@@ -1,5 +1,5 @@
 /**
- * Lightweight markdown renderer for HomeOps assistant messages.
+ * Lightweight markdown renderer for FamiliOS assistant messages.
  * Handles the subset the assistant actually produces: bold, italic, inline code,
  * code blocks, headings (##/###), unordered lists (- /*), ordered lists, and
  * paragraph breaks. No external dependencies.

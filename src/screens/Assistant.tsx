@@ -35,7 +35,7 @@ function AssistantHome({ conversations, onStart, onOpen, onDismiss }: { conversa
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-ember-400 to-ember-600 text-white shadow-ember">
           <Icon name="Sparkles" size={26} />
         </div>
-        <h1 className="font-display text-3xl font-semibold tracking-tight text-ink-900">Ask HomeOps, {first}</h1>
+        <h1 className="font-display text-3xl font-semibold tracking-tight text-ink-900">Ask FamiliOS, {first}</h1>
         <p className="mt-1.5 text-sm text-ink-500">Tell me what you need. I'll answer, or draft a plan you can approve and run.</p>
       </div>
 
@@ -45,7 +45,7 @@ function AssistantHome({ conversations, onStart, onOpen, onDismiss }: { conversa
             autoFocus value={text} onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
             placeholder="e.g. Plan Lily's birthday and email the invites"
-            aria-label="Ask HomeOps"
+            aria-label="Ask FamiliOS"
             className="max-h-40 min-h-[44px] flex-1 resize-none bg-transparent py-2 text-sm text-ink-800 placeholder:text-ink-400 focus:outline-none"
             rows={1}
           />
@@ -116,13 +116,13 @@ function Conversation({ conv, onSend }: { conv: AssistantConversation; onSend: (
           <textarea
             value={text} onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
-            placeholder="Reply to HomeOps…" aria-label="Message HomeOps"
+            placeholder="Reply to FamiliOS…" aria-label="Message FamiliOS"
             className="max-h-40 min-h-[40px] flex-1 resize-none bg-transparent py-2 text-sm text-ink-800 placeholder:text-ink-400 focus:outline-none"
             rows={1} disabled={thinking}
           />
           <Button variant="ember" onClick={submit} disabled={!text.trim() || thinking}><Icon name="ArrowUp" size={16} /></Button>
         </div>
-        <p className="px-1 pt-1.5 text-center text-[11px] text-ink-400">HomeOps proposes; you approve. Risky actions never run without your sign-off.</p>
+        <p className="px-1 pt-1.5 text-center text-[11px] text-ink-400">FamiliOS proposes; you approve. Risky actions never run without your sign-off.</p>
       </div>
     </div>
   );

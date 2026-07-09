@@ -191,11 +191,11 @@ function Improvements() {
 
   if (loading) return <div className="flex items-center gap-2 text-sm text-ink-400 py-6"><Icon name="Loader2" size={14} className="animate-spin" /> Loading improvements…</div>;
   if (sorted.length === 0)
-    return <EmptyState icon="Sparkles" title="No improvement suggestions yet" message="When a run fails, HomeOps studies the trace and proposes a concrete, low-risk fix here — automatically." />;
+    return <EmptyState icon="Sparkles" title="No improvement suggestions yet" message="When a run fails, FamiliOS studies the trace and proposes a concrete, low-risk fix here — automatically." />;
   return (
     <div>
       <div className="mb-4 flex items-center gap-2 rounded-2xl border border-ember-200/70 bg-ember-50 px-4 py-2.5 text-sm text-ember-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
-        <Icon name="Sparkles" size={15} /> HomeOps learns from real run traces. Accepting a suggestion versions the target entity server-side.
+        <Icon name="Sparkles" size={15} /> FamiliOS learns from real run traces. Accepting a suggestion versions the target entity server-side.
       </div>
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         {sorted.map((e) => (
