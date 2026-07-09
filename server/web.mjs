@@ -191,6 +191,22 @@ export async function searchWeb(query, { maxResults = 8 } = {}) {
     attempts.push("bing: no results parsed");
   } else attempts.push(`bing: ${bing.error ?? bing.status}`);
 
+  // 5) Real-browser fallback: render the results page in the in-process Chromium.
+  // Datacenter IPs get bot-walled on plain fetches, but a real browser usually
+  // passes — this is what makes keyless search work on hosted deployments.
+  if (browserAvailable()) {
+    for (const [engine, url, parse] of [
+      ["duckduckgo-browser", `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, parseDuckDuckGo],
+      ["bing-browser", `https://www.bing.com/search?q=${encodeURIComponent(q)}`, parseBing],
+    ]) {
+      const page = await renderPage(url, { timeoutMs: 20_000 });
+      if (!page?.html) { attempts.push(`${engine}: render failed`); continue; }
+      const results = parse(page.html);
+      if (results.length) return { ok: true, engine, query: q, results: results.slice(0, maxResults) };
+      attempts.push(`${engine}: no results parsed`);
+    }
+  }
+
   const hint = anyKey ? "" : " Hosted deployments are often bot-walled by search engines — set BRAVE_SEARCH_API_KEY or TAVILY_API_KEY (both have free tiers) for reliable search.";
   return { ok: false, error: "search_failed", message: `Web search failed (${attempts.join("; ")}).${hint}` };
 }
