@@ -11,8 +11,9 @@ import { providerChat, providerChatStream } from "./ai.mjs";
 import { getSettings, listEvents, listTasks, listMemory, listMembers, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride } from "./store.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
 
-// Input hints for the internal family-data tools, so the planner knows how to fill them.
-const INTERNAL_INPUTS = {
+// Input hints for the internal family-data tools, so the planner knows how to fill
+// them (and the engine knows which fields require threading — see toolInputSchema).
+export const INTERNAL_INPUTS = {
   "homeops.create_event_draft": [{ key: "title", required: true }, { key: "startAt" }, { key: "location" }, { key: "participantIds" }, { key: "driverId" }, { key: "visibility" }],
   "homeops.update_event_checklist": [{ key: "eventId", required: true }, { key: "items", required: true }],
   "homeops.assign_driver": [{ key: "eventId", required: true }, { key: "driverId", required: true }],

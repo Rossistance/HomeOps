@@ -24,7 +24,7 @@ import { resolveRegisteredFunction, runFunctionHandler, computeFunctionState } f
 import { getAgent } from "./store.mjs";
 import { isToolStepAllowed } from "./agents.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
-import { proposeEvolution } from "./planner.mjs";
+import { proposeEvolution, INTERNAL_INPUTS } from "./planner.mjs";
 import { providerChat } from "./ai.mjs";
 
 const RUN_STEP_TIMEOUT_MS = 60_000;
@@ -125,16 +125,44 @@ function priorResultsJSON(run, uptoIndex) {
   return str;
 }
 function toolInputSchema(resolved) {
-  const raw = resolved?.tool?.inputs ?? resolved?.def?.input_schema ?? [];
+  // Internal homeops.* tools declare their inputs in INTERNAL_INPUTS (the same
+  // hints the planner uses) — without this the engine saw an empty schema and
+  // never threaded their inputs.
+  const internalHints = resolved?.kind === "internal" ? INTERNAL_INPUTS[resolved.def?.id] : null;
+  const raw = resolved?.tool?.inputs ?? resolved?.def?.input_schema ?? internalHints ?? [];
   return (Array.isArray(raw) ? raw : []).map((f) => ({ key: f.key, label: f.label ?? f.key, required: !!f.required }));
 }
-// Does this step's input need resolving from prior results?
+// Does this step's input need resolving from prior results (or, for the first
+// step, from the run goal itself — a plan's opening web.search often arrives
+// with query:"" and must not execute empty)?
 function inputNeedsFill(step, schema, stepIndex) {
-  if (stepIndex === 0) return false; // nothing earlier to draw from
   const inp = step.input ?? {};
   const hasTemplate = Object.values(inp).some((v) => typeof v === "string" && v.includes("{{"));
   const missingRequired = schema.some((f) => f.required && !String(inp[f.key] ?? "").trim());
   return hasTemplate || missingRequired;
+}
+// Deterministic input threading — no AI required. URLs come from the most recent
+// succeeded step whose result carries one (search results, read pages); queries
+// come from the step's own instruction. This keeps runs functional when the AI
+// fill is unavailable or returns nothing, instead of executing with empty input.
+function deterministicFill(run, stepIndex, step, schema) {
+  const filled = { ...(step.input ?? {}) };
+  let changed = false;
+  for (const f of schema) {
+    if (String(filled[f.key] ?? "").trim()) continue;
+    if (/(^|_)(url|link|page|href)/i.test(f.key)) {
+      for (let j = stepIndex - 1; j >= 0; j--) {
+        const s = run.steps[j];
+        if (s?.status !== "succeeded" || !s.result) continue;
+        const m = JSON.stringify(s.result).match(/https?:\/\/[^"\\\s)>]+/);
+        if (m) { filled[f.key] = m[0]; changed = true; break; }
+      }
+    } else if (/(query|q$|search|topic|text|goal)/i.test(f.key)) {
+      const q = String(step.detail || step.title || run.plan?.title || "").trim();
+      if (q) { filled[f.key] = q.slice(0, 300); changed = true; }
+    }
+  }
+  return changed ? filled : null;
 }
 async function fillStepInput(run, stepIndex, step, schema) {
   const provider = activeAiProvider();
@@ -383,9 +411,16 @@ async function _drive(runId) {
       const schema = toolInputSchema(resolved);
       if (inputNeedsFill(step, schema, i)) {
         const { filled, note } = await fillStepInput(run, i, step, schema);
-        if (filled) {
-          patchRunStep(runId, i, { input: filled, inputResolved: true, detail: step.detail });
-          appendAudit({ type: "run.input_resolved", runId, toolId: step.toolId, keys: Object.keys(filled), householdId: run.householdId });
+        // AI fill unavailable or incomplete → deterministic threading before giving up.
+        const missing = (inp) => schema.some((f) => f.required && !String((inp ?? {})[f.key] ?? "").trim());
+        let finalInput = filled;
+        if (!finalInput || missing(finalInput)) {
+          const det = deterministicFill(run, i, { ...step, input: finalInput ?? step.input }, schema);
+          if (det) finalInput = det;
+        }
+        if (finalInput) {
+          patchRunStep(runId, i, { input: finalInput, inputResolved: true, detail: step.detail });
+          appendAudit({ type: "run.input_resolved", runId, toolId: step.toolId, keys: Object.keys(finalInput), householdId: run.householdId });
         } else {
           patchRunStep(runId, i, { inputResolved: true, detail: note ? `${step.detail ?? step.title} — ${note}` : step.detail });
         }
