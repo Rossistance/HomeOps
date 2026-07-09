@@ -1,8 +1,33 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useStore } from "@/store/useStore";
 import { PageHeader, Card, Button, IconButton, Badge, Avatar, Tabs, Drawer, Modal, Field, TextInput, TextArea, Select, Toggle, EmptyState, ACCENT_BG } from "@/components/ui";
 import { Icon } from "@/components/Icon";
+import { backend, type ServerMember, type ServerContactMethod } from "@/connectors/api";
 import type { Role, Space, SpaceType } from "@/types";
+
+/* Members are SERVER-owned (same registry the iOS app writes to) — the local
+ * store is only used for spaces. This hook is the single source of truth for
+ * the roster so the web and mobile views can never drift apart again. */
+const AVATAR_ACCENTS = ["ember", "sage", "sky", "lavender", "amber", "ink"] as const;
+const avatarColor = (name: string) => AVATAR_ACCENTS[[...name].reduce((a, c) => a + c.charCodeAt(0), 0) % AVATAR_ACCENTS.length];
+const initialsOf = (name: string) => name.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
+function useServerMembers() {
+  const [members, setMembers] = useState<ServerMember[]>([]);
+  const [methods, setMethods] = useState<ServerContactMethod[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const reload = useCallback(async () => {
+    const [m, cm] = await Promise.all([backend.members(), backend.contactMethods()]);
+    setMembers(m);
+    setMethods(cm);
+    setLoaded(true);
+    if (m.length === 0) setError("Couldn't load the household roster from the server.");
+    else setError(null);
+  }, []);
+  useEffect(() => { void reload(); }, [reload]);
+  return { members, methods, loaded, error, reload, setError };
+}
 
 const ROLES: Role[] = ["Owner", "Adult Admin", "Adult Member", "Limited Member", "Child View", "Guest/Helper"];
 const SPACE_TYPES: SpaceType[] = ["Personal", "Family", "School", "Bills", "Medical", "Travel", "Home Maintenance", "Caregiving", "Pets", "Custom"];
@@ -117,61 +142,113 @@ function SpaceModal({ onClose }: { onClose: () => void }) {
 }
 
 function Members() {
-  const data = useStore((s) => s.data);
-  const updateMember = useStore((s) => s.updateMember);
-  const del = useStore((s) => s.deleteMember);
+  const { members, methods, loaded, error, reload, setError } = useServerMembers();
   const [creating, setCreating] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const friendly = (e?: string, msg?: string) =>
+    msg ?? (e === "insufficient_role" ? "Only an Owner or Adult Admin can do that."
+      : e === "last_owner" ? "The household needs at least one Owner."
+      : e === "cannot_archive_self" ? "You can't remove the profile you're signed in as."
+      : "Something went wrong — try again.");
+
+  const changeRole = async (m: ServerMember, role: string) => {
+    setBusyId(m.actorId); setError(null);
+    const r = await backend.updateMemberRemote(m.actorId, { role });
+    setBusyId(null);
+    if (r.error) setError(friendly(r.error, r.message));
+    await reload();
+  };
+
+  const remove = async (m: ServerMember) => {
+    if (!window.confirm(`Remove ${m.displayName} from the household? Their profile disappears from every device and any invite they received stops working.`)) return;
+    setBusyId(m.actorId); setError(null);
+    const r = await backend.archiveMemberRemote(m.actorId);
+    setBusyId(null);
+    if (r.error) setError(friendly(r.error, r.message));
+    await reload();
+  };
+
   return (
     <div>
-      <div className="mb-4 flex justify-end"><Button variant="ember" onClick={() => setCreating(true)}><Icon name="UserPlus" size={16} /> Add member</Button></div>
-      <div className="stagger grid grid-cols-1 gap-4 md:grid-cols-2">
-        {data.members.map((m) => {
-          const methods = data.contactMethods.filter((c) => c.memberId === m.id);
-          const spaceNames = data.spaces.filter((s) => m.spaceIds.includes(s.id)).map((s) => s.name);
-          return (
-            <Card key={m.id} className="card-pad">
-              <div className="flex items-start gap-3">
-                <Avatar initials={m.initials} color={m.avatarColor} size={44} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2"><p className="font-display text-lg font-semibold text-ink-900">{m.displayName}</p>{m.isCurrentUser && <Badge color="sky">You</Badge>}</div>
-                  <p className="text-xs text-ink-500">{m.relationship}</p>
-                </div>
-                {!m.isCurrentUser && m.role !== "Owner" && <IconButton icon="Trash2" label="Remove" onClick={() => del(m.id)} />}
-              </div>
-              <div className="mt-3 space-y-2">
-                <Field label="Role"><Select value={m.role} onChange={(e) => updateMember(m.id, { role: e.target.value as Role })} disabled={m.role === "Owner"}>{ROLES.map((r) => <option key={r}>{r}</option>)}</Select></Field>
-                <div className="well space-y-1.5 px-3 py-2.5">
-                  <div className="text-xs text-ink-500"><span className="font-semibold text-ink-600">Spaces:</span> {spaceNames.join(", ") || "—"}</div>
-                  <div className="text-xs text-ink-500"><span className="font-semibold text-ink-600">Contact:</span> {methods.length ? methods.map((c) => c.label).join(", ") : "none"}</div>
-                </div>
-              </div>
-            </Card>
-          );
-        })}
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <p className="text-xs text-ink-500">The roster is shared with the iOS app — changes here show up there instantly, and vice versa.</p>
+        <Button variant="ember" onClick={() => setCreating(true)}><Icon name="UserPlus" size={16} /> Add member</Button>
       </div>
-      {creating && <MemberModal onClose={() => setCreating(false)} />}
+      {error && <div className="mb-4 rounded-xl bg-coral-50 px-3 py-2 text-sm text-coral-600">{error}</div>}
+      {!loaded ? (
+        <p className="text-sm text-ink-500">Loading the household…</p>
+      ) : (
+        <div className="stagger grid grid-cols-1 gap-4 md:grid-cols-2">
+          {members.map((m) => {
+            const mine = methods.filter((c) => c.memberId === m.actorId);
+            return (
+              <Card key={m.actorId} className="card-pad">
+                <div className="flex items-start gap-3">
+                  <Avatar initials={initialsOf(m.displayName)} color={avatarColor(m.displayName)} size={44} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2"><p className="font-display text-lg font-semibold text-ink-900">{m.displayName}</p>{m.isCurrentUser && <Badge color="sky">You</Badge>}</div>
+                    <p className="text-xs text-ink-500">{m.relationship ?? m.role}</p>
+                  </div>
+                  {!m.isCurrentUser && m.role !== "Owner" && (
+                    <IconButton icon="Trash2" label={`Remove ${m.displayName}`} onClick={() => void remove(m)} />
+                  )}
+                </div>
+                <div className="mt-3 space-y-2">
+                  <Field label="Role">
+                    <Select value={m.role} onChange={(e) => void changeRole(m, e.target.value)} disabled={m.role === "Owner" || busyId === m.actorId}>
+                      {ROLES.map((r) => <option key={r}>{r}</option>)}
+                    </Select>
+                  </Field>
+                  <div className="well space-y-1.5 px-3 py-2.5">
+                    <div className="text-xs text-ink-500"><span className="font-semibold text-ink-600">Contact:</span> {mine.length ? mine.map((c) => `${c.label} (${c.type})`).join(", ") : "none yet"}</div>
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+      {creating && <MemberModal onClose={() => setCreating(false)} onCreated={() => void reload()} />}
     </div>
   );
 }
 
-function MemberModal({ onClose }: { onClose: () => void }) {
-  const create = useStore((s) => s.createMember);
+function MemberModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [name, setName] = useState("");
   const [role, setRole] = useState<Role>("Adult Member");
   const [rel, setRel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async () => {
+    if (!name.trim() || busy) return;
+    setBusy(true); setError(null);
+    const r = await backend.createMemberRemote({ displayName: name.trim(), role, relationship: rel.trim() || null });
+    setBusy(false);
+    if (r.error) {
+      setError(r.error === "insufficient_role" ? "Only an Owner or Adult Admin can add members."
+        : r.error === "actor_exists" ? "Someone with that profile already exists."
+        : r.message ?? "Couldn't add the member — try again.");
+      return;
+    }
+    onCreated();
+    onClose();
+  };
   return (
-    <Modal open onClose={onClose} title="Add member" icon="UserPlus" footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!name.trim()} onClick={() => { create({ displayName: name, role, relationship: rel }); onClose(); }}>Add</Button></>}>
+    <Modal open onClose={onClose} title="Add member" icon="UserPlus" footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!name.trim() || busy} onClick={() => void submit()}>{busy ? "Adding…" : "Add"}</Button></>}>
       <div className="space-y-3">
+        {error && <div className="rounded-xl bg-coral-50 px-3 py-2 text-sm text-coral-600">{error}</div>}
         <Field label="Name"><TextInput value={name} onChange={(e) => setName(e.target.value)} /></Field>
         <Field label="Role"><Select value={role} onChange={(e) => setRole(e.target.value as Role)}>{ROLES.map((r) => <option key={r}>{r}</option>)}</Select></Field>
-        <Field label="Relationship"><TextInput value={rel} onChange={(e) => setRel(e.target.value)} placeholder="Parent, child, caregiver…" /></Field>
+        <Field label="Relationship"><TextInput value={rel} onChange={(e) => setRel(e.target.value)} placeholder="Parent, child, grandparent, caregiver…" /></Field>
       </div>
     </Modal>
   );
 }
 
 function RolesView() {
-  const members = useStore((s) => s.data.members);
+  const { members: serverMembers } = useServerMembers();
+  const members = serverMembers.map((m) => ({ id: m.actorId, displayName: m.displayName, role: m.role as Role, initials: initialsOf(m.displayName), avatarColor: avatarColor(m.displayName) }));
   return (
     <div className="stagger grid grid-cols-1 gap-4 md:grid-cols-2">
       {ROLE_ACCESS.map((r) => (

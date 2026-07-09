@@ -54,6 +54,28 @@ export default function SettingsScreen() {
   const initials = (session?.actorName ?? "?").split(" ").map((p) => p[0]).slice(0, 2).join("");
   const version = Constants.expoConfig?.version ?? "1.0";
 
+  // Revoking an invite = archiving the member. Their profile disappears from the
+  // lock screen everywhere and any pending invite they got stops working.
+  const removeMember = (m: MemberRec) => {
+    Alert.alert(
+      `Remove ${m.displayName.split(" ")[0]}?`,
+      "Their profile disappears from every device and any invite they received stops working.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove", style: "destructive",
+          onPress: async () => {
+            const r = await api.deleteMember(m.actorId);
+            if (r.error) {
+              Alert.alert("Couldn't remove", r.error === "insufficient_role" ? "Only an Owner or Adult Admin can remove members." : r.message ?? "Try again.");
+            }
+            void load();
+          },
+        },
+      ],
+    );
+  };
+
   const renameHousehold = () => {
     Alert.prompt?.(
       "Rename household",
@@ -125,17 +147,21 @@ export default function SettingsScreen() {
               ) : undefined}
             />
             <Card padded={false}>
-              {members.map((m, i) => (
-                <Row
-                  key={m.actorId}
-                  icon="person.fill"
-                  iconColor={colors.ember}
-                  iconBg={colors.emberBg}
-                  title={`${m.displayName}${m.isCurrentUser ? " — you" : ""}`}
-                  subtitle={m.relationship ?? m.role}
-                  last={false}
-                />
-              ))}
+              {members.map((m) => {
+                const removable = canInvite && !m.isCurrentUser && m.role !== "Owner";
+                return (
+                  <Row
+                    key={m.actorId}
+                    icon="person.fill"
+                    iconColor={colors.ember}
+                    iconBg={colors.emberBg}
+                    title={`${m.displayName}${m.isCurrentUser ? " — you" : ""}`}
+                    subtitle={`${m.relationship ?? m.role}${removable ? " · hold to remove" : ""}`}
+                    onLongPress={removable ? () => removeMember(m) : undefined}
+                    last={false}
+                  />
+                );
+              })}
               {canInvite && (
                 <Row
                   icon="plus"

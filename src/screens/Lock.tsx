@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useStore } from "@/store/useStore";
+import { backend } from "@/connectors/api";
 import { Avatar, Button, Card, Field, TextInput } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { brand } from "@/brand";
@@ -8,26 +9,57 @@ import { brand } from "@/brand";
  * Profile lock screen. A real session boundary: choosing a profile establishes an
  * authenticated backend session (httpOnly cookie + CSRF) whose role gates the
  * control plane and the UI. Elevated roles can be protected by an owner PIN.
+ *
+ * Profiles come from the SERVER registry (/api/profiles) — the same roster the
+ * iOS app shows — so archived demo members and sample data can never appear.
+ * The local store is only a fallback when the backend is unreachable.
  */
+interface LockProfile { id: string; displayName: string; role: string; initials: string; avatarColor: string; pinRequired?: boolean }
+
+const AV = ["ember", "sage", "sky", "lavender", "amber", "ink"];
+const colorFor = (name: string) => AV[[...name].reduce((a, c) => a + c.charCodeAt(0), 0) % AV.length];
+const initialsOf = (name: string) => name.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
 export function Lock() {
   const data = useStore((s) => s.data);
   const loginAs = useStore((s) => s.loginAs);
   const authBusy = useStore((s) => s.authBusy);
   const [pinFor, setPinFor] = useState<string | null>(null);
   const [pin, setPin] = useState("");
+  const [serverProfiles, setServerProfiles] = useState<LockProfile[] | null>(null);
+  const [householdName, setHouseholdName] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
 
-  const members = data.members;
-  const owner = data.members.find((m) => m.id === data.household.ownerMemberId);
+  useEffect(() => {
+    void backend.profiles().then((r) => {
+      if (!r || !r.profiles?.length) { setOffline(!r); return; }
+      setServerProfiles(r.profiles.map((p) => ({
+        id: p.actorId, displayName: p.displayName, role: p.role,
+        initials: initialsOf(p.displayName), avatarColor: colorFor(p.displayName),
+        pinRequired: p.pinRequired,
+      })));
+      const name = (r as { householdName?: string | null }).householdName;
+      if (name) setHouseholdName(name);
+    });
+  }, []);
 
-  const choose = async (memberId: string, role: string) => {
-    const elevated = role === "Owner" || role === "Adult Admin";
-    if (elevated && pinFor !== memberId) {
-      // Try without a PIN first; if the server requires one, reveal the field.
-      const ok = await loginAs(memberId);
-      if (!ok) setPinFor(memberId);
+  // Server registry is the truth; local members appear only when it's unreachable.
+  const members = serverProfiles ?? data.members.map((m) => ({
+    id: m.id, displayName: m.displayName, role: m.role,
+    initials: m.initials, avatarColor: m.avatarColor,
+    pinRequired: m.role === "Owner" || m.role === "Adult Admin",
+  }));
+  const owner = members.find((m) => m.role === "Owner");
+  const subtitle = householdName ?? (serverProfiles ? null : data.household.name);
+
+  const choose = async (p: LockProfile) => {
+    const elevated = p.role === "Owner" || p.role === "Adult Admin";
+    if (elevated && pinFor !== p.id) {
+      const ok = await loginAs(p.id, undefined, p);
+      if (!ok) setPinFor(p.id);
       return;
     }
-    const ok = await loginAs(memberId, pin);
+    const ok = await loginAs(p.id, pin, p);
     if (ok) { setPinFor(null); setPin(""); }
   };
 
@@ -40,18 +72,22 @@ export function Lock() {
           <div className="relative z-10 flex flex-col items-center">
             <span className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/10 text-ember-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] backdrop-blur"><Icon name="House" size={28} /></span>
             <h1 className="font-display text-2xl font-semibold leading-tight tracking-tight sm:text-3xl">Who's using {brand.shortName}?</h1>
-            <p className="mt-2 max-w-md text-sm leading-relaxed text-white/70">{data.household.name} · choose a profile to continue. Your role controls what you can see and do.</p>
+            <p className="mt-2 max-w-md text-sm leading-relaxed text-white/70">{subtitle ? `${subtitle} · ` : ""}choose a profile to continue. Your role controls what you can see and do.</p>
           </div>
         </div>
 
+        {offline && (
+          <p className="mb-4 text-center text-xs text-amber-600">The backend is unreachable — showing local profiles. Server features stay locked until it's back.</p>
+        )}
+
         <div className="stagger grid grid-cols-2 gap-3 sm:grid-cols-3">
           {members.map((m, i) => (
-            <Card key={m.id} className="card-pad flex flex-col items-center text-center" hover onClick={() => choose(m.id, m.role)}>
+            <Card key={m.id} className="card-pad flex flex-col items-center text-center" hover onClick={() => void choose(m)}>
               <span style={{ ["--i" as string]: i }} className="flex flex-col items-center">
                 <Avatar initials={m.initials} color={m.avatarColor} size={48} />
                 <p className="font-display mt-2.5 truncate text-base font-semibold text-ink-900">{m.displayName}</p>
                 <p className="text-xs font-medium text-ink-500">{m.role}</p>
-                {(m.role === "Owner" || m.role === "Adult Admin") && <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-ink-400"><Icon name="Lock" size={10} /> may need PIN</span>}
+                {m.pinRequired && <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-ink-400"><Icon name="Lock" size={10} /> may need PIN</span>}
               </span>
             </Card>
           ))}
@@ -61,10 +97,10 @@ export function Lock() {
           <Card className="card-pad mx-auto mt-5 max-w-sm animate-slide-up">
             <p className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink-800"><Icon name="Lock" size={15} className="text-lavender-600" /> Enter owner PIN for {members.find((m) => m.id === pinFor)?.displayName}</p>
             <Field label="Owner PIN">
-              <TextInput type="password" value={pin} autoFocus placeholder="••••" onChange={(e) => setPin(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void choose(pinFor, members.find((m) => m.id === pinFor)?.role ?? "Adult Admin"); }} />
+              <TextInput type="password" value={pin} autoFocus placeholder="••••" onChange={(e) => setPin(e.target.value)} onKeyDown={(e) => { const p = members.find((m) => m.id === pinFor); if (e.key === "Enter" && p) void choose(p); }} />
             </Field>
             <div className="mt-3 flex gap-2">
-              <Button variant="ember" disabled={authBusy || !pin} onClick={() => void choose(pinFor, members.find((m) => m.id === pinFor)?.role ?? "Adult Admin")}><Icon name="LogIn" size={16} /> Sign in</Button>
+              <Button variant="ember" disabled={authBusy || !pin} onClick={() => { const p = members.find((m) => m.id === pinFor); if (p) void choose(p); }}><Icon name="LogIn" size={16} /> Sign in</Button>
               <Button variant="ghost" onClick={() => { setPinFor(null); setPin(""); }}>Cancel</Button>
             </div>
           </Card>

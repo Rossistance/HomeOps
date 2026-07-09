@@ -20,6 +20,10 @@ import { api } from "@/lib/api";
 
 void SplashScreen.preventAutoHideAsync();
 
+// Launch on Today — without this, expo-router anchors the alphabetically-first
+// route group, which is (agents).
+export const unstable_settings = { initialRouteName: "(home)" };
+
 // Show notifications when the app is foregrounded.
 Notifications.setNotificationHandler({
   handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: true, shouldShowBanner: true, shouldShowList: true }),

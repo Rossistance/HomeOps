@@ -11,11 +11,11 @@
 
 :root {
   color-scheme: light;
-  --ring: 210 122 53; /* ember focus ring (r g b) */
-  --font-display: "Fraunces", Georgia, Cambria, "Times New Roman", serif;
+  --ring: 206 93 29; /* ember focus ring (r g b) — handoff #CE5D1D */
+  --font-display: "Newsreader", Georgia, Cambria, "Times New Roman", serif;
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  /* Live ember glow — referenced by the hearth + accents. */
-  --ember-glow: radial-gradient(120% 120% at 78% -10%, rgba(228, 127, 53, 0.42), transparent 55%);
+  /* Live ember glow — referenced by the hearth + accents (handoff #E0662C). */
+  --ember-glow: radial-gradient(120% 120% at 78% -10%, rgba(224, 102, 44, 0.4), transparent 55%);
 }
 
 html,
@@ -31,12 +31,11 @@ body {
      home-indicator zones — without this the safe areas render as bare gaps. */
   min-height: 100dvh;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-  /* Warm, layered "room light" — daylight from above-right, hearth warmth below. */
-  background-color: #ece3d5;
+  /* Warm porcelain (handoff bg) with a whisper of ember room-light. */
+  background-color: #f5f1e9;
   background-image:
-    radial-gradient(1100px 620px at 85% -12%, rgba(228, 127, 53, 0.10), transparent 58%),
-    radial-gradient(1000px 560px at -8% 8%, rgba(125, 102, 192, 0.08), transparent 55%),
-    radial-gradient(1100px 600px at 50% 118%, rgba(111, 168, 115, 0.10), transparent 56%);
+    radial-gradient(1100px 620px at 85% -12%, rgba(224, 102, 44, 0.06), transparent 58%),
+    radial-gradient(1100px 600px at 50% 118%, rgba(232, 163, 78, 0.05), transparent 56%);
   background-repeat: no-repeat;
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
@@ -185,11 +184,11 @@ body {
     @apply relative overflow-hidden rounded-[1.9rem] border border-white/10 text-white shadow-e3;
     background-image:
       var(--ember-glow),
-      linear-gradient(150deg, #1b2030 0%, #232a3c 46%, #2c3144 100%);
+      linear-gradient(160deg, #232b3e 0%, #1c2333 50%, #151a26 100%);
   }
   .hearth-glow {
     @apply pointer-events-none absolute -right-10 -top-16 h-64 w-64 rounded-full;
-    background: radial-gradient(closest-side, rgba(228, 127, 53, 0.55), rgba(228, 127, 53, 0) 72%);
+    background: radial-gradient(closest-side, rgba(224, 102, 44, 0.5), rgba(224, 102, 44, 0) 72%);
     filter: blur(6px);
   }
   .glass {

@@ -4,86 +4,83 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Warm "paper & clay" surface palette — the material base of the home.
+        // Hearth (FamiliOS handoff) — the same token values the iOS app ships.
+        // Warm porcelain surfaces, ember accent, ink-navy heroes.
         sand: {
-          50: "#faf8f5",
-          100: "#f4f0e9",
-          200: "#e9e1d4",
-          300: "#d9cdb8",
-          400: "#c2b094",
+          50: "#fbf9f4",
+          100: "#f5f1e9",
+          200: "#ede7d9",
+          300: "#dfd5c2",
+          400: "#c9bca0",
         },
-        // Layered material surfaces (Tactile Hearth). Raised sits lighter than the
-        // page so cards physically "lift"; sunken is for wells/inputs.
+        // Layered material surfaces. Raised = pure white cards on warm porcelain;
+        // sunken is for wells/inputs/segmented tracks.
         surface: {
-          base: "#ece3d5", // page — warm oat
-          raised: "#fdfbf7", // card — warm porcelain
-          sunken: "#e6dccb", // inset well
-          overlay: "#fbf8f2", // popovers / modals
+          base: "#f5f1e9", // page — warm porcelain
+          raised: "#ffffff", // card
+          sunken: "#ede7d9", // inset well
+          overlay: "#ffffff", // popovers / modals
           rim: "#ffffff", // lit top edge
         },
-        // Deep warm charcoal-navy navigation.
+        // Ink-navy — text at the dark end, and the hero/nav gradient stops
+        // (700→900 is exactly the handoff hero: #2A3147 → #151A26).
         ink: {
-          50: "#f3f4f7",
-          100: "#e6e8ee",
-          200: "#cfd3dd",
-          300: "#aab1c1",
-          900: "#171b26",
-          800: "#1f2535",
-          700: "#2b3346",
-          600: "#3a435a",
-          500: "#525d76",
-          400: "#7b8499",
+          50: "#f4f5f7",
+          100: "#ebedf1",
+          200: "#dcdfe5",
+          300: "#c2c7d1",
+          400: "#9aa1b0",
+          500: "#6c7488",
+          600: "#4a5468",
+          700: "#2a3147",
+          800: "#232b3e",
+          900: "#151a26",
         },
-        // Ember — the signature brand warmth (the "hearth glow"). Distinct from the
-        // status colors below; used for the hero, primary delight, and live accents.
+        // Ember — the signature accent (#CE5D1D, per handoff).
         ember: {
-          50: "#fdf1e7",
-          100: "#fad9be",
-          200: "#f5bc8c",
+          50: "#faede3",
+          100: "#f4d6c0",
+          200: "#ecb58c",
           300: "#ee9c5c",
-          400: "#e47f35",
-          500: "#d26420",
-          600: "#ae4d18",
+          400: "#e0662c",
+          500: "#ce5d1d",
+          600: "#b14f17",
         },
-        // Sage success / done
+        // Semantic status colors (handoff table; meaning is fixed).
         sage: {
-          50: "#eef5ee",
-          100: "#d7e8d6",
-          400: "#6fa873",
-          500: "#558a59",
-          600: "#436e46",
+          50: "#ecf2ed",
+          100: "#d5e4d8",
+          400: "#6fae7c",
+          500: "#4e8c5e",
+          600: "#3f7a4f",
         },
-        // Coral attention / danger
         coral: {
-          50: "#fdeeea",
-          100: "#fad7cd",
-          400: "#f08a6c",
-          500: "#e26948",
-          600: "#c4502f",
+          50: "#f9eae7",
+          100: "#f3d2ca",
+          400: "#e2694b",
+          500: "#d25839",
+          600: "#c6482e",
         },
-        // Amber warning
         amber: {
-          50: "#fdf6e7",
-          100: "#fbe9bf",
-          400: "#eab308",
-          500: "#d99a06",
-          600: "#b27c04",
+          50: "#f7efdf",
+          100: "#eeddb9",
+          400: "#d9a24b",
+          500: "#c78d2f",
+          600: "#b4791e",
         },
-        // Sky informational
         sky: {
-          50: "#ebf4fb",
-          100: "#cfe6f6",
-          400: "#5aa9e0",
-          500: "#3a8bc7",
-          600: "#2c6e9f",
+          50: "#eaf1f7",
+          100: "#d2e2ef",
+          400: "#6fa6d6",
+          500: "#4b85b9",
+          600: "#2e6fa3",
         },
-        // Muted lavender — caregiving / family
         lavender: {
-          50: "#f2effa",
-          100: "#e2dbf3",
-          400: "#9b86d4",
-          500: "#7d66c0",
-          600: "#634c9f",
+          50: "#f2eef7",
+          100: "#e2d9ee",
+          400: "#b096d6",
+          500: "#9578bf",
+          600: "#7c5ca8",
         },
       },
       fontFamily: {
@@ -98,22 +95,21 @@ export default {
           "Arial",
           "sans-serif",
         ],
-        // Display — soft optical serif (Fraunces). Warm, human, used with restraint
+        // Display — Newsreader (matches iOS). Warm, human, used with restraint
         // for heroes, greetings, and big numbers.
-        display: ["Fraunces", "Georgia", "Cambria", "Times New Roman", "serif"],
+        display: ["Newsreader", "Georgia", "Cambria", "Times New Roman", "serif"],
       },
       boxShadow: {
-        // Tactile elevation scale — warm-tinted shadows + a lit top inner-highlight
-        // so surfaces read as physical, lit material rather than flat SaaS cards.
-        e1: "inset 0 1px 0 rgba(255,255,255,0.65), 0 1px 2px rgba(38,30,20,0.05), 0 3px 8px rgba(38,30,20,0.05)",
-        e2: "inset 0 1px 0 rgba(255,255,255,0.7), 0 2px 4px rgba(38,30,20,0.06), 0 14px 30px rgba(38,30,20,0.11)",
-        e3: "inset 0 1px 0 rgba(255,255,255,0.6), 0 16px 34px rgba(31,24,16,0.16), 0 36px 70px rgba(31,24,16,0.18)",
-        well: "inset 0 2px 4px rgba(38,30,20,0.10), inset 0 1px 0 rgba(255,255,255,0.5)",
-        ember: "0 6px 24px rgba(214,108,46,0.32), 0 2px 6px rgba(214,108,46,0.22)",
-        // Back-compat aliases (used across existing screens) — upgraded to the new
-        // material depth so the whole app lifts at once.
-        card: "inset 0 1px 0 rgba(255,255,255,0.65), 0 1px 2px rgba(38,30,20,0.05), 0 3px 8px rgba(38,30,20,0.05)",
-        pop: "inset 0 1px 0 rgba(255,255,255,0.6), 0 16px 34px rgba(31,24,16,0.16), 0 36px 70px rgba(31,24,16,0.18)",
+        // Hearth elevation — resting cards are VERY quiet (0 1px 2px @ 4%); only
+        // heroes and popovers get real depth.
+        e1: "0 1px 2px rgba(32,28,21,0.04)",
+        e2: "0 2px 4px rgba(32,28,21,0.05), 0 12px 28px rgba(32,28,21,0.08)",
+        e3: "0 18px 40px -20px rgba(21,26,38,0.55), 0 36px 70px rgba(21,26,38,0.12)",
+        well: "inset 0 1px 3px rgba(32,28,21,0.06)",
+        ember: "0 10px 24px -12px rgba(206,93,29,0.55)",
+        // Back-compat aliases (used across existing screens).
+        card: "0 1px 2px rgba(32,28,21,0.04)",
+        pop: "0 18px 40px -20px rgba(21,26,38,0.55), 0 36px 70px rgba(21,26,38,0.12)",
       },
       borderRadius: {
         xl2: "1.1rem",

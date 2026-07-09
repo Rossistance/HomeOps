@@ -238,11 +238,36 @@ export default function AskScreen() {
     }
   }, [busy, conversationId, flushReveal, revealInto, text]);
 
-  /* ---------- plan + build actions (wired exactly like the old screen) ---------- */
+  /* ---------- plan + build actions ---------- */
+  // Runs stay IN the chat: live progress renders inline below the messages and
+  // the finished run's results come back as a chat message (no Activity detour).
+  const expectRunResult = useRef(false);
+  const handledRunRef = useRef<string | null>(null);
   const runPlan = useCallback(async (plan: AgentPlan) => {
-    router.push("/activity");
+    expectRunResult.current = true;
     await startRun(plan);
   }, [startRun]);
+
+  useEffect(() => {
+    if (!activeRun || !expectRunResult.current) return;
+    if (activeRun.status !== "completed" && activeRun.status !== "failed") return;
+    if (handledRunRef.current === activeRun.id) return;
+    handledRunRef.current = activeRun.id;
+    expectRunResult.current = false;
+    void (async () => {
+      const arts = (await api.artifacts().catch(() => [])).filter((a) => a.runId === activeRun.id);
+      const done = activeRun.steps.filter((s) => s.status === "done").length;
+      const stepLines = activeRun.steps
+        .filter((s) => s.output && s.status === "done")
+        .slice(0, 3)
+        .map((s) => `- **${s.title}**: ${String(s.output).slice(0, 200)}`);
+      const artLines = arts.slice(0, 3).map((a) => `- **${a.title}**${a.body ? `\n\n${a.body.slice(0, 600)}` : ""}`);
+      const text = activeRun.status === "completed"
+        ? `Done — **${activeRun.planTitle}** finished (${done}/${activeRun.steps.length} steps).${stepLines.length ? `\n\n${stepLines.join("\n")}` : ""}${artLines.length ? `\n\n${artLines.join("\n\n")}` : ""}`
+        : `**${activeRun.planTitle}** didn't finish — ${activeRun.steps.find((s) => s.status === "blocked")?.output ?? "a step failed."} You can adjust the plan and try again.`;
+      setMsgs((m) => [...m, { id: `run-${activeRun.id}`, role: "assistant", text, error: activeRun.status === "failed" }]);
+    })();
+  }, [activeRun]);
 
   const runBuild = useCallback(async (msgId: string, build: ChatBuild) => {
     setBuildingId(msgId);
@@ -421,6 +446,34 @@ export default function AskScreen() {
             );
           })}
 
+          {/* Live run progress, inline in the thread (runs never leave the chat). */}
+          {activeRun && msgs.length > 0 && activeRun.status !== "completed" && activeRun.status !== "failed" ? (
+            <Card style={{ gap: spacing.sm }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                <T kind="h3" color={colors.text} style={{ flex: 1 }}>{activeRun.planTitle}</T>
+                <Badge
+                  label={activeRun.status === "waiting" ? "Needs approval" : "Running"}
+                  fg={activeRun.status === "waiting" ? colors.amber : colors.ember}
+                  bg={activeRun.status === "waiting" ? colors.amberBg : colors.emberBg}
+                />
+              </View>
+              {activeRun.steps.map((s, i) => (
+                <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                  <View style={{
+                    width: 8, height: 8, borderRadius: 4,
+                    backgroundColor: s.status === "done" ? colors.sage : s.status === "running" ? colors.ember : s.status === "blocked" ? colors.amber : colors.textFaint,
+                  }} />
+                  <T kind="sub" color={colors.textSecondary} numberOfLines={1} style={{ flex: 1 }}>{s.title}</T>
+                </View>
+              ))}
+              {activeRun.status === "waiting" ? (
+                <PressableScale onPress={() => router.push("/(home)")} haptic="select" style={{ paddingTop: 2 }}>
+                  <T kind="subMedium" color={colors.ember}>A step is waiting for your approval — review it on Today</T>
+                </PressableScale>
+              ) : null}
+            </Card>
+          ) : null}
+
           {busy ? <TypingBubble phase={phase} /> : null}
         </ScrollView>
 
@@ -579,7 +632,7 @@ function PlanCard({ plan, onRun }: { plan: AgentPlan; onRun: () => void }) {
         <Button title="Run this plan" variant="ember" icon="play.fill" full onPress={onRun} />
       </View>
       {plan.approvalRequired ? (
-        <T kind="sub" style={{ marginTop: spacing.sm }}>Risky steps will pause for your approval in the Activity tab.</T>
+        <T kind="sub" style={{ marginTop: spacing.sm }}>Risky steps pause for your approval — the run and its results stay right here in the chat.</T>
       ) : null}
     </Card>
   );

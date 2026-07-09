@@ -2511,9 +2511,10 @@ server.listen(PORT, () => {
     }
   }, 15 * 60_000);
   startScheduler();
-  // If a browser runtime URL is configured, probe it once so the connector's
-  // readiness reflects reality (connected vs. runtime_unavailable) from the start.
-  if (process.env.BROWSER_RUNTIME_URL) healthCheck("browser").catch(() => {});
+  // Probe the browser runtime once at boot (in-process Playwright first, then
+  // any external BROWSER_RUNTIME_URL) so the connector's readiness — and the
+  // /api/health browserRuntime flag — reflect reality from the start.
+  healthCheck("browser").catch(() => {});
   // eslint-disable-next-line no-console
   console.log(`FamiliOS backend (control plane v${VERSION}) listening on http://localhost:${PORT} — env=${IS_PROD ? "production" : "development"}, origins=${ALLOWED_ORIGINS.join(",") || "(none)"}`);
 });

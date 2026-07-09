@@ -702,8 +702,14 @@ export const backend = {
     try { return (await req<{ members: ServerMember[] }>("/members")).members ?? []; } catch { return []; }
   },
   // Pre-auth profile picker + one-time household claim (demo roster → your family).
-  async profiles(): Promise<{ profiles: { actorId: string; displayName: string; role: string; relationship: string | null; pinRequired: boolean }[]; claimed: boolean } | null> {
+  async profiles(): Promise<{ profiles: { actorId: string; displayName: string; role: string; relationship: string | null; pinRequired: boolean }[]; claimed: boolean; householdName?: string | null } | null> {
     try { return await req("/profiles"); } catch { return null; }
+  },
+  async household(): Promise<{ id: string; name: string | null } | null> {
+    try { return (await req<{ household: { id: string; name: string | null } }>("/household")).household ?? null; } catch { return null; }
+  },
+  async renameHousehold(name: string): Promise<{ household?: { id: string; name: string | null }; error?: string; message?: string }> {
+    try { return await req("/household", { method: "PATCH", body: JSON.stringify({ name }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
   async claimHousehold(body: { ownerName: string; actorId?: string }): Promise<{ member?: { actorId: string; displayName: string; role: string }; session?: Session; error?: string; message?: string }> {
     try {

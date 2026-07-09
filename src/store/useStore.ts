@@ -297,7 +297,7 @@ export interface Store extends UIState {
   /* onboarding + session */
   completeOnboarding: (choice: "sample" | "blank" | "import", opts?: { householdName?: string; ownerName?: string; data?: AppData }) => Promise<void>;
   bootstrapSession: () => Promise<void>;
-  loginAs: (memberId: string, pin?: string) => Promise<boolean>;
+  loginAs: (memberId: string, pin?: string, fallback?: { displayName: string; role: string }) => Promise<boolean>;
   logout: () => Promise<void>;
   currentRole: () => Role;
   canAccess: (screen: ScreenId) => boolean;
@@ -573,8 +573,12 @@ export const useStore = create<Store>((set, get) => {
         set({ session: null });
       }
     },
-    loginAs: async (memberId, pin) => {
-      const m = get().data.members.find((x) => x.id === memberId);
+    loginAs: async (memberId, pin, fallback) => {
+      // Server-registered profiles (e.g. the claimed owner, mobile-created invites)
+      // may not exist in the local store yet — the Lock screen passes their server
+      // profile so sign-in works before the first hydrate.
+      const m = get().data.members.find((x) => x.id === memberId)
+        ?? (fallback ? { id: memberId, displayName: fallback.displayName, role: fallback.role as Role } : undefined);
       if (!m) return false;
       set({ authBusy: true });
       const r = await backend.login({ actorId: m.id, actorName: m.displayName, role: m.role, pin });
@@ -1229,8 +1233,8 @@ export const useStore = create<Store>((set, get) => {
     // from the server member registry (the client can render but never mint roles). If the
     // backend is offline this is a no-op and the local-first cache continues to render.
     hydrateFromServer: async () => {
-      const [events, tasks, members, conversations, memory, serverAgents, contactMethods] = await Promise.all([
-        backend.events(), backend.tasks(), backend.members(), backend.conversations(), backend.memory(), backend.agents(), backend.contactMethods(),
+      const [events, tasks, members, conversations, memory, serverAgents, contactMethods, household] = await Promise.all([
+        backend.events(), backend.tasks(), backend.members(), backend.conversations(), backend.memory(), backend.agents(), backend.contactMethods(), backend.household(),
       ]);
       const mapEvent = (e: ServerEvent): CalendarEvent => ({
         id: e.id, serverId: e.id, title: e.title, startAt: e.startAt ?? "", endAt: e.endAt ?? undefined,
@@ -1286,12 +1290,35 @@ export const useStore = create<Store>((set, get) => {
           : [...contactMethods.map(mapContact), ...d.contactMethods.filter((c) => !cmIds.has(c.id))];
         const tkIds = new Set(tasks.map((t) => t.id));
         d.tasks = [...tasks.map(mapTask), ...d.tasks.filter((t) => !tkIds.has(t.serverId ?? t.id))];
-        // Roles are server-authoritative: overlay role/relationship onto local members,
-        // preserving presentation fields (avatar/initials/email) the server doesn't store.
-        for (const sm of members) {
-          const local = d.members.find((m) => m.id === sm.actorId);
-          if (local) { local.role = sm.role as Member["role"]; if (sm.relationship) local.relationship = sm.relationship; }
+        // The roster is server-authoritative: the server registry IS the member list
+        // (the iOS app writes to the same registry). Presentation fields the server
+        // doesn't store (avatar color, initials, email) survive by id; local-only
+        // members — the demo seed, pre-claim leftovers — are DROPPED so sample data
+        // can never shadow the real household.
+        if (members.length > 0) {
+          const AV = ["ember", "sage", "sky", "lavender", "amber", "ink"];
+          const nowISO = new Date().toISOString();
+          d.members = members.map((sm) => {
+            const local = d.members.find((m) => m.id === sm.actorId);
+            return {
+              id: sm.actorId,
+              displayName: sm.displayName,
+              role: sm.role as Member["role"],
+              relationship: sm.relationship ?? local?.relationship ?? "",
+              avatarColor: local?.avatarColor ?? AV[[...sm.displayName].reduce((a, c) => a + c.charCodeAt(0), 0) % AV.length],
+              initials: local?.initials ?? sm.displayName.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase(),
+              spaceIds: local?.spaceIds ?? sm.spaceIds ?? [],
+              isCurrentUser: sm.isCurrentUser,
+              email: local?.email,
+              createdAt: local?.createdAt ?? nowISO,
+              updatedAt: nowISO,
+            };
+          });
+          const serverOwner = members.find((m) => m.role === "Owner");
+          if (serverOwner) d.household.ownerMemberId = serverOwner.actorId;
         }
+        // Household name is server-owned too (renameable from iOS Settings).
+        if (household?.name) d.household.name = household.name;
         const convIds = new Set(conversations.map((c) => c.id));
         const localConvs = (d.conversations ?? []).filter((c) => !convIds.has(c.id));
         d.conversations = [...conversations.map(mapConv), ...localConvs];

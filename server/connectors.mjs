@@ -4,6 +4,7 @@
 // fail honestly with a typed reason and never fabricate success.
 import { getConnectorConfig, setConnectorConfig, getSecret, getSettings, appendAudit, setHealth, getHealth } from "./store.mjs";
 import { safeFetch, assertSafeUrl } from "./net.mjs";
+import { browserAvailable, probeBrowser, renderPage } from "./browser.mjs";
 import { searchWeb, readPage, extractRecipe } from "./web.mjs";
 
 /**
@@ -173,14 +174,15 @@ export function readinessOf(c) {
     return requiredSatisfied(c) || c.configSchema.every((f) => !f.required) ? "connected" : "not_configured";
   }
   if (c.runtime === "browser-automation") {
-    // Truthful: a runtime URL is NOT proof of an executable runtime. We only report
-    // "connected" if a real handshake has succeeded (recorded in health). Otherwise
-    // the connector is runtime_unavailable, regardless of any configured URL.
+    // Truthful: only a real handshake (recorded in health) proves an executable
+    // runtime — either the in-process Playwright Chromium or an external
+    // BROWSER_RUNTIME_URL. A configured URL alone is not proof.
+    const h = getHealth(c.id);
+    if (h && h.ok) return "connected";
     const url = (c.configSchema[0]?.env && process.env[c.configSchema[0].env]) || cfg.fields?.runtimeUrl;
     if (!url) return "runtime_unavailable";
     try { const u = new URL(url); if (!["ws:", "wss:", "http:", "https:"].includes(u.protocol)) return "error"; } catch { return "error"; }
-    const h = getHealth(c.id);
-    return h && h.ok ? "connected" : "runtime_unavailable";
+    return "runtime_unavailable";
   }
   if (c.authType === "oauth2") {
     if (!requiredSatisfied(c)) return "not_configured";
@@ -260,8 +262,12 @@ export async function healthCheck(id) {
     }
     if (c.id === "webhook") return persist({ ok: true, status: "healthy", latencyMs: 0 });
     if (c.runtime === "browser-automation") {
-      // A real handshake is required. http(s) runtimes are probed; ws(s) cannot be
-      // verified here, so they remain unavailable until a real runtime is wired.
+      // A real handshake is required. Preferred: the in-process Playwright
+      // Chromium (launched right here as proof). Fallback: probe an external
+      // http(s) runtime; ws(s) cannot be verified, so it stays unavailable.
+      if (browserAvailable() && await probeBrowser()) {
+        return persist({ ok: true, status: "healthy", source: "in-process", latencyMs: Date.now() - t0 });
+      }
       const cfg = getConnectorConfig(c.id);
       const url = process.env.BROWSER_RUNTIME_URL || cfg.fields?.runtimeUrl;
       if (!url) return persist({ ok: false, status: "runtime_unavailable", error: "no_runtime_url" });
@@ -321,9 +327,20 @@ function base64url(str) {
   return Buffer.from(str, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-// Call the optional Playwright runtime (server/browser-runtime) over loopback.
-// The runtime is a separate process; if it isn't running we fail honestly.
+// Browser actions: prefer the in-process Playwright Chromium (server/browser.mjs);
+// fall back to the optional external runtime (server/browser-runtime) over
+// loopback. If neither is available we fail honestly.
 async function callBrowserRuntime(pathname, body) {
+  // In-process path — full JS rendering with no extra process to run. Downloads
+  // still need the external runtime (it manages a download directory).
+  if (pathname === "/open" && browserAvailable()) {
+    const safe = await assertSafeUrl(body.url, { allowLoopback: false });
+    if (!safe.ok) return { ok: false, error: "egress_blocked", message: `Blocked target: ${safe.error}` };
+    const page = await renderPage(body.url);
+    if (page) {
+      return { ok: true, result: { title: page.title, url: page.url, text: page.text?.slice(0, 18_000), rendered: "browser" } };
+    }
+  }
   const cfg = getConnectorConfig("browser");
   const baseRaw = process.env.BROWSER_RUNTIME_URL || cfg.fields?.runtimeUrl || "";
   const base = baseRaw.replace(/\/$/, "");

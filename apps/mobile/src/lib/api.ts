@@ -327,6 +327,11 @@ export const api = {
     const r = await req<{ household?: { id: string; name: string | null } }>("/household");
     return r.data?.household ?? null;
   },
+  async deleteMember(actorId: string): Promise<{ ok?: boolean; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; error?: string; message?: string }>(`/members/${encodeURIComponent(actorId)}`, { method: "DELETE" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
   async renameHousehold(name: string): Promise<{ household?: { id: string; name: string | null }; error?: string; message?: string }> {
     const r = await req<{ household?: { id: string; name: string | null }; error?: string; message?: string }>("/household", { method: "PATCH", body: JSON.stringify({ name }) });
     if (r.status === 403) return { error: "insufficient_role" };

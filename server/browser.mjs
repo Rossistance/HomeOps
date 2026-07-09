@@ -37,6 +37,13 @@ export function browserAvailable() {
   return !DISABLED && !unavailable;
 }
 
+/** Real handshake: actually launch (or reuse) Chromium. Used by health checks
+ * so "connected" is never reported on hope. */
+export async function probeBrowser() {
+  const b = await getBrowser();
+  return !!b;
+}
+
 /**
  * Render a page in real Chromium and return { title, url, html, text }.
  * Returns null when the browser is unavailable or rendering fails — callers
