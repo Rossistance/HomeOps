@@ -17,6 +17,49 @@ const RUN_LABEL: Record<string, string> = {
   running: "Running", waiting: "Waiting for approval", completed: "Completed", failed: "Failed",
 };
 
+const FILTERS = ["All", "Agents", "Approvals", "Files"] as const;
+type Filter = (typeof FILTERS)[number];
+
+function matchesFilter(e: AuditEvent, f: Filter): boolean {
+  const k = `${e.type} ${e.toolId ?? ""}`.toLowerCase();
+  switch (f) {
+    case "Approvals": return k.includes("approv") || k.includes("decide") || k.includes("deny");
+    case "Files": return k.includes("file") || k.includes("upload") || k.includes("doc");
+    case "Agents": return k.includes("run") || k.includes("agent") || k.includes("tool");
+    default: return true;
+  }
+}
+
+function dayGroup(at: string): string {
+  const d = new Date(at);
+  const today = new Date();
+  const yesterday = new Date(); yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return "Today";
+  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return "Earlier";
+}
+
+function Segmented({ value, onChange }: { value: Filter; onChange: (f: Filter) => void }) {
+  const { colors } = useTheme();
+  return (
+    <View style={{ flexDirection: "row", backgroundColor: colors.surfaceSunken, borderRadius: 12, borderCurve: "continuous", padding: 3, gap: 2 }}>
+      {FILTERS.map((f) => (
+        <PressableScale
+          key={f}
+          onPress={() => { tapHaptic("select"); onChange(f); }}
+          haptic={null}
+          style={{
+            flex: 1, paddingVertical: 7, borderRadius: 9, borderCurve: "continuous", alignItems: "center",
+            backgroundColor: value === f ? colors.surface : "transparent",
+          }}
+        >
+          <T kind="caption" color={value === f ? colors.text : colors.textSecondary} style={{ fontSize: 12.5 }}>{f}</T>
+        </PressableScale>
+      ))}
+    </View>
+  );
+}
+
 export default function ActivityScreen() {
   const { colors, spacing } = useTheme();
   const { session } = useSession();
@@ -28,6 +71,7 @@ export default function ActivityScreen() {
   const [memory, setMemory] = useState<MemoryRec[]>([]);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [filter, setFilter] = useState<Filter>("All");
 
   const load = useCallback(async () => {
     const [h, rs, mem, ev] = await Promise.all([api.health(), api.runs(), api.memory(), api.audit(20)]);
@@ -122,7 +166,7 @@ export default function ActivityScreen() {
                   ))}
                 </View>
                 {activeRun.status === "waiting" ? (
-                  <T kind="sub" style={{ marginTop: spacing.sm }}>Review the gated steps in the Inbox tab, then re-run.</T>
+                  <T kind="sub" style={{ marginTop: spacing.sm }}>Review the gated steps on Today — they're waiting in your approvals.</T>
                 ) : null}
               </Card>
             </Rise>
@@ -187,26 +231,45 @@ export default function ActivityScreen() {
           </Rise>
 
           <Rise index={3}>
-            <SectionHeader title="Audit trail" />
-            {audit.length === 0 ? (
-              <Card><T kind="sub">No server events yet — run a plan to see activity here.</T></Card>
-            ) : (
-              <Card padded={false}>
-                {audit.map((e, i) => (
-                  <Row
-                    key={e.id}
-                    icon={e.ok ? "checkmark.circle.fill" : "xmark.circle.fill"}
-                    iconColor={e.ok ? colors.sage : colors.coral}
-                    iconBg={e.ok ? colors.sageBg : colors.coralBg}
-                    title={e.toolId ? `${e.type} · ${e.toolId}` : e.type}
-                    subtitle={`${e.actorName ?? "system"} · ${new Date(e.at).toLocaleTimeString()}`}
-                    trailing={!e.ok ? <Badge label="Failed" fg={colors.coral} bg={colors.coralBg} /> : undefined}
-                    last={i === audit.length - 1}
-                  />
-                ))}
-              </Card>
-            )}
+            <SectionHeader title="Timeline" />
+            <Segmented value={filter} onChange={setFilter} />
+            {(() => {
+              const filtered = audit.filter((e) => matchesFilter(e, filter));
+              if (filtered.length === 0) {
+                return <Card style={{ marginTop: spacing.md }}><T kind="sub">Nothing here yet — agent actions land in this timeline.</T></Card>;
+              }
+              const groups = ["Today", "Yesterday", "Earlier"].map((g) => ({
+                label: g, items: filtered.filter((e) => dayGroup(e.at) === g),
+              })).filter((g) => g.items.length > 0);
+              return groups.map((g) => (
+                <View key={g.label} style={{ gap: spacing.sm, marginTop: spacing.md }}>
+                  <T kind="eyebrow">{g.label}</T>
+                  <Card padded={false}>
+                    {g.items.map((e, i) => (
+                      <Row
+                        key={e.id}
+                        icon={e.ok ? "checkmark.circle.fill" : "xmark.circle.fill"}
+                        iconColor={e.ok ? colors.sage : colors.coral}
+                        iconBg={e.ok ? colors.sageBg : colors.coralBg}
+                        title={e.toolId ? `${e.type} · ${e.toolId}` : e.type}
+                        subtitle={e.actorName ?? "system"}
+                        trailing={
+                          <T kind="detail" color={colors.textMuted}>
+                            {new Date(e.at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                          </T>
+                        }
+                        last={i === g.items.length - 1}
+                      />
+                    ))}
+                  </Card>
+                </View>
+              ));
+            })()}
           </Rise>
+
+          <T kind="detail" center style={{ marginTop: spacing.sm }}>
+            Everything agents do is logged here.{"\n"}Nothing leaves the household without approval.
+          </T>
         </>
       )}
     </HScreen>

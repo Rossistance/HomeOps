@@ -5,14 +5,16 @@ import { View, type StyleProp, type ViewStyle } from "react-native";
 import { useTheme } from "@/theme";
 import { PressableScale, type PressableScaleProps } from "./pressable-scale";
 
+// Handoff: cards are 22px radius, 1px cardBorder outline, very quiet resting
+// shadow (0 1px 2px @ 4%). Dark mode is border-only.
 export function cardStyle(colors: ReturnType<typeof useTheme>["colors"], dark: boolean): ViewStyle {
   return {
     backgroundColor: colors.surface,
-    borderRadius: 20,
+    borderRadius: 22,
     borderCurve: "continuous",
     borderWidth: 1,
-    borderColor: dark ? colors.rim : colors.border,
-    boxShadow: dark ? "none" : `0 1px 0 ${colors.rim} inset, 0 6px 18px ${colors.shadow}`,
+    borderColor: colors.border,
+    boxShadow: dark ? "none" : "0 1px 2px rgba(32,28,21,0.04)",
   };
 }
 
@@ -34,7 +36,7 @@ export function PressableCard({ children, style, padded = true, ...rest }: Press
 export function Well({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
   const { colors, spacing } = useTheme();
   return (
-    <View style={[{ backgroundColor: colors.surfaceSunken, borderRadius: 14, borderCurve: "continuous", padding: spacing.md }, style]}>
+    <View style={[{ backgroundColor: colors.surfaceSunken, borderRadius: 16, borderCurve: "continuous", padding: spacing.md }, style]}>
       {children}
     </View>
   );

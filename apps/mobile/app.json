@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "HomeOps",
+    "name": "FamiliOS",
     "slug": "homeops-claude",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -16,7 +16,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#12161F",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
@@ -42,9 +42,9 @@
         {
           "image": "./assets/images/splash-logo.png",
           "imageWidth": 140,
-          "backgroundColor": "#ece3d5",
+          "backgroundColor": "#10141E",
           "dark": {
-            "backgroundColor": "#17130e"
+            "backgroundColor": "#10141E"
           }
         }
       ]

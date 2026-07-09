@@ -1,37 +1,46 @@
-// Files & Knowledge — the household's server-owned file library (upload from the
-// phone's photo library or files app) plus the read-only knowledge the helpers
-// have accumulated (memory entries + run artifacts). Search filters client-side.
+// Library — the household's document home. Spaces grid (real file groupings),
+// recent documents with badges, search, inline preview, plus the read-only
+// knowledge the agents have accumulated. Uploads run through the Upload sheet.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, TextInput, View } from "react-native";
 import { Image } from "expo-image";
-import * as DocumentPicker from "expo-document-picker";
-import * as ImagePicker from "expo-image-picker";
-import { readAsStringAsync } from "expo-file-system/legacy";
+import { useLocalSearchParams } from "expo-router";
 import { api, type ArtifactRec, type FileRec, type MemoryRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { useTheme } from "@/theme";
+import { useTheme, tapHaptic } from "@/theme";
 import {
-  Badge, Button, Card, Chip, ChipRow, EmptyState, HScreen, Notice,
-  PressableScale, Rise, SectionHeader, SkeletonCards, Sym, SymTile, T, Well,
+  Badge, Button, Card, EmptyState, HScreen, Notice, PressableScale, Rise,
+  SectionHeader, SkeletonCards, Sym, SymTile, T, Well,
 } from "@/components/ui";
+import { UploadSheet } from "@/components/sheets/upload-sheet";
 
 const fmtSize = (b: number) => (b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
-const MAX_BYTES = 5 * 1024 * 1024;
+const isTextMime = (mime: string) => mime.startsWith("text/") || /json|csv|markdown/.test(mime);
+const fileIcon = (mime: string) => (mime.startsWith("image/") ? "photo" : isTextMime(mime) ? "doc.text" : "doc");
 
 type Tab = "files" | "knowledge";
 
-const isTextMime = (mime: string) => mime.startsWith("text/") || /json|csv|markdown/.test(mime);
+// The four handoff spaces, matched against real file spaceId/tags/name keywords.
+const SPACE_DEFS = [
+  { key: "school", label: "School", icon: "graduationcap", tint: "sky", match: /school|class|teacher|homework|permission/i },
+  { key: "medical", label: "Medical & IDs", icon: "heart", tint: "lavender", sensitive: true, match: /medic|health|passport|id|insurance-card|sensitive/i },
+  { key: "bills", label: "Bills & Receipts", icon: "tag", tint: "amber", match: /bill|receipt|invoice|utility|statement/i },
+  { key: "home", label: "Home", icon: "wrench.adjustable", tint: "sage", match: /./ },
+] as const;
+type SpaceKey = (typeof SPACE_DEFS)[number]["key"];
 
-function fileIcon(mime: string): string {
-  if (mime.startsWith("image/")) return "photo";
-  if (isTextMime(mime)) return "doc.text";
-  return "doc";
+function spaceOf(f: FileRec): SpaceKey {
+  const hay = `${f.spaceId} ${f.tags.join(" ")} ${f.name}`;
+  for (const s of SPACE_DEFS) if (s.match.test(hay)) return s.key;
+  return "home";
 }
 
-export default function FilesScreen() {
+export default function LibraryScreen() {
   const { session } = useSession();
-  const { colors, spacing, radii, fonts } = useTheme();
+  const { colors, spacing, radii } = useTheme();
+  const { upload: uploadParam } = useLocalSearchParams<{ upload?: string }>();
   const canUpload = ["Owner", "Adult Admin", "Adult Member", "Limited Member"].includes(session?.role ?? "");
+
   const [tab, setTab] = useState<Tab>("files");
   const [files, setFiles] = useState<FileRec[]>([]);
   const [memory, setMemory] = useState<MemoryRec[]>([]);
@@ -41,9 +50,10 @@ export default function FilesScreen() {
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
   const [preview, setPreview] = useState<{ id: string; mime: string; text?: string; dataUri?: string } | null>(null);
-  // Client-side search — `query` is the raw keystroke state, `filter` the debounced value.
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("");
+  const [spaceFilter, setSpaceFilter] = useState<SpaceKey | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   const load = useCallback(async () => {
     const [f, m, a] = await Promise.all([api.files(), api.memory(), api.artifacts()]);
@@ -51,6 +61,7 @@ export default function FilesScreen() {
     setLoaded(true);
   }, []);
   useEffect(() => { if (session) void load(); }, [session, load]);
+  useEffect(() => { if (uploadParam === "1" && canUpload) setUploadOpen(true); }, [uploadParam, canUpload]);
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
   useEffect(() => {
@@ -58,55 +69,23 @@ export default function FilesScreen() {
     return () => clearTimeout(t);
   }, [query]);
 
+  const spaceCounts = useMemo(() => {
+    const m = new Map<SpaceKey, number>();
+    for (const f of files) m.set(spaceOf(f), (m.get(spaceOf(f)) ?? 0) + 1);
+    return m;
+  }, [files]);
+
   const visibleFiles = useMemo(() => {
-    if (!filter) return files;
-    return files.filter((f) =>
-      f.name.toLowerCase().includes(filter) ||
-      f.mime.toLowerCase().includes(filter) ||
-      f.tags.some((t) => t.toLowerCase().includes(filter)),
-    );
-  }, [files, filter]);
-
-  const upload = async (name: string, contentBase64: string, mime: string) => {
-    const r = await api.uploadFile({ name, contentBase64, mime });
-    if (r.file) { setNotice({ text: `${name} uploaded.`, ok: true }); await load(); }
-    else setNotice({
-      text: r.error === "too_large" ? "That file is over the 5 MB cap."
-        : r.error === "insufficient_role" ? "Uploading needs Limited Member or higher."
-        : `Upload failed: ${r.message ?? r.error ?? "unknown error"}`,
-      ok: false,
-    });
-  };
-
-  const pickDocument = async () => {
-    setBusy("doc"); setNotice(null);
-    try {
-      const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false });
-      if (res.canceled || !res.assets?.[0]) return;
-      const a = res.assets[0];
-      if ((a.size ?? 0) > MAX_BYTES) { setNotice({ text: "That file is over the 5 MB cap.", ok: false }); return; }
-      const b64 = await readAsStringAsync(a.uri, { encoding: "base64" });
-      await upload(a.name ?? "document", b64, a.mimeType ?? "application/octet-stream");
-    } catch (e) {
-      setNotice({ text: `Couldn't read that file: ${String((e as Error)?.message ?? e)}`, ok: false });
-    } finally { setBusy(null); }
-  };
-
-  const pickPhoto = async () => {
-    setBusy("photo"); setNotice(null);
-    try {
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!perm.granted) { setNotice({ text: "Photo library access was denied.", ok: false }); return; }
-      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], base64: true, quality: 0.8 });
-      if (res.canceled || !res.assets?.[0]?.base64) return;
-      const a = res.assets[0];
-      if (a.base64!.length * 0.75 > MAX_BYTES) { setNotice({ text: "That photo is over the 5 MB cap.", ok: false }); return; }
-      const name = a.fileName ?? `photo-${Date.now()}.jpg`;
-      await upload(name, a.base64!, a.mimeType ?? "image/jpeg");
-    } catch (e) {
-      setNotice({ text: `Couldn't read that photo: ${String((e as Error)?.message ?? e)}`, ok: false });
-    } finally { setBusy(null); }
-  };
+    let out = [...files].sort((a, b) => b.createdAt.localeCompare?.(a.createdAt) ?? 0);
+    if (spaceFilter) out = out.filter((f) => spaceOf(f) === spaceFilter);
+    if (filter) {
+      out = out.filter((f) =>
+        f.name.toLowerCase().includes(filter) ||
+        f.mime.toLowerCase().includes(filter) ||
+        f.tags.some((t) => t.toLowerCase().includes(filter)));
+    }
+    return out;
+  }, [files, filter, spaceFilter]);
 
   const openPreview = async (f: FileRec) => {
     if (preview?.id === f.id) { setPreview(null); return; }
@@ -134,7 +113,6 @@ export default function FilesScreen() {
     else setNotice({ text: r.error === "forbidden" ? "You can only remove files you uploaded." : `Couldn't remove: ${r.error}`, ok: false });
     await load();
   };
-
   const confirmRemove = (f: FileRec) => {
     Alert.alert(`Remove “${f.name}”?`, "This deletes it from the household library for everyone.", [
       { text: "Cancel", style: "cancel" },
@@ -142,18 +120,38 @@ export default function FilesScreen() {
     ]);
   };
 
-  const fileTone = (mime: string) =>
-    mime.startsWith("image/") ? { fg: colors.sky, bg: colors.skyBg }
-      : isTextMime(mime) ? { fg: colors.amber, bg: colors.amberBg }
-      : { fg: colors.textMuted, bg: colors.surfaceSunken };
+  const badgeFor = (f: FileRec) => {
+    const sensitive = f.visibility === "private" || f.tags.includes("sensitive");
+    if (sensitive) return { label: "Sensitive", fg: colors.lavender, bg: colors.lavenderBg };
+    if (Date.now() - Date.parse(f.createdAt) < 5 * 60 * 1000) return { label: "Processing", fg: colors.sky, bg: colors.skyBg };
+    return null;
+  };
+
+  const spaceLabel = (k: SpaceKey) => SPACE_DEFS.find((s) => s.key === k)?.label ?? "Home";
 
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh}>
       <Rise index={0}>
-        <ChipRow>
-          <Chip label={`Files (${files.length})`} selected={tab === "files"} icon="folder" onPress={() => setTab("files")} />
-          <Chip label={`Knowledge (${memory.length + artifacts.length})`} selected={tab === "knowledge"} icon="brain" onPress={() => setTab("knowledge")} />
-        </ChipRow>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          {/* Files / Knowledge segmented */}
+          <View style={{ flexDirection: "row", backgroundColor: colors.surfaceSunken, borderRadius: 12, borderCurve: "continuous", padding: 3, gap: 2, flex: 1, marginRight: spacing.md }}>
+            {(["files", "knowledge"] as const).map((t) => (
+              <PressableScale key={t} onPress={() => { tapHaptic("select"); setTab(t); }} haptic={null}
+                style={{ flex: 1, paddingVertical: 7, borderRadius: 9, borderCurve: "continuous", alignItems: "center", backgroundColor: tab === t ? colors.surface : "transparent" }}>
+                <T kind="caption" color={tab === t ? colors.text : colors.textSecondary} style={{ fontSize: 12.5 }}>
+                  {t === "files" ? `Files (${files.length})` : `Knowledge (${memory.length + artifacts.length})`}
+                </T>
+              </PressableScale>
+            ))}
+          </View>
+          {canUpload && tab === "files" && (
+            <PressableScale onPress={() => setUploadOpen(true)} haptic="select" accessibilityRole="button" accessibilityLabel="Upload"
+              style={{ flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.emberBg, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999 }}>
+              <Sym name="square.and.arrow.up" size={13} color={colors.ember} />
+              <T kind="subMedium" color={colors.ember}>Upload</T>
+            </PressableScale>
+          )}
+        </View>
       </Rise>
 
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
@@ -162,22 +160,7 @@ export default function FilesScreen() {
         <SkeletonCards count={4} />
       ) : tab === "files" ? (
         <>
-          {canUpload ? (
-            <Rise index={1} style={{ flexDirection: "row", gap: spacing.sm }}>
-              <View style={{ flex: 1 }}>
-                <Button title="Upload document" variant="ember" icon="doc.badge.plus" full loading={busy === "doc"} onPress={() => void pickDocument()} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Button title="Upload photo" variant="neutral" icon="photo" full loading={busy === "photo"} onPress={() => void pickPhoto()} />
-              </View>
-            </Rise>
-          ) : (
-            <Rise index={1}>
-              <T kind="sub">You can browse the library; uploading needs Limited Member or higher.</T>
-            </Rise>
-          )}
-
-          <Rise index={2}>
+          <Rise index={1}>
             <View style={{
               flexDirection: "row", alignItems: "center", gap: spacing.sm,
               backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous",
@@ -185,7 +168,7 @@ export default function FilesScreen() {
             }}>
               <Sym name="magnifyingglass" size={15} color={colors.textFaint} />
               <TextInput
-                style={{ flex: 1, color: colors.text, fontFamily: fonts.regular, fontSize: 15, paddingVertical: 10 }}
+                style={{ flex: 1, color: colors.text, fontSize: 15, paddingVertical: 10 }}
                 placeholder="Search by name or type"
                 placeholderTextColor={colors.textFaint}
                 value={query}
@@ -198,9 +181,46 @@ export default function FilesScreen() {
             </View>
           </Rise>
 
+          {/* Spaces grid */}
+          <Rise index={2}>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
+              {SPACE_DEFS.map((s) => {
+                const count = spaceCounts.get(s.key) ?? 0;
+                const active = spaceFilter === s.key;
+                const fg = colors[s.tint];
+                const bg = colors[`${s.tint}Bg`];
+                return (
+                  <PressableScale
+                    key={s.key}
+                    onPress={() => { tapHaptic("select"); setSpaceFilter(active ? null : s.key); }}
+                    haptic={null}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${s.label}, ${count} files${active ? ", filtering" : ""}`}
+                    style={{
+                      flexBasis: "48%", flexGrow: 1, padding: spacing.lg, gap: 8,
+                      borderRadius: 22, borderCurve: "continuous",
+                      backgroundColor: colors.surface,
+                      borderWidth: active ? 1.5 : 1, borderColor: active ? fg : colors.border,
+                    }}
+                  >
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                      <SymTile name={s.icon} color={fg} bg={bg} size={38} iconSize={17} />
+                      {"sensitive" in s && s.sensitive ? <Sym name="checkmark.shield" size={13} color={colors.lavender} /> : null}
+                    </View>
+                    <View>
+                      <T kind="rowTitle">{s.label}</T>
+                      <T kind="detail">{count} file{count === 1 ? "" : "s"}</T>
+                    </View>
+                  </PressableScale>
+                );
+              })}
+            </View>
+          </Rise>
+
+          <SectionHeader title={spaceFilter ? spaceLabel(spaceFilter) : "Recent documents"} />
           {visibleFiles.length === 0 ? (
-            filter ? (
-              <EmptyState icon="magnifyingglass" title="No matches" hint={`Nothing in the library matches “${query.trim()}”.`} />
+            filter || spaceFilter ? (
+              <EmptyState icon="magnifyingglass" title="No matches" hint="Nothing in the library matches that." />
             ) : (
               <EmptyState
                 icon="folder"
@@ -210,8 +230,8 @@ export default function FilesScreen() {
             )
           ) : (
             visibleFiles.map((f, i) => {
-              const tn = fileTone(f.mime);
               const open = preview?.id === f.id;
+              const b = badgeFor(f);
               return (
                 <Rise key={f.id} index={Math.min(i + 3, 8)}>
                   <Card padded={false}>
@@ -223,13 +243,14 @@ export default function FilesScreen() {
                       accessibilityLabel={`${f.name}, ${fmtSize(f.sizeBytes)}${open ? ", close preview" : ", open preview"}`}
                     >
                       <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, padding: spacing.lg }}>
-                        <SymTile name={fileIcon(f.mime)} color={tn.fg} bg={tn.bg} />
+                        <SymTile name={fileIcon(f.mime)} color={colors.textSecondary} bg={colors.surfaceSunken} size={36} iconSize={16} />
                         <View style={{ flex: 1, gap: 2 }}>
-                          <T kind="bodyMedium" color={colors.text} numberOfLines={1}>{f.name}</T>
-                          <T kind="sub" numberOfLines={1}>
-                            {fmtSize(f.sizeBytes)} · {new Date(f.createdAt).toLocaleDateString()}{f.tags.length ? ` · ${f.tags.join(", ")}` : ""}
+                          <T kind="rowTitle" numberOfLines={1}>{f.name}</T>
+                          <T kind="detail" numberOfLines={1}>
+                            {spaceLabel(spaceOf(f))} · {fmtSize(f.sizeBytes)} · {new Date(f.createdAt).toLocaleDateString()}{f.uploadedBy ? ` · ${f.uploadedBy}` : ""}
                           </T>
                         </View>
+                        {b && <Badge label={b.label} fg={b.fg} bg={b.bg} />}
                         {busy === `open:${f.id}`
                           ? <ActivityIndicator size="small" color={colors.textFaint} />
                           : <Sym name={open ? "chevron.up" : "chevron.down"} size={13} color={colors.textFaint} />}
@@ -264,10 +285,10 @@ export default function FilesScreen() {
         <>
           <SectionHeader title="Memory" />
           <Rise index={1}>
-            <T kind="sub">What HomeOps has learned from real runs — read-only here.</T>
+            <T kind="sub">What Famili has learned from real runs — read-only here.</T>
           </Rise>
           {memory.length === 0 ? (
-            <EmptyState icon="brain" title="No memory yet" hint="Entries appear as your helpers complete runs." />
+            <EmptyState icon="brain" title="No memory yet" hint="Entries appear as your agents complete runs." />
           ) : (
             memory.map((m, i) => (
               <Rise key={m.id} index={Math.min(i + 2, 8)}>
@@ -283,9 +304,6 @@ export default function FilesScreen() {
           )}
 
           <SectionHeader title="Artifacts" />
-          <Rise index={2}>
-            <T kind="sub">Documents and outputs produced by runs.</T>
-          </Rise>
           {artifacts.length === 0 ? (
             <EmptyState icon="doc.text" title="No artifacts yet" hint="Run outputs will collect here." />
           ) : (
@@ -296,7 +314,7 @@ export default function FilesScreen() {
                     <Badge label={a.kind} fg={colors.sky} bg={colors.skyBg} />
                     <T kind="caption" color={colors.textFaint}>{new Date(a.createdAt).toLocaleDateString()}</T>
                   </View>
-                  <T kind="bodyMedium" color={colors.text}>{a.title}</T>
+                  <T kind="rowTitle">{a.title}</T>
                   {a.body ? <T kind="sub" numberOfLines={6}>{a.body.slice(0, 400)}</T> : null}
                 </Card>
               </Rise>
@@ -304,6 +322,8 @@ export default function FilesScreen() {
           )}
         </>
       )}
+
+      <UploadSheet visible={uploadOpen} onClose={() => setUploadOpen(false)} onUploaded={() => void load()} />
     </HScreen>
   );
 }

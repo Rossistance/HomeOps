@@ -10,6 +10,7 @@ import Animated, {
 } from "react-native-reanimated";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { LinearGradient } from "expo-linear-gradient";
 import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec } from "@/lib/api";
 import { streamAssistant } from "@/lib/assistant-stream";
 import { useSession } from "@/lib/session";
@@ -145,8 +146,9 @@ export default function AskScreen() {
     })));
   }, [busy, flushReveal]);
 
-  // Deep link support: the Inbox screen links with /(ask)?c=<conversation id>.
-  const params = useLocalSearchParams<{ c?: string }>();
+  // Deep link support: the Inbox screen links with /(ask)?c=<conversation id>;
+  // the Approval sheet links with ?prefill=<draft message> (filled, not sent).
+  const params = useLocalSearchParams<{ c?: string; prefill?: string }>();
   const handledC = useRef<string | null>(null);
   useEffect(() => {
     const id = typeof params.c === "string" && params.c ? params.c : null;
@@ -154,6 +156,13 @@ export default function AskScreen() {
     handledC.current = id;
     void openConversation(id);
   }, [params.c, session, openConversation]);
+  const handledPrefill = useRef<string | null>(null);
+  useEffect(() => {
+    const p = typeof params.prefill === "string" && params.prefill ? params.prefill : null;
+    if (!p || handledPrefill.current === p) return;
+    handledPrefill.current = p;
+    setText(p);
+  }, [params.prefill]);
 
   const newChat = useCallback(() => {
     if (busy) return;
@@ -322,10 +331,18 @@ export default function AskScreen() {
 
           {msgs.length === 0 ? (
             <View style={{ alignItems: "center", paddingVertical: spacing.xxl, gap: spacing.sm }}>
-              <SymTile name="sparkles" color={colors.ember} bg={colors.emberBg} size={64} iconSize={30} />
-              <T kind="h2" center>What can I take off your plate?</T>
+              <LinearGradient
+                colors={[colors.hero1, colors.hero2]}
+                start={{ x: 0.1, y: 0 }} end={{ x: 0.75, y: 1 }}
+                style={{ width: 64, height: 64, borderRadius: 17, borderCurve: "continuous", alignItems: "center", justifyContent: "center" }}
+              >
+                <Sym name="sparkles" size={30} color={colors.heroText} />
+              </LinearGradient>
+              <T kind="h1" center style={{ fontSize: 24, lineHeight: 30 }}>
+                Ask Famili{session?.actorName ? `, ${session.actorName.split(" ")[0]}` : ""}
+              </T>
               <T kind="sub" center style={{ maxWidth: 300 }}>
-                Ask anything — I'll answer, draft a plan you can approve, or build a helper for the house.
+                Tell me what your family needs. I'll answer, or draft a plan you can approve and run.
               </T>
               {activeRun ? (
                 <PressableScale
@@ -345,6 +362,7 @@ export default function AskScreen() {
           {msgs.length === 0 && suggestions.length > 0 ? (
             <View style={{ gap: spacing.sm }}>
               <T kind="eyebrow">For you right now</T>
+              {/* 2×2 suggestion grid per the handoff */}
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
                 {suggestions.map((s) => (
                   <PressableScale
@@ -353,10 +371,14 @@ export default function AskScreen() {
                     haptic="light"
                     accessibilityRole="button"
                     accessibilityLabel={s.text}
-                    style={{ flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.surface, borderWidth: 1, borderColor: dark ? colors.rim : colors.border, borderRadius: radii.pill, paddingHorizontal: 13, paddingVertical: 9, maxWidth: "100%" }}
+                    style={{
+                      flexBasis: "47%", flexGrow: 1, gap: 8,
+                      backgroundColor: colors.surface, borderWidth: 1, borderColor: dark ? colors.rim : colors.border,
+                      borderRadius: radii.md, borderCurve: "continuous", padding: 13,
+                    }}
                   >
-                    <Sym name={s.icon} size={13} color={colors.ember} />
-                    <T kind="subMedium" color={colors.textSecondary} style={{ flexShrink: 1 }}>{s.text}</T>
+                    <SymTile name={s.icon} color={colors.ember} bg={colors.emberBg} size={30} iconSize={14} />
+                    <T kind="subMedium" color={colors.textSecondary} numberOfLines={2}>{s.text}</T>
                   </PressableScale>
                 ))}
               </View>
@@ -367,10 +389,11 @@ export default function AskScreen() {
             const plan = m.plan;
             const build = m.build;
             if (m.role === "user") {
+              // Handoff: user bubbles are fixed ink-navy in BOTH modes (18/18/4/18).
               return (
                 <Animated.View key={m.id} entering={FadeInDown.duration(200).reduceMotion(ReduceMotion.System)} style={{ alignItems: "flex-end" }}>
-                  <View style={{ backgroundColor: colors.emberBg, borderRadius: radii.lg, borderBottomRightRadius: 6, borderCurve: "continuous", paddingHorizontal: 14, paddingVertical: 10, maxWidth: "86%" }}>
-                    <T selectable color={colors.text}>{m.text}</T>
+                  <View style={{ backgroundColor: "#2A3147", borderRadius: 18, borderBottomRightRadius: 4, borderCurve: "continuous", paddingHorizontal: 14, paddingVertical: 10, maxWidth: "86%" }}>
+                    <T selectable color="#F3EDE1">{m.text}</T>
                   </View>
                 </Animated.View>
               );
@@ -406,7 +429,7 @@ export default function AskScreen() {
           <TextInput
             value={text}
             onChangeText={setText}
-            placeholder="Ask HomeOps…"
+            placeholder="Message Famili"
             placeholderTextColor={colors.textFaint}
             multiline
             accessibilityLabel="Message"

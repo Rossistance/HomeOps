@@ -1,9 +1,10 @@
-// Typography primitives. Fraunces = hearth voice (headings, hero numbers);
-// Inter = UI voice (everything else). Never set fontFamily in screens.
+// Typography primitives. Newsreader = display voice (screen titles, hero lines,
+// agent names); system SF Pro = body/UI voice. Never set fontFamily in screens,
+// and never set body copy in the serif.
 import { Text, type TextProps } from "react-native";
 import { useTheme } from "@/theme";
 
-type Kind = "h1" | "h2" | "h3" | "body" | "bodyMedium" | "sub" | "subMedium" | "caption" | "eyebrow";
+type Kind = "h1" | "h2" | "h2Serif" | "hero" | "h3" | "rowTitle" | "body" | "bodyMedium" | "sub" | "subMedium" | "detail" | "caption" | "eyebrow" | "tab";
 
 interface TProps extends TextProps {
   kind?: Kind;
@@ -15,9 +16,9 @@ export function T({ kind = "body", color, center, style, ...rest }: TProps) {
   const { colors, type } = useTheme();
   const base = type[kind];
   const fallback =
-    kind === "h1" || kind === "h2" ? colors.text :
-    kind === "eyebrow" || kind === "caption" ? colors.textFaint :
-    kind === "sub" || kind === "subMedium" ? colors.textMuted :
+    kind === "h1" || kind === "h2" || kind === "h2Serif" || kind === "hero" || kind === "rowTitle" || kind === "h3" ? colors.text :
+    kind === "eyebrow" || kind === "caption" || kind === "tab" ? colors.textFaint :
+    kind === "sub" || kind === "subMedium" || kind === "detail" ? colors.textMuted :
     colors.textSecondary;
   return (
     <Text
