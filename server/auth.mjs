@@ -65,7 +65,7 @@ export function clearSessionCookie() {
 export function corsHeaders(req) {
   const origin = req.headers.origin;
   const h = {
-    "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
+    "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
     "access-control-allow-headers": "content-type, authorization, x-homeops-csrf, x-homeops-signature, x-homeops-timestamp, x-homeops-nonce, x-homeops-test",
     vary: "Origin",
   };

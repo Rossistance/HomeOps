@@ -80,13 +80,13 @@ export default function ConnectionsScreen() {
         return;
       }
       // ASWebAuthenticationSession: opens a secure in-app browser and waits for the
-      // homeops:// redirect that the server issues after the code exchange completes.
+      // familios:// redirect that the server issues after the code exchange completes.
       // The server reports failures through the same deep link (ok=0&message=...), so
       // the user always lands back here instead of being stranded in the browser.
       // Ephemeral = private context: the PWA's service worker / Safari cookies can
       // never intercept the /api/oauth/callback navigation (a stale worker used to
       // swallow it and render the cached web app instead of finishing the exchange).
-      const result = await WebBrowser.openAuthSessionAsync(start.url, "homeops://", { preferEphemeralSession: true });
+      const result = await WebBrowser.openAuthSessionAsync(start.url, "familios://", { preferEphemeralSession: true });
       if (result.type === "success") {
         const u = new URL(result.url);
         if (u.searchParams.get("ok") === "0") {

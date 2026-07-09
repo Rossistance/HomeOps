@@ -2,7 +2,7 @@
 // Steps 3 and 4 are wired to the real household: members come from the API and
 // the starter-agent picker activates/pauses the household's real agents.
 import { useEffect, useMemo, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, TextInput, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -34,12 +34,15 @@ export function Onboarding() {
   const [agents, setAgents] = useState<AgentRec[]>([]);
   const [picked, setPicked] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState(false);
+  const [householdName, setHouseholdName] = useState("");
+  const isOwner = session?.role === "Owner";
 
   useEffect(() => {
     void (async () => {
-      const [m, a] = await Promise.all([api.members(), api.agents()]);
+      const [m, a, hh] = await Promise.all([api.members(), api.agents(), api.household()]);
       setMembers(m);
       setAgents(a);
+      setHouseholdName(hh?.name ?? "");
       const initial: Record<string, boolean> = {};
       for (const ag of a) initial[ag.id] = ag.status === "Active";
       setPicked(initial);
@@ -56,6 +59,10 @@ export function Onboarding() {
   async function finish() {
     if (saving) return;
     setSaving(true);
+    // Owner-typed household name persists server-side (appears on briefings/invites).
+    if (isOwner && householdName.trim()) {
+      await api.renameHousehold(householdName.trim()).catch(() => null);
+    }
     // Handoff rule: unpicked starter agents launch as Paused. Only touch agents
     // whose status actually changes; failures are non-fatal (Agents tab can fix).
     if (isAdmin) {
@@ -137,8 +144,23 @@ export function Onboarding() {
 
         {kind === "household" && (
           <Animated.View entering={FadeInDown.duration(320)} style={{ gap: spacing.lg }}>
-            <T kind="h1" style={{ fontSize: 26, lineHeight: 32 }}>Your household</T>
-            <T kind="body">Everyone here shares the family calendar. Spaces like Medical or Bills stay with the adults you choose.</T>
+            <T kind="h1" style={{ fontSize: 26, lineHeight: 32 }}>{isOwner ? "Name your household" : "Your household"}</T>
+            <T kind="body">
+              {isOwner
+                ? "It appears on briefings, invites and updates."
+                : "Everyone here shares the family calendar. Spaces like Medical or Bills stay with the adults you choose."}
+            </T>
+            {isOwner && (
+              <View style={{ backgroundColor: colors.surfaceSunken, borderRadius: 16, borderCurve: "continuous" }}>
+                <TextInput
+                  value={householdName}
+                  onChangeText={setHouseholdName}
+                  placeholder="e.g. The Harper Family"
+                  placeholderTextColor={colors.textFaint}
+                  style={{ paddingHorizontal: 16, paddingVertical: 14, fontSize: 19, color: colors.text, fontFamily: "Newsreader_600SemiBold" }}
+                />
+              </View>
+            )}
             <Card style={{ gap: spacing.md }}>
               {(members.length ? members : null)?.map((m) => (
                 <View key={m.actorId} style={st.trustRow}>

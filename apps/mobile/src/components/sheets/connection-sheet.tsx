@@ -69,7 +69,7 @@ export function ConnectionSheet({ service, visible, onClose, onChanged }: {
         setNote(start.message ?? start.error ?? "Could not start the connection.");
         return;
       }
-      const result = await WebBrowser.openAuthSessionAsync(start.url, "homeops://", { preferEphemeralSession: true });
+      const result = await WebBrowser.openAuthSessionAsync(start.url, "familios://", { preferEphemeralSession: true });
       if (result.type === "success") {
         const u = new URL(result.url);
         if (u.searchParams.get("ok") === "0") {

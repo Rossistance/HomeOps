@@ -249,7 +249,7 @@ const server = http.createServer(async (req, res) => {
       // that navigates via JS immediately AND offers a tap-through link, so the user
       // is never stranded looking at a web page inside the auth browser.
       const finishMobile = (params) => {
-        const deepLink = `homeops://oauth-callback?${new URLSearchParams(params).toString()}`;
+        const deepLink = `familios://oauth-callback?${new URLSearchParams(params).toString()}`;
         const ok = params.ok === "1";
         res.writeHead(200, { "content-type": "text/html" });
         return res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:system-ui;background:#f4f0e9;color:#1f2535;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center;max-width:28rem;padding:1rem"><div style="font-size:40px">${ok ? "✓" : "✕"}</div><h2>${ok ? `${escapeHtml(params.provider ?? "Account")} connected` : "Connection failed"}</h2><p style="color:#4a5568">${escapeHtml(params.message ?? (ok ? "Returning to FamiliOS…" : "Return to FamiliOS and try again."))}</p><p><a href="${deepLink}" style="display:inline-block;padding:12px 22px;border-radius:12px;background:#d26420;color:#fff;text-decoration:none;font-weight:600">Return to FamiliOS</a></p></div><script>location.replace(${JSON.stringify(deepLink)})</script></body>`);
@@ -276,7 +276,7 @@ const server = http.createServer(async (req, res) => {
         }
         const acct = await upsertAccount({ provider: st.provider, householdId: st.householdId, actorId: st.actorId, tokens: ex.tokens });
         appendAudit({ type: "oauth.callback", provider: st.provider, ok: true, actorId: st.actorId, accountId: acct.id });
-        // Mobile-initiated flows: hand control back to the app via the homeops:// scheme.
+        // Mobile-initiated flows: hand control back to the app via the familios:// scheme.
         // Web flows: postMessage to the opener window.
         if (isMobileFlow) {
           return finishMobile({ ok: "1", provider: provider.name, displayName: acct.displayName ?? "" });
@@ -448,7 +448,11 @@ const server = http.createServer(async (req, res) => {
         actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null,
         pinRequired: pinSet && (m.role === "Owner" || m.role === "Adult Admin"),
       }));
-      return json(res, 200, { profiles, claimed: profiles.some((p) => !SEED_ACTOR_IDS.includes(p.actorId)) }, req);
+      return json(res, 200, {
+        profiles,
+        claimed: profiles.some((p) => !SEED_ACTOR_IDS.includes(p.actorId)),
+        householdName: getSettings().householdName ?? null,
+      }, req);
     }
     // Claim the household: replace the demo Harper roster with YOUR owner profile.
     // Unauthenticated by necessity (a new household has nobody to sign in as), but
@@ -470,6 +474,8 @@ const server = http.createServer(async (req, res) => {
       // then register the real owner.
       for (const m of live) putMember({ actorId: m.actorId, archived: true });
       const owner = putMember({ actorId, displayName: ownerName, role: "Owner", relationship: body.relationship ?? "Account owner", householdId: "local" });
+      const claimedName = String(body.householdName ?? "").trim();
+      if (claimedName) setSettings({ householdName: claimedName.slice(0, 60) });
       const s = createSession({ actorId, actorName: ownerName, role: "Owner", householdId: "local" });
       audit({ type: "household.claim", ok: true, actorId, archivedDemo: live.length }, req, s);
       const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
@@ -478,6 +484,23 @@ const server = http.createServer(async (req, res) => {
         member: { actorId: owner.actorId, displayName: owner.displayName, role: owner.role },
         session: sessionView, ...(wantToken ? { token: s.token } : {}),
       }, req, { "set-cookie": sessionCookie(s.token) });
+    }
+
+    /* ---- Household identity: the name shows on the lock screen, briefings,
+     * and invites. Any member can read it; renaming is Owner-only. ---- */
+    if (path === "/api/household" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      return json(res, 200, { household: { id: g.session.householdId, name: getSettings().householdName ?? null } }, req);
+    }
+    if (path === "/api/household" && method === "PATCH") {
+      const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const name = String(body.name ?? "").trim();
+      if (!name) return json(res, 400, { error: "name_required" }, req);
+      if (name.length > 60) return json(res, 400, { error: "name_too_long", message: "Keep the household name under 60 characters." }, req);
+      setSettings({ householdName: name });
+      audit({ type: "household.rename", ok: true, name }, req, g.session);
+      return json(res, 200, { household: { id: g.session.householdId, name } }, req);
     }
 
     /* ---- Everything below requires an authenticated, allowed-origin session ---- */

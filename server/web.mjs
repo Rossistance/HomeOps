@@ -1,11 +1,12 @@
 // FamiliOS — production web capability (search / read / recipe extraction).
 //
-// Zero-dependency: works on any host (Render, local, CI) with plain fetch, so
-// web + iOS clients get real web access WITHOUT the local Playwright runtime.
-// When BROWSER_RUNTIME_URL points at a live runtime, `readPage` upgrades to a
-// real headless browser for JS-heavy pages; otherwise it degrades honestly to
-// server-side HTML fetching (which covers search engines and recipe sites).
+// Works on any host with plain fetch; JS-heavy pages upgrade to a real headless
+// browser in this order: (1) in-process Playwright Chromium (server/browser.mjs,
+// installed via `npm run install-browser`), (2) an external runtime at
+// BROWSER_RUNTIME_URL. Without either it degrades honestly to server-side HTML
+// fetching (which covers search engines and recipe sites).
 import { safeFetch } from "./net.mjs";
+import { renderPage, browserAvailable } from "./browser.mjs";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const FETCH_HEADERS = { "user-agent": UA, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "accept-language": "en-US,en;q=0.9" };
@@ -221,8 +222,22 @@ export async function readPage(url, { maxChars = MAX_TEXT } = {}) {
   let text = html ? htmlToText(html) : "";
   let rendered = "http";
 
-  // Thin/blocked pages get a second chance in the real browser (if available).
-  if (text.length < 400) {
+  // Thin pages (JS shells, bot walls) get a second chance in a real browser.
+  // Never render targets safeFetch refused on policy (SSRF guard).
+  const thin = text.length < 400 || /<div id=["'](root|app|__next)["']>\s*<\/div>/i.test(html);
+  if (thin && !direct.policyBlocked) {
+    // 1) In-process Playwright Chromium (full JS runtime), when installed.
+    if (browserAvailable()) {
+      const viaLocal = await renderPage(target);
+      if (viaLocal && (viaLocal.text?.length ?? 0) > text.length) {
+        html = viaLocal.html ?? html;
+        finalUrl = viaLocal.url ?? finalUrl;
+        text = viaLocal.text ?? text;
+        rendered = "browser";
+        return { ok: true, title: viaLocal.title || extractTitle(html), url: finalUrl, text: text.slice(0, maxChars), links: extractLinks(html, finalUrl), rendered, html };
+      }
+    }
+    // 2) External browser runtime, when configured.
     const viaRuntime = await tryBrowserRuntime(target);
     if (viaRuntime && (viaRuntime.text?.length ?? 0) > text.length) {
       return { ok: true, title: viaRuntime.title ?? "", url: viaRuntime.url ?? target, text: String(viaRuntime.text ?? "").slice(0, maxChars), links: viaRuntime.links ?? [], rendered: "browser" };

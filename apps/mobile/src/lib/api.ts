@@ -316,6 +316,22 @@ export const api = {
     const r = await req<{ members: MemberRec[] }>("/members");
     return r.data?.members ?? [];
   },
+  /* ---- household roster + identity (invites are real member records; roles are
+   * server-resolved at sign-in, never client-minted) ---- */
+  async createMember(body: { displayName: string; role: string; relationship?: string | null }): Promise<{ member?: { actorId: string; displayName: string; role: string; relationship: string | null }; error?: string; message?: string }> {
+    const r = await req<{ member?: { actorId: string; displayName: string; role: string; relationship: string | null }; error?: string; message?: string }>("/members", { method: "POST", body: JSON.stringify(body) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async household(): Promise<{ id: string; name: string | null } | null> {
+    const r = await req<{ household?: { id: string; name: string | null } }>("/household");
+    return r.data?.household ?? null;
+  },
+  async renameHousehold(name: string): Promise<{ household?: { id: string; name: string | null }; error?: string; message?: string }> {
+    const r = await req<{ household?: { id: string; name: string | null }; error?: string; message?: string }>("/household", { method: "PATCH", body: JSON.stringify({ name }) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
   async updateTask(id: string, patch: Partial<TaskRec>): Promise<{ task?: TaskRec; error?: string }> {
     const r = await req<{ task?: TaskRec; error?: string }>(`/tasks/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
     if (r.status === 403) return { error: "insufficient_role" };

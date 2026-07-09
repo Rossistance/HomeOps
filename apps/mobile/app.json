@@ -5,10 +5,10 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "homeops",
+    "scheme": ["familios", "homeops"],
     "userInterfaceStyle": "automatic",
     "ios": {
-      "bundleIdentifier": "ai.homeops.app",
+      "bundleIdentifier": "ai.familios.app",
       "supportsTablet": true,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false

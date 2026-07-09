@@ -16,6 +16,9 @@ import {
 } from "@/components/ui";
 import { ApprovalSheet } from "@/components/sheets/approval-sheet";
 import { ChoreSheet, isKidMember } from "@/components/sheets/chore-sheet";
+import { InviteSheet } from "@/components/sheets/invite-sheet";
+
+const isGrandparent = (m: MemberRec) => /grand(parent|ma|pa|mother|father)/i.test(m.relationship ?? "");
 
 function SeeAll({ label = "See all", onPress }: { label?: string; onPress: () => void }) {
   const { colors } = useTheme();
@@ -49,13 +52,15 @@ export default function TodayScreen() {
   const [members, setMembers] = useState<MemberRec[]>([]);
   const [openApproval, setOpenApproval] = useState<ApprovalRec | null>(null);
   const [choreOpen, setChoreOpen] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [householdName, setHouseholdName] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [h, aps, evts, tks, mem] = await Promise.all([
-      api.health(), api.approvals(), api.events(), api.tasks(), api.members(),
+    const [h, aps, evts, tks, mem, hh] = await Promise.all([
+      api.health(), api.approvals(), api.events(), api.tasks(), api.members(), api.household(),
     ]);
     setOffline(!h);
-    if (h) { setApprovals(aps); setEvents(evts); setTasks(tks); setMembers(mem); }
+    if (h) { setApprovals(aps); setEvents(evts); setTasks(tks); setMembers(mem); setHouseholdName(hh?.name ?? null); }
     setLoading(false);
   }, []);
 
@@ -126,18 +131,20 @@ export default function TodayScreen() {
               <View style={{ flexDirection: "row", gap: spacing.lg, flexWrap: "wrap" }}>
                 {members.map((m, i) => {
                   const kid = isKidMember(m);
-                  const tint = kid ? KID_TINTS[i % KID_TINTS.length] : "ember";
+                  const gp = !kid && isGrandparent(m);
+                  const tint = kid ? KID_TINTS[i % KID_TINTS.length] : gp ? "lavender" : "ember";
                   const fg = tint === "ember" ? colors.ember : colors[tint];
                   const bg = tint === "ember" ? colors.emberBg : colors[`${tint}Bg`];
                   const initials = m.displayName.split(" ").map((p) => p[0]).slice(0, 2).join("");
+                  const dest = kid ? "/kid" : gp ? "/grandparent" : null;
                   return (
                     <PressableScale
                       key={m.actorId}
-                      onPress={kid ? () => router.push({ pathname: "/kid", params: { id: m.actorId } }) : undefined}
-                      disabled={!kid}
-                      haptic={kid ? "select" : null}
+                      onPress={dest ? () => router.push({ pathname: dest, params: { id: m.actorId } }) : undefined}
+                      disabled={!dest}
+                      haptic={dest ? "select" : null}
                       style={{ alignItems: "center", gap: 5, width: 52 }}
-                      accessibilityLabel={kid ? `Open ${m.displayName}'s view` : m.displayName}
+                      accessibilityLabel={dest ? `Open ${m.displayName}'s view` : m.displayName}
                     >
                       <View style={[st.avatar, { backgroundColor: bg }]}>
                         <T kind="subMedium" color={fg} style={{ fontWeight: "600" }}>{initials}</T>
@@ -147,7 +154,7 @@ export default function TodayScreen() {
                   );
                 })}
                 <PressableScale
-                  onPress={() => router.push("/household")}
+                  onPress={() => setInviteOpen(true)}
                   haptic="select"
                   style={{ alignItems: "center", gap: 5, width: 52 }}
                   accessibilityLabel="Invite someone"
@@ -347,6 +354,7 @@ export default function TodayScreen() {
         onDecided={() => void load()}
       />
       <ChoreSheet visible={choreOpen} onClose={() => setChoreOpen(false)} members={members} onAssigned={() => void load()} />
+      <InviteSheet visible={inviteOpen} onClose={() => setInviteOpen(false)} householdName={householdName} onInvited={() => void load()} />
     </HScreen>
   );
 }

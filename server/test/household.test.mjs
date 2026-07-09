@@ -93,3 +93,28 @@ test("a child cannot manage the roster", async () => {
   const r = await kidSession.req("/api/members", { method: "POST", body: JSON.stringify({ displayName: "Friend", role: "Owner" }) });
   assert.equal(r.status, 403);
 });
+
+test("household name: any member reads it, only the Owner renames it", async () => {
+  const owner = await makeSession(ctx, "m-owner");
+  // Owner renames.
+  const renamed = await owner.req("/api/household", { method: "PATCH", body: JSON.stringify({ name: "The Hixon Household" }) });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.data.household.name, "The Hixon Household");
+  // Any member (a child) can read it.
+  const kid = (await owner.req("/api/members", { method: "POST", body: JSON.stringify({ displayName: "Nia", role: "Child View" }) })).data.member;
+  const kidSession = await makeSession(ctx, kid.actorId);
+  const read = await kidSession.req("/api/household");
+  assert.equal(read.status, 200);
+  assert.equal(read.data.household.name, "The Hixon Household");
+  // ...but cannot rename it.
+  const denied = await kidSession.req("/api/household", { method: "PATCH", body: JSON.stringify({ name: "Nia World" }) });
+  assert.equal(denied.status, 403);
+  // Empty and oversized names are rejected.
+  const empty = await owner.req("/api/household", { method: "PATCH", body: JSON.stringify({ name: "  " }) });
+  assert.equal(empty.status, 400);
+  const long = await owner.req("/api/household", { method: "PATCH", body: JSON.stringify({ name: "x".repeat(61) }) });
+  assert.equal(long.status, 400);
+  // The name also surfaces pre-auth on the profile picker.
+  const profiles = await raw("/api/profiles");
+  assert.equal(profiles.data.householdName, "The Hixon Household");
+});
