@@ -195,6 +195,28 @@ export async function providerHealth(id) {
 }
 
 // ---- Chat (real provider call) ----
+/** providerChat with resilience: one retry on transient failure (429/5xx/
+ * timeout/network), then fall through to the next CONFIGURED provider so a
+ * single vendor blip never takes the assistant down. Successful fallbacks are
+ * labeled degraded:true + fellBackFrom so clients can show a quiet banner. */
+export async function providerChatWithFallback(primaryId, opts) {
+  const transient = (r) => !r.ok && (r.error === "provider_error" || r.error === "timeout" || r.error === "network" || (r.status && (r.status === 429 || r.status >= 500)));
+  let out = await providerChat(primaryId, opts);
+  if (transient(out)) {
+    await new Promise((r) => setTimeout(r, 800));
+    out = await providerChat(primaryId, opts);
+  }
+  if (out.ok || !transient(out)) return out;
+  for (const p of AI_PROVIDERS) {
+    if (p.id === primaryId) continue;
+    const readiness = providerReadiness(p);
+    if (!["healthy", "configured", "needs_health_check"].includes(readiness)) continue;
+    const alt = await providerChat(p.id, { messages: opts?.messages });
+    if (alt.ok) return { ...alt, degraded: true, fellBackFrom: primaryId };
+  }
+  return out; // honest original failure — nothing else could answer
+}
+
 export async function providerChat(id, { messages = [], model } = {}) {
   const p = aiProviderById(id);
   if (!p) return { ok: false, error: "unknown_provider" };

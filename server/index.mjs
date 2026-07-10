@@ -13,7 +13,7 @@ import {
   getConnectorConfig, setConnectorConfig, revokeConnector, getSecret,
   appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings, getDataRev,
   quarantinedCollections, acknowledgeQuarantine,
-  createSession, deleteSession, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
+  createSession, deleteSession, deleteSessionsForActor, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
   getPushTokens, addPushToken, removePushToken,
   getRun, listRuns, getSkill, listSkills,
@@ -62,7 +62,11 @@ import {
 import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode } from "./notify.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
-import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast } from "./auth.mjs";
+import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast, sessionFromReq } from "./auth.mjs";
+
+// Sliding-window rate-limit buckets (in-process; per-IP pre-auth, per-actor assistant).
+const _rateBuckets = new Map();
+setInterval(() => { if (_rateBuckets.size > 5000) _rateBuckets.clear(); }, 10 * 60_000).unref();
 import { listProviders as listAIProviders, aiProviderById, setProviderConfig, revokeProvider, setActiveProvider, providerHealth, providerModels, providerChat, bootstrapAIFromEnv } from "./ai.mjs";
 import { listProviders as listConnectorProviders, providerById as connectorProviderById, providerConfigured, publicProvider as publicConnectorProvider, findToolGlobal } from "./providers.mjs";
 import { buildAuthUrl, exchangeCode, apiForAccount } from "./oauth.mjs";
@@ -224,6 +228,34 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    /* ---- Rate limits (in-process sliding window; public URL = hostile input) ----
+     * Pre-auth routes limit per-IP (credential/claim probing); assistant routes
+     * limit per-actor (runaway clients / cost abuse). Honest 429 + audit.
+     * MUST run before any route handler — routing order is the firewall order. */
+    const rlKeyIp = (req.socket?.remoteAddress ?? "unknown") + ":" + (req.headers["x-forwarded-for"] ?? "");
+    const rateLimited = (bucket, key, limit, windowMs) => {
+      const now = Date.now();
+      const k = `${bucket}:${key}`;
+      const arr = (_rateBuckets.get(k) ?? []).filter((t) => now - t < windowMs);
+      if (arr.length >= limit) { _rateBuckets.set(k, arr); return true; }
+      arr.push(now);
+      _rateBuckets.set(k, arr);
+      return false;
+    };
+    if ((path === "/api/session" && method === "POST") || path === "/api/household/claim") {
+      if (rateLimited("auth", rlKeyIp, 20, 60_000)) {
+        audit({ type: "rate.limited", route: path }, req);
+        return json(res, 429, { error: "rate_limited", message: "Too many attempts — wait a minute and try again." }, req);
+      }
+    }
+    if (path.startsWith("/api/assistant")) {
+      const s0 = sessionFromReq(req);
+      if (s0 && rateLimited("assistant", s0.actorId, 30, 60_000)) {
+        audit({ type: "rate.limited", route: path, actorId: s0.actorId }, req);
+        return json(res, 429, { error: "rate_limited", message: "That's a lot of messages at once — give it a minute." }, req);
+      }
+    }
+
     /* ---- Health (origin-allowed, no session; used to detect backend) ---- */
     if (path === "/api/health") {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
@@ -655,7 +687,9 @@ const server = http.createServer(async (req, res) => {
       const owners = listMembers({ householdId: g.session.householdId }).filter((x) => !x.archived && x.role === "Owner");
       if (m.role === "Owner" && owners.length <= 1) return json(res, 409, { error: "last_owner", message: "The household needs at least one Owner." }, req);
       putMember({ actorId: m.actorId, archived: true });
-      audit({ type: "member.archive", memberId: m.actorId, ok: true }, req, g.session);
+      // A removed member's devices lose access NOW, not at token expiry.
+      const killed = deleteSessionsForActor(m.actorId);
+      audit({ type: "member.archive", memberId: m.actorId, sessionsKilled: killed, ok: true }, req, g.session);
       return json(res, 200, { ok: true }, req);
     }
     const acctHealth = path.match(/^\/api\/accounts\/([^/]+)\/health$/);

@@ -13,7 +13,7 @@ import {
   createApproval, consumeApproval, getApproval, decideApproval,
   appendAudit, getSettings, putEvolution, patchEvolution,
   idempotencyKey, checkIdempotency, recordIdempotency, withRunLock, hashInput,
-  getRiskOverride, addArtifact, addMemory, listMemory,
+  getRiskOverride, addArtifact, addMemory, listMemory, addNotification,
 } from "./store.mjs";
 import { findToolGlobal } from "./providers.mjs";
 import { listConnectors, executeTool, toolActionOf } from "./connectors.mjs";
@@ -563,11 +563,42 @@ async function _drive(runId) {
   }
 }
 
+// Failure classes make silent degradation visible: dashboards, digests, and
+// alerts key off these instead of raw error strings.
+function classifyFailure(error) {
+  const e = String(error ?? "").toLowerCase();
+  if (/interrupt|stall/.test(e)) return "interrupted";
+  if (/timeout/.test(e)) return "timeout";
+  if (/no_provider|provider_error|rate_limit|429/.test(e)) return "provider_down";
+  if (/bot|blocked|fetch_failed|no results|search_failed|no_recipe/.test(e)) return "bot_wall";
+  if (/invalid_input|empty_|bad_/.test(e)) return "invalid_input";
+  return "other";
+}
+
 function finishFailed(runId, error) {
   patchRun(runId, { status: "failed", error, finishedAt: Date.now(), lease: null });
   const run = getRun(runId);
-  appendAudit({ type: "run.failed", runId, error, householdId: run?.householdId });
-  if (run) recordFailureEvolution(run); // real, evidence-backed proposal (deterministic baseline)
+  appendAudit({ type: "run.failed", runId, error, failureClass: classifyFailure(error), householdId: run?.householdId });
+  if (run) {
+    recordFailureEvolution(run); // real, evidence-backed proposal (deterministic baseline)
+    // Consecutive-failure alert: the same agent/automation failing twice in a
+    // row is a broken routine, not a blip — tell the Owner now, in-app.
+    try {
+      const refId = run.sourceRef?.agentId || run.sourceRef?.automationId || null;
+      if (refId) {
+        const siblings = listRuns({ householdId: run.householdId, limit: 50 })
+          .filter((r) => (r.sourceRef?.agentId || r.sourceRef?.automationId) === refId && r.id !== run.id && ["completed", "failed"].includes(r.status))
+          .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
+        if (siblings[0]?.status === "failed") {
+          addNotification({
+            householdId: run.householdId, actorId: run.actorId, channel: "In-App", to: null,
+            title: "An agent keeps failing",
+            body: `"${run.title}" has failed twice in a row (${classifyFailure(error)}). Check its details in Agents — it may need a connection fixed or its instructions adjusted.`,
+          });
+        }
+      }
+    } catch { /* alerting must never mask the original failure */ }
+  }
   emit(runId, "run.failed");
   return { ok: false, status: "failed", error };
 }

@@ -7,7 +7,7 @@
 import { PROVIDERS } from "./providers.mjs";
 import { CONNECTORS, readinessOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
-import { providerChat, providerChatStream } from "./ai.mjs";
+import { providerChat, providerChatStream, providerChatWithFallback } from "./ai.mjs";
 import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride } from "./store.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
 
@@ -166,7 +166,7 @@ export async function planFromGoal({ goal, session, providerId } = {}) {
   const catalog = toolCatalog(session);
   const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
   const user = `Available tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nGoal: ${String(goal).trim()}`;
-  const out = await providerChat(id, { messages: [{ role: "system", content: PLAN_SYS }, { role: "user", content: user }] });
+  const out = await providerChatWithFallback(id, { messages: [{ role: "system", content: PLAN_SYS }, { role: "user", content: user }] });
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
   const parsed = extractJSON(out.text);
   if (!parsed) return { ok: false, error: "parse_failed", message: "The AI response could not be parsed into a plan. Try rephrasing the goal." };
@@ -284,7 +284,7 @@ export async function assistantRespond({ message, context, session, providerId, 
     .filter((m) => m && (m.role === "user" || m.role === "assistant") && m.text)
     .slice(-10)
     .map((m) => ({ role: m.role, content: String(m.text).slice(0, 1500) }));
-  const out = await providerChat(id, { messages: [{ role: "system", content: ASSISTANT_SYS }, ...priorTurns, { role: "user", content: user }] });
+  const out = await providerChatWithFallback(id, { messages: [{ role: "system", content: ASSISTANT_SYS }, ...priorTurns, { role: "user", content: user }] });
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
   const parsed = extractJSON(out.text);
   // Robust chat: if the model didn't return clean JSON, treat its prose as an answer.

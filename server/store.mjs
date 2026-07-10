@@ -228,6 +228,19 @@ export function deleteSession(token) {
   return false;
 }
 
+/** Kill every live session (cookie + bearer) for an actor — called when a
+ * member is archived so a removed person's devices lose access immediately,
+ * not at token expiry. Also used on role demotion. */
+export function deleteSessionsForActor(actorId) {
+  const all = readJSON("sessions.json", {});
+  let killed = 0;
+  for (const [token, s] of Object.entries(all)) {
+    if (s.actorId === actorId) { delete all[token]; killed++; }
+  }
+  if (killed) writeJSON("sessions.json", all);
+  return killed;
+}
+
 /* ---- Household members (server-owned role source of truth) ----
  * Authority is NEVER taken from the client. A session's effective role is resolved
  * from this registry by actorId. members.json is seeded on boot (seed.mjs) and is
