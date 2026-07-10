@@ -656,9 +656,32 @@ export function findRunByApprovalId(approvalId) {
 // Runs by household; safe to call on an interval. Returns count expired.
 // Only genuine TTL lapse expires a parked run here; a `denied` approval is owned by
 // the _drive/resumeRun path (→ failed) so the terminal status stays consistent.
+const RUN_STALL_MS = 30 * 60_000;
+
 export async function expireStaleRuns() {
   let expired = 0;
   const jobs = [];
+  // Belt-and-braces stall sweeper: a run claiming "running"/"retrying" that
+  // hasn't been touched in 30 minutes has lost its driver (step timeouts patch
+  // every ≤2 min, so silence this long means the loop is gone). Fail it
+  // honestly instead of showing a family a forever-spinning run.
+  for (const r of listRuns({ limit: 1000 })) {
+    if (!["running", "retrying"].includes(r.status)) continue;
+    const touched = Date.parse(r.updatedAt ?? "") || r.createdAt || 0;
+    if (!touched || Date.now() - touched < RUN_STALL_MS) continue;
+    jobs.push(withRunLock(r.id, async () => {
+      const run = getRun(r.id);
+      if (!run || !["running", "retrying"].includes(run.status)) return;
+      const cur = run.steps[run.cursor];
+      if (cur && ["running", "ready", "pending"].includes(cur.status)) {
+        patchRunStep(run.id, run.cursor, { status: "failed", detail: "Run stalled (no progress for 30 minutes) — stopped so it doesn't hang forever. Retry when ready.", finishedAt: Date.now() });
+      }
+      patchRun(run.id, { status: "failed", error: "stalled", finishedAt: Date.now(), lease: null });
+      appendAudit({ type: "run.stalled", runId: run.id, householdId: run.householdId });
+      emit(run.id, "run.failed");
+      expired++;
+    }).catch(() => {}));
+  }
   for (const r of listRuns({ limit: 1000 })) {
     if (r.status !== "waiting_for_approval") continue;
     const step = r.steps[r.cursor];
