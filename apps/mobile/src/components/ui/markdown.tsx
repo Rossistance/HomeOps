@@ -1,16 +1,43 @@
 // Minimal markdown renderer for assistant responses: headings, bullets,
-// numbered lists, bold/italic/inline-code, fenced code blocks. Deliberately
-// dependency-free; anything unrecognized falls through as plain text.
-import { View } from "react-native";
+// numbered lists, bold/italic/inline-code, fenced code blocks, and tappable
+// [text](url) / bare-URL links. Deliberately dependency-free; anything
+// unrecognized falls through as plain text.
+import { Linking, View } from "react-native";
 import { Text } from "react-native";
 import { useTheme, fonts } from "@/theme";
 import { T } from "./text";
 
 function inline(text: string, colors: { text: string; ember: string; surfaceSunken: string }, keyBase: string) {
-  // Tokenize **bold**, *italic*, `code`
-  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g).filter(Boolean);
+  // Tokenize [links](url), bare URLs, **bold**, *italic*, `code`
+  const parts = text.split(/(\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s)<>"']+|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g).filter(Boolean);
   return parts.map((p, i) => {
     const key = `${keyBase}-${i}`;
+    const md = p.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+    if (md) {
+      return (
+        <Text
+          key={key}
+          accessibilityRole="link"
+          onPress={() => { void Linking.openURL(md[2]); }}
+          style={{ color: colors.ember, textDecorationLine: "underline", fontFamily: fonts.semibold }}
+        >
+          {md[1]}
+        </Text>
+      );
+    }
+    if (/^https?:\/\//.test(p)) {
+      const clean = p.replace(/[.,;:]+$/, "");
+      return (
+        <Text
+          key={key}
+          accessibilityRole="link"
+          onPress={() => { void Linking.openURL(clean); }}
+          style={{ color: colors.ember, textDecorationLine: "underline" }}
+        >
+          {clean}
+        </Text>
+      );
+    }
     if (p.startsWith("**") && p.endsWith("**")) return <Text key={key} style={{ fontFamily: fonts.semibold }}>{p.slice(2, -2)}</Text>;
     if (p.startsWith("*") && p.endsWith("*") && p.length > 2) return <Text key={key} style={{ fontStyle: "italic" }}>{p.slice(1, -1)}</Text>;
     if (p.startsWith("`") && p.endsWith("`")) {

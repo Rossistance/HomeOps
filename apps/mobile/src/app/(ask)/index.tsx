@@ -11,7 +11,7 @@ import Animated, {
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec } from "@/lib/api";
+import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec, type RunRec } from "@/lib/api";
 import { streamAssistant } from "@/lib/assistant-stream";
 import { useSession } from "@/lib/session";
 import { useRun } from "@/lib/run-context";
@@ -29,6 +29,7 @@ interface Msg {
   build?: ChatBuild;
   built?: boolean;
   error?: boolean;
+  runId?: string; // plan messages that the server already started executing
 }
 
 interface Suggestion { text: string; icon: string }
@@ -133,6 +134,14 @@ export default function AskScreen() {
   }, []);
 
   /* ---------- conversations ---------- */
+  const mapServerMessages = useCallback((c: ConversationRec): Msg[] =>
+    c.messages.map((m, i) => ({
+      id: `${c.id}-${i}`, role: m.role, text: m.text,
+      plan: m.plan ?? undefined, build: m.build ?? undefined, built: !!m.built,
+      error: m.kind === "error" || (m.kind === "run_result" && m.status === "failed"),
+      runId: m.runId ?? undefined,
+    })), []);
+
   const openConversation = useCallback(async (id: string) => {
     if (busy) return;
     flushReveal();
@@ -140,12 +149,48 @@ export default function AskScreen() {
     if (!c) return;
     instantScroll.current = true;
     setConversationId(c.id);
-    setMsgs(c.messages.map((m, i) => ({
-      id: `${c.id}-${i}`, role: m.role, text: m.text,
-      plan: m.plan ?? undefined, build: m.build ?? undefined, built: !!m.built,
-      error: m.kind === "error",
-    })));
-  }, [busy, flushReveal]);
+    setMsgs(mapServerMessages(c));
+  }, [busy, flushReveal, mapServerMessages]);
+
+  // The server thread is the truth once runs execute server-side: results,
+  // repair status lines, and save-as-helper offers all land there. Refresh
+  // pulls them into the visible chat.
+  const refreshConversation = useCallback(async (id: string) => {
+    const c = await api.conversation(id);
+    if (!c) return;
+    setMsgs(mapServerMessages(c));
+  }, [mapServerMessages]);
+
+  /* ---------- server-run watching (auto-executed plans + self-repair) ---------- */
+  const [serverRun, setServerRun] = useState<RunRec | null>(null);
+  const watchedRuns = useRef<Set<string>>(new Set());
+  const watchServerRun = useCallback((runId: string, convId: string) => {
+    if (watchedRuns.current.has(runId)) return;
+    watchedRuns.current.add(runId);
+    let ticks = 0;
+    const poll = async () => {
+      const r = await api.getRun(runId);
+      if (r.run) setServerRun(r.run);
+      const terminal = r.run && ["completed", "failed", "cancelled", "expired"].includes(r.run.status);
+      if (!terminal && ticks++ < 120) { setTimeout(() => void poll(), 1500); return; }
+      setServerRun(null);
+      await refreshConversation(convId);
+      if (r.run?.status === "failed") {
+        // Self-repair happens server-side moments later: keep syncing the thread
+        // and hop onto the repaired run when its status message names it.
+        for (const delay of [2500, 6000, 12000, 22000]) {
+          setTimeout(() => void (async () => {
+            const c = await api.conversation(convId);
+            if (!c) return;
+            setMsgs(mapServerMessages(c));
+            const repairMsg = [...c.messages].reverse().find((m) => m.kind === "status" && m.runId && m.runId !== runId);
+            if (repairMsg?.runId) watchServerRun(repairMsg.runId, convId);
+          })(), delay);
+        }
+      }
+    };
+    void poll();
+  }, [mapServerMessages, refreshConversation]);
 
   // Deep link support: the Inbox screen links with /(ask)?c=<conversation id>;
   // the Approval sheet links with ?prefill=<draft message> (filled, not sent).
@@ -220,15 +265,19 @@ export default function AskScreen() {
     const aid = uid + "a";
     if (r.ok) {
       const full =
-        r.kind === "plan" && r.plan ? (r.answer || r.plan.summary || "Here's my plan.")
+        r.kind === "plan" && r.plan ? (r.answer || r.plan.summary || "On it.")
         : r.kind === "build" && r.build ? (r.answer || r.build.summary || "Here's what I'll set up.")
         : (r.answer || "I'm not sure how to help with that yet.");
       setMsgs((m) => [...m, {
         id: aid, role: "assistant", text: "",
         plan: r.kind === "plan" ? r.plan ?? undefined : undefined,
         build: r.kind === "build" ? r.build ?? undefined : undefined,
+        runId: r.run?.id,
       }]);
       revealInto(aid, full);
+      // Do-requests already started executing server-side — watch the run live;
+      // its results (and any self-repair) come back into this thread.
+      if (r.run?.id && convId) watchServerRun(r.run.id, convId);
     } else {
       setMsgs((m) => [...m, {
         id: aid, role: "assistant", error: true,
@@ -237,7 +286,7 @@ export default function AskScreen() {
           : (r.message || "I couldn't reach the AI provider just now."),
       }]);
     }
-  }, [busy, conversationId, flushReveal, revealInto, text]);
+  }, [busy, conversationId, flushReveal, revealInto, text, watchServerRun]);
 
   /* ---------- plan + build actions ---------- */
   // Runs stay IN the chat: live progress renders inline below the messages and
@@ -436,7 +485,7 @@ export default function AskScreen() {
                       ? <T selectable color={colors.coral}>{m.text}</T>
                       : <MarkdownText text={m.text} />}
                   </Card>
-                  {plan ? <PlanCard plan={plan} onRun={() => void runPlan(plan)} /> : null}
+                  {plan ? <PlanCard plan={plan} autoRun={!!m.runId} onRun={() => void runPlan(plan)} /> : null}
                   {build ? (
                     <BuildCard
                       build={build}
@@ -450,6 +499,32 @@ export default function AskScreen() {
               </Animated.View>
             );
           })}
+
+          {/* Auto-executed server run: live step progress inline in the thread. */}
+          {serverRun && msgs.length > 0 && !["completed", "failed", "cancelled", "expired"].includes(serverRun.status) ? (
+            <Card style={{ gap: spacing.sm }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                <T kind="h3" color={colors.text} style={{ flex: 1 }}>{serverRun.title}</T>
+                <Badge
+                  label={serverRun.status === "waiting_approval" ? "Needs approval" : "Doing it"}
+                  fg={serverRun.status === "waiting_approval" ? colors.amber : colors.ember}
+                  bg={serverRun.status === "waiting_approval" ? colors.amberBg : colors.emberBg}
+                />
+              </View>
+              {serverRun.steps.map((s, i) => (
+                <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                  <View style={{
+                    width: 8, height: 8, borderRadius: 4,
+                    backgroundColor: ["succeeded", "done", "completed"].includes(s.status) ? colors.sage
+                      : s.status === "running" ? colors.ember
+                      : s.status === "failed" ? colors.coral
+                      : s.status === "waiting_approval" ? colors.amber : colors.textFaint,
+                  }} />
+                  <T kind="sub" color={colors.textSecondary} numberOfLines={1} style={{ flex: 1 }}>{s.title}</T>
+                </View>
+              ))}
+            </Card>
+          ) : null}
 
           {/* Live run progress, inline in the thread (runs never leave the chat). */}
           {activeRun && msgs.length > 0 && activeRun.status !== "completed" && activeRun.status !== "failed" ? (
@@ -586,8 +661,9 @@ function TypingDot({ delay }: { delay: number }) {
   return <Animated.View style={[{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.textFaint }, style]} />;
 }
 
-/** Proposed plan: risk badge, timeline of steps, one ember action. */
-function PlanCard({ plan, onRun }: { plan: AgentPlan; onRun: () => void }) {
+/** Plan card. autoRun plans are ALREADY executing server-side — no button,
+ * just the step outline while live progress renders below in the thread. */
+function PlanCard({ plan, onRun, autoRun }: { plan: AgentPlan; onRun: () => void; autoRun?: boolean }) {
   const { colors, spacing } = useTheme();
   const rc = riskColor(colors, plan.risk);
   return (
@@ -633,12 +709,20 @@ function PlanCard({ plan, onRun }: { plan: AgentPlan; onRun: () => void }) {
           );
         })}
       </View>
-      <View style={{ marginTop: spacing.md }}>
-        <Button title="Run this plan" variant="ember" icon="play.fill" full onPress={onRun} />
-      </View>
-      {plan.approvalRequired ? (
-        <T kind="sub" style={{ marginTop: spacing.sm }}>Risky steps pause for your approval — the run and its results stay right here in the chat.</T>
-      ) : null}
+      {autoRun ? (
+        <T kind="sub" style={{ marginTop: spacing.md }}>
+          Already on it — progress and results land right here in the chat.{plan.approvalRequired ? " Risky steps will pause for your approval." : ""}
+        </T>
+      ) : (
+        <>
+          <View style={{ marginTop: spacing.md }}>
+            <Button title="Run this plan" variant="ember" icon="play.fill" full onPress={onRun} />
+          </View>
+          {plan.approvalRequired ? (
+            <T kind="sub" style={{ marginTop: spacing.sm }}>Risky steps pause for your approval — the run and its results stay right here in the chat.</T>
+          ) : null}
+        </>
+      )}
     </Card>
   );
 }

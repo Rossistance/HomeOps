@@ -42,6 +42,19 @@ function emit(runId, type) {
   try { runEmitter(runId).emit("event", { type, run: getRun(runId) }); } catch { /* non-fatal */ }
 }
 
+/* ---- Run-finished hooks (C-intel): observers of terminal runs ----
+ * Registered by higher layers (assistant self-healing, conversation result
+ * append). Fire-and-forget: a hook can never delay or fail the engine. */
+const _runFinishedHooks = [];
+export function onRunFinished(cb) { _runFinishedHooks.push(cb); }
+function fireRunFinished(runId) {
+  const run = getRun(runId);
+  if (!run) return;
+  for (const cb of _runFinishedHooks) {
+    try { void Promise.resolve(cb(run)).catch(() => {}); } catch { /* observer-only */ }
+  }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function withTimeout(promise, ms) {
   return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error("step_timeout")), ms))]);
@@ -368,6 +381,7 @@ async function _drive(runId) {
       // Automatic memory (item 11b) — fire-and-forget so completion is never delayed.
       void proposeRunMemory(runId).catch(() => {});
       emit(runId, "run.completed");
+      fireRunFinished(runId);
       return { ok: true, status: "completed" };
     }
     const step = run.steps[i];
@@ -611,6 +625,7 @@ function finishFailed(runId, error) {
     } catch { /* alerting must never mask the original failure */ }
   }
   emit(runId, "run.failed");
+  fireRunFinished(runId);
   return { ok: false, status: "failed", error };
 }
 

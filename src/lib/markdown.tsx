@@ -43,18 +43,23 @@ function tokenize(src: string): Token[] {
   return tokens;
 }
 
-/** Render inline markdown: **bold**, *italic*, `code`. */
+/** Render inline markdown: [links](url), bare URLs, **bold**, *italic*, `code`. */
 function InlineContent({ text }: { text: string }): ReactNode {
   const parts: ReactNode[] = [];
-  // Split by bold (**text**), italic (*text*), inline code (`text`)
-  const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g;
+  const re = /(\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s)<>"']+|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let key = 0;
+  const link = (href: string, label: string) => (
+    <a key={key++} href={href} target="_blank" rel="noopener noreferrer" className="font-semibold text-ember-600 underline underline-offset-2 hover:text-ember-700">{label}</a>
+  );
   while ((m = re.exec(text))) {
     if (m.index > last) parts.push(text.slice(last, m.index));
     const raw = m[0];
-    if (raw.startsWith("**")) parts.push(<strong key={key++}>{raw.slice(2, -2)}</strong>);
+    const md = raw.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+    if (md) parts.push(link(md[2], md[1]));
+    else if (/^https?:\/\//.test(raw)) { const clean = raw.replace(/[.,;:]+$/, ""); parts.push(link(clean, clean)); if (clean.length < raw.length) parts.push(raw.slice(clean.length)); }
+    else if (raw.startsWith("**")) parts.push(<strong key={key++}>{raw.slice(2, -2)}</strong>);
     else if (raw.startsWith("`")) parts.push(<code key={key++} className="rounded bg-ink-900/[0.06] px-1 py-0.5 font-mono text-[0.8em]">{raw.slice(1, -1)}</code>);
     else parts.push(<em key={key++}>{raw.slice(1, -1)}</em>);
     last = m.index + raw.length;

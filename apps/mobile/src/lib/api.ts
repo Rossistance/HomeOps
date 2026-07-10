@@ -44,13 +44,14 @@ export interface BuildResult {
   updated?: { kind: string; id: string; name?: string; ok: boolean }[];
   notes?: string[]; error?: string; message?: string;
 }
-export interface AssistantResult { ok: boolean; kind?: "answer" | "plan" | "build"; answer?: string; plan?: AgentPlan; build?: ChatBuild; model?: string; error?: string; message?: string }
+export interface AssistantResult { ok: boolean; kind?: "answer" | "plan" | "build"; answer?: string; plan?: AgentPlan; build?: ChatBuild; run?: RunRec; model?: string; error?: string; message?: string }
 // Server-durable assistant conversations — same records the web client uses, so a chat
 // started on the phone shows up on the web (and vice versa) and survives app restarts.
 export interface ConversationMessage {
   role: "user" | "assistant"; text: string; at: string; kind?: string;
   plan?: AgentPlan | null; build?: ChatBuild | null; built?: boolean;
   builtIds?: { skillId?: string; agentId?: string; triggerId?: string };
+  runId?: string | null; status?: string;
 }
 export interface ConversationRec { id: string; title: string; messages: ConversationMessage[]; createdAt: string; updatedAt: string }
 // Durable server runs (read-only view) — used to enrich approval previews with the

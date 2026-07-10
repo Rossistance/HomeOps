@@ -35,6 +35,7 @@ import {
 } from "./store.mjs";
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases } from "./engine.mjs";
 import { createBackup, listBackups, readBackup, restoreBackup, backupTick } from "./backup.mjs";
+import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { closeBrowser } from "./browser.mjs";
 import { runSkill, runAgent } from "./orchestrator.mjs";
 import { seedDefaults } from "./seed.mjs";
@@ -2427,10 +2428,23 @@ const handleRequest = async (req, res) => {
       const histConv = body.conversationId ? getConversation(body.conversationId) : null;
       const history = histConv && histConv.householdId === g.session.householdId && histConv.actorId === g.session.actorId ? histConv.messages : [];
       const out = await assistantRespond({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history });
-      // The assistant is advisory: it ANSWERS or proposes a PLAN. Executing the plan
-      // is an explicit user action ("Run plan") that starts a durable server run via
-      // POST /api/runs/start — so the browser never orchestrates, and nothing runs
-      // before the user approves the plan itself.
+      // Do-requests EXECUTE immediately (C-intel): a plan from chat auto-starts as a
+      // durable server run — no "Run plan" click. Approval-gated steps still pause
+      // for human sign-off inside the run, and results append back to this thread.
+      // Only BUILD proposals (agent creation) wait for explicit confirmation.
+      if (out.ok && out.kind === "plan" && out.plan && roleAtLeast(g.session.role, "Limited Member")) {
+        try {
+          const run = await startRun({
+            source: "assistant",
+            sourceRef: { conversationId: body.conversationId ?? null, via: "chat" },
+            plan: out.plan, session: g.session, title: out.plan.title,
+          });
+          out.run = publicRun(run);
+          audit({ type: "run.start", runId: run.id, source: "assistant", ok: true }, req, g.session);
+        } catch (e) {
+          out.answer = `${out.answer}\n\n(I couldn't start it: ${String(e?.message ?? e)})`;
+        }
+      }
       // Server-durable thread: if a conversation is named, persist the turn so history
       // survives refresh and is owned by the server, not the client. Failed turns are
       // persisted too — the user saw their question and the honest error, so a refresh
@@ -2443,7 +2457,7 @@ const handleRequest = async (req, res) => {
           // `build` persisted too — otherwise a build-proposal card vanished on refresh
           // and the user had no durable evidence the assistant ever offered to build.
           appendConversationMessage(conv.id, out.ok
-            ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, model: out.model ?? null, at }
+            ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, runId: out.run?.id ?? null, model: out.model ?? null, at }
             : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at });
         }
       }
@@ -2466,6 +2480,21 @@ const handleRequest = async (req, res) => {
           { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history },
           (_tok) => { tokenCount++; if (tokenCount % 4 === 0) res.write(`data: ${JSON.stringify({ type: "progress", tokens: tokenCount })}\n\n`); },
         );
+        // Do-requests auto-execute here too (see POST /api/assistant): the run starts
+        // before the "done" event so the client can attach to it immediately.
+        if (out.ok && out.kind === "plan" && out.plan && roleAtLeast(g.session.role, "Limited Member")) {
+          try {
+            const run = await startRun({
+              source: "assistant",
+              sourceRef: { conversationId: body.conversationId ?? null, via: "chat" },
+              plan: out.plan, session: g.session, title: out.plan.title,
+            });
+            out.run = publicRun(run);
+            audit({ type: "run.start", runId: run.id, source: "assistant", ok: true }, req, g.session);
+          } catch (e) {
+            out.answer = `${out.answer}\n\n(I couldn't start it: ${String(e?.message ?? e)})`;
+          }
+        }
         // Same server-durable persistence as POST /api/assistant — this was previously
         // MISSING here, which is why every conversation created through the real chat UI
         // (which always streams) stayed empty (messages: []) server-side forever: history
@@ -2477,7 +2506,7 @@ const handleRequest = async (req, res) => {
             const at = new Date().toISOString();
             appendConversationMessage(conv.id, { role: "user", text: String(body.message), at });
             appendConversationMessage(conv.id, out.ok
-              ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, model: out.model ?? null, at }
+              ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, runId: out.run?.id ?? null, model: out.model ?? null, at }
               : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at });
           }
         }
@@ -2800,6 +2829,7 @@ server.listen(PORT, () => {
   // Hosted deployments hand AI keys via env — configure + activate once, never
   // overwriting a Settings-made choice (see bootstrapAIFromEnv).
   try { const boot = bootstrapAIFromEnv(); if (boot.length) console.log(`[ai] bootstrapped from env: ${boot.join(", ")}`); } catch { /* non-fatal */ }
+  registerAssistantRunHooks(); // inline chat results + one-shot self-repair for conversation runs
   // Recovery + sweeps + trigger tick run once PER HOUSEHOLD, each inside that
   // household's tenant context — one family's broken state never blocks another's.
   void forEachTenant(() => recoverRuns()); // re-drive any runs that were mid-flight at shutdown

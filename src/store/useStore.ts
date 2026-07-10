@@ -1105,7 +1105,11 @@ export const useStore = create<Store>((set, get) => {
               ? "I can't reach the FamiliOS runtime. Make sure it's running (npm run dev), then try again."
               : "I couldn't reach the AI provider just now. Check it's configured and reachable in Settings → AI Providers, then ask me again.";
         } else if (r.kind === "plan" && r.plan) {
-          m.status = "planned"; m.text = r.answer || r.plan.summary || "Here's my plan."; m.plan = r.plan; m.model = r.model;
+          // Auto-run (C-intel): the server already started executing this plan —
+          // attach the run so the card shows live status instead of a Run button.
+          if (r.run?.id) { m.status = "done"; m.runId = r.run.id; m.text = r.answer || r.plan.summary || "On it — doing it now."; }
+          else { m.status = "planned"; m.text = r.answer || r.plan.summary || "Here's my plan."; }
+          m.plan = r.plan; m.model = r.model;
         } else if (r.kind === "build" && r.build) {
           m.status = "planned"; m.text = r.answer || r.build.summary || "Here's what I'll set up."; m.build = r.build; m.model = r.model;
         } else {
@@ -1113,6 +1117,21 @@ export const useStore = create<Store>((set, get) => {
         }
         c.updatedAt = nowISO();
       });
+      // Watch a server-auto-started run to a terminal state, hydrating so its
+      // live status, run_result message, and any self-repair follow-ups (status
+      // lines, the repaired run, the save-as-helper offer) land in this thread.
+      if (r.ok && r.kind === "plan" && r.run?.id) {
+        const runId = r.run.id;
+        void (async () => {
+          for (let i = 0; i < 60; i++) {
+            await new Promise((res) => setTimeout(res, 2500));
+            await get().hydrateFromServer();
+            const run = get().data.runs.find((x) => x.id === runId);
+            if (run && ["Completed", "Failed", "Cancelled", "Expired"].includes(run.status)) break;
+          }
+          for (const d of [4000, 10000, 22000]) setTimeout(() => void get().hydrateFromServer(), d);
+        })();
+      }
     },
     // Unified chat-builder: approve a proposed build and materialize it server-side, then
     // mark the chat message "built" and append a confirmation listing what was created.

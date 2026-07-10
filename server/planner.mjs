@@ -10,6 +10,7 @@ import { listAccountsFor } from "./accounts.mjs";
 import { providerChat, providerChatStream, providerChatWithFallback } from "./ai.mjs";
 import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride, recordAiUsage, aiBudgetExhausted } from "./store.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
+import { searchWeb, readPage } from "./web.mjs";
 
 // Input hints for the internal family-data tools, so the planner knows how to fill
 // them (and the engine knows which fields require threading — see toolInputSchema).
@@ -105,7 +106,7 @@ function extractJSON(text) {
   try { return JSON.parse(slice); } catch { return null; }
 }
 
-function normalizePlan(p, catalog, goal) {
+export function normalizePlan(p, catalog, goal) {
   const byId = new Map(catalog.map((t) => [t.toolId, t]));
   const icon = ICONS.includes(p.icon) ? p.icon : "Bot";
   const spaceType = SPACE_TYPES.includes(p.spaceType) ? p.spaceType : "Personal";
@@ -192,9 +193,10 @@ export async function planFromGoal({ goal, session, providerId } = {}) {
 const ASSISTANT_SYS = `You are FamiliOS, a warm, capable assistant for a family's household operations. You either ANSWER with information grounded in the provided household context, or you propose an ACTION PLAN using the available tools.
 
 Choose:
-- ANSWER when the user wants information, a summary, status, or advice. Ground every claim in the provided context; if needed data isn't connected or present, say so plainly — never invent events, counts, or results.
-- PLAN when the user wants a ONE-OFF thing done now (send this, find-and-do, remind me once). Build the smallest plan that achieves it.
-- BUILD when the user wants a DURABLE or RECURRING capability — phrases like "every week / each morning", "always", "set up", "create a helper/agent that…", "automate", "from now on". Propose the reusable pieces to stand up: a skill (the recipe), optionally an agent to own it, and optionally an automation (the schedule/trigger).
+- ANSWER when the user wants information you already have — household context, advice, opinions, summaries of provided data. Ground every claim in the provided context; if needed data isn't connected or present, say so plainly — never invent events, counts, or results.
+- LOOKUP when answering needs CURRENT outside information (news, headlines, weather, prices, hours, scores, "what's happening with…", any fact you don't reliably know). The server fetches the web for you mid-turn and you compose the final answer — the user gets real information in THIS turn, never a plan they must run. A purely informational request must NEVER become a plan.
+- PLAN when the user wants a ONE-OFF thing DONE now with side effects (send this, add/schedule/change something, find-and-do). Build the smallest plan that achieves it. Plans EXECUTE IMMEDIATELY — the user does not click anything — so your "answer" sentence says what you're doing right now ("On it — adding taco night and the groceries…"), not "here's my plan". Steps that send/write externally still pause for the family's approval automatically.
+- BUILD only when the user asks for a DURABLE or RECURRING capability — "create an agent/helper that…", "every week / each morning", "automate", "from now on". This is the ONLY case where you present the full worked-up plan for confirmation before anything runs.
 
 Plan rules:
 - Use tools ONLY from the catalog, matched by exact "id". For a reasoning/notify/summarize step with no matching tool, set "toolId" to null.
@@ -225,6 +227,7 @@ Build rules:
 
 Respond with ONLY a JSON object (no prose, no markdown fences), one of:
 { "kind": "answer", "answer": string }
+{ "kind": "lookup", "answer": string, "queries": [string], "readUrls": [string] }  — "answer" is one short working sentence ("Checking the latest headlines…"); "queries" is 1-3 plain-English web searches; "readUrls" is 0-2 exact URLs worth reading in full (usually empty — search snippets often suffice).
 { "kind": "plan", "answer": string, "plan": { "title": string, "summary": string, "icon": string, "spaceType": string, "instructions": string, "trigger": { "type": string, "detail": string }, "steps": [ { "toolId": string|null, "title": string, "detail": string, "input": object, "requiresApproval": boolean } ], "approvalGates": [string], "risk": "Low"|"Medium"|"High"|"Sensitive" } }
 { "kind": "build", "answer": string, "build": { "summary": string, "skill": { "name": string, "description": string, "domain": string, "planner_guidance": string, "steps": [ { "name": string, "tool_id": string|null, "approval_required": boolean } ], "risk_level": "Low"|"Medium"|"High"|"Sensitive" } | null, "agent": { "name": string, "purpose": string, "instructions": string } | null, "automation": { "name": string, "type": "recurring"|"schedule"|"webhook"|"manual", "intervalMs": number | null, "runAt": string | null } | null, "edits": [ { "kind": "agent"|"skill", "id": string, "summary": string, "patch": object } ] } }
 For a plan or build, "answer" is one friendly sentence summarizing what you'll set up or change.`;
@@ -279,6 +282,59 @@ export function buildServerContext(session, clientContext) {
   };
 }
 
+/* ---- One-turn live lookups ----
+ * When the assistant decides it needs current outside information, the server
+ * fetches it MID-TURN (bounded: ≤3 searches, ≤2 page reads through the existing
+ * 5-tier web chain) and a second model pass composes the final chat answer with
+ * inline markdown links. The user asks "top 5 global news stories" and gets
+ * five linked headlines in THIS reply — never a plan card. */
+const COMPOSE_SYS = `You compose the final chat reply for a family assistant, using ONLY the fetched web material provided (search results and page extracts) plus the user's question. Rules:
+- Cite with inline markdown links: [Headline or source name](url). Every factual claim should trace to a provided result.
+- "Top N" requests get a numbered list: each item is the headline as a markdown link, then one plain sentence of what happened.
+- Prefer diverse, reputable sources; skip duplicates of the same story.
+- Be honest about gaps: if the fetched material doesn't cover part of the question, say so briefly.
+- Plain markdown text only — no JSON, no code fences. Keep it tight and readable on a phone.`;
+
+async function performLookup({ id, session, message, parsed }) {
+  const queries = (Array.isArray(parsed.queries) ? parsed.queries : []).map((q) => String(q).trim()).filter(Boolean).slice(0, 3);
+  const readUrls = (Array.isArray(parsed.readUrls) ? parsed.readUrls : []).map((u) => String(u).trim()).filter((u) => /^https?:\/\//.test(u)).slice(0, 2);
+  if (!queries.length && !readUrls.length) {
+    return { ok: true, kind: "answer", answer: String(parsed.answer ?? "I couldn't work out what to look up — can you rephrase?") };
+  }
+  const searches = [];
+  for (const q of queries) {
+    const r = await searchWeb(q, { maxResults: 6 }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+    searches.push({
+      query: q, ok: !!r?.ok,
+      results: (r?.results ?? []).slice(0, 6).map((x) => ({ title: x.title, url: x.url, snippet: String(x.snippet ?? "").slice(0, 240) })),
+      ...(r?.ok ? {} : { error: r?.error ?? "search_failed" }),
+    });
+  }
+  const pages = [];
+  for (const u of readUrls) {
+    const p = await readPage(u, { maxChars: 2600 }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+    pages.push({ url: u, ok: !!p?.ok, title: p?.title ?? "", text: String(p?.text ?? "").slice(0, 2600), ...(p?.ok ? {} : { error: p?.error ?? "read_failed" }) });
+  }
+  const anyMaterial = searches.some((s) => s.results.length) || pages.some((p) => p.ok);
+  if (!anyMaterial) {
+    const why = searches[0]?.error ?? pages[0]?.error ?? "no results";
+    return { ok: true, kind: "answer", answer: `I tried to look that up but the web fetch came back empty (${why}). Try again in a minute, or rephrase the question.` };
+  }
+  recordAiUsage(session?.householdId, "assistant"); // the compose pass is a second metered call
+  const compose = await providerChatWithFallback(id, {
+    messages: [
+      { role: "system", content: COMPOSE_SYS },
+      { role: "user", content: `User asked: ${String(message).trim()}\n\nSearch results (JSON): ${JSON.stringify(searches)}\n\nPage extracts (JSON): ${JSON.stringify(pages)}` },
+    ],
+  });
+  if (!compose.ok) {
+    // Honest fallback: hand over the raw links rather than nothing.
+    const links = searches.flatMap((s) => s.results).slice(0, 5).map((r, i) => `${i + 1}. [${r.title}](${r.url})`).join("\n");
+    return { ok: true, kind: "answer", answer: `Here's what I found (the summarizer hiccuped, so these are raw results):\n\n${links}` };
+  }
+  return { ok: true, kind: "answer", answer: String(compose.text ?? "").trim(), model: compose.model, lookedUp: true };
+}
+
 export async function assistantRespond({ message, context, session, providerId, history } = {}) {
   if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
   const id = activeProviderId(providerId, session?.householdId);
@@ -301,9 +357,12 @@ export async function assistantRespond({ message, context, session, providerId, 
   const parsed = extractJSON(out.text);
   // Robust chat: if the model didn't return clean JSON, treat its prose as an answer.
   if (!parsed) return { ok: true, kind: "answer", answer: String(out.text || "").trim() || "I'm not sure how to help with that yet.", model: out.model };
+  if (parsed.kind === "lookup") {
+    return await performLookup({ id, session, message, parsed });
+  }
   if (parsed.kind === "plan" && parsed.plan && typeof parsed.plan === "object") {
     const plan = normalizePlan(parsed.plan, catalog, String(message).trim());
-    return { ok: true, kind: "plan", answer: String(parsed.answer ?? plan.summary ?? "Here's my plan."), plan, model: out.model };
+    return { ok: true, kind: "plan", answer: String(parsed.answer ?? plan.summary ?? "On it."), plan, model: out.model };
   }
   if (parsed.kind === "build" && parsed.build && typeof parsed.build === "object") {
     return { ok: true, kind: "build", answer: String(parsed.answer ?? parsed.build.summary ?? "Here's what I'll set up."), build: normalizeBuild(parsed.build), model: out.model };
@@ -379,9 +438,15 @@ export async function assistantStream({ message, context, session, providerId, h
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
   const parsed = extractJSON(out.text);
   if (!parsed) return { ok: true, kind: "answer", answer: String(out.text || "").trim() || "I'm not sure how to help with that yet.", model: out.model };
+  if (parsed.kind === "lookup") {
+    // Signal the client that live fetching started (the streamed JSON tokens
+    // weren't meaningful), then do the bounded fetch + compose pass.
+    try { onToken?.(""); } catch { /* liveness only */ }
+    return await performLookup({ id, session, message, parsed });
+  }
   if (parsed.kind === "plan" && parsed.plan && typeof parsed.plan === "object") {
     const plan = normalizePlan(parsed.plan, catalog, String(message).trim());
-    return { ok: true, kind: "plan", answer: String(parsed.answer ?? plan.summary ?? "Here's my plan."), plan, model: out.model };
+    return { ok: true, kind: "plan", answer: String(parsed.answer ?? plan.summary ?? "On it."), plan, model: out.model };
   }
   if (parsed.kind === "build" && parsed.build && typeof parsed.build === "object") {
     return { ok: true, kind: "build", answer: String(parsed.answer ?? parsed.build.summary ?? "Here's what I'll set up."), build: normalizeBuild(parsed.build), model: out.model };
