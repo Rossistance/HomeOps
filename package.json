@@ -4,6 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "description": "FamiliOS — Personal agent teams for family life and household admin.",
+  "engines": {
+    "node": ">=22.13 <25"
+  },
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:web": "vite",
@@ -11,7 +14,7 @@
     "start": "node server/index.mjs",
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "test": "node --test server/test",
+    "test": "node --test \"server/test/*.test.mjs\"",
     "typecheck": "tsc -p tsconfig.json",
     "generate-icons": "node mobile-version/setup-icons.mjs",
     "install-browser": "playwright install chromium",

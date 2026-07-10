@@ -16,7 +16,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # node:sqlite (tenant store, ADR-001) is flag-free from 22.13 / 24 LTS.
+          node-version: 24
           cache: npm
       - run: npm ci --include=dev
         env:
@@ -32,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - run: npm ci --include=dev
         env:
