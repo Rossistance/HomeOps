@@ -67,6 +67,19 @@ export async function renderPage(url, { timeoutMs = NAV_TIMEOUT_MS } = {}) {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => {});
     await page.waitForTimeout(SETTLE_MS);
+    // Lazy-hydrating pages (galleries, infinite lists) only populate content —
+    // sometimes even anchor hrefs — as items scroll into view. Two quick passes
+    // down the page wake them up before we read the DOM.
+    await page.evaluate(async () => {
+      for (let i = 0; i < 2; i++) {
+        for (let y = 0; y < document.body.scrollHeight; y += 900) {
+          window.scrollTo(0, y);
+          await new Promise((r) => setTimeout(r, 120));
+        }
+      }
+      window.scrollTo(0, 0);
+    }).catch(() => {});
+    await page.waitForTimeout(400);
     const title = await page.title().catch(() => "");
     const finalUrl = page.url();
     const html = await page.content().catch(() => "");

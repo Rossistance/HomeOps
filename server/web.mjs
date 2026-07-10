@@ -417,5 +417,9 @@ export async function extractRecipe(url) {
     const subFound = recipeFromHtml(sub.html ?? "", { title: sub.title, url: sub.url });
     if (subFound) return { ok: true, ...subFound, via: page.url };
   }
-  return { ok: false, error: "no_recipe_found", message: `No structured recipe data found at ${page.url}${candidates.length ? ` (also tried ${candidates.length} linked recipe page${candidates.length === 1 ? "" : "s"})` : ""}. The page text is available via web.read.`, title: page.title };
+  return {
+    ok: false, error: "no_recipe_found",
+    message: `No structured recipe data found at ${page.url}${candidates.length ? ` (also tried: ${candidates.map((c) => c.href).join(", ")})` : ""}. The page text is available via web.read.`,
+    title: page.title,
+  };
 }
