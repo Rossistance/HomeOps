@@ -1255,6 +1255,19 @@ export const useStore = create<Store>((set, get) => {
         void get().migrateAgentsToServer();
         void get().migrateContactMethodsToServer();
         void get().hydrateFromServer();
+        // Cross-device freshness: poll the tiny /api/rev number and re-hydrate
+        // only when household data actually changed (phone edits show up here
+        // within ~15s and vice versa). Singleton — survives repeat loadBackend.
+        const w = window as unknown as { __familiosRevTimer?: number; __familiosRev?: number };
+        if (!w.__familiosRevTimer) {
+          w.__familiosRevTimer = window.setInterval(async () => {
+            if (!get().session) return;
+            const rev = await backend.rev();
+            if (rev == null) return;
+            if (w.__familiosRev != null && rev !== w.__familiosRev) void get().hydrateFromServer();
+            w.__familiosRev = rev;
+          }, 15_000);
+        }
       }
     },
     // Pull server-owned family data (events/tasks/members/conversations) and reconcile it

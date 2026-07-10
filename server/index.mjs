@@ -11,7 +11,7 @@ import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep 
 import { fileURLToPath } from "node:url";
 import {
   getConnectorConfig, setConnectorConfig, revokeConnector, getSecret,
-  appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings,
+  appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings, getDataRev,
   createSession, deleteSession, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
   getPushTokens, addPushToken, removePushToken,
@@ -484,6 +484,14 @@ const server = http.createServer(async (req, res) => {
         member: { actorId: owner.actorId, displayName: owner.displayName, role: owner.role },
         session: sessionView, ...(wantToken ? { token: s.token } : {}),
       }, req, { "set-cookie": sessionCookie(s.token) });
+    }
+
+    // Data revision — one tiny number that changes whenever household data does.
+    // Clients poll this (cheap) and refetch screens only on change, which keeps
+    // web and iOS in sync within seconds without websocket plumbing.
+    if (path === "/api/rev" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      return json(res, 200, { rev: getDataRev() }, req);
     }
 
     /* ---- Household identity: the name shows on the lock screen, briefings,

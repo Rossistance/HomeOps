@@ -711,6 +711,9 @@ export const backend = {
   async household(): Promise<{ id: string; name: string | null } | null> {
     try { return (await req<{ household: { id: string; name: string | null } }>("/household")).household ?? null; } catch { return null; }
   },
+  async rev(): Promise<number | null> {
+    try { return (await req<{ rev: number }>("/rev")).rev ?? null; } catch { return null; }
+  },
   async renameHousehold(name: string): Promise<{ household?: { id: string; name: string | null }; error?: string; message?: string }> {
     try { return await req("/household", { method: "PATCH", body: JSON.stringify({ name }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },

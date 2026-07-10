@@ -17,6 +17,7 @@ import {
 import { ApprovalSheet } from "@/components/sheets/approval-sheet";
 import { ChoreSheet, isKidMember } from "@/components/sheets/chore-sheet";
 import { InviteSheet } from "@/components/sheets/invite-sheet";
+import { useRevSync } from "@/lib/rev-sync";
 
 const isGrandparent = (m: MemberRec) => /grand(parent|ma|pa|mother|father)/i.test(m.relationship ?? "");
 
@@ -65,6 +66,7 @@ export default function TodayScreen() {
   }, []);
 
   useFocusEffect(useCallback(() => { if (session) void load(); }, [session, load]));
+  useRevSync(useCallback(() => { void load(); }, [load]));
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
   const now = new Date();

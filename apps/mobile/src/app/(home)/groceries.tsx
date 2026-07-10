@@ -7,6 +7,7 @@ import { useFocusEffect } from "expo-router";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import { api, type MemberRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic, motion } from "@/theme";
 import {
   T, Card, Well, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
@@ -53,6 +54,7 @@ export default function GroceriesScreen() {
     setLoading(false);
   }, []);
   useFocusEffect(useCallback(() => { if (session) void load(); }, [session, load]));
+  useRevSync(useCallback(() => { void load(); }, [load]));
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
   const done = useMemo(() => items.filter((t) => t.status === "done").length, [items]);

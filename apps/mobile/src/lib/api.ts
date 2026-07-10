@@ -323,6 +323,10 @@ export const api = {
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
+  async rev(): Promise<number | null> {
+    const r = await req<{ rev?: number }>("/rev");
+    return r.data?.rev ?? null;
+  },
   async household(): Promise<{ id: string; name: string | null } | null> {
     const r = await req<{ household?: { id: string; name: string | null } }>("/household");
     return r.data?.household ?? null;

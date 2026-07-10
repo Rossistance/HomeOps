@@ -53,6 +53,14 @@ function readJSON(file, fallback) {
     return fallback;
   }
 }
+// Data revision — bumped on every meaningful write so clients can poll ONE tiny
+// number and refetch only when something actually changed (cross-device
+// freshness without websockets). Plumbing files that churn on their own are
+// excluded so the rev only moves for user-visible data.
+let _dataRev = Date.now();
+const REV_EXCLUDE = new Set(["sessions.json", "idempotency.json", "health.json", "oauth_states.json", "contact_verifications.json"]);
+export function getDataRev() { return _dataRev; }
+
 // Atomic write: write to a temp file then rename (atomic on the same volume), so a
 // crash mid-write can never leave a half-written / corrupt JSON file behind.
 function writeJSON(file, value) {
@@ -60,6 +68,7 @@ function writeJSON(file, value) {
   const tmp = `${p}.${crypto.randomBytes(6).toString("hex")}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
   fs.renameSync(tmp, p);
+  if (!REV_EXCLUDE.has(file)) _dataRev++;
 }
 // Exported for the run engine and the agent/skill/function registries, which build
 // their own accessors on top of the same file-backed, atomic-write substrate.
