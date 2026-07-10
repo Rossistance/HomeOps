@@ -28,6 +28,19 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Served in the raw HTML, before any JS runs: A2P/carrier compliance vetters
+         and crawlers do not execute JavaScript, so policy links rendered only by
+         React are invisible to them. -->
+    <footer style="font-family: system-ui, -apple-system, sans-serif; font-size: 12px; line-height: 1.6; text-align: center; padding: 16px 12px; color: #6b6357; background: #ece3d5;">
+      <p style="margin: 0 0 4px;">FamiliOS — household-management application. Account notifications, reminders, and one-time verification codes are sent by SMS only to registered users who verify their number and opt in. Reply STOP to opt out, HELP for help. Message and data rates may apply.</p>
+      <p style="margin: 0;">
+        <a href="/privacy.html" style="color: #6b6357;">Privacy Policy</a>
+        &middot;
+        <a href="/terms.html" style="color: #6b6357;">SMS Terms &amp; Conditions</a>
+        &middot;
+        <a href="mailto:budgetbeacon.ai@gmail.com" style="color: #6b6357;">Support</a>
+      </p>
+    </footer>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
