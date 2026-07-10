@@ -131,13 +131,13 @@ export async function makeSession(ctx, actorId, body = {}) {
  * only sweeps root files once, at first boot, so runtime seeding goes through
  * the same engine the server uses (SQLite WAL is safely multi-process). */
 import { createEngine } from "../tenant-db.mjs";
-export function readStoreDoc(ctx, file, fallback) {
+export function readStoreDoc(ctx, file, fallback, tenant = "local") {
   const eng = createEngine(ctx.dataDir);
-  try { return eng.getDoc("local", file, fallback); } finally { eng.closeAll(); }
+  try { return eng.getDoc(tenant, file, fallback); } finally { eng.closeAll(); }
 }
-export function writeStoreDoc(ctx, file, value) {
+export function writeStoreDoc(ctx, file, value, tenant = "local") {
   const eng = createEngine(ctx.dataDir);
-  try { eng.putDoc("local", file, value); } finally { eng.closeAll(); }
+  try { eng.putDoc(tenant, file, value); } finally { eng.closeAll(); }
 }
 
 export { ORIGIN };

@@ -14,6 +14,7 @@ import {
   setConnectorConfig, getSecret, revokeConnector, appendAudit,
 } from "./store.mjs";
 import { runAgent, runSkill } from "./orchestrator.mjs";
+import { runWithTenant } from "./tenant-context.mjs";
 
 export const TRIGGER_TYPES = ["schedule", "recurring", "webhook", "connector_event", "manual"];
 const TICKABLE = ["schedule", "recurring"];
@@ -139,8 +140,13 @@ export function listPublicTriggers(session, { type } = {}) {
 // A synthetic system session carries the household; runs are attributed to the
 // "scheduler" actor. Fire-and-forget: startRun returns once the run is created and
 // driveRun proceeds asynchronously (so the scheduler never blocks on a long run).
-export async function fireTrigger(trigger, { triggerType = trigger.type, payload, now = Date.now() } = {}) {
+export async function fireTrigger(trigger, opts = {}) {
   if (!trigger) return { ok: false, error: "unknown_trigger" };
+  // The fire executes AS the trigger's household (webhooks arrive with no
+  // session; the tick may run under a different tenant's context).
+  return runWithTenant(trigger.householdId ?? "local", () => fireTriggerInner(trigger, opts));
+}
+async function fireTriggerInner(trigger, { triggerType = trigger.type, payload, now = Date.now() } = {}) {
   const session = { householdId: trigger.householdId ?? "local", actorId: "scheduler", role: "Owner" };
   const tgt = trigger.target ?? {};
   const params = { ...(tgt.params ?? {}), ...(payload ? { trigger_payload: payload } : {}) };

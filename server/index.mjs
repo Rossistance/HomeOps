@@ -12,7 +12,8 @@ import { fileURLToPath } from "node:url";
 import {
   getConnectorConfig, setConnectorConfig, revokeConnector, getSecret,
   appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings, getDataRev,
-  quarantinedCollections, acknowledgeQuarantine, CURRENT_TENANT,
+  quarantinedCollections, acknowledgeQuarantine, CURRENT_TENANT, forEachTenant, runWithTenant,
+  tenantEngine, sysDoc, putSysDoc, deleteSessionsForHousehold,
   createSession, deleteSession, deleteSessionsForActor, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
   getPushTokens, addPushToken, removePushToken,
@@ -216,7 +217,17 @@ function jobView(job) {
 }
 
 /* --------------------------------- Server ------------------------------- */
-const server = http.createServer(async (req, res) => {
+// Every request runs inside its own tenant context (C1.4): gate() fills in the
+// household from the session, and every store accessor below follows it.
+import { runWithRequestContext } from "./tenant-context.mjs";
+import {
+  createIdentity, verifyCredentials, consumeVerifyToken, beginPasswordReset, completePasswordReset,
+  deleteIdentity, deleteIdentitiesForHousehold, listIdentitiesForHousehold, validEmail, validPassword,
+} from "./identity.mjs";
+const server = http.createServer((req, res) => {
+  runWithRequestContext(() => handleRequest(req, res)).catch(() => { try { res.writeHead(500); res.end(); } catch { /* socket gone */ } });
+});
+const handleRequest = async (req, res) => {
   req.__rid = crypto.randomUUID();
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const path = url.pathname;
@@ -243,7 +254,8 @@ const server = http.createServer(async (req, res) => {
       _rateBuckets.set(k, arr);
       return false;
     };
-    if ((path === "/api/session" && method === "POST") || path === "/api/household/claim") {
+    const AUTH_LIMITED = new Set(["/api/household/claim", "/api/signup", "/api/login", "/api/verify-email", "/api/password-reset/request", "/api/password-reset/complete"]);
+    if ((path === "/api/session" && method === "POST") || AUTH_LIMITED.has(path)) {
       if (rateLimited("auth", rlKeyIp, 20, 60_000)) {
         audit({ type: "rate.limited", route: path }, req);
         return json(res, 429, { error: "rate_limited", message: "Too many attempts — wait a minute and try again." }, req);
@@ -520,6 +532,106 @@ const server = http.createServer(async (req, res) => {
         member: { actorId: owner.actorId, displayName: owner.displayName, role: owner.role },
         session: sessionView, ...(wantToken ? { token: s.token } : {}),
       }, req, { "set-cookie": sessionCookie(s.token) });
+    }
+
+    /* ---- Self-serve identity (C1.4): stranger households ----
+     * Email+password accounts create and sign into their OWN household — a
+     * fresh tenant database, physically separate from every other family's.
+     * The resident household's profile-picker + PIN flow is untouched. */
+    if (path === "/api/signup" && method === "POST") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const email = String(body.email ?? "").trim().toLowerCase();
+      const ownerName = String(body.ownerName ?? "").trim();
+      if (!validEmail(email)) return json(res, 400, { error: "invalid_email" }, req);
+      if (!validPassword(body.password)) return json(res, 400, { error: "weak_password", message: "Use at least 8 characters." }, req);
+      if (!ownerName) return json(res, 400, { error: "owner_name_required" }, req);
+      const householdId = "hh_" + crypto.randomBytes(6).toString("hex");
+      const actorId = "m-owner";
+      const made = createIdentity({ email, password: body.password, householdId, actorId, displayName: ownerName });
+      if (made.error) return json(res, 409, { error: "email_taken", message: "An account with this email already exists — sign in instead." }, req);
+      await runWithTenant(householdId, () => {
+        putMember({ actorId, displayName: ownerName, role: "Owner", relationship: "Account owner", householdId });
+        setSettings({ householdName: String(body.householdName ?? "").trim().slice(0, 60) || `${ownerName}'s household` }, householdId);
+        appendAudit({ type: "household.signup", email, actorId });
+      });
+      const s = createSession({ actorId, actorName: ownerName, role: "Owner", householdId });
+      const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
+      const wantToken = req.headers["x-homeops-bearer"] === "1";
+      // Honest verification status: sending needs an email channel this fresh
+      // household hasn't connected yet. The token exists; verification is
+      // non-blocking until C2 compliance work wires a real sender.
+      return json(res, 200, {
+        session: sessionView, household: { id: householdId }, ...(wantToken ? { token: s.token } : {}),
+        emailVerification: { sent: false, required: false, reason: "no_email_channel_yet" },
+      }, req, { "set-cookie": sessionCookie(s.token) });
+    }
+    if (path === "/api/login" && method === "POST") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const idn = verifyCredentials(body.email, body.password);
+      if (!idn) { audit({ type: "identity.login", ok: false }, req); return json(res, 401, { error: "invalid_credentials" }, req); }
+      const member = await runWithTenant(idn.householdId, () => getMember(idn.actorId));
+      if (!member || member.archived) return json(res, 403, { error: "member_archived", message: "This account's household profile was removed." }, req);
+      const s = createSession({ actorId: idn.actorId, actorName: member.displayName ?? idn.displayName, role: member.role, householdId: idn.householdId });
+      await runWithTenant(idn.householdId, () => appendAudit({ type: "identity.login", ok: true, actorId: idn.actorId }));
+      const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
+      const wantToken = req.headers["x-homeops-bearer"] === "1";
+      return json(res, 200, { session: sessionView, ...(wantToken ? { token: s.token } : {}) }, req, { "set-cookie": sessionCookie(s.token) });
+    }
+    if (path === "/api/verify-email" && method === "POST") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const idn = consumeVerifyToken(String(body.token ?? ""));
+      if (!idn) return json(res, 400, { error: "invalid_token" }, req);
+      return json(res, 200, { ok: true, email: idn.email, verified: true }, req);
+    }
+    if (path === "/api/password-reset/request" && method === "POST") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      beginPasswordReset(String(body.email ?? "")); // 200 either way — no account enumeration
+      return json(res, 200, { ok: true, message: "If that email has an account, a reset link is on its way." }, req);
+    }
+    if (path === "/api/password-reset/complete" && method === "POST") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      if (!validPassword(body.password)) return json(res, 400, { error: "weak_password", message: "Use at least 8 characters." }, req);
+      const idn = completePasswordReset(String(body.token ?? ""), body.password);
+      if (!idn) return json(res, 400, { error: "invalid_or_expired_token" }, req);
+      deleteSessionsForActor(idn.actorId, idn.householdId); // every device re-authenticates
+      return json(res, 200, { ok: true }, req);
+    }
+    /* Apple 5.1.1(v) account deletion. An Owner deletes the WHOLE household —
+     * physically: the tenant database directory is removed. A non-owner member
+     * deletes their own identity and is archived from the roster. Requires the
+     * account password again; the resident family household (PIN model, no
+     * identity) can never be deleted through this route. */
+    if (path === "/api/account" && method === "DELETE") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const idn = listIdentitiesForHousehold(g.session.householdId).find((i) => i.actorId === g.session.actorId);
+      if (!idn) return json(res, 400, { error: "not_identity_account", message: "This profile signs in without an email account — remove members from Settings instead." }, req);
+      if (!verifyCredentials(idn.email, body.password)) {
+        audit({ type: "account.delete", ok: false, error: "bad_password" }, req, g.session);
+        return json(res, 403, { error: "password_incorrect" }, req);
+      }
+      if (g.session.role === "Owner") {
+        const hh = g.session.householdId;
+        appendAudit({ type: "account.delete", scope: "household", by: g.session.actorId }); // last entry in the household's own log
+        deleteIdentitiesForHousehold(hh);
+        deleteSessionsForHousehold(hh);
+        // Durable tombstone in the system registry (the household's own audit goes down with it).
+        const gone = sysDoc("deleted_households.json", []);
+        gone.push({ householdId: hh, at: new Date().toISOString(), by: g.session.actorId, email: idn.email });
+        putSysDoc("deleted_households.json", gone);
+        tenantEngine().deleteTenant(hh);
+        return json(res, 200, { ok: true, deleted: "household" }, req, { "set-cookie": clearSessionCookie() });
+      }
+      putMember({ actorId: g.session.actorId, archived: true, householdId: g.session.householdId });
+      deleteIdentity(idn.email);
+      deleteSessionsForActor(g.session.actorId, g.session.householdId);
+      audit({ type: "account.delete", scope: "member", ok: true }, req, g.session);
+      return json(res, 200, { ok: true, deleted: "account" }, req, { "set-cookie": clearSessionCookie() });
     }
 
     /* ---- Backups & store health (Owner-only; the family's safety net) ---- */
@@ -2437,7 +2549,7 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     return json(res, 500, { error: "server_error", message: String(e?.message ?? e) }, req);
   }
-});
+};
 
 function publicSkill(s) {
   // All fields are non-secret — expose the full skill record to authenticated same-household clients.
@@ -2592,14 +2704,16 @@ server.listen(PORT, () => {
   // Hosted deployments hand AI keys via env — configure + activate once, never
   // overwriting a Settings-made choice (see bootstrapAIFromEnv).
   try { const boot = bootstrapAIFromEnv(); if (boot.length) console.log(`[ai] bootstrapped from env: ${boot.join(", ")}`); } catch { /* non-fatal */ }
-  recoverRuns().catch(() => {}); // re-drive any runs that were mid-flight at shutdown
-  setInterval(() => { try { expireStaleRuns(); } catch { /* non-fatal */ } }, 60_000); // sweep stale parked runs
-  setInterval(() => { tick().catch(() => {}); }, 10_000); // fire due schedule/recurring triggers (no browser needed)
+  // Recovery + sweeps + trigger tick run once PER HOUSEHOLD, each inside that
+  // household's tenant context — one family's broken state never blocks another's.
+  void forEachTenant(() => recoverRuns()); // re-drive any runs that were mid-flight at shutdown
+  setInterval(() => { void forEachTenant(() => expireStaleRuns()); }, 60_000); // sweep stale parked runs
+  setInterval(() => { void forEachTenant(() => tick()); }, 10_000); // fire due schedule/recurring triggers
   // Calendar auto-sync: re-pull url/google subscriptions that have gone stale so linked
   // events stay fresh without a manual "Sync now". Pasted imports are static — skipped.
   // Staleness window via HOMEOPS_CAL_SYNC_MINUTES (default 6h); swept every 15 minutes.
   const calSyncMs = Math.max(5, parseInt(process.env.HOMEOPS_CAL_SYNC_MINUTES ?? "360", 10) || 360) * 60_000;
-  setInterval(async () => {
+  setInterval(() => void forEachTenant(async () => {
     const due = listSubscriptions((s) => s.source !== "import" && (Date.now() - (s.lastSyncAt ?? 0)) > calSyncMs);
     for (const sub of due) {
       try {
@@ -2628,7 +2742,7 @@ server.listen(PORT, () => {
         } catch { /* one account must not stop the sweep */ }
       }
     }
-  }, 15 * 60_000);
+  }), 15 * 60_000);
   startScheduler();
   // Probe the browser runtime once at boot (in-process Playwright first, then
   // any external BROWSER_RUNTIME_URL) so the connector's readiness — and the

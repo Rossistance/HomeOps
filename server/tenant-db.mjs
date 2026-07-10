@@ -300,6 +300,18 @@ export function createEngine(dataDir) {
       quarantine.set(t, list);
       return had;
     },
+    /** Permanently delete a household's storage — its database, audit log, and
+     * file blobs. The physical payoff of one-file-per-family: account deletion
+     * is a directory removal, provably complete. Protected tenants refuse. */
+    deleteTenant(t) {
+      if (t === "local" || t === "_system") throw new Error(`tenant_protected: ${t} cannot be deleted`);
+      const db = handles.get(t);
+      if (db) { try { db.close(); } catch { /* closing */ } handles.delete(t); }
+      quarantine.delete(t);
+      const dir = join(tenantsDir, t);
+      if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+      return true;
+    },
     closeAll() {
       for (const db of handles.values()) { try { db.close(); } catch { /* closing */ } }
       handles.clear();

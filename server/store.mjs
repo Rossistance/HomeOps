@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { createEngine } from "./tenant-db.mjs";
+import { currentTenant, runWithTenant, RESIDENT_TENANT } from "./tenant-context.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Data dir is overridable (HOMEOPS_DATA_DIR) so the test harness can point at an
@@ -17,16 +18,48 @@ const DATA_DIR = process.env.HOMEOPS_DATA_DIR
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 /* ---- Tenant storage engine (ADR-001): SQLite database per household ----
- * The single production household is tenant "local"; opening it migrates any
+ * The original production household is tenant "local"; opening it migrates any
  * legacy JSON collections into tenants/local/household.db (originals preserved
- * under .migrated/). Every accessor below keeps its synchronous signature —
- * the swap is invisible above this file. */
-const TENANT = "local";
+ * under .migrated/). Every accessor below keeps its synchronous signature and
+ * resolves WHICH household at call time from the async tenant context (C1.4):
+ * requests act as their session's household, engine runs as their run's,
+ * anything outside a context as the resident household. */
 const engine = createEngine(DATA_DIR);
-engine.openTenant(TENANT);
+engine.openTenant(RESIDENT_TENANT);
+const T = () => currentTenant();
 /** The storage engine, for per-household export/import (backups). */
 export function tenantEngine() { return engine; }
-export const CURRENT_TENANT = TENANT;
+export const CURRENT_TENANT = RESIDENT_TENANT;
+export { runWithTenant, currentTenant };
+/** Run fn once per known household, inside that household's tenant context. */
+export async function forEachTenant(fn) {
+  const ids = [...new Set([RESIDENT_TENANT, ...engine.tenantIds()])].filter((t) => t !== SYSTEM_TENANT);
+  for (const t of ids) {
+    try { await runWithTenant(t, () => fn(t)); } catch { /* one household must never break the loop for the rest */ }
+  }
+}
+
+/* ---- System tenant: cross-household registries (identities, sessions) ----
+ * Sessions and login identities can't live inside a household db — at login
+ * time we don't yet know which household the caller belongs to. They live in
+ * a dedicated "_system" tenant instead (same engine, same backup coverage).
+ * One-shot migration: sessions born in the legacy single-tenant era move over
+ * so nobody gets logged out by the upgrade. */
+const SYSTEM_TENANT = "_system";
+engine.openTenant(SYSTEM_TENANT);
+{
+  const sysSessions = engine.getDoc(SYSTEM_TENANT, "sessions.json", {});
+  if (Object.keys(sysSessions).length === 0) {
+    const legacy = engine.getDoc(RESIDENT_TENANT, "sessions.json", {});
+    if (Object.keys(legacy).length > 0) {
+      engine.putDoc(SYSTEM_TENANT, "sessions.json", legacy);
+      engine.putDoc(RESIDENT_TENANT, "sessions.json", {});
+    }
+  }
+}
+const sysDoc = (file, fallback) => engine.getDoc(SYSTEM_TENANT, file, fallback);
+const putSysDoc = (file, value) => engine.putDoc(SYSTEM_TENANT, file, value);
+export { sysDoc, putSysDoc, SYSTEM_TENANT };
 
 const KEY_FILE = join(DATA_DIR, "key");
 function loadKey() {
@@ -63,12 +96,12 @@ export function decrypt(blob) {
 // REFUSE, because silently overwriting is how a family's data gets erased.
 // Recovery: restore from a backup, then acknowledge via the Owner store route.
 export function quarantinedCollections() {
-  return engine.quarantined(TENANT);
+  return engine.quarantined(T());
 }
-export function acknowledgeQuarantine(file) { return engine.acknowledge(TENANT, file); }
+export function acknowledgeQuarantine(file) { return engine.acknowledge(T(), file); }
 
 function readJSON(file, fallback) {
-  return engine.getDoc(TENANT, file, fallback);
+  return engine.getDoc(T(), file, fallback);
 }
 // Data revision — bumped on every meaningful write so clients can poll ONE tiny
 // number and refetch only when something actually changed (cross-device
@@ -82,7 +115,7 @@ function bumpRev(file) { if (!REV_EXCLUDE.has(file)) _dataRev++; }
 // Durability: the engine writes through SQLite WAL transactions — a crash
 // mid-write rolls back cleanly instead of leaving a half-written file.
 function writeJSON(file, value) {
-  engine.putDoc(TENANT, file, value); // throws store_quarantined/tenant_quarantined
+  engine.putDoc(T(), file, value); // throws store_quarantined/tenant_quarantined
   bumpRev(file);
 }
 // Exported for the run engine and the agent/skill/function registries, which build
@@ -104,7 +137,7 @@ export function withLock(key, fn) {
 // All mutations of a single run funnel through this so steps/cursor stay consistent.
 // Tenant-prefixed so two households can never contend on (or alias) one lock key.
 export function withRunLock(runId, fn) {
-  return withLock(`run:${TENANT}:${runId}`, fn);
+  return withLock(`run:${T()}:${runId}`, fn);
 }
 
 /* ---- Idempotency (at-most-once side effects, durable across restart) ---- */
@@ -155,10 +188,10 @@ export function getSecret(id, field) {
 /* ---- Audit log (append-only, redacted; lives beside the tenant db) ---- */
 export function appendAudit(event) {
   const line = JSON.stringify({ id: crypto.randomUUID(), at: new Date().toISOString(), ...event });
-  fs.appendFileSync(engine.tenantPath(TENANT, "audit.jsonl"), line + "\n");
+  fs.appendFileSync(engine.tenantPath(T(), "audit.jsonl"), line + "\n");
 }
 export function readAudit(limit = 100) {
-  const p = engine.tenantPath(TENANT, "audit.jsonl");
+  const p = engine.tenantPath(T(), "audit.jsonl");
   if (!fs.existsSync(p)) return [];
   const lines = fs.readFileSync(p, "utf8").trim().split("\n").filter(Boolean);
   return lines.slice(-limit).reverse().map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
@@ -181,13 +214,13 @@ export function addWebhookEvent(id, event) {
  * settings. Omitting householdId falls back to the resident household, which
  * is only correct for boot/bootstrap paths that predate a session. */
 export function getSettings(householdId) {
-  return engine.getDoc(householdId ?? TENANT, "settings.json", { externalActionsEnabled: true });
+  return engine.getDoc(householdId ?? T(), "settings.json", { externalActionsEnabled: true });
 }
 export function setSettings(patch, householdId) {
-  const t = householdId ?? TENANT;
+  const t = householdId ?? T();
   const next = { ...getSettings(t), ...patch };
   engine.putDoc(t, "settings.json", next);
-  if (t === TENANT) bumpRev("settings.json"); // rev poll is per resident household until C1.4
+  bumpRev("settings.json"); // rev is a single shared signal until per-tenant rev lands
   return next;
 }
 
@@ -200,7 +233,7 @@ export function setSettings(patch, householdId) {
  * until a plan says otherwise). */
 const dayKey = (d = new Date()) => d.toISOString().slice(0, 10);
 export function recordAiUsage(householdId, kind = "other") {
-  const t = householdId ?? TENANT;
+  const t = householdId ?? T();
   const all = engine.getDoc(t, "ai_usage.json", {});
   const day = dayKey();
   const rec = all[day] ?? {};
@@ -213,7 +246,7 @@ export function recordAiUsage(householdId, kind = "other") {
   return rec;
 }
 export function getAiUsage(householdId, day = dayKey()) {
-  return engine.getDoc(householdId ?? TENANT, "ai_usage.json", {})[day] ?? { total: 0 };
+  return engine.getDoc(householdId ?? T(), "ai_usage.json", {})[day] ?? { total: 0 };
 }
 export function aiBudgetExhausted(householdId) {
   const budget = Number(getSettings(householdId).aiDailyCallBudget);
@@ -233,41 +266,57 @@ export function hashInput(input) {
   return crypto.createHash("sha256").update(JSON.stringify(canonicalize(input ?? {}))).digest("hex");
 }
 
-/* ---- Sessions (httpOnly cookie token + CSRF double-submit token) ---- */
+/* ---- Sessions (httpOnly cookie token + CSRF double-submit token) ----
+ * Sessions live in the _system tenant: they are resolved BEFORE we know which
+ * household a request belongs to, and each carries the householdId the tenant
+ * context is then set from. */
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
 export function createSession({ actorId, actorName, role, householdId }) {
-  const all = readJSON("sessions.json", {});
+  const all = sysDoc("sessions.json", {});
   const token = crypto.randomBytes(32).toString("hex");
   const csrf = crypto.randomBytes(24).toString("hex");
   const now = Date.now();
   all[token] = { token, csrf, actorId, actorName, role, householdId: householdId ?? "local", createdAt: now, expiresAt: now + SESSION_TTL_MS };
-  writeJSON("sessions.json", all);
+  putSysDoc("sessions.json", all);
   return all[token];
 }
 export function getSession(token) {
   if (!token) return null;
-  const all = readJSON("sessions.json", {});
+  const all = sysDoc("sessions.json", {});
   const s = all[token];
   if (!s) return null;
-  if (s.expiresAt < Date.now()) { delete all[token]; writeJSON("sessions.json", all); return null; }
+  if (s.expiresAt < Date.now()) { delete all[token]; putSysDoc("sessions.json", all); return null; }
   return s;
 }
 export function deleteSession(token) {
-  const all = readJSON("sessions.json", {});
-  if (all[token]) { delete all[token]; writeJSON("sessions.json", all); return true; }
+  const all = sysDoc("sessions.json", {});
+  if (all[token]) { delete all[token]; putSysDoc("sessions.json", all); return true; }
   return false;
 }
 
 /** Kill every live session (cookie + bearer) for an actor — called when a
  * member is archived so a removed person's devices lose access immediately,
- * not at token expiry. Also used on role demotion. */
-export function deleteSessionsForActor(actorId) {
-  const all = readJSON("sessions.json", {});
+ * not at token expiry. Also used on role demotion. Household-scoped: the same
+ * actorId in another household is a different person. */
+/** Kill every session belonging to a household — used when the household
+ * itself is deleted (Apple 5.1.1(v) account deletion). */
+export function deleteSessionsForHousehold(householdId) {
+  const all = sysDoc("sessions.json", {});
   let killed = 0;
   for (const [token, s] of Object.entries(all)) {
-    if (s.actorId === actorId) { delete all[token]; killed++; }
+    if ((s.householdId ?? "local") === householdId) { delete all[token]; killed++; }
   }
-  if (killed) writeJSON("sessions.json", all);
+  if (killed) putSysDoc("sessions.json", all);
+  return killed;
+}
+export function deleteSessionsForActor(actorId, householdId) {
+  const hh = householdId ?? T();
+  const all = sysDoc("sessions.json", {});
+  let killed = 0;
+  for (const [token, s] of Object.entries(all)) {
+    if (s.actorId === actorId && (s.householdId ?? "local") === hh) { delete all[token]; killed++; }
+  }
+  if (killed) putSysDoc("sessions.json", all);
   return killed;
 }
 
@@ -509,22 +558,22 @@ function keyedCollection(file) {
   const coll = file.replace(/\.json$/, "");
   return {
     all: () => readJSON(file, {}),
-    get: (id) => engine.getRecord(TENANT, coll, id),
+    get: (id) => engine.getRecord(T(), coll, id),
     put: (obj) => {
-      engine.putRecord(TENANT, coll, obj.id, obj);
+      engine.putRecord(T(), coll, obj.id, obj);
       bumpRev(file);
       return obj;
     },
     patch: (id, patch) => {
-      const existing = engine.getRecord(TENANT, coll, id);
+      const existing = engine.getRecord(T(), coll, id);
       if (!existing) return null;
       const next = { ...existing, ...patch, updatedAt: new Date().toISOString() };
-      engine.putRecord(TENANT, coll, id, next);
+      engine.putRecord(T(), coll, id, next);
       bumpRev(file);
       return next;
     },
     remove: (id) => {
-      const had = engine.deleteRecord(TENANT, coll, id);
+      const had = engine.deleteRecord(T(), coll, id);
       if (had) bumpRev(file);
       return had;
     },
@@ -544,36 +593,36 @@ function keyedCollection(file) {
 // not the whole runs collection (the old whole-file pattern cost ~25ms per step
 // write once runs.json hit 2MB; this is ~1ms).
 export function createRun(run) {
-  engine.putRecord(TENANT, "runs", run.id, run);
+  engine.putRecord(T(), "runs", run.id, run);
   bumpRev("runs.json");
   return run;
 }
 export function getRun(id) {
-  return engine.getRecord(TENANT, "runs", id);
+  return engine.getRecord(T(), "runs", id);
 }
 export function patchRun(id, patch) {
-  const r = engine.getRecord(TENANT, "runs", id);
+  const r = engine.getRecord(T(), "runs", id);
   if (!r) return null;
   const next = { ...r, ...patch, updatedAt: new Date().toISOString() };
-  engine.putRecord(TENANT, "runs", id, next);
+  engine.putRecord(T(), "runs", id, next);
   bumpRev("runs.json");
   return next;
 }
 export function patchRunStep(id, index, patch) {
-  const r = engine.getRecord(TENANT, "runs", id);
+  const r = engine.getRecord(T(), "runs", id);
   if (!r || !r.steps?.[index]) return null;
   r.steps[index] = { ...r.steps[index], ...patch, updatedAt: new Date().toISOString() };
   r.updatedAt = new Date().toISOString();
-  engine.putRecord(TENANT, "runs", id, r);
+  engine.putRecord(T(), "runs", id, r);
   bumpRev("runs.json");
   return r;
 }
 export function appendToolCall(id, index, call) {
-  const r = engine.getRecord(TENANT, "runs", id);
+  const r = engine.getRecord(T(), "runs", id);
   if (!r || !r.steps?.[index]) return null;
   (r.steps[index].toolCalls ??= []).push({ at: new Date().toISOString(), ...call });
   r.updatedAt = new Date().toISOString();
-  engine.putRecord(TENANT, "runs", id, r);
+  engine.putRecord(T(), "runs", id, r);
   bumpRev("runs.json");
   return r;
 }
@@ -589,7 +638,7 @@ export function listRuns({ householdId, status, source, agentId, skillId, functi
   return arr.slice(0, limit);
 }
 export function deleteRun(id) {
-  const had = engine.deleteRecord(TENANT, "runs", id);
+  const had = engine.deleteRecord(T(), "runs", id);
   if (had) bumpRev("runs.json");
   return had;
 }
@@ -765,18 +814,19 @@ export const listFiles = (filter) => _files.list(filter);
 export const getFileRec = (id) => _files.get(id);
 export const putFileRec = (f) => _files.put(f);
 export const patchFileRec = (id, patch) => _files.patch(id, patch);
-const FILES_DIR = engine.tenantPath(TENANT, "files");
+// Resolved per call, not at boot — each household's blobs live beside ITS db.
+const filesDir = () => engine.tenantPath(T(), "files");
 export function writeFileBlob(id, buf) {
-  fs.mkdirSync(FILES_DIR, { recursive: true });
-  fs.writeFileSync(join(FILES_DIR, `${id}.bin`), buf);
+  fs.mkdirSync(filesDir(), { recursive: true });
+  fs.writeFileSync(join(filesDir(), `${id}.bin`), buf);
 }
 export function readFileBlob(id) {
-  const p = join(FILES_DIR, `${id}.bin`);
+  const p = join(filesDir(), `${id}.bin`);
   return fs.existsSync(p) ? fs.readFileSync(p) : null;
 }
 export function deleteFileRec(id) {
   _files.remove(id);
-  try { fs.unlinkSync(join(FILES_DIR, `${id}.bin`)); } catch { /* already gone */ }
+  try { fs.unlinkSync(join(filesDir(), `${id}.bin`)); } catch { /* already gone */ }
 }
 
 /* ---- Server-durable assistant conversations (P1.1) ----

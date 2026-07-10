@@ -3,6 +3,7 @@
 // a matching CSRF token, and an allowed Origin. Reads of sensitive state
 // (audit, settings, connector config, webhook history) require a session too.
 import { getSession } from "./store.mjs";
+import { setTenant } from "./tenant-context.mjs";
 
 const IS_PROD = (process.env.HOMEOPS_ENV || process.env.NODE_ENV) === "production";
 
@@ -91,6 +92,9 @@ export function gate(req, opts = {}) {
   const bearer = bearerToken(req);
   const viaBearer = !!(bearer && getSession(bearer));
   const session = viaBearer ? getSession(bearer) : sessionFromReq(req);
+  // C1.4: identify the request's household — every store accessor for the rest
+  // of this request reads/writes THAT household's database.
+  if (session) setTenant(session.householdId);
 
   if (!viaBearer && !isAllowedOrigin(req.headers.origin)) {
     return { ok: false, status: 403, error: "origin_not_allowed" };
