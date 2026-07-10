@@ -667,12 +667,32 @@ export async function expireStaleRuns() {
 // retrying/planning, or a "running" run whose cursor step is pending/ready) re-drive
 // safely because `done` steps are skipped via the cursor. Parked (waiting_*) runs
 // stay parked until their dependency resolves.
+// Tools that are safe to RE-RUN after an interruption because they are
+// idempotent by construction (dedupe-by-title, slot-aware, no double writes).
+// Every deploy restarts the server; without this list a family's 12-step plan
+// died mid-flight whenever a deploy landed during a run.
+const IDEMPOTENT_TOOLS = new Set(["homeops.plan_meal", "homeops.write_memory", "homeops.create_artifact"]);
+
 export async function recoverRuns() {
   let recovered = 0, quarantined = 0;
   for (const r of listRuns({ limit: 1000 })) {
     if (!["running", "retrying", "planning", "queued"].includes(r.status)) continue;
     const step = r.steps[r.cursor];
     if (step && step.status === "running") {
+      // Idempotent step → safe to re-drive: re-running lands the same state.
+      if (step.toolId && IDEMPOTENT_TOOLS.has(step.toolId)) {
+        recovered++;
+        withRunLock(r.id, async () => {
+          const run = getRun(r.id);
+          if (!run) return;
+          const cur = run.steps[run.cursor];
+          if (cur && cur.status === "running") {
+            patchRunStep(run.id, run.cursor, { status: "ready", detail: "Interrupted by a server restart — safely re-run (idempotent step)." });
+          }
+          await _drive(run.id);
+        }).catch(() => {});
+        continue;
+      }
       quarantined++;
       withRunLock(r.id, async () => {
         const run = getRun(r.id);
