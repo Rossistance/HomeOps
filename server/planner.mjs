@@ -207,6 +207,10 @@ Plan rules:
 Web research:
 - When answering requires information you don't have (recipes, prices, hours, how-tos, current facts), plan it: "web.search" with a plain-English query, then "web.read" on the best result URL. For recipe pages use "web.recipe" — it returns the structured name, ingredients, step-by-step instructions, and source URL.
 
+Location awareness:
+- When context.location is present (city/region from the user's device), USE IT for anything local: weather, "near us/me", local news, restaurants, stores, events, drive times. Put the city into lookup queries and plan-step inputs ("weather Chattanooga TN", "pizza near Chattanooga") — never ask "where are you?" when the context already says.
+- When a local request arrives WITHOUT context.location, check recentMemory for the family's area; only ask as a last resort, and suggest they allow location access for next time.
+
 Be state-aware before scheduling ANYTHING:
 - The context lists upcomingMeals and upcomingEvents. If a requested date/slot already has something (e.g. Wednesday dinner is already "Tacos"), do NOT silently double-book: ANSWER with the conflict and ask — "Wednesday dinner is already Tacos. Swap it for X, or pick another night?" — then act on their choice (homeops.plan_meal accepts replace:true to swap).
 - Size everything to the household: householdSize and members (with relationships) are in the context. A family of 4 gets 4-serving meals — scale ingredient quantities and never propose "serves 10" without being asked.
@@ -274,10 +278,17 @@ export function buildServerContext(session, clientContext) {
     .sort((a, b) => String(a.date).localeCompare(String(b.date)))
     .slice(0, 14)
     .map((m) => ({ date: m.date, slot: m.slot, title: m.title }));
+  // Device location (permission-gated, city-level, sent by the app) is promoted
+  // to a first-class context field so local requests tailor without follow-ups.
+  const loc = clientContext?.location;
+  const location = loc && typeof loc === "object" && Number.isFinite(loc.latitude) && Number.isFinite(loc.longitude)
+    ? { latitude: loc.latitude, longitude: loc.longitude, city: loc.city ?? null, region: loc.region ?? null, country: loc.country ?? null }
+    : undefined;
   return {
     now, asActor: { id: session.actorId, role: session.role },
     householdSize, members, upcomingEvents: events, openTasks: tasks, upcomingMeals, recentMemory: memory,
     existingAgents, existingSkills, existingAutomations,
+    ...(location ? { location } : {}),
     clientHints: clientContext ?? undefined,
   };
 }

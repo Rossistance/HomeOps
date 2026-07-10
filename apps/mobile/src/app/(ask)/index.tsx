@@ -13,6 +13,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec, type RunRec } from "@/lib/api";
 import { streamAssistant } from "@/lib/assistant-stream";
+import { getLocationContext } from "@/lib/location";
 import { useSession } from "@/lib/session";
 import { useRun } from "@/lib/run-context";
 import { useTheme, useCalmMotion, riskColor, tapHaptic } from "@/theme";
@@ -253,13 +254,17 @@ export default function AskScreen() {
         setRecent((r) => [c, ...r.filter((x) => x.id !== c.id)].slice(0, 8));
       }
     }
+    // Coarse location rides along (permission-gated, cached, city-level) so
+    // "weather", "near us", and local-news requests tailor without a follow-up.
+    const location = await getLocationContext();
+    const context = location ? { location } : undefined;
     let r: AssistantResult;
     try {
-      r = await streamAssistant(t0, { conversationId: convId ?? undefined, onProgress: () => setPhase("writing") });
+      r = await streamAssistant(t0, { conversationId: convId ?? undefined, context, onProgress: () => setPhase("writing") });
     } catch {
       // Any stream failure (transport, auth, parse) → non-streaming call, so
       // behavior never regresses. The server persists the turn either way.
-      r = await api.assistant(t0, { conversationId: convId ?? undefined });
+      r = await api.assistant(t0, { conversationId: convId ?? undefined, context });
     }
     setBusy(false);
     const aid = uid + "a";
