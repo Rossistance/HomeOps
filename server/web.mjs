@@ -313,6 +313,15 @@ export async function readPage(url, { maxChars = MAX_TEXT } = {}) {
     if (viaRuntime && (viaRuntime.text?.length ?? 0) > text.length) {
       return { ok: true, title: viaRuntime.title ?? "", url: viaRuntime.url ?? target, text: String(viaRuntime.text ?? "").slice(0, maxChars), links: viaRuntime.links ?? [], rendered: "browser" };
     }
+    // 3) Reader proxy (r.jina.ai): renders the page remotely and returns readable
+    // markdown. No key, no local browser — the fallback that keeps small hosts
+    // reading bot-walled sites. Honest label: rendered:"proxy".
+    const viaProxy = await safeFetch(`https://r.jina.ai/${target}`, { headers: { accept: "text/plain" } }, { timeoutMs: 25_000, maxBytes: 2_000_000 });
+    if (viaProxy.ok && viaProxy.httpOk && (viaProxy.text?.length ?? 0) > Math.max(600, text.length)) {
+      const md = viaProxy.text;
+      const mTitle = md.match(/^Title:\s*(.+)$/m)?.[1] ?? md.match(/^#\s+(.+)$/m)?.[1] ?? "";
+      return { ok: true, title: mTitle.trim().slice(0, 200), url: target, text: md.slice(0, maxChars), links: extractLinks(html, finalUrl), rendered: "proxy" };
+    }
   }
   if (!html && !text) return { ok: false, error: "fetch_failed", message: `Could not read ${target} (${direct.error ?? `HTTP ${direct.status}`}).` };
   return { ok: true, title: extractTitle(html), url: finalUrl, text: text.slice(0, maxChars), links: extractLinks(html, finalUrl), rendered, html };
@@ -420,6 +429,50 @@ export function recipeFromHtml(html, { title = "", url = "" } = {}) {
   return null;
 }
 
+/** LLM text-extraction fallback for pages with readable content but no
+ * schema.org Recipe markup (or bot-walled HTML rescued via the reader proxy).
+ * Uses the household's OpenAI key; returns null quietly when unavailable so
+ * the honest no_recipe_found path still runs. Output carries
+ * extraction:"text" so callers can label provenance. */
+async function recipeFromText(page, { maxChars = 6000 } = {}) {
+  const key = openAIKey();
+  const text = String(page.text ?? "");
+  if (!key || text.length < 600) return null;
+  const r = await safeFetch(
+    "https://api.openai.com/v1/chat/completions",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: "Extract the main recipe from the page text. Reply with JSON: {\"found\":boolean,\"name\":string,\"ingredients\":string[],\"instructions\":string[]}. If the page has no single concrete recipe (e.g. it's a list of links), reply {\"found\":false}. Never invent ingredients that aren't in the text." },
+          { role: "user", content: `Page: ${page.title ?? ""} (${page.url})\n\n${text.slice(0, maxChars)}` },
+        ],
+      }),
+    },
+    { timeoutMs: 25_000, maxBytes: 1_000_000 },
+  );
+  if (!r.ok || !r.httpOk) return null;
+  try {
+    const j = JSON.parse(r.text);
+    const parsed = JSON.parse(j.choices?.[0]?.message?.content ?? "{}");
+    if (!parsed.found || !Array.isArray(parsed.ingredients) || parsed.ingredients.length === 0) return null;
+    return {
+      ok: true,
+      source: page.url,
+      extraction: "text",
+      recipe: {
+        name: String(parsed.name ?? page.title ?? "Recipe").slice(0, 160),
+        url: page.url,
+        ingredients: parsed.ingredients.map((x) => String(x).slice(0, 160)).slice(0, 40),
+        instructions: (parsed.instructions ?? []).map((x) => String(x).slice(0, 400)).slice(0, 25),
+      },
+    };
+  } catch { return null; }
+}
+
 /** Extract a structured recipe from a live page. Search often lands on gallery /
  * listicle pages ("25 easy weeknight dinners") that carry no Recipe JSON-LD of
  * their own — those exist to link to real recipe pages, so before failing we
@@ -472,6 +525,11 @@ export async function extractRecipe(url) {
     const subFound = recipeFromHtml(sub.html ?? "", { title: sub.title, url: sub.url });
     if (subFound) return { ok: true, ...subFound, via: page.url };
   }
+
+  // Last tier: the page (or its proxy-rendered text) is readable but carries no
+  // machine recipe schema — extract with the household's LLM, honestly labeled.
+  const textFound = await recipeFromText(page, { maxChars: 6000 });
+  if (textFound) return textFound;
   return {
     ok: false, error: "no_recipe_found",
     message: `No structured recipe data found at ${page.url}${candidates.length ? ` (also tried: ${candidates.map((c) => c.href).join(", ")})` : ""}. The page text is available via web.read.`,
