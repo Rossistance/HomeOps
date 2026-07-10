@@ -16,7 +16,7 @@ import {
   getRiskOverride, addArtifact, addMemory, listMemory,
 } from "./store.mjs";
 import { findToolGlobal } from "./providers.mjs";
-import { listConnectors, executeTool } from "./connectors.mjs";
+import { listConnectors, executeTool, toolActionOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
@@ -521,6 +521,21 @@ async function _drive(runId) {
       patchRun(runId, { status: "retrying" });
       emit(runId, "run.retrying");
       await sleep(400 * attempts);
+      continue;
+    }
+    // SOFT failure for read-only enrichment steps: a recipe page that won't
+    // parse or a feed that won't load must not kill a 10-step plan that
+    // already gathered good material — later steps (LLM reasoning, writes)
+    // see the honest failure detail and work with what succeeded. Writes and
+    // approval-gated steps keep hard-fail semantics, and a failing FINAL step
+    // still fails the run (there's nothing left to salvage it).
+    const actionClass = step.toolId ? toolActionOf(step.toolId) : null;
+    const hasLaterSteps = i < run.steps.length - 1;
+    if (actionClass === "Read" && !resolved.requiresApproval && hasLaterSteps) {
+      patchRunStep(runId, i, { status: "failed", detail: `${out.message ?? out.error} — continued without this step's result.`, finishedAt: Date.now() });
+      appendAudit({ type: "run.step_failed_soft", runId, toolId: step.toolId, error: out.error, householdId: run.householdId });
+      patchRun(runId, { cursor: i + 1 });
+      emit(runId, "run.step");
       continue;
     }
     patchRunStep(runId, i, { status: "failed", detail: out.message ?? out.error, finishedAt: Date.now() });

@@ -354,6 +354,13 @@ async function callBrowserRuntime(pathname, body) {
   return { ok: true, result: json };
 }
 
+/** Action class ("Read" / "Write" / …) for a connector tool, or null if unknown.
+ * The run engine uses this to decide which failed steps may fail SOFT. */
+export function toolActionOf(toolId) {
+  const c = CONNECTORS.find((x) => x.tools.some((t) => t.id === toolId));
+  return c?.tools.find((t) => t.id === toolId)?.action ?? null;
+}
+
 /* ----------------------------- Tool execution --------------------------- */
 export async function executeTool(toolId, input = {}, ctx = {}) {
   const c = CONNECTORS.find((x) => x.tools.some((t) => t.id === toolId));
