@@ -16,24 +16,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, "..", "index.mjs");
 const ORIGIN = "http://localhost:5173";
 
-// A deterministic-ish free-ish port in the high range. Tests run serially per file, and
-// each server gets its own data dir, so collisions only matter within a run; vary by pid.
-function pickPort() {
-  return 19000 + (process.pid % 2000) + Math.floor((Date.now() / 7) % 1000);
-}
-
 /**
  * Start a fresh server instance. Returns a context object with helpers.
+ * PORT=0 lets the OS assign a free port (no collisions, ever); the harness
+ * learns the real port from the server's "listening on" line.
  * @param {object} [opts]
  * @param {boolean} [opts.prod] run with HOMEOPS_ENV=production
  * @param {Record<string,string>} [opts.env] extra env vars
  */
 export async function startServer(opts = {}) {
-  const port = pickPort();
   const dataDir = fs.mkdtempSync(join(os.tmpdir(), "homeops-test-"));
   const env = {
     ...process.env,
-    PORT: String(port),
+    PORT: "0",
     HOMEOPS_DATA_DIR: dataDir,
     HOMEOPS_ALLOWED_ORIGINS: ORIGIN,
     HOMEOPS_SECRET_KEY: "test-secret-key-test-secret-key-32",
@@ -44,7 +39,23 @@ export async function startServer(opts = {}) {
   const child = spawn(process.execPath, [SERVER_ENTRY], { env, stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.on("data", (d) => { stderr += d.toString(); });
+  let stdout = "";
+  let port = 0;
+  child.stdout.on("data", (d) => {
+    stdout += d.toString();
+    const m = stdout.match(/listening on http:\/\/localhost:(\d+)/);
+    if (m) port = Number(m[1]);
+  });
 
+  // Learn the bound port before probing health.
+  {
+    const deadline = Date.now() + 15_000;
+    while (!port) {
+      if (child.exitCode !== null) throw new Error(`server exited early (code ${child.exitCode}):\n${stderr}`);
+      if (Date.now() > deadline) throw new Error(`server never reported its port:\n${stdout}\n${stderr}`);
+      await new Promise((res) => setTimeout(res, 50));
+    }
+  }
   const base = `http://localhost:${port}`;
   const ctx = {
     base, port, dataDir, child,

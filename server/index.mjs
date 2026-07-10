@@ -2638,7 +2638,10 @@ server.listen(PORT, () => {
   setInterval(() => { void backupTick(); }, 30 * 60_000);
   void backupTick();
   // eslint-disable-next-line no-console
-  console.log(`FamiliOS backend (control plane v${VERSION}) listening on http://localhost:${PORT} — env=${IS_PROD ? "production" : "development"}, origins=${ALLOWED_ORIGINS.join(",") || "(none)"}`);
+  // Report the ACTUAL bound port (PORT=0 asks the OS for a free one — the test
+  // harness relies on this line to learn where the server landed).
+  const boundPort = server.address()?.port ?? PORT;
+  console.log(`FamiliOS backend (control plane v${VERSION}) listening on http://localhost:${boundPort} — env=${IS_PROD ? "production" : "development"}, origins=${ALLOWED_ORIGINS.join(",") || "(none)"}`);
 
   // Graceful shutdown: deploys used to hard-kill mid-run ("interrupted" failures).
   // Now: refuse new runs, hand every lease back cleanly (recovery re-drives on the
