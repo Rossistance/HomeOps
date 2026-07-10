@@ -254,7 +254,27 @@ async function execResolved(resolved, input, ctx, approvalId) {
 const WAITING_CONNECTOR_RE = /not_configured|not_connected|not_authorized|connector_|runtime_unavailable/;
 
 /* ---- start a run from a concrete plan ---- */
+// Graceful-shutdown support: once draining, new runs are refused (existing runs
+// finish their current step and park via lease release — recovery re-drives them
+// on the next boot). Flipped by the SIGTERM handler in index.mjs.
+let _draining = false;
+export function setDraining(v = true) { _draining = !!v; }
+
+/** Release every live lease without changing run state — the shutdown handoff.
+ * recoverRuns() on next boot re-drives them (idempotent steps resume; mid-write
+ * non-idempotent steps quarantine per at-most-once policy). */
+export function releaseAllLeases() {
+  let released = 0;
+  for (const r of listRuns({ limit: 1000 })) {
+    if (r.lease) { patchRun(r.id, { lease: null }); released++; }
+  }
+  return released;
+}
+
 export async function startRun({ source = "manual", sourceRef = {}, plan, params = {}, session, title } = {}) {
+  // Callers treat the return as a run record, so refuse loudly while draining
+  // (the window is seconds long; clients surface the message and retry).
+  if (_draining) throw new Error("server_restarting: an update is deploying — try again in about a minute.");
   const runId = "run_" + crypto.randomBytes(10).toString("hex");
   const now = Date.now();
   const steps = (plan?.steps ?? []).map((s, i) => {

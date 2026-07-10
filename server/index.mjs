@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   getConnectorConfig, setConnectorConfig, revokeConnector, getSecret,
   appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings, getDataRev,
+  quarantinedCollections, acknowledgeQuarantine,
   createSession, deleteSession, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
   getPushTokens, addPushToken, removePushToken,
@@ -31,7 +32,9 @@ import {
   listFiles, getFileRec, putFileRec, writeFileBlob, readFileBlob, deleteFileRec,
   listPlaybooks, getPlaybook, putPlaybook, deletePlaybookRec,
 } from "./store.mjs";
-import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns } from "./engine.mjs";
+import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases } from "./engine.mjs";
+import { createBackup, listBackups, readBackup, restoreBackup, backupTick } from "./backup.mjs";
+import { closeBrowser } from "./browser.mjs";
 import { runSkill, runAgent } from "./orchestrator.mjs";
 import { seedDefaults } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes } from "./calendar.mjs";
@@ -484,6 +487,38 @@ const server = http.createServer(async (req, res) => {
         member: { actorId: owner.actorId, displayName: owner.displayName, role: owner.role },
         session: sessionView, ...(wantToken ? { token: s.token } : {}),
       }, req, { "set-cookie": sessionCookie(s.token) });
+    }
+
+    /* ---- Backups & store health (Owner-only; the family's safety net) ---- */
+    if (path === "/api/backups" && method === "GET") {
+      const g = gate(req, { requireSession: true, minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      return json(res, 200, { backups: listBackups(), quarantined: quarantinedCollections() }, req);
+    }
+    if (path === "/api/backups/run" && method === "POST") {
+      const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const name = createBackup();
+      return json(res, 200, { ok: true, name }, req);
+    }
+    const backupOne = path.match(/^\/api\/backups\/([^/]+)$/);
+    if (backupOne && backupOne[1] !== "run" && backupOne[1] !== "restore" && method === "GET") {
+      const g = gate(req, { requireSession: true, minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const raw = readBackup(backupOne[1]);
+      if (!raw) return json(res, 404, { error: "not_found" }, req);
+      res.writeHead(200, { "content-type": "application/gzip", "content-disposition": `attachment; filename="${backupOne[1]}"`, ...corsHeaders(req) });
+      return res.end(raw);
+    }
+    if (path === "/api/backups/restore" && method === "POST") {
+      const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body?.name) return json(res, 400, { error: "name_required" }, req);
+      const out = restoreBackup(String(body.name));
+      return json(res, out.ok ? 200 : 422, out, req);
+    }
+    if (path === "/api/store/quarantine/ack" && method === "POST") {
+      const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body?.file) return json(res, 400, { error: "file_required" }, req);
+      const ok = acknowledgeQuarantine(String(body.file));
+      audit({ type: "store.quarantine_ack", file: body.file, ok }, req, g.session);
+      return json(res, 200, { ok }, req);
     }
 
     // Data revision — one tiny number that changes whenever household data does.
@@ -2550,6 +2585,27 @@ server.listen(PORT, () => {
   // any external BROWSER_RUNTIME_URL) so the connector's readiness — and the
   // /api/health browserRuntime flag — reflect reality from the start.
   healthCheck("browser").catch(() => {});
+  // Nightly household backup (+ weekly Owner notice), piggybacked on a light timer.
+  setInterval(() => { void backupTick(); }, 30 * 60_000);
+  void backupTick();
   // eslint-disable-next-line no-console
   console.log(`FamiliOS backend (control plane v${VERSION}) listening on http://localhost:${PORT} — env=${IS_PROD ? "production" : "development"}, origins=${ALLOWED_ORIGINS.join(",") || "(none)"}`);
+
+  // Graceful shutdown: deploys used to hard-kill mid-run ("interrupted" failures).
+  // Now: refuse new runs, hand every lease back cleanly (recovery re-drives on the
+  // next boot), close Chromium, and exit before the platform's SIGKILL deadline.
+  let shuttingDown = false;
+  const shutdown = (sig) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      setDraining(true);
+      const released = releaseAllLeases();
+      appendAudit({ type: "server.shutdown", signal: sig, leasesReleased: released });
+    } catch { /* never block exit */ }
+    void closeBrowser().catch(() => {}).finally(() => process.exit(0));
+    // Hard floor: exit even if the browser hangs.
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => shutdown(sig));
 });

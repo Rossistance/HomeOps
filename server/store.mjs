@@ -44,12 +44,29 @@ export function decrypt(blob) {
   }
 }
 
+// Corruption quarantine: a JSON file that fails to parse is preserved (copied
+// aside) and the collection is marked read-degraded — writeJSON then REFUSES to
+// overwrite it, because "parse failed → return {} → next write persists {}"
+// silently erases a family's whole collection. Recovery: restore from the
+// .corrupt copy or a backup, then acknowledge via the Owner store route.
+const _quarantined = new Map(); // file → { at, error, copy }
+export function quarantinedCollections() {
+  return [..._quarantined.entries()].map(([file, info]) => ({ file, ...info }));
+}
+export function acknowledgeQuarantine(file) { return _quarantined.delete(file); }
+
 function readJSON(file, fallback) {
   const p = join(DATA_DIR, file);
   if (!fs.existsSync(p)) return fallback;
   try {
     return JSON.parse(fs.readFileSync(p, "utf8"));
-  } catch {
+  } catch (e) {
+    if (!_quarantined.has(file)) {
+      const copy = `${file}.corrupt-${Date.now()}`;
+      try { fs.copyFileSync(p, join(DATA_DIR, copy)); } catch { /* best effort */ }
+      _quarantined.set(file, { at: new Date().toISOString(), error: String(e?.message ?? e), copy });
+      try { appendAudit({ type: "store.corrupt", file, copy, error: String(e?.message ?? e) }); } catch { /* audit may share the fault */ }
+    }
     return fallback;
   }
 }
@@ -64,6 +81,11 @@ export function getDataRev() { return _dataRev; }
 // Atomic write: write to a temp file then rename (atomic on the same volume), so a
 // crash mid-write can never leave a half-written / corrupt JSON file behind.
 function writeJSON(file, value) {
+  if (_quarantined.has(file)) {
+    // The on-disk copy failed to parse — writing now would permanently replace
+    // the family's data with whatever partial state is in memory. Fail loudly.
+    throw new Error(`store_quarantined: ${file} is corrupt on disk; restore it (a .corrupt copy was preserved) and acknowledge before writing.`);
+  }
   const p = join(DATA_DIR, file);
   const tmp = `${p}.${crypto.randomBytes(6).toString("hex")}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
