@@ -1,5 +1,7 @@
-// R0 data durability: backup round-trip, corruption quarantine (a corrupt file
-// must never be silently overwritten), and shutdown lease release.
+// R0 data durability contracts, now over the tenant db (C1.1): backup
+// round-trip, restore refusing a tampered bundle, corruption quarantine
+// (a collection that can't be read cleanly must never be silently
+// overwritten), and shutdown lease release.
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -11,6 +13,9 @@ const DIR = fs.mkdtempSync(join(os.tmpdir(), "familios-backup-test-"));
 
 before(async () => {
   process.env.HOMEOPS_DATA_DIR = DIR;
+  // A corrupt LEGACY collection sits in the data root before first boot — the
+  // migration must quarantine it (preserved in place), not destroy or shadow it.
+  fs.writeFileSync(join(DIR, "tasks.json"), "{ corrupt!!");
   store = await import("../store.mjs");
   backup = await import("../backup.mjs");
 });
@@ -20,42 +25,53 @@ test("backup round-trip: snapshot captures collections and restore brings them b
   const name = backup.createBackup();
   assert.ok(backup.listBackups().some((b) => b.name === name));
 
-  // Damage the live file, then restore.
-  const membersPath = join(DIR, "members.json");
-  const original = fs.readFileSync(membersPath, "utf8");
-  fs.writeFileSync(membersPath, JSON.stringify({}));
+  // Damage the live record, then restore.
+  store.putMember({ actorId: "m-owner", displayName: "WRONG NAME", role: "Guest", householdId: "local" });
   const out = backup.restoreBackup(name);
   assert.equal(out.ok, true, JSON.stringify(out));
-  assert.equal(fs.readFileSync(membersPath, "utf8"), original);
+  const m = store.getMember("m-owner");
+  assert.equal(m.displayName, "Ross");
+  assert.equal(m.role, "Owner");
 });
 
-test("restore refuses a bundle containing invalid JSON (never partial-writes)", async () => {
+test("restore refuses a tampered bundle (never partial-writes)", async () => {
+  store.putMember({ actorId: "m-owner", displayName: "Ross", role: "Owner", householdId: "local" });
   const name = backup.createBackup();
   const p = join(DIR, "backups", name);
   const { gunzipSync, gzipSync } = await import("node:zlib");
   const bundle = JSON.parse(gunzipSync(fs.readFileSync(p)).toString("utf8"));
-  bundle.files["members.json"] = "{ definitely not json";
+  bundle.tenants.local.files = "definitely not a files object";
   fs.writeFileSync(p, gzipSync(JSON.stringify(bundle)));
   const out = backup.restoreBackup(name);
   assert.equal(out.ok, false);
-  assert.equal(out.error, "invalid_file");
+  assert.equal(out.error, "bad_format");
+  assert.equal(store.getMember("m-owner").displayName, "Ross", "live data untouched");
+});
+
+test("legacy format-1 bundles (JSON-file era) still restore", async () => {
+  const { gzipSync } = await import("node:zlib");
+  const legacy = {
+    meta: { format: 1, app: "familios" },
+    files: { "events.json": JSON.stringify({ ev1: { id: "ev1", title: "From the old world" } }) },
+  };
+  const name = "familios-backup-2026-01-01.json.gz";
+  fs.writeFileSync(join(DIR, "backups", name), gzipSync(JSON.stringify(legacy)));
+  const out = backup.restoreBackup(name);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(store.getEvent("ev1").title, "From the old world");
 });
 
 test("corruption quarantine: reads fall back, writes REFUSE until acknowledged", () => {
-  const file = "tasks.json";
-  const p = join(DIR, file);
-  fs.writeFileSync(p, "{ corrupt!!");
-  // Read → fallback + quarantine + preserved copy.
-  const tasks = store.listTasks(() => true);
-  assert.deepEqual(tasks, []);
+  // tasks.json was corrupt at boot (see before()): reads degrade to empty…
+  assert.deepEqual(store.listTasks(() => true), []);
   const q = store.quarantinedCollections();
-  assert.ok(q.some((x) => x.file === file), JSON.stringify(q));
-  assert.ok(fs.readdirSync(DIR).some((f) => f.startsWith("tasks.json.corrupt-")), "corrupt copy preserved");
-  // Write must throw — this is the whole point.
+  assert.ok(q.some((x) => x.file === "tasks.json"), JSON.stringify(q));
+  // …the original is preserved in place, never destroyed or migrated…
+  assert.ok(fs.existsSync(join(DIR, "tasks.json")), "corrupt original preserved");
+  // …and writes must throw — this is the whole point.
   assert.throws(() => store.putTask({ id: "tk_x", householdId: "local", title: "boom", type: "task", status: "todo" }), /store_quarantined/);
-  // Owner acknowledges (after restoring the file) → writes flow again.
-  fs.writeFileSync(p, "{}");
-  assert.equal(store.acknowledgeQuarantine(file), true);
+  // Owner acknowledges (after recovering what they can) → writes flow again.
+  assert.equal(store.acknowledgeQuarantine("tasks.json"), true);
   const rec = store.putTask({ id: "tk_x", householdId: "local", title: "ok now", type: "task", status: "todo" });
   assert.equal(rec.title, "ok now");
 });
@@ -63,8 +79,7 @@ test("corruption quarantine: reads fall back, writes REFUSE until acknowledged",
 test("releaseAllLeases hands leases back without touching run state", async () => {
   const engine = await import("../engine.mjs");
   const runId = "run_leasetest";
-  store.putRun?.({ id: runId, householdId: "local", status: "running", cursor: 0, steps: [], lease: { owner: 1, at: Date.now() } });
-  if (!store.putRun) return; // store may not export putRun directly; covered via harness elsewhere
+  store.createRun({ id: runId, householdId: "local", status: "running", cursor: 0, steps: [], lease: { owner: 1, at: Date.now() } });
   const released = engine.releaseAllLeases();
   assert.ok(released >= 1);
   const run = store.getRun(runId);

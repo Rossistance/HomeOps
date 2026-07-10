@@ -137,10 +137,10 @@ test("pushing a canonical event with no Google account returns a helpful 422", a
 
 test("pushing a canonical event WITH a Google account requires approval first (approval-gated write)", async () => {
   // Seed a Google account (with calendar scope) owned by m-morgan directly into the store.
-  const fs = await import("node:fs"); const { join } = await import("node:path");
-  fs.writeFileSync(join(ctx.dataDir, "accounts.json"), JSON.stringify([
+  const { writeStoreDoc } = await import("./harness.mjs");
+  writeStoreDoc(ctx, "accounts.json", [
     { id: "acct_morgan_google", provider: "google", displayName: "morgan@harper.example", scopes: ["https://www.googleapis.com/auth/calendar.events"], status: "connected", connectedByActorId: "m-morgan", householdId: "local", createdAt: Date.now(), updatedAt: new Date().toISOString() },
-  ]));
+  ]);
   const ev = (await adult.req("/api/events", { method: "POST", body: JSON.stringify({ title: "Soccer game", startAt: "2026-04-02T17:00:00.000Z", location: "Field 3" }) })).data.event;
   const r = await adult.req(`/api/calendar/push/${ev.id}`, { method: "POST" });
   assert.equal(r.status, 200);

@@ -1,37 +1,39 @@
-// FamiliOS — household data backups. Nightly gzipped bundle of every JSON
-// collection in DATA_DIR (single-file format: { meta, files: { name: content } }),
-// 30-day retention, Owner-only list/download/restore. Weekly the Owner gets a
-// "backup ready" notification — and, when Gmail is connected, a summary email
-// (attachments aren't supported by the gmail tool yet, so the email points at
-// Settings → download; the snapshot itself always lives on disk).
+// FamiliOS — household data backups. Nightly gzipped bundle per household,
+// exported from the tenant database back into the human-readable JSON shape
+// (format 2: { meta, tenants: { <id>: { files, audit } } }), 30-day retention,
+// Owner-only list/download/restore. Weekly the Owner gets a "backup ready"
+// notification. Format-1 bundles (the JSON-file era) restore transparently.
 import fs from "node:fs";
 import { join } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
-import { getSettings, setSettings, appendAudit, addNotification, listMembers } from "./store.mjs";
+import { getSettings, setSettings, appendAudit, addNotification, listMembers, tenantEngine, CURRENT_TENANT } from "./store.mjs";
 
 const DATA_DIR = process.env.HOMEOPS_DATA_DIR || join(process.cwd(), "server", ".data");
 const BACKUP_DIR = join(DATA_DIR, "backups");
 const RETENTION_DAYS = 30;
-const EXCLUDE = new Set(["key", "win-root-cas.pem"]);
 
 function backupName(d = new Date()) {
   return `familios-backup-${d.toISOString().slice(0, 10)}.json.gz`;
 }
 
-/** Create a snapshot bundle of every JSON/JSONL collection. Returns its name. */
+/** Snapshot every household: full tenant export + its audit log. */
 export function createBackup() {
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
-  const files = {};
-  for (const f of fs.readdirSync(DATA_DIR)) {
-    if (EXCLUDE.has(f) || f.endsWith(".tmp") || f.includes(".corrupt-") || f === "backups") continue;
-    const p = join(DATA_DIR, f);
-    if (!fs.statSync(p).isFile()) continue;
-    files[f] = fs.readFileSync(p, "utf8");
+  const engine = tenantEngine();
+  const tenants = {};
+  const ids = new Set([CURRENT_TENANT, ...engine.tenantIds()]);
+  for (const t of ids) {
+    const files = engine.exportTenant(t);
+    if (!files) continue; // quarantined tenant: nothing readable to snapshot
+    const auditPath = engine.tenantPath(t, "audit.jsonl");
+    const audit = fs.existsSync(auditPath) ? fs.readFileSync(auditPath, "utf8") : "";
+    tenants[t] = { files, audit };
   }
-  const bundle = { meta: { at: new Date().toISOString(), app: "familios", format: 1, count: Object.keys(files).length }, files };
+  const count = Object.values(tenants).reduce((n, t) => n + Object.keys(t.files).length, 0);
+  const bundle = { meta: { at: new Date().toISOString(), app: "familios", format: 2, count, tenants: Object.keys(tenants) }, tenants };
   const name = backupName();
   fs.writeFileSync(join(BACKUP_DIR, name), gzipSync(JSON.stringify(bundle)));
-  appendAudit({ type: "backup.created", name, files: bundle.meta.count });
+  appendAudit({ type: "backup.created", name, files: count });
   return name;
 }
 
@@ -50,25 +52,48 @@ export function readBackup(name) {
   return fs.readFileSync(p);
 }
 
-/** Restore: stage every file, verify each parses, then swap. Never partial. */
+/** Restore: verify the whole bundle first, then import atomically per tenant. */
 export function restoreBackup(name) {
   const raw = readBackup(name);
   if (!raw) return { ok: false, error: "not_found" };
   let bundle;
   try { bundle = JSON.parse(gunzipSync(raw).toString("utf8")); } catch { return { ok: false, error: "corrupt_backup" }; }
-  if (bundle?.meta?.format !== 1 || !bundle.files) return { ok: false, error: "bad_format" };
-  // Verify all JSON files parse before touching anything.
-  for (const [f, content] of Object.entries(bundle.files)) {
-    if (f.endsWith(".json")) { try { JSON.parse(content); } catch { return { ok: false, error: "invalid_file", file: f }; } }
+  const engine = tenantEngine();
+
+  if (bundle?.meta?.format === 2 && bundle.tenants) {
+    let count = 0;
+    for (const [t, data] of Object.entries(bundle.tenants)) {
+      if (!data || typeof data.files !== "object") return { ok: false, error: "bad_format", tenant: t };
+      count += Object.keys(data.files).length;
+    }
+    for (const [t, data] of Object.entries(bundle.tenants)) {
+      engine.importTenant(t, data.files); // single transaction per tenant
+      if (typeof data.audit === "string" && data.audit.length) {
+        fs.writeFileSync(engine.tenantPath(t, "audit.jsonl"), data.audit);
+      }
+    }
+    appendAudit({ type: "backup.restored", name, files: count });
+    return { ok: true, files: count, note: "Restart the server so all collections reload." };
   }
-  for (const [f, content] of Object.entries(bundle.files)) {
-    const p = join(DATA_DIR, f);
-    const tmp = `${p}.restore.tmp`;
-    fs.writeFileSync(tmp, content);
-    fs.renameSync(tmp, p);
+
+  if (bundle?.meta?.format === 1 && bundle.files) {
+    // Legacy JSON-file-era bundle: parse-verify everything, then import into the
+    // current household's tenant db (audit.jsonl goes back beside it).
+    const files = {};
+    for (const [f, content] of Object.entries(bundle.files)) {
+      if (f.endsWith(".json")) {
+        try { files[f] = JSON.parse(content); } catch { return { ok: false, error: "invalid_file", file: f }; }
+      }
+    }
+    engine.importTenant(CURRENT_TENANT, files);
+    if (typeof bundle.files["audit.jsonl"] === "string") {
+      fs.writeFileSync(engine.tenantPath(CURRENT_TENANT, "audit.jsonl"), bundle.files["audit.jsonl"]);
+    }
+    appendAudit({ type: "backup.restored", name, files: Object.keys(files).length, legacyFormat: 1 });
+    return { ok: true, files: Object.keys(files).length, note: "Restart the server so all collections reload." };
   }
-  appendAudit({ type: "backup.restored", name, files: Object.keys(bundle.files).length });
-  return { ok: true, files: Object.keys(bundle.files).length, note: "Restart the server so all collections reload from disk." };
+
+  return { ok: false, error: "bad_format" };
 }
 
 export function pruneBackups() {

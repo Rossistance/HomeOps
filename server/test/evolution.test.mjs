@@ -5,22 +5,21 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { join } from "node:path";
-import { startServer, stopServer, makeSession } from "./harness.mjs";
+import { startServer, stopServer, makeSession, readStoreDoc, writeStoreDoc } from "./harness.mjs";
 
 let ctx, adultAdmin, child;
 const SKILL_ID = "skl_morning_brief"; // seeded by seed.mjs
 const NEW_GUIDANCE = "Lead with school pickups and prescription refills. Always confirm before sharing.";
 
-// Seed a pending skill evolution straight into the server's isolated data dir.
+// Seed a pending skill evolution straight into the server's isolated store.
 function seedEvolution(id, patch = {}) {
-  const file = join(ctx.dataDir, "evolution.json");
-  const all = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+  const all = readStoreDoc(ctx, "evolution.json", {});
   all[id] = {
     id, householdId: "local", kind: "skill", skillId: SKILL_ID,
     title: "Improve morning briefing", reason: "A step failed", after: NEW_GUIDANCE,
     status: "pending", createdAt: Date.now(), ...patch,
   };
-  fs.writeFileSync(file, JSON.stringify(all, null, 2));
+  writeStoreDoc(ctx, "evolution.json", all);
 }
 
 before(async () => {

@@ -17,7 +17,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import fs from "node:fs";
-import { startServer, stopServer, makeSession } from "./harness.mjs";
+import { startServer, stopServer, makeSession, readStoreDoc, writeStoreDoc } from "./harness.mjs";
 
 let ctx, owner, guest, child;
 before(async () => {
@@ -28,18 +28,17 @@ before(async () => {
 });
 after(async () => { await stopServer(ctx); });
 
-const CHALLENGES = () => join(ctx.dataDir, "contact_verifications.json");
 function seedChallenge(methodId, overrides = {}) {
-  const all = fs.existsSync(CHALLENGES()) ? JSON.parse(fs.readFileSync(CHALLENGES(), "utf8")) : {};
+  const all = readStoreDoc(ctx, "contact_verifications.json", {});
   all[methodId] = {
     id: methodId, householdId: "local", code: "123456", channel: "email", delivered: true,
     attempts: 0, maxAttempts: 5, expiresAt: Date.now() + 10 * 60 * 1000, nextSendAt: Date.now() + 60 * 1000,
     requestedBy: "m-sam", createdAt: new Date().toISOString(), ...overrides,
   };
-  fs.writeFileSync(CHALLENGES(), JSON.stringify(all, null, 2));
+  writeStoreDoc(ctx, "contact_verifications.json", all);
 }
 function readChallenges() {
-  return fs.existsSync(CHALLENGES()) ? JSON.parse(fs.readFileSync(CHALLENGES(), "utf8")) : {};
+  return readStoreDoc(ctx, "contact_verifications.json", {});
 }
 async function makeEmailMethod(session, label) {
   const r = await session.req("/api/contact-methods", { method: "POST", body: JSON.stringify({ label, type: "Email", value: `${label.replace(/\W/g, "").toLowerCase()}@example.com` }) });

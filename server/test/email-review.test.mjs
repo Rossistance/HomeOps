@@ -38,7 +38,8 @@ before(async () => {
   run.steps.push({ index: 3, toolId: "gmail.listLabels", status: "succeeded", input: {}, result: { count: 2, labels: [{ id: "Label_1", name: "Social", type: "user" }, { id: "Label_2", name: "Receipts", type: "user" }] } });
 
   const foreign = { ...run, id: "run_foreign", householdId: "some-other-household" };
-  fs.writeFileSync(join(ctx.dataDir, "runs.json"), JSON.stringify({ [run.id]: run, [foreign.id]: foreign }, null, 2));
+  const { writeStoreDoc } = await import("./harness.mjs");
+  writeStoreDoc(ctx, "runs.json", { [run.id]: run, [foreign.id]: foreign });
 });
 after(async () => { await stopServer(ctx); });
 

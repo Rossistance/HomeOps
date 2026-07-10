@@ -115,5 +115,19 @@ export async function makeSession(ctx, actorId, body = {}) {
   return client;
 }
 
+/* ---- Direct store seeding (C1.1: the store is a per-tenant SQLite db) ----
+ * Tests used to seed by dropping JSON files into ctx.dataDir; the tenant db
+ * only sweeps root files once, at first boot, so runtime seeding goes through
+ * the same engine the server uses (SQLite WAL is safely multi-process). */
+import { createEngine } from "../tenant-db.mjs";
+export function readStoreDoc(ctx, file, fallback) {
+  const eng = createEngine(ctx.dataDir);
+  try { return eng.getDoc("local", file, fallback); } finally { eng.closeAll(); }
+}
+export function writeStoreDoc(ctx, file, value) {
+  const eng = createEngine(ctx.dataDir);
+  try { eng.putDoc("local", file, value); } finally { eng.closeAll(); }
+}
+
 export { ORIGIN };
 export const newId = () => crypto.randomBytes(6).toString("hex");

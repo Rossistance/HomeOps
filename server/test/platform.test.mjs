@@ -3,7 +3,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { join } from "node:path";
-import { startServer, stopServer, makeSession } from "./harness.mjs";
+import { startServer, stopServer, makeSession, readStoreDoc, writeStoreDoc } from "./harness.mjs";
 
 let ctx, admin, child;
 before(async () => {
@@ -61,10 +61,9 @@ test("the household member roster is server-owned and readable", async () => {
 
 test("a linked (synced) event is read-only — editing is refused", async () => {
   // Seed a linked, externally-owned event directly into the store.
-  const file = join(ctx.dataDir, "events.json");
-  const all = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+  const all = readStoreDoc(ctx, "events.json", {});
   all["ev_synced"] = { id: "ev_synced", householdId: "local", title: "From Google", layer: "linked", visibility: "household", source: "Google Calendar", ownerId: "m-alex", createdAt: Date.now(), updatedAt: new Date().toISOString() };
-  fs.writeFileSync(file, JSON.stringify(all, null, 2));
+  writeStoreDoc(ctx, "events.json", all);
   const edit = await admin.req("/api/events/ev_synced", { method: "PATCH", body: JSON.stringify({ title: "hacked" }) });
   assert.equal(edit.status, 409);
   assert.equal(edit.data.error, "read_only_layer");

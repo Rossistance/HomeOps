@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { createEngine } from "./tenant-db.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Data dir is overridable (HOMEOPS_DATA_DIR) so the test harness can point at an
@@ -14,6 +15,18 @@ const DATA_DIR = process.env.HOMEOPS_DATA_DIR
   ? process.env.HOMEOPS_DATA_DIR
   : join(__dirname, ".data");
 fs.mkdirSync(DATA_DIR, { recursive: true });
+
+/* ---- Tenant storage engine (ADR-001): SQLite database per household ----
+ * The single production household is tenant "local"; opening it migrates any
+ * legacy JSON collections into tenants/local/household.db (originals preserved
+ * under .migrated/). Every accessor below keeps its synchronous signature —
+ * the swap is invisible above this file. */
+const TENANT = "local";
+const engine = createEngine(DATA_DIR);
+engine.openTenant(TENANT);
+/** The storage engine, for per-household export/import (backups). */
+export function tenantEngine() { return engine; }
+export const CURRENT_TENANT = TENANT;
 
 const KEY_FILE = join(DATA_DIR, "key");
 function loadKey() {
@@ -44,31 +57,18 @@ export function decrypt(blob) {
   }
 }
 
-// Corruption quarantine: a JSON file that fails to parse is preserved (copied
-// aside) and the collection is marked read-degraded — writeJSON then REFUSES to
-// overwrite it, because "parse failed → return {} → next write persists {}"
-// silently erases a family's whole collection. Recovery: restore from the
-// .corrupt copy or a backup, then acknowledge via the Owner store route.
-const _quarantined = new Map(); // file → { at, error, copy }
+// Corruption quarantine: storage that can't be read cleanly (a tenant db that
+// fails integrity_check, an unparseable legacy file at migration, or a kv doc
+// that won't parse) is preserved as-is and marked read-degraded — writes then
+// REFUSE, because silently overwriting is how a family's data gets erased.
+// Recovery: restore from a backup, then acknowledge via the Owner store route.
 export function quarantinedCollections() {
-  return [..._quarantined.entries()].map(([file, info]) => ({ file, ...info }));
+  return engine.quarantined(TENANT);
 }
-export function acknowledgeQuarantine(file) { return _quarantined.delete(file); }
+export function acknowledgeQuarantine(file) { return engine.acknowledge(TENANT, file); }
 
 function readJSON(file, fallback) {
-  const p = join(DATA_DIR, file);
-  if (!fs.existsSync(p)) return fallback;
-  try {
-    return JSON.parse(fs.readFileSync(p, "utf8"));
-  } catch (e) {
-    if (!_quarantined.has(file)) {
-      const copy = `${file}.corrupt-${Date.now()}`;
-      try { fs.copyFileSync(p, join(DATA_DIR, copy)); } catch { /* best effort */ }
-      _quarantined.set(file, { at: new Date().toISOString(), error: String(e?.message ?? e), copy });
-      try { appendAudit({ type: "store.corrupt", file, copy, error: String(e?.message ?? e) }); } catch { /* audit may share the fault */ }
-    }
-    return fallback;
-  }
+  return engine.getDoc(TENANT, file, fallback);
 }
 // Data revision — bumped on every meaningful write so clients can poll ONE tiny
 // number and refetch only when something actually changed (cross-device
@@ -77,20 +77,13 @@ function readJSON(file, fallback) {
 let _dataRev = Date.now();
 const REV_EXCLUDE = new Set(["sessions.json", "idempotency.json", "health.json", "oauth_states.json", "contact_verifications.json"]);
 export function getDataRev() { return _dataRev; }
+function bumpRev(file) { if (!REV_EXCLUDE.has(file)) _dataRev++; }
 
-// Atomic write: write to a temp file then rename (atomic on the same volume), so a
-// crash mid-write can never leave a half-written / corrupt JSON file behind.
+// Durability: the engine writes through SQLite WAL transactions — a crash
+// mid-write rolls back cleanly instead of leaving a half-written file.
 function writeJSON(file, value) {
-  if (_quarantined.has(file)) {
-    // The on-disk copy failed to parse — writing now would permanently replace
-    // the family's data with whatever partial state is in memory. Fail loudly.
-    throw new Error(`store_quarantined: ${file} is corrupt on disk; restore it (a .corrupt copy was preserved) and acknowledge before writing.`);
-  }
-  const p = join(DATA_DIR, file);
-  const tmp = `${p}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
-  fs.renameSync(tmp, p);
-  if (!REV_EXCLUDE.has(file)) _dataRev++;
+  engine.putDoc(TENANT, file, value); // throws store_quarantined/tenant_quarantined
+  bumpRev(file);
 }
 // Exported for the run engine and the agent/skill/function registries, which build
 // their own accessors on top of the same file-backed, atomic-write substrate.
@@ -109,8 +102,9 @@ export function withLock(key, fn) {
   return run;
 }
 // All mutations of a single run funnel through this so steps/cursor stay consistent.
+// Tenant-prefixed so two households can never contend on (or alias) one lock key.
 export function withRunLock(runId, fn) {
-  return withLock(`run:${runId}`, fn);
+  return withLock(`run:${TENANT}:${runId}`, fn);
 }
 
 /* ---- Idempotency (at-most-once side effects, durable across restart) ---- */
@@ -158,13 +152,13 @@ export function getSecret(id, field) {
   return blob ? decrypt(blob) : null;
 }
 
-/* ---- Audit log (append-only, redacted) ---- */
+/* ---- Audit log (append-only, redacted; lives beside the tenant db) ---- */
 export function appendAudit(event) {
   const line = JSON.stringify({ id: crypto.randomUUID(), at: new Date().toISOString(), ...event });
-  fs.appendFileSync(join(DATA_DIR, "audit.jsonl"), line + "\n");
+  fs.appendFileSync(engine.tenantPath(TENANT, "audit.jsonl"), line + "\n");
 }
 export function readAudit(limit = 100) {
-  const p = join(DATA_DIR, "audit.jsonl");
+  const p = engine.tenantPath(TENANT, "audit.jsonl");
   if (!fs.existsSync(p)) return [];
   const lines = fs.readFileSync(p, "utf8").trim().split("\n").filter(Boolean);
   return lines.slice(-limit).reverse().map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
@@ -472,29 +466,30 @@ export function removePushToken(token) {
    run steps, memory, artifacts, routing decisions, and evolution records.
    ======================================================================= */
 
-// Generic keyed-object collection helper (mirrors the connectors.json shape).
+// Generic keyed-object collection helper. Point ops go through the engine's
+// single-row fast path (one row, not a whole-collection parse); whole-set reads
+// go through getDoc, which reconstructs from rows or falls back to a kv doc.
 function keyedCollection(file) {
+  const coll = file.replace(/\.json$/, "");
   return {
     all: () => readJSON(file, {}),
-    get: (id) => readJSON(file, {})[id] ?? null,
+    get: (id) => engine.getRecord(TENANT, coll, id),
     put: (obj) => {
-      const all = readJSON(file, {});
-      all[obj.id] = obj;
-      writeJSON(file, all);
+      engine.putRecord(TENANT, coll, obj.id, obj);
+      bumpRev(file);
       return obj;
     },
     patch: (id, patch) => {
-      const all = readJSON(file, {});
-      if (!all[id]) return null;
-      all[id] = { ...all[id], ...patch, updatedAt: new Date().toISOString() };
-      writeJSON(file, all);
-      return all[id];
+      const existing = engine.getRecord(TENANT, coll, id);
+      if (!existing) return null;
+      const next = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+      engine.putRecord(TENANT, coll, id, next);
+      bumpRev(file);
+      return next;
     },
     remove: (id) => {
-      const all = readJSON(file, {});
-      const had = !!all[id];
-      delete all[id];
-      writeJSON(file, all);
+      const had = engine.deleteRecord(TENANT, coll, id);
+      if (had) bumpRev(file);
       return had;
     },
     list: (filter) => {
@@ -509,38 +504,41 @@ function keyedCollection(file) {
             params, plan, cursor, steps:[{ index, toolId|functionId, title, input,
             requiresApproval, risk, status, approvalId, idempotencyKey, attempts,
             toolCalls:[], startedAt, finishedAt }], error, lease, timestamps } */
+// Run mutations are single-row engine ops: a step patch rewrites ONE run's row,
+// not the whole runs collection (the old whole-file pattern cost ~25ms per step
+// write once runs.json hit 2MB; this is ~1ms).
 export function createRun(run) {
-  const all = readJSON("runs.json", {});
-  all[run.id] = run;
-  writeJSON("runs.json", all);
+  engine.putRecord(TENANT, "runs", run.id, run);
+  bumpRev("runs.json");
   return run;
 }
 export function getRun(id) {
-  return readJSON("runs.json", {})[id] ?? null;
+  return engine.getRecord(TENANT, "runs", id);
 }
 export function patchRun(id, patch) {
-  const all = readJSON("runs.json", {});
-  if (!all[id]) return null;
-  all[id] = { ...all[id], ...patch, updatedAt: new Date().toISOString() };
-  writeJSON("runs.json", all);
-  return all[id];
+  const r = engine.getRecord(TENANT, "runs", id);
+  if (!r) return null;
+  const next = { ...r, ...patch, updatedAt: new Date().toISOString() };
+  engine.putRecord(TENANT, "runs", id, next);
+  bumpRev("runs.json");
+  return next;
 }
 export function patchRunStep(id, index, patch) {
-  const all = readJSON("runs.json", {});
-  const r = all[id];
+  const r = engine.getRecord(TENANT, "runs", id);
   if (!r || !r.steps?.[index]) return null;
   r.steps[index] = { ...r.steps[index], ...patch, updatedAt: new Date().toISOString() };
   r.updatedAt = new Date().toISOString();
-  writeJSON("runs.json", all);
+  engine.putRecord(TENANT, "runs", id, r);
+  bumpRev("runs.json");
   return r;
 }
 export function appendToolCall(id, index, call) {
-  const all = readJSON("runs.json", {});
-  const r = all[id];
+  const r = engine.getRecord(TENANT, "runs", id);
   if (!r || !r.steps?.[index]) return null;
   (r.steps[index].toolCalls ??= []).push({ at: new Date().toISOString(), ...call });
   r.updatedAt = new Date().toISOString();
-  writeJSON("runs.json", all);
+  engine.putRecord(TENANT, "runs", id, r);
+  bumpRev("runs.json");
   return r;
 }
 export function listRuns({ householdId, status, source, agentId, skillId, functionId, limit = 100 } = {}) {
@@ -555,10 +553,8 @@ export function listRuns({ householdId, status, source, agentId, skillId, functi
   return arr.slice(0, limit);
 }
 export function deleteRun(id) {
-  const all = readJSON("runs.json", {});
-  const had = !!all[id];
-  delete all[id];
-  writeJSON("runs.json", all);
+  const had = engine.deleteRecord(TENANT, "runs", id);
+  if (had) bumpRev("runs.json");
   return had;
 }
 
@@ -733,7 +729,7 @@ export const listFiles = (filter) => _files.list(filter);
 export const getFileRec = (id) => _files.get(id);
 export const putFileRec = (f) => _files.put(f);
 export const patchFileRec = (id, patch) => _files.patch(id, patch);
-const FILES_DIR = join(DATA_DIR, "files");
+const FILES_DIR = engine.tenantPath(TENANT, "files");
 export function writeFileBlob(id, buf) {
   fs.mkdirSync(FILES_DIR, { recursive: true });
   fs.writeFileSync(join(FILES_DIR, `${id}.bin`), buf);

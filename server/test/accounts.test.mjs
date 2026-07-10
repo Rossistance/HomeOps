@@ -4,20 +4,20 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { join } from "node:path";
-import { startServer, stopServer, makeSession } from "./harness.mjs";
+import { startServer, stopServer, makeSession, writeStoreDoc } from "./harness.mjs";
 
 let ctx, alex, morgan;
 before(async () => {
   ctx = await startServer();
-  // Seed an account owned by m-alex directly into the server's data dir.
-  fs.writeFileSync(join(ctx.dataDir, "accounts.json"), JSON.stringify([
+  // Seed an account owned by m-alex directly into the server's store.
+  writeStoreDoc(ctx, "accounts.json", [
     {
       id: "acct_alex_google", provider: "google", displayName: "alex@harper.example",
       scopes: ["gmail.send", "calendar"], status: "connected", connectedByActorId: "m-alex",
       householdId: "local", lastHealthAt: null, lastHealthOk: null,
       createdAt: Date.now(), updatedAt: new Date().toISOString(),
     },
-  ], null, 2));
+  ]);
   alex = await makeSession(ctx, "m-alex");
   morgan = await makeSession(ctx, "m-morgan");
 });

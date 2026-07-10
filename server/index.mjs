@@ -262,7 +262,7 @@ const server = http.createServer(async (req, res) => {
       const browserCfg = getConnectorConfig("browser");
       const browserHealth = getHealth("browser");
       return json(res, 200, {
-        ok: true, version: VERSION, time: new Date().toISOString(), runtime: "node-http", env: IS_PROD ? "production" : "development",
+        ok: true, version: VERSION, time: new Date().toISOString(), runtime: "node-http", node: process.version, env: IS_PROD ? "production" : "development",
         browserRuntime: !!(browserHealth && browserHealth.ok),
         externalActionsEnabled: externalActionsEnabled(),
         webhookBaseUrl: (process.env.HOMEOPS_PUBLIC_URL || `http://localhost:${PORT}`).split(",")[0].trim().replace(/\/$/, ""),
