@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as Notifications from "expo-notifications";
 import * as SplashScreen from "expo-splash-screen";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
+import { router } from "expo-router";
 import { NativeTabs } from "expo-router/unstable-native-tabs";
 import { ThemeProvider, DarkTheme, DefaultTheme } from "expo-router/react-navigation";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -31,6 +32,15 @@ Notifications.setNotificationHandler({
 
 // Handoff IA: Today · Ask (sparkle) · Agents (bot) · Library (folder) · Settings (gear).
 function TabsNav() {
+  // Today is home base. unstable_settings.initialRouteName doesn't anchor
+  // NativeTabs (it kept opening the alphabetically-first group, (agents)),
+  // so force the selection once on mount — before first paint.
+  const anchored = useRef(false);
+  useLayoutEffect(() => {
+    if (anchored.current) return;
+    anchored.current = true;
+    router.replace("/(home)");
+  }, []);
   return (
     <NativeTabs>
       <NativeTabs.Trigger name="(home)">

@@ -2127,7 +2127,11 @@ const server = http.createServer(async (req, res) => {
     if (path === "/api/assistant" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const out = await assistantRespond({ message: body.message, context: body.context, session: g.session, providerId: body.providerId });
+      // Prior turns from the durable conversation ride into the model call —
+      // otherwise the assistant forgets facts stated one message earlier.
+      const histConv = body.conversationId ? getConversation(body.conversationId) : null;
+      const history = histConv && histConv.householdId === g.session.householdId && histConv.actorId === g.session.actorId ? histConv.messages : [];
+      const out = await assistantRespond({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history });
       // The assistant is advisory: it ANSWERS or proposes a PLAN. Executing the plan
       // is an explicit user action ("Run plan") that starts a durable server run via
       // POST /api/runs/start — so the browser never orchestrates, and nothing runs
@@ -2160,8 +2164,10 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", ...corsHeaders(req) });
       let tokenCount = 0;
       try {
+        const histConv = body.conversationId ? getConversation(body.conversationId) : null;
+        const history = histConv && histConv.householdId === g.session.householdId && histConv.actorId === g.session.actorId ? histConv.messages : [];
         const out = await assistantStream(
-          { message: body.message, context: body.context, session: g.session, providerId: body.providerId },
+          { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history },
           (_tok) => { tokenCount++; if (tokenCount % 4 === 0) res.write(`data: ${JSON.stringify({ type: "progress", tokens: tokenCount })}\n\n`); },
         );
         // Same server-durable persistence as POST /api/assistant — this was previously

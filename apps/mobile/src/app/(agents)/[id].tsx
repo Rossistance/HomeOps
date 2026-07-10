@@ -190,7 +190,7 @@ export default function AgentDetailScreen() {
           ) : (
             runs.map((r, i) => {
               const tone = statusColor(colors, r.status);
-              const done = r.steps.filter((s) => s.status === "done" || s.status === "completed").length;
+              const done = r.steps.filter((s) => ["done", "completed", "succeeded"].includes(s.status)).length;
               return (
                 <Row
                   key={r.id}

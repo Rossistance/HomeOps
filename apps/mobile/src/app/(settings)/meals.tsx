@@ -3,7 +3,7 @@
 // an add-meal composer (header +), and the shared grocery checklist
 // (list-tasks named "Groceries") with an animated strikethrough on check-off.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, ScrollView, TextInput, View } from "react-native";
+import { Alert, Linking, ScrollView, TextInput, View } from "react-native";
 import Animated, { FadeOut, LinearTransition, ReduceMotion, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import { Stack, useFocusEffect } from "expo-router";
 import { api, type Meal, type TaskRec } from "@/lib/api";
@@ -413,19 +413,56 @@ function MealCard({ m, canManage, busy, onGrocery, onCalendar, onRemove }: {
   const { colors, spacing } = useTheme();
   const tint = slotTint(colors, m.slot);
   const needs = m.ingredients.filter((i) => !i.have).length;
+  const [open, setOpen] = useState(false);
+  const recipeUrl = (m as Meal & { recipeUrl?: string }).recipeUrl;
+  const instructions = ((m as Meal & { instructions?: string[] }).instructions ?? []).filter(Boolean);
   return (
     <Card>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-        <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={2}>{m.title}</T>
-        <Badge label={m.slot} fg={tint.fg} bg={tint.bg} />
-      </View>
-      {m.ingredients.length > 0 ? (
+      {/* Tap the header to expand: full ingredients, instructions, recipe link. */}
+      <PressableScale onPress={() => setOpen(!open)} haptic="select" accessibilityRole="button" accessibilityState={{ expanded: open }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+          <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={2}>{m.title}</T>
+          <Badge label={m.slot} fg={tint.fg} bg={tint.bg} />
+          <Sym name={open ? "chevron.up" : "chevron.down"} size={12} color={colors.textFaint} />
+        </View>
+      </PressableScale>
+      {!open && m.ingredients.length > 0 ? (
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 }}>
           <Sym name="cart" size={12} color={colors.textFaint} />
           <T kind="sub" numberOfLines={2} style={{ flex: 1 }}>
             {m.ingredients.length} ingredient{m.ingredients.length === 1 ? "" : "s"}
             {needs > 0 ? ` · ${needs} needed` : ""} — {m.ingredients.map((i) => i.item).join(", ")}
           </T>
+        </View>
+      ) : null}
+      {open ? (
+        <View style={{ marginTop: spacing.md, gap: spacing.sm }}>
+          {m.ingredients.length > 0 ? (
+            <>
+              <T kind="eyebrow">Ingredients</T>
+              {m.ingredients.map((i, idx) => (
+                <T key={idx} kind="sub" color={i.have ? colors.textFaint : colors.textSecondary}>
+                  {i.have ? "✓ " : "• "}{i.item}
+                </T>
+              ))}
+            </>
+          ) : (
+            <T kind="sub">No ingredients recorded — ask Famili to plan this meal again to fill them in.</T>
+          )}
+          {instructions.length > 0 ? (
+            <>
+              <T kind="eyebrow" style={{ marginTop: 4 }}>Instructions</T>
+              {instructions.slice(0, 12).map((s, idx) => (
+                <T key={idx} kind="sub" color={colors.textSecondary}>{idx + 1}. {s}</T>
+              ))}
+            </>
+          ) : null}
+          {recipeUrl ? (
+            <PressableScale onPress={() => { void Linking.openURL(recipeUrl); }} haptic="select" accessibilityRole="link" style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
+              <Sym name="link" size={13} color={colors.ember} />
+              <T kind="subMedium" color={colors.ember} numberOfLines={1} style={{ flex: 1 }}>Open recipe</T>
+            </PressableScale>
+          ) : null}
         </View>
       ) : null}
       {canManage ? (

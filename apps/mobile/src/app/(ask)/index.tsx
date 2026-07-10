@@ -16,6 +16,7 @@ import { streamAssistant } from "@/lib/assistant-stream";
 import { useSession } from "@/lib/session";
 import { useRun } from "@/lib/run-context";
 import { useTheme, useCalmMotion, riskColor, tapHaptic } from "@/theme";
+import { humanDetail } from "@/lib/format";
 // NOTE: explicit /index path — the legacy src/components/ui.tsx (old design
 // system, deleted with the old screens) shadows the ui/ directory otherwise.
 import { Badge, Button, Card, MarkdownText, Notice, PressableScale, Sym, SymTile, T } from "@/components/ui";
@@ -260,7 +261,8 @@ export default function AskScreen() {
       const stepLines = activeRun.steps
         .filter((s) => s.output && s.status === "done")
         .slice(0, 3)
-        .map((s) => `- **${s.title}**: ${String(s.output).slice(0, 200)}`);
+        .map((s) => `- **${s.title}**: ${humanDetail(s.output) ?? ""}`)
+        .filter((l) => !l.endsWith(": "));
       const artLines = arts.slice(0, 3).map((a) => `- **${a.title}**${a.body ? `\n\n${a.body.slice(0, 600)}` : ""}`);
       const text = activeRun.status === "completed"
         ? `Done — **${activeRun.planTitle}** finished (${done}/${activeRun.steps.length} steps).${stepLines.length ? `\n\n${stepLines.join("\n")}` : ""}${artLines.length ? `\n\n${artLines.join("\n\n")}` : ""}`

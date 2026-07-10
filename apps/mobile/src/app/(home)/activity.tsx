@@ -8,6 +8,7 @@ import { api, type AuditEvent, type MemoryRec, type RunRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useRun } from "@/lib/run-context";
 import { useTheme, statusColor, tapHaptic } from "@/theme";
+import { humanDetail } from "@/lib/format";
 import {
   T, Card, Badge, Row, SectionHeader, SkeletonCards, ErrorState, Notice,
   Rise, HScreen, Sym, PressableScale,
@@ -157,7 +158,7 @@ export default function ActivityScreen() {
                       <View style={{ width: 8, height: 8, borderRadius: 4, marginTop: 6, backgroundColor: stepDot(s.status) }} />
                       <View style={{ flex: 1, gap: 1 }}>
                         <T kind="subMedium" color={colors.text}>{s.title}</T>
-                        {s.output || s.detail ? <T kind="sub" numberOfLines={2}>{s.output || s.detail}</T> : null}
+                        {humanDetail(s.output || s.detail) ? <T kind="sub" numberOfLines={2}>{humanDetail(s.output || s.detail)}</T> : null}
                       </View>
                       {s.status === "done" ? <Sym name="checkmark.circle.fill" size={15} color={colors.sage} />
                         : s.status === "blocked" ? <Sym name="pause.circle.fill" size={15} color={colors.amber} />
@@ -179,7 +180,9 @@ export default function ActivityScreen() {
             ) : (
               <Card padded={false}>
                 {history.map((r, i) => {
-                  const done = r.steps.filter((s) => s.status === "done" || s.status === "completed").length;
+                  // Server step vocabulary is "succeeded" — counting only local
+                  // statuses made every finished run read "0/N steps done".
+                  const done = r.steps.filter((s) => ["done", "completed", "succeeded"].includes(s.status)).length;
                   const tone = statusColor(colors, r.status);
                   return (
                     <Row

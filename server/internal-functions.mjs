@@ -212,10 +212,37 @@ export const INTERNAL_FUNCTIONS = {
       const title = String(input?.title ?? "").trim();
       if (!title) return { ok: false, error: "empty_title", message: "A meal needs a title." };
       const now = nowISO();
-      const ingredients = (Array.isArray(input?.ingredients) ? input.ingredients : [])
+      let ingredients = (Array.isArray(input?.ingredients) ? input.ingredients : [])
         .map((i) => (typeof i === "string" ? { item: i.trim(), have: false } : { item: String(i.item ?? "").trim(), have: !!i.have }))
         .filter((i) => i.item).slice(0, 60);
-      const instructions = (Array.isArray(input?.instructions) ? input.instructions : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 60);
+      let instructions = (Array.isArray(input?.instructions) ? input.instructions : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 60);
+      let enrichmentNote = "";
+      // Self-enrichment: planners routinely arrive with a bare title (recipe pages
+      // bot-walled upstream). A meal without ingredients puts NOTHING on the
+      // grocery list — the exact silent failure users hit — so fetch the recipe
+      // here, and as a last resort estimate a standard list, honestly labeled.
+      if (ingredients.length === 0) {
+        const recipeUrl = typeof input?.recipeUrl === "string" ? input.recipeUrl.trim() : "";
+        try {
+          const { extractRecipe, estimateIngredients } = await import("./web.mjs");
+          if (recipeUrl) {
+            const r = await extractRecipe(recipeUrl);
+            if (r.ok && r.recipe?.ingredients?.length) {
+              ingredients = r.recipe.ingredients.map((x) => ({ item: String(x).slice(0, 160), have: false })).slice(0, 60);
+              if (instructions.length === 0) instructions = (r.recipe.instructions ?? []).map((s) => String(s)).slice(0, 60);
+              if (r.extraction === "text") enrichmentNote = "Ingredients read from the recipe page text.";
+            }
+          }
+          if (ingredients.length === 0) {
+            const est = await estimateIngredients(title, input?.servings ?? 4);
+            if (est) {
+              ingredients = est.ingredients.map((x) => ({ item: x, have: false }));
+              if (instructions.length === 0) instructions = est.instructions;
+              enrichmentNote = "Ingredients estimated by Famili — check quantities before shopping.";
+            }
+          }
+        } catch { /* enrichment is best-effort; the meal still lands */ }
+      }
       const slot = ["breakfast", "lunch", "dinner", "snack"].includes(input?.slot) ? input.slot : "dinner";
       const date = typeof input?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.date) ? input.date : null;
       const meal = putMeal({

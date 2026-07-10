@@ -9,7 +9,7 @@ import { api, type ArtifactRec, type FileRec, type MemoryRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 import {
-  Badge, Button, Card, EmptyState, HScreen, Notice, PressableScale, Rise,
+  Badge, Button, Card, EmptyState, HScreen, MarkdownText, Notice, PressableScale, Rise,
   SectionHeader, SkeletonCards, Sym, SymTile, T, Well,
 } from "@/components/ui";
 import { UploadSheet } from "@/components/sheets/upload-sheet";
@@ -54,6 +54,7 @@ export default function LibraryScreen() {
   const [filter, setFilter] = useState("");
   const [spaceFilter, setSpaceFilter] = useState<SpaceKey | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [expandedArtifact, setExpandedArtifact] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const [f, m, a] = await Promise.all([api.files(), api.memory(), api.artifacts()]);
@@ -307,18 +308,32 @@ export default function LibraryScreen() {
           {artifacts.length === 0 ? (
             <EmptyState icon="doc.text" title="No artifacts yet" hint="Run outputs will collect here." />
           ) : (
-            artifacts.map((a, i) => (
-              <Rise key={a.id} index={Math.min(i + 3, 8)}>
-                <Card style={{ gap: spacing.sm }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.sm }}>
-                    <Badge label={a.kind} fg={colors.sky} bg={colors.skyBg} />
-                    <T kind="caption" color={colors.textFaint}>{new Date(a.createdAt).toLocaleDateString()}</T>
-                  </View>
-                  <T kind="rowTitle">{a.title}</T>
-                  {a.body ? <T kind="sub" numberOfLines={6}>{a.body.slice(0, 400)}</T> : null}
-                </Card>
-              </Rise>
-            ))
+            artifacts.map((a, i) => {
+              const open = expandedArtifact === a.id;
+              // Bare URLs in artifact bodies become tappable markdown links.
+              const linked = (a.body ?? "").replace(/(?<![([])(https?:\/\/[^\s)\]]+)/g, "[$1]($1)");
+              return (
+                <Rise key={a.id} index={Math.min(i + 3, 8)}>
+                  <Card style={{ gap: spacing.sm }}>
+                    <PressableScale onPress={() => { tapHaptic("select"); setExpandedArtifact(open ? null : a.id); }} haptic={null} accessibilityRole="button" accessibilityState={{ expanded: open }} style={{ gap: spacing.sm }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.sm }}>
+                        <Badge label={a.kind.replace(/_/g, " ")} fg={colors.sky} bg={colors.skyBg} />
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                          <T kind="caption" color={colors.textFaint}>{new Date(a.createdAt).toLocaleDateString()}</T>
+                          <Sym name={open ? "chevron.up" : "chevron.down"} size={12} color={colors.textFaint} />
+                        </View>
+                      </View>
+                      <T kind="rowTitle">{a.title}</T>
+                    </PressableScale>
+                    {a.body ? (
+                      open
+                        ? <MarkdownText text={linked} />
+                        : <T kind="sub" numberOfLines={3}>{a.body.slice(0, 240)}</T>
+                    ) : null}
+                  </Card>
+                </Rise>
+              );
+            })
           )}
         </>
       )}

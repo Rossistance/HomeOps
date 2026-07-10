@@ -473,6 +473,40 @@ async function recipeFromText(page, { maxChars = 6000 } = {}) {
   } catch { return null; }
 }
 
+/** Estimate a standard ingredient list for a dish by name — the last-resort
+ * enrichment plan_meal uses when no recipe page could be read. Clearly labeled
+ * estimated:true so callers can tell users to check quantities. */
+export async function estimateIngredients(title, servings = 4) {
+  const key = openAIKey();
+  if (!key || !String(title ?? "").trim()) return null;
+  const r = await safeFetch(
+    "https://api.openai.com/v1/chat/completions",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: `List the standard ingredients (with rough quantities for ${servings} servings) and short instructions for the dish the user names. JSON: {"ingredients":string[],"instructions":string[]}.` },
+          { role: "user", content: String(title).slice(0, 200) },
+        ],
+      }),
+    },
+    { timeoutMs: 20_000, maxBytes: 500_000 },
+  );
+  if (!r.ok || !r.httpOk) return null;
+  try {
+    const parsed = JSON.parse(JSON.parse(r.text).choices?.[0]?.message?.content ?? "{}");
+    if (!Array.isArray(parsed.ingredients) || parsed.ingredients.length === 0) return null;
+    return {
+      estimated: true,
+      ingredients: parsed.ingredients.map((x) => String(x).slice(0, 160)).slice(0, 40),
+      instructions: (parsed.instructions ?? []).map((x) => String(x).slice(0, 400)).slice(0, 25),
+    };
+  } catch { return null; }
+}
+
 /** Extract a structured recipe from a live page. Search often lands on gallery /
  * listicle pages ("25 easy weeknight dinners") that carry no Recipe JSON-LD of
  * their own — those exist to link to real recipe pages, so before failing we

@@ -236,7 +236,11 @@ export function buildServerContext(session, clientContext) {
   const memory = listMemory({ householdId: hh, limit: 6 })
     .filter((m) => m.scope !== "personal" || m.source?.actorId === session.actorId)
     .map((m) => ({ text: m.text, scope: m.scope }));
-  const members = listMembers({ householdId: hh }).map((m) => ({ id: m.actorId, name: m.displayName, role: m.role }));
+  // Active roster only — archived members (removed invites, demo seeds) were
+  // leaking in and made the assistant size meals for a phantom family of 10.
+  const activeMembers = listMembers({ householdId: hh }).filter((m) => !m.archived);
+  const members = activeMembers.map((m) => ({ id: m.actorId, name: m.displayName, role: m.role, relationship: m.relationship ?? null }));
+  const householdSize = activeMembers.length;
   // Existing helpers/recipes/automations — so the assistant can EDIT/extend them by id
   // instead of creating duplicates, and answer "what helpers do I have?".
   const inHh = (x) => x.householdId === hh || x.householdId === "local";
@@ -245,13 +249,13 @@ export function buildServerContext(session, clientContext) {
   const existingAutomations = listTriggers(inHh).map((t) => ({ id: t.id, name: t.name, type: t.type, enabled: t.enabled }));
   return {
     now, asActor: { id: session.actorId, role: session.role },
-    members, upcomingEvents: events, openTasks: tasks, recentMemory: memory,
+    householdSize, members, upcomingEvents: events, openTasks: tasks, recentMemory: memory,
     existingAgents, existingSkills, existingAutomations,
     clientHints: clientContext ?? undefined,
   };
 }
 
-export async function assistantRespond({ message, context, session, providerId } = {}) {
+export async function assistantRespond({ message, context, session, providerId, history } = {}) {
   if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
   const id = activeProviderId(providerId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
@@ -260,7 +264,14 @@ export async function assistantRespond({ message, context, session, providerId }
   const serverCtx = buildServerContext(session, context);
   const ctxStr = JSON.stringify(serverCtx).slice(0, 4000);
   const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nUser message: ${String(message).trim()}`;
-  const out = await providerChat(id, { messages: [{ role: "system", content: ASSISTANT_SYS }, { role: "user", content: user }] });
+  // Conversation memory: without prior turns the assistant is amnesiac — a fact
+  // stated one message ago ("we're a family of 4") was already forgotten. The
+  // last few turns ride along as real chat messages, truncated per turn.
+  const priorTurns = (Array.isArray(history) ? history : [])
+    .filter((m) => m && (m.role === "user" || m.role === "assistant") && m.text)
+    .slice(-10)
+    .map((m) => ({ role: m.role, content: String(m.text).slice(0, 1500) }));
+  const out = await providerChat(id, { messages: [{ role: "system", content: ASSISTANT_SYS }, ...priorTurns, { role: "user", content: user }] });
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
   const parsed = extractJSON(out.text);
   // Robust chat: if the model didn't return clean JSON, treat its prose as an answer.
@@ -324,7 +335,7 @@ function normalizeBuild(b) {
  * liveness signals; the JSON tokens are not meaningful mid-stream). Returns the
  * same {ok, kind, answer, plan, model} shape when the full response is assembled.
  */
-export async function assistantStream({ message, context, session, providerId } = {}, onToken) {
+export async function assistantStream({ message, context, session, providerId, history } = {}, onToken) {
   if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
   const id = activeProviderId(providerId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
@@ -333,7 +344,12 @@ export async function assistantStream({ message, context, session, providerId } 
   const serverCtx = buildServerContext(session, context);
   const ctxStr = JSON.stringify(serverCtx).slice(0, 4000);
   const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nUser message: ${String(message).trim()}`;
-  const out = await providerChatStream(id, { messages: [{ role: "system", content: ASSISTANT_SYS }, { role: "user", content: user }] }, onToken);
+  // Same conversation memory as assistantRespond (the chat UIs always stream).
+  const priorTurns = (Array.isArray(history) ? history : [])
+    .filter((m) => m && (m.role === "user" || m.role === "assistant") && m.text)
+    .slice(-10)
+    .map((m) => ({ role: m.role, content: String(m.text).slice(0, 1500) }));
+  const out = await providerChatStream(id, { messages: [{ role: "system", content: ASSISTANT_SYS }, ...priorTurns, { role: "user", content: user }] }, onToken);
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
   const parsed = extractJSON(out.text);
   if (!parsed) return { ok: true, kind: "answer", answer: String(out.text || "").trim() || "I'm not sure how to help with that yet.", model: out.model };
