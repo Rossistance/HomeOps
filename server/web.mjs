@@ -384,15 +384,19 @@ export async function extractRecipe(url) {
     const sameSite = extractLinks(html ?? "", baseUrl, 120)
       .filter((l) => { try { return new URL(l.href).hostname === host && l.href.split("#")[0] !== baseUrl; } catch { return false; } })
       .filter((l) => !/\/(gallery|collection|roundup|category|tag|about|contact|shop|privacy|newsletter|subscribe)\b/i.test(l.href));
-    const tier1 = sameSite.filter((l) => /\/recipes?\//i.test(l.href));
+    // Roundup slugs ("/easy-salad-recipes/", "/weeknight-dinners/") are more
+    // listicles, not dishes — skip them or we burn our tries on nav links.
+    const ROUNDUP_SLUG = /(-|\b)(recipes|dinners|ideas|meals|dishes|sides|desserts|breakfasts|lunches|favorites)\/?$/i;
+    const tier1 = sameSite.filter((l) => /\/recipes?\//i.test(l.href) && !ROUNDUP_SLUG.test(l.href));
     const tier2 = sameSite.filter((l) => {
       try {
         const path = new URL(l.href).pathname;
-        return /^\/[a-z0-9]+(?:-[a-z0-9]+)+\/?$/i.test(path) && l.text.trim().split(/\s+/).length >= 2 && !NAV_TEXT.test(l.text.trim());
+        return /^\/[a-z0-9]+(?:-[a-z0-9]+)+\/?$/i.test(path) && !ROUNDUP_SLUG.test(path)
+          && l.text.trim().split(/\s+/).length >= 2 && !NAV_TEXT.test(l.text.trim());
       } catch { return false; }
     });
     const seen = new Set();
-    return [...tier1, ...tier2].filter((l) => !seen.has(l.href) && seen.add(l.href)).slice(0, 3);
+    return [...tier1, ...tier2].filter((l) => !seen.has(l.href) && seen.add(l.href)).slice(0, 5);
   };
 
   let candidates = mineCandidates(page.html, page.url);
