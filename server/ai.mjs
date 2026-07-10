@@ -6,9 +6,9 @@ import { getConnectorConfig, setConnectorConfig, revokeConnector, getSecret, get
 import { safeFetch, safeFetchStream } from "./net.mjs";
 
 export const AI_PROVIDERS = [
-  { id: "openai", name: "OpenAI", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.openai.com/v1", defaultModel: "gpt-4o-mini", docs: "Paste an API key from platform.openai.com." },
-  { id: "anthropic", name: "Anthropic Claude", kind: "cloud", style: "anthropic", needsKey: true, defaultBaseUrl: "https://api.anthropic.com", defaultModel: "claude-3-5-haiku-latest", docs: "Paste an API key from console.anthropic.com." },
-  { id: "gemini", name: "Google Gemini", kind: "cloud", style: "gemini", needsKey: true, defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta", defaultModel: "gemini-1.5-flash", docs: "Paste an API key from aistudio.google.com." },
+  { id: "openai", name: "OpenAI", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.openai.com/v1", defaultModel: "gpt-5-mini", docs: "Paste an API key from platform.openai.com." },
+  { id: "anthropic", name: "Anthropic Claude", kind: "cloud", style: "anthropic", needsKey: true, defaultBaseUrl: "https://api.anthropic.com", defaultModel: "claude-haiku-4-5", docs: "Paste an API key from console.anthropic.com." },
+  { id: "gemini", name: "Google Gemini", kind: "cloud", style: "gemini", needsKey: true, defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta", defaultModel: "gemini-2.5-flash", docs: "Paste an API key from aistudio.google.com." },
   { id: "compatible", name: "OpenAI-compatible", kind: "cloud", style: "openai", needsKey: true, needsBaseUrl: true, defaultBaseUrl: "", defaultModel: "", docs: "Any OpenAI-compatible endpoint (Together, Groq, OpenRouter, vLLM, …). Set base URL + key." },
   { id: "ollama", name: "Ollama (local)", kind: "local", style: "ollama", needsKey: false, local: true, defaultBaseUrl: "http://localhost:11434", defaultModel: "", docs: "Runs locally. Start Ollama, then Discover models." },
   { id: "lmstudio", name: "LM Studio (local)", kind: "local", style: "openai", needsKey: false, local: true, defaultBaseUrl: "http://localhost:1234/v1", defaultModel: "", docs: "Open LM Studio's local server, then Discover models." },
