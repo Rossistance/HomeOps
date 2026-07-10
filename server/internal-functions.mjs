@@ -2,7 +2,7 @@
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
-import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listEvents, getSettings } from "./store.mjs";
+import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings } from "./store.mjs";
 import { mealEventNotes, pushEventToGoogle } from "./calendar.mjs";
 import crypto from "node:crypto";
 
@@ -244,18 +244,58 @@ export const INTERNAL_FUNCTIONS = {
         } catch { /* enrichment is best-effort; the meal still lands */ }
       }
       const slot = ["breakfast", "lunch", "dinner", "snack"].includes(input?.slot) ? input.slot : "dinner";
-      const date = typeof input?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.date) ? input.date : null;
-      const meal = putMeal({
-        id: eid("meal"), householdId: ctx.householdId, title, date, slot,
-        time: typeof input?.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(input.time) ? input.time : null,
-        notes: String(input?.notes ?? ""), ingredients, instructions,
-        servings: Number.isFinite(+input?.servings) && +input.servings > 0 ? Math.floor(+input.servings) : null,
-        recipeUrl: typeof input?.recipeUrl === "string" ? input.recipeUrl.trim() : "",
-        visibility: input?.visibility ?? "household", source: "assistant", createdBy: ctx.actorId, createdAt: now, updatedAt: now,
-      });
-      // 2) Groceries — every not-yet-have ingredient, linked by mealId.
+      let date = typeof input?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.date) ? input.date : null;
+      let scheduleNote = "";
+      // State-aware scheduling — the intelligence users expect:
+      // 1. Same meal already planned this week → update it, never duplicate.
+      // 2. The requested slot is taken → replace only when explicitly asked
+      //    (replace:true); otherwise shift to the nearest free slot and say so.
+      const household = (m) => m.householdId === ctx.householdId && !m.archived;
+      const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const dupe = listMeals(household).find((m) => norm(m.title) === norm(title) && (!date || !m.date || Math.abs(Date.parse(m.date) - Date.parse(date)) < 8 * 86400000));
+      const occupant = (d) => listMeals(household).find((m) => m.date === d && m.slot === slot && (!dupe || m.id !== dupe.id));
+      if (date && occupant(date)) {
+        if (input?.replace === true) {
+          const old = occupant(date);
+          patchMeal(old.id, { archived: true, updatedAt: nowISO() });
+          scheduleNote = `Replaced ${old.title} on ${date}.`;
+        } else {
+          const requested = date;
+          for (let d = 1; d <= 7 && occupant(date); d++) {
+            date = new Date(Date.parse(requested) + d * 86400000).toISOString().slice(0, 10);
+          }
+          scheduleNote = occupant(date)
+            ? "" // week is full — keep the requested date rather than land nowhere
+            : `${requested} ${slot} already had ${occupant(requested)?.title ?? "a meal"} — moved to ${date}. Ask me to "replace" if you'd rather swap.`;
+          if (!scheduleNote) date = requested;
+        }
+      }
+      let meal;
+      if (dupe) {
+        // Same dish already on the plan — move/refresh it instead of duplicating.
+        meal = patchMeal(dupe.id, {
+          date, slot, updatedAt: now,
+          ...(ingredients.length && !(dupe.ingredients ?? []).length ? { ingredients } : {}),
+          ...(instructions.length && !(dupe.instructions ?? []).length ? { instructions } : {}),
+        }) ?? dupe;
+        scheduleNote = scheduleNote || `${meal.title} was already planned — updated it instead of adding a duplicate.`;
+      } else {
+        meal = putMeal({
+          id: eid("meal"), householdId: ctx.householdId, title, date, slot,
+          time: typeof input?.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(input.time) ? input.time : null,
+          notes: String(input?.notes ?? ""), ingredients, instructions,
+          servings: Number.isFinite(+input?.servings) && +input.servings > 0 ? Math.floor(+input.servings) : null,
+          recipeUrl: typeof input?.recipeUrl === "string" ? input.recipeUrl.trim() : "",
+          visibility: input?.visibility ?? "household", source: "assistant", createdBy: ctx.actorId, createdAt: now, updatedAt: now,
+        });
+      }
+      if (enrichmentNote) scheduleNote = [scheduleNote, enrichmentNote].filter(Boolean).join(" ");
+      // 2) Groceries — every not-yet-have ingredient, linked by mealId. Items
+      // already on the open list (any meal) aren't added twice.
+      const { listTasks } = await import("./store.mjs");
+      const openGrocery = new Set(listTasks((t) => t.householdId === ctx.householdId && t.type === "list" && t.listName === "Groceries" && t.status !== "done").map((t) => norm(t.title)));
       const groceryIds = [];
-      for (const ing of ingredients.filter((i) => !i.have)) {
+      for (const ing of ingredients.filter((i) => !i.have && !openGrocery.has(norm(i.item)))) {
         const tk = putTask({
           id: eid("tk"), householdId: ctx.householdId, title: ing.item, type: "list", status: "todo",
           listName: "Groceries", spaceId: "sp-family", priority: "low", visibility: "household",
@@ -292,7 +332,7 @@ export const INTERNAL_FUNCTIONS = {
         const r = await pushEventToGoogle({ ev: event, householdId: ctx.householdId, actorId: ctx.actorId });
         google = r.ok ? { pushed: true, googleEventId: r.googleEventId, action: r.action } : { pushed: false, error: r.error };
       }
-      return { ok: true, result: { id: meal.id, mealId: meal.id, title: meal.title, date, slot, groceryItems: groceryIds.length, eventId: event?.id ?? null, google } };
+      return { ok: true, result: { id: meal.id, mealId: meal.id, title: meal.title, date, slot, groceryItems: groceryIds.length, eventId: event?.id ?? null, google, ...(scheduleNote ? { note: scheduleNote } : {}) } };
     },
   },
 

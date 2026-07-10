@@ -8,7 +8,7 @@ import { PROVIDERS } from "./providers.mjs";
 import { CONNECTORS, readinessOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { providerChat, providerChatStream } from "./ai.mjs";
-import { getSettings, listEvents, listTasks, listMemory, listMembers, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride } from "./store.mjs";
+import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride } from "./store.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
 
 // Input hints for the internal family-data tools, so the planner knows how to fill
@@ -194,6 +194,11 @@ Plan rules:
 Web research:
 - When answering requires information you don't have (recipes, prices, hours, how-tos, current facts), plan it: "web.search" with a plain-English query, then "web.read" on the best result URL. For recipe pages use "web.recipe" — it returns the structured name, ingredients, step-by-step instructions, and source URL.
 
+Be state-aware before scheduling ANYTHING:
+- The context lists upcomingMeals and upcomingEvents. If a requested date/slot already has something (e.g. Wednesday dinner is already "Tacos"), do NOT silently double-book: ANSWER with the conflict and ask — "Wednesday dinner is already Tacos. Swap it for X, or pick another night?" — then act on their choice (homeops.plan_meal accepts replace:true to swap).
+- Size everything to the household: householdSize and members (with relationships) are in the context. A family of 4 gets 4-serving meals — scale ingredient quantities and never propose "serves 10" without being asked.
+- Never re-add what already exists: check upcomingMeals, openTasks, existingAgents before proposing duplicates; prefer updating or extending the existing item.
+
 Meal planning ("plan N meals", "what's for dinner this week"):
 - Research candidate recipes with web.search + web.recipe, then PRESENT the suggestions inline in "answer" (name, why it fits, source URL) so the family can approve or swap each one in chat.
 - For EACH approved meal, use "homeops.plan_meal" with {title, date (YYYY-MM-DD), slot, recipeUrl, ingredients (full list), instructions (steps), servings}. That single tool adds the meal to the Meal Planner, puts missing ingredients on the shared Groceries list (grocery mini app), creates the calendar event with the recipe + ingredients + instructions in its body, and — when calendar auto-sync is on — pushes it straight to Google Calendar. Do not duplicate those steps with separate tools.
@@ -247,9 +252,15 @@ export function buildServerContext(session, clientContext) {
   const existingAgents = listAgents(inHh).map((a) => ({ id: a.id, name: a.name, purpose: a.purpose, status: a.status }));
   const existingSkills = listSkills(inHh).map((s) => ({ id: s.id, name: s.name, description: s.description, status: s.status }));
   const existingAutomations = listTriggers(inHh).map((t) => ({ id: t.id, name: t.name, type: t.type, enabled: t.enabled }));
+  // The meal plan rides along so scheduling conflicts are visible BEFORE the
+  // assistant proposes anything ("Wednesday already has tacos — swap or keep?").
+  const upcomingMeals = listMeals((m) => m.householdId === hh && !m.archived && m.date && m.date >= now.slice(0, 10))
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    .slice(0, 14)
+    .map((m) => ({ date: m.date, slot: m.slot, title: m.title }));
   return {
     now, asActor: { id: session.actorId, role: session.role },
-    householdSize, members, upcomingEvents: events, openTasks: tasks, recentMemory: memory,
+    householdSize, members, upcomingEvents: events, openTasks: tasks, upcomingMeals, recentMemory: memory,
     existingAgents, existingSkills, existingAutomations,
     clientHints: clientContext ?? undefined,
   };
