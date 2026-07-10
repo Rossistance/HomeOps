@@ -376,11 +376,37 @@ export async function extractRecipe(url) {
   const found = recipeFromHtml(page.html ?? "", { title: page.title, url: page.url });
   if (found) return { ok: true, ...found };
 
-  const host = (() => { try { return new URL(page.url).hostname; } catch { return null; } })();
-  const candidates = (page.links ?? [])
-    .filter((l) => /\/recipes?\//i.test(l.href) && !/\/(gallery|collection|roundup)\//i.test(l.href))
-    .filter((l) => { try { return new URL(l.href).hostname === host && l.href !== page.url; } catch { return false; } })
-    .slice(0, 3);
+  // Tier 1: URLs that say "recipe". Tier 2: dish-slug links (single hyphenated
+  // path segment + multi-word anchor text — how most food blogs address recipes).
+  const NAV_TEXT = /^(home|about|recipes?|blog|menu|search|more|next|previous|comments?|reply|log in|sign up)$/i;
+  const mineCandidates = (html, baseUrl) => {
+    const host = (() => { try { return new URL(baseUrl).hostname; } catch { return null; } })();
+    const sameSite = extractLinks(html ?? "", baseUrl, 120)
+      .filter((l) => { try { return new URL(l.href).hostname === host && l.href.split("#")[0] !== baseUrl; } catch { return false; } })
+      .filter((l) => !/\/(gallery|collection|roundup|category|tag|about|contact|shop|privacy|newsletter|subscribe)\b/i.test(l.href));
+    const tier1 = sameSite.filter((l) => /\/recipes?\//i.test(l.href));
+    const tier2 = sameSite.filter((l) => {
+      try {
+        const path = new URL(l.href).pathname;
+        return /^\/[a-z0-9]+(?:-[a-z0-9]+)+\/?$/i.test(path) && l.text.trim().split(/\s+/).length >= 2 && !NAV_TEXT.test(l.text.trim());
+      } catch { return false; }
+    });
+    const seen = new Set();
+    return [...tier1, ...tier2].filter((l) => !seen.has(l.href) && seen.add(l.href)).slice(0, 3);
+  };
+
+  let candidates = mineCandidates(page.html, page.url);
+  // Many food sites hydrate their listicle links with JS (the static HTML has
+  // hrefless anchors) — a real render is the only way to see them, and some
+  // inject the Recipe JSON-LD client-side too.
+  if (candidates.length === 0 && browserAvailable()) {
+    const rendered = await renderPage(page.url);
+    if (rendered?.html) {
+      const renderedFound = recipeFromHtml(rendered.html, { title: rendered.title, url: rendered.url });
+      if (renderedFound) return { ok: true, ...renderedFound };
+      candidates = mineCandidates(rendered.html, rendered.url ?? page.url);
+    }
+  }
   for (const c of candidates) {
     const sub = await readPage(c.href, { maxChars: 4000 });
     if (!sub.ok) continue;
