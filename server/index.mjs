@@ -13,7 +13,7 @@ import {
   getConnectorConfig, setConnectorConfig, revokeConnector, getSecret,
   appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings, getDataRev,
   quarantinedCollections, acknowledgeQuarantine, CURRENT_TENANT, forEachTenant, runWithTenant,
-  tenantEngine, sysDoc, putSysDoc, deleteSessionsForHousehold,
+  tenantEngine, sysDoc, putSysDoc, deleteSessionsForHousehold, getPlan, setPlanFromEntitlement,
   createSession, deleteSession, deleteSessionsForActor, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
   getPushTokens, addPushToken, removePushToken,
@@ -160,6 +160,14 @@ async function readBody(req) {
   try { return raw ? JSON.parse(raw) : {}; } catch { return null; }
 }
 function externalActionsEnabled(householdId) { return getSettings(householdId).externalActionsEnabled !== false; }
+// C1.5 plan gate for AI-spend routes: resident household and active trials/
+// subscriptions pass; an expired household gets an honest 402 with its plan
+// state. Family DATA routes are never gated — data is theirs regardless.
+function planGate(g, res, req) {
+  const plan = getPlan(g.session.householdId);
+  if (plan.active) return null;
+  return json(res, 402, { error: "plan_required", plan, message: "Your free trial has ended — subscribe to FamiliOS Plus to keep using the assistant and agents. Your family's data stays fully accessible either way." }, req);
+}
 function audit(event, req, session) {
   appendAudit({
     ...event,
@@ -375,6 +383,39 @@ const handleRequest = async (req, res) => {
       return xml(twiml(r.replyText));
     }
 
+    // RevenueCat webhook (C1.5) — the ONLY writer of plan state. Fail closed:
+    // without the shared secret configured, every delivery is refused. MUST sit
+    // before the generic /api/webhooks/:id trigger receiver below.
+    if (path === "/api/webhooks/revenuecat" && method === "POST") {
+      const secret = process.env.HOMEOPS_RC_WEBHOOK_SECRET;
+      if (!secret) return json(res, 503, { error: "webhook_not_configured", message: "Set HOMEOPS_RC_WEBHOOK_SECRET and configure the same value as the webhook's Authorization header in RevenueCat." }, req);
+      const auth = req.headers.authorization ?? "";
+      if (auth !== secret && auth !== `Bearer ${secret}`) {
+        appendAudit({ type: "billing.webhook", ok: false, error: "unauthorized" });
+        return json(res, 401, { error: "unauthorized" }, req);
+      }
+      const body = await readBody(req); if (!body?.event) return json(res, 400, { error: "malformed_json" }, req);
+      const ev = body.event;
+      const hh = String(ev.app_user_id ?? "");
+      // Only real stranger households are billable app_user_ids; anything else is
+      // acknowledged-and-ignored so RevenueCat doesn't retry forever.
+      if (!/^hh_[a-z0-9]+$/.test(hh) || !tenantEngine().tenantIds().includes(hh)) {
+        appendAudit({ type: "billing.webhook", ok: true, ignored: "unknown_household", eventType: ev.type });
+        return json(res, 200, { ok: true, ignored: "unknown_household" }, req);
+      }
+      const entitlements = ev.entitlement_ids ?? (ev.entitlement_id ? [ev.entitlement_id] : []);
+      const entitled = entitlements.includes("familios_plus");
+      const expiresAt = ev.expiration_at_ms ?? null;
+      const ACTIVATE = ["INITIAL_PURCHASE", "RENEWAL", "UNCANCELLATION", "PRODUCT_CHANGE", "NON_RENEWING_PURCHASE", "SUBSCRIPTION_EXTENDED", "TRANSFER"];
+      let applied = null;
+      if (ACTIVATE.includes(ev.type) && entitled) applied = setPlanFromEntitlement(hh, { active: true, expiresAt });
+      else if (ev.type === "BILLING_ISSUE") applied = setPlanFromEntitlement(hh, { active: true, expiresAt, graceUntil: ev.grace_period_expiration_at_ms ?? null });
+      else if (ev.type === "EXPIRATION") applied = setPlanFromEntitlement(hh, { active: false, expiresAt });
+      // CANCELLATION = auto-renew turned off; access runs to expiration — no change.
+      await runWithTenant(hh, () => appendAudit({ type: "billing.webhook", ok: true, eventType: ev.type, applied: applied?.tier ?? "no_change" }));
+      return json(res, 200, { ok: true, applied: applied?.tier ?? "no_change" }, req);
+    }
+
     /* ---- Webhook receiver (external inbound; signature-gated, not session) ---- */
     const whMatch = path.match(/^\/api\/webhooks\/([^/]+)$/);
     if (whMatch && method === "POST") {
@@ -564,7 +605,7 @@ const handleRequest = async (req, res) => {
       if (invite) consumeInvite(invite.token);
       await runWithTenant(householdId, () => {
         putMember({ actorId, displayName: ownerName, role, relationship, householdId });
-        if (!invite) setSettings({ householdName: String(body.householdName ?? "").trim().slice(0, 60) || `${ownerName}'s household` }, householdId);
+        if (!invite) setSettings({ householdName: String(body.householdName ?? "").trim().slice(0, 60) || `${ownerName}'s household`, householdCreatedAt: Date.now() }, householdId);
         appendAudit({ type: invite ? "household.join" : "household.signup", email, actorId, role });
       });
       const s = createSession({ actorId, actorName: ownerName, role, householdId });
@@ -613,6 +654,12 @@ const handleRequest = async (req, res) => {
       deleteSessionsForActor(idn.actorId, idn.householdId); // every device re-authenticates
       return json(res, 200, { ok: true }, req);
     }
+    /* ---- Plan & billing (C1.5) ---- */
+    if (path === "/api/plan" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      return json(res, 200, { plan: getPlan(g.session.householdId) }, req);
+    }
+
     /* ---- Household invites: join codes for existing households ---- */
     if (path === "/api/invites" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -2353,6 +2400,7 @@ const handleRequest = async (req, res) => {
     }
     if (path === "/api/ai/chat" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const id = body.providerId || getSettings(g.session.householdId).aiActiveProvider;
       if (!id) return json(res, 400, { error: "no_provider", message: "No AI provider selected." }, req);
@@ -2364,6 +2412,7 @@ const handleRequest = async (req, res) => {
     /* ---- Planner brain: plain English → plan / mini app / playbook ---- */
     if (path === "/api/agent/plan" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const out = await planFromGoal({ goal: body.goal, session: g.session, providerId: body.providerId });
       audit({ type: "agent.plan", ok: out.ok, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
@@ -2371,6 +2420,7 @@ const handleRequest = async (req, res) => {
     }
     if (path === "/api/assistant" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       // Prior turns from the durable conversation ride into the model call —
       // otherwise the assistant forgets facts stated one message earlier.
@@ -2405,6 +2455,7 @@ const handleRequest = async (req, res) => {
     // Clients that don't support SSE can fall back to POST /api/assistant unchanged.
     if (path === "/api/assistant/stream" && method === "POST") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", ...corsHeaders(req) });
       let tokenCount = 0;
@@ -2446,6 +2497,7 @@ const handleRequest = async (req, res) => {
     // still pause for approval at run time. Adult Admin only (creating agents/automations).
     if (path === "/api/assistant/build" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const spec = body.build ?? body;
       const hasEdits = Array.isArray(spec?.edits) && spec.edits.length > 0;
@@ -2464,6 +2516,7 @@ const handleRequest = async (req, res) => {
     // created/updated, then a "done" event — so the chat can show the build happening live.
     if (path === "/api/assistant/build/stream" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const spec = body.build ?? body;
       const hasEdits = Array.isArray(spec?.edits) && spec.edits.length > 0;

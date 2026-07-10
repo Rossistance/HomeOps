@@ -254,6 +254,40 @@ export function aiBudgetExhausted(householdId) {
   return (getAiUsage(householdId).total ?? 0) >= budget;
 }
 
+/* ---- Plan & entitlement (C1.5) ----
+ * The billing truth lives on each household's settings under `plan`, written
+ * ONLY by the RevenueCat webhook (or an operator). Resolution order:
+ *   resident household → always active (it's the family's own server);
+ *   paid entitlement (familios_plus) → active until expiry (+ billing grace);
+ *   otherwise → 21-day trial from household creation, then expired.
+ * Apple's intro offers can't express a 21-day trial, so the trial is ours. */
+const TRIAL_DAYS = 21;
+export function getPlan(householdId) {
+  const t = householdId ?? T();
+  if (t === RESIDENT_TENANT) return { tier: "resident", active: true };
+  const s = getSettings(t);
+  const plan = s.plan ?? {};
+  const now = Date.now();
+  if (plan.tier === "plus") {
+    if (!plan.expiresAt || plan.expiresAt > now) return { tier: "plus", active: true, expiresAt: plan.expiresAt ?? null };
+    if (plan.graceUntil && plan.graceUntil > now) return { tier: "plus", active: true, grace: true, expiresAt: plan.expiresAt };
+  }
+  let createdAt = Number(s.householdCreatedAt ?? 0);
+  if (!createdAt) { createdAt = now; setSettings({ householdCreatedAt: createdAt }, t); } // first-seen backfill
+  const trialEndsAt = createdAt + TRIAL_DAYS * 86400000;
+  return trialEndsAt > now
+    ? { tier: "trial", active: true, trialEndsAt }
+    : { tier: "expired", active: false, trialEndsAt };
+}
+/** Applied by the RevenueCat webhook — the only writer of plan state. */
+export function setPlanFromEntitlement(householdId, { active, expiresAt = null, graceUntil = null, source = "revenuecat" }) {
+  const next = active
+    ? { tier: "plus", expiresAt, graceUntil, source, updatedAt: Date.now() }
+    : { tier: "none", expiresAt, graceUntil: null, source, updatedAt: Date.now() };
+  setSettings({ plan: next }, householdId);
+  return next;
+}
+
 /* ---- Canonical input hashing (stable, key-sorted) for approval binding ---- */
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
