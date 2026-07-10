@@ -181,13 +181,28 @@ export async function fireConnectorEvent(connectorId, payload) {
 }
 
 /* --------------------------------- tick --------------------------------- */
-// Called on an interval by the server. Fires every due schedule/recurring trigger
+// Called on an interval by the server. Fires due schedule/recurring triggers
 // EXACTLY once: scheduling state is advanced BEFORE firing so an overlapping tick
 // can't double-fire, and the run itself is fire-and-forget.
+//
+// Fairness (C1.3): fires are capped per tick, and capped PER HOUSEHOLD first —
+// one family with fifty due automations can neither starve another family's
+// single morning briefing nor flood the AI provider in one burst. Skipped
+// triggers keep their due nextRunAt untouched, so the next tick (10s later)
+// picks them up — deferred, never dropped.
+const MAX_FIRES_PER_TICK = 10;
+const MAX_FIRES_PER_HOUSEHOLD_PER_TICK = 3;
 export async function tick(now = Date.now()) {
+  const due = listTriggers((x) => x.enabled && TICKABLE.includes(x.type) && x.nextRunAt && x.nextRunAt <= now)
+    .sort((a, b) => (a.nextRunAt ?? 0) - (b.nextRunAt ?? 0)); // oldest-due first
   let fired = 0;
-  for (const t of listTriggers((x) => x.enabled && TICKABLE.includes(x.type))) {
-    if (!t.nextRunAt || t.nextRunAt > now) continue;
+  const perHousehold = new Map();
+  for (const t of due) {
+    if (fired >= MAX_FIRES_PER_TICK) break;
+    const hh = t.householdId ?? "local";
+    const used = perHousehold.get(hh) ?? 0;
+    if (used >= MAX_FIRES_PER_HOUSEHOLD_PER_TICK) continue; // stays due; next tick
+    perHousehold.set(hh, used + 1);
     if (t.type === "recurring" && t.intervalMs) patchTrigger(t.id, { nextRunAt: now + t.intervalMs });
     else patchTrigger(t.id, { enabled: false, nextRunAt: null }); // one-shot schedule completes
     fired++;

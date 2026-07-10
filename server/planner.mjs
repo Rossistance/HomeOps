@@ -8,7 +8,7 @@ import { PROVIDERS } from "./providers.mjs";
 import { CONNECTORS, readinessOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { providerChat, providerChatStream, providerChatWithFallback } from "./ai.mjs";
-import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride } from "./store.mjs";
+import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride, recordAiUsage, aiBudgetExhausted } from "./store.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
 
 // Input hints for the internal family-data tools, so the planner knows how to fill
@@ -37,6 +37,16 @@ const EXECUTABLE = ["connected", "authorized_write", "authorized_readonly", "loc
 
 function activeProviderId(explicit, householdId) {
   return explicit || getSettings(householdId).aiActiveProvider || null;
+}
+// C1.3 budget gate: every planner entry point checks the household's optional
+// daily AI budget BEFORE spending, then meters the call it's about to make.
+// Returns an honest refusal object, or null to proceed.
+function budgetGate(session) {
+  if (aiBudgetExhausted(session?.householdId)) {
+    return { ok: false, error: "ai_budget_exhausted", message: "Your household's daily AI budget is used up — it resets at midnight (UTC). An admin can raise or remove the limit in Settings." };
+  }
+  recordAiUsage(session?.householdId, "assistant");
+  return null;
 }
 
 /** The full, live tool catalog with per-actor connectedness — the planner's menu. */
@@ -163,6 +173,7 @@ export async function planFromGoal({ goal, session, providerId } = {}) {
   if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe what you want first." };
   const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then try plain-English generation." };
+  const gated = budgetGate(session); if (gated) return gated;
   const catalog = toolCatalog(session);
   const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
   const user = `Available tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nGoal: ${String(goal).trim()}`;
@@ -272,6 +283,7 @@ export async function assistantRespond({ message, context, session, providerId, 
   if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
   const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
+  const gated = budgetGate(session); if (gated) return gated;
   const catalog = toolCatalog(session);
   const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
   const serverCtx = buildServerContext(session, context);
@@ -352,6 +364,7 @@ export async function assistantStream({ message, context, session, providerId, h
   if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
   const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
+  const gated = budgetGate(session); if (gated) return gated;
   const catalog = toolCatalog(session);
   const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
   const serverCtx = buildServerContext(session, context);
@@ -390,6 +403,7 @@ const EVOLVE_SYS = `You are FamiliOS' improvement engine. Given a run trace, pro
 export async function proposeEvolution({ trace, session, providerId } = {}) {
   const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider" };
+  const gated = budgetGate(session); if (gated) return gated;
   if (!trace || typeof trace !== "object") return { ok: false, error: "empty_trace" };
   const out = await providerChat(id, { messages: [{ role: "system", content: EVOLVE_SYS }, { role: "user", content: `Run trace (JSON): ${JSON.stringify(trace).slice(0, 4000)}` }] });
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message };
@@ -414,6 +428,7 @@ export async function generateMiniApp({ goal, type, session, providerId } = {}) 
   if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe the mini app you want." };
   const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers to generate mini apps." };
+  const gated = budgetGate(session); if (gated) return gated;
   const user = `Allowed types: ${MINIAPP_TYPES.join(", ")}.${type ? ` Preferred type: ${type}.` : ""}\nRequest: ${String(goal).trim()}`;
   const out = await providerChat(id, { messages: [{ role: "system", content: MINIAPP_SYS }, { role: "user", content: user }] });
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
@@ -431,6 +446,7 @@ export async function generatePlaybook({ goal, session, providerId } = {}) {
   if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe the playbook you want." };
   const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers to generate playbooks." };
+  const gated = budgetGate(session); if (gated) return gated;
   const out = await providerChat(id, { messages: [{ role: "system", content: PLAYBOOK_SYS }, { role: "user", content: `Request: ${String(goal).trim()}` }] });
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
   const parsed = extractJSON(out.text);

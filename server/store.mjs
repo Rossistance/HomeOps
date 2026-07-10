@@ -191,6 +191,36 @@ export function setSettings(patch, householdId) {
   return next;
 }
 
+/* ---- AI usage metering (C1.3 → C1.5 billing hook) ----
+ * Every AI call made on a household's behalf is counted in that household's
+ * own store, by day and kind ("run" = engine steps, "assistant" = chat/planner).
+ * An optional settings.aiDailyCallBudget turns the meter into a cap: callers
+ * check aiBudgetExhausted() and degrade honestly (like "no provider"), never
+ * silently. No budget set = unlimited (the family's server stays unmetered
+ * until a plan says otherwise). */
+const dayKey = (d = new Date()) => d.toISOString().slice(0, 10);
+export function recordAiUsage(householdId, kind = "other") {
+  const t = householdId ?? TENANT;
+  const all = engine.getDoc(t, "ai_usage.json", {});
+  const day = dayKey();
+  const rec = all[day] ?? {};
+  rec[kind] = (rec[kind] ?? 0) + 1;
+  rec.total = (rec.total ?? 0) + 1;
+  all[day] = rec;
+  // Keep ~60 days; usage history is operational, not archival.
+  for (const k of Object.keys(all)) if (k < dayKey(new Date(Date.now() - 60 * 86400000))) delete all[k];
+  engine.putDoc(t, "ai_usage.json", all);
+  return rec;
+}
+export function getAiUsage(householdId, day = dayKey()) {
+  return engine.getDoc(householdId ?? TENANT, "ai_usage.json", {})[day] ?? { total: 0 };
+}
+export function aiBudgetExhausted(householdId) {
+  const budget = Number(getSettings(householdId).aiDailyCallBudget);
+  if (!Number.isFinite(budget) || budget <= 0) return false; // unmetered
+  return (getAiUsage(householdId).total ?? 0) >= budget;
+}
+
 /* ---- Canonical input hashing (stable, key-sorted) for approval binding ---- */
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);

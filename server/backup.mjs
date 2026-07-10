@@ -23,11 +23,16 @@ export function createBackup() {
   const tenants = {};
   const ids = new Set([CURRENT_TENANT, ...engine.tenantIds()]);
   for (const t of ids) {
-    const files = engine.exportTenant(t);
-    if (!files) continue; // quarantined tenant: nothing readable to snapshot
-    const auditPath = engine.tenantPath(t, "audit.jsonl");
-    const audit = fs.existsSync(auditPath) ? fs.readFileSync(auditPath, "utf8") : "";
-    tenants[t] = { files, audit };
+    // One broken household must never abort the snapshot of every other one.
+    try {
+      const files = engine.exportTenant(t);
+      if (!files) continue; // quarantined tenant: nothing readable to snapshot
+      const auditPath = engine.tenantPath(t, "audit.jsonl");
+      const audit = fs.existsSync(auditPath) ? fs.readFileSync(auditPath, "utf8") : "";
+      tenants[t] = { files, audit };
+    } catch (e) {
+      appendAudit({ type: "backup.tenant_failed", tenant: t, error: String(e?.message ?? e) });
+    }
   }
   const count = Object.values(tenants).reduce((n, t) => n + Object.keys(t.files).length, 0);
   const bundle = { meta: { at: new Date().toISOString(), app: "familios", format: 2, count, tenants: Object.keys(tenants) }, tenants };

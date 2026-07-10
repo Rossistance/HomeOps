@@ -11,7 +11,7 @@ import crypto from "node:crypto";
 import {
   createRun, getRun, patchRun, patchRunStep, appendToolCall, listRuns,
   createApproval, consumeApproval, getApproval, decideApproval,
-  appendAudit, getSettings, putEvolution, patchEvolution,
+  appendAudit, getSettings, putEvolution, patchEvolution, recordAiUsage, aiBudgetExhausted,
   idempotencyKey, checkIdempotency, recordIdempotency, withRunLock, hashInput,
   getRiskOverride, addArtifact, addMemory, listMemory, addNotification,
 } from "./store.mjs";
@@ -86,7 +86,9 @@ async function proposeRunMemory(runId) {
     .map((s) => ({ title: s.title, detail: (s.detail ?? "").slice(0, 300), text: s.result?.text ? String(s.result.text).slice(0, 1200) : null }))
     .slice(0, 12);
   if (!material.length) return;
+  if (aiBudgetExhausted(run.householdId)) return; // optional enrichment — budget saves it for real work
   const user = `Run title: ${run.title}\n\nStep outcomes (JSON): ${JSON.stringify(material)}`;
+  recordAiUsage(run.householdId, "run");
   const out = await providerChat(provider, { messages: [{ role: "system", content: MEMORY_JUDGE_SYS }, { role: "user", content: user }] }).catch(() => null);
   if (!out?.ok) return;
   const parsed = extractJSONLoose(out.text);
@@ -167,6 +169,8 @@ function deterministicFill(run, stepIndex, step, schema) {
 async function fillStepInput(run, stepIndex, step, schema) {
   const provider = activeAiProvider(run.householdId);
   if (!provider) return { filled: null, note: "No AI provider connected — used the plan's original input." };
+  if (aiBudgetExhausted(run.householdId)) return { filled: null, note: "Daily AI budget reached — used the plan's original input." };
+  recordAiUsage(run.householdId, "run");
   const user = `Run goal: ${run.goal ?? run.plan?.title ?? ""}\nPlan summary: ${run.plan?.summary ?? ""}\n\nTool: ${step.toolId}\nStep: ${step.title}${step.detail ? ` — ${step.detail}` : ""}\nInput schema: ${JSON.stringify(schema)}\nCurrent input: ${JSON.stringify(step.input ?? {})}\n\nPrior step results (JSON): ${priorResultsJSON(run, stepIndex)}`;
   const out = await providerChat(provider, { messages: [{ role: "system", content: FILL_SYS }, { role: "user", content: user }] }).catch(() => null);
   if (!out?.ok) return { filled: null, note: `Input resolution unavailable (${out?.error ?? "provider error"}) — used the plan's original input.` };
@@ -379,9 +383,16 @@ async function _drive(runId) {
         emit(runId, "run.step");
         continue;
       }
+      if (aiBudgetExhausted(run.householdId)) {
+        patchRunStep(runId, i, { status: "succeeded", detail: `${step.detail || "Reasoning step"} (daily AI budget reached — reasoning skipped)`, finishedAt: Date.now() });
+        patchRun(runId, { cursor: i + 1 });
+        emit(runId, "run.step");
+        continue;
+      }
       patchRunStep(runId, i, { status: "running", startedAt: step.startedAt ?? Date.now() });
       emit(runId, "run.step");
       const user = `Run goal: ${run.goal ?? run.plan?.title ?? ""}\nPlan summary: ${run.plan?.summary ?? ""}\n\nThis step: ${step.title}\nInstruction: ${step.detail ?? ""}\n\nPrior step results (JSON): ${priorResultsJSON(run, i)}`;
+      recordAiUsage(run.householdId, "run");
       const out = await providerChat(provider, { messages: [{ role: "system", content: REASONING_SYS }, { role: "user", content: user }] }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
       const parsed = out?.ok ? extractJSONLoose(out.text) : null;
       const text = parsed?.text ? String(parsed.text) : out?.ok ? String(out.text ?? "").slice(0, 400) : null;
