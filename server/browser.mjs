@@ -12,12 +12,31 @@
 // Install locally / on the host with:  npm run install-browser
 // Disable explicitly with:             FAMILIOS_BROWSER=0
 
+import { readFileSync } from "node:fs";
+import os from "node:os";
+
 let browserPromise = null;   // Promise<Browser> while launching / launched
 let unavailable = false;     // sticky: don't retry a broken install every call
 let idleTimer = null;        // closes Chromium after IDLE_CLOSE_MS of no renders
 let queue = Promise.resolve(); // single-flight: one render at a time
 
-const DISABLED = String(process.env.FAMILIOS_BROWSER ?? "").trim() === "0";
+// Memory gate: Chromium + this Node server measured >512MB on real pages and
+// OOM-killed the whole instance (Render events, 2026-07-09). Unless the host
+// has real headroom, the browser stays off and callers use their static
+// fallbacks. FAMILIOS_BROWSER=1 forces on; =0 forces off; unset → auto.
+const MIN_BROWSER_BYTES = 900 * 1024 * 1024;
+function containerMemoryBytes() {
+  // cgroup v2 (Render, most containers), then v1, then host total.
+  for (const p of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
+    try {
+      const raw = readFileSync(p, "utf8").trim();
+      if (raw && raw !== "max") { const n = Number(raw); if (Number.isFinite(n) && n > 0) return n; }
+    } catch { /* not this cgroup layout */ }
+  }
+  return os.totalmem();
+}
+const FORCED = String(process.env.FAMILIOS_BROWSER ?? "").trim();
+const DISABLED = FORCED === "0" || (FORCED !== "1" && containerMemoryBytes() < MIN_BROWSER_BYTES);
 const NAV_TIMEOUT_MS = 25_000;
 const SETTLE_MS = 1_200;      // give SPAs a beat after network-idle for late paints
 const IDLE_CLOSE_MS = 20_000; // reclaim Chromium's memory shortly after use
