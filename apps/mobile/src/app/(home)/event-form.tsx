@@ -1,4 +1,4 @@
-// Event form — create or edit a canonical HomeOps event, presented as a form
+// Event form — create or edit a canonical FamiliOS event, presented as a form
 // sheet. Native SwiftUI date/time pickers via @expo/ui (compact style inline on
 // iOS; dialog presentation elsewhere). Edit mode (?id=) prefls from the server
 // and adds a destructive delete. Synced (linked/public) events are read-only.

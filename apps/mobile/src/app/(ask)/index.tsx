@@ -1,4 +1,4 @@
-// Ask HomeOps — the one front door. A first-class iOS chat that answers,
+// Ask Famili — the one front door. A first-class iOS chat that answers,
 // drafts executable plans (run via the durable run flow), and builds helpers
 // (skills/agents/automations) straight from conversation. Streams via
 // /api/assistant/stream with a silent fallback to POST /api/assistant.

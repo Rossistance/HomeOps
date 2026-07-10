@@ -1,6 +1,6 @@
 // Playbooks — browse the household's step-by-step workflows: what each one is
 // for, the numbered steps helpers follow, what it needs connected, and where it
-// pauses for approval. Read-only on mobile; authoring stays in Ask HomeOps and
+// pauses for approval. Read-only on mobile; authoring stays in Ask Famili and
 // on the web. (Redesigned port of the pre-Hearth src/app/playbooks.tsx.)
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { View } from "react-native";
@@ -26,7 +26,7 @@ export default function PlaybooksScreen() {
   const load = useCallback(async () => {
     const all = await api.playbooks();
     if (all.length === 0 && !(await api.health())) {
-      setError("The HomeOps server didn't answer.");
+      setError("The FamiliOS server didn't answer.");
     } else {
       setError(null);
       setPlaybooks(all.filter((p) => !p.archived));
@@ -61,7 +61,7 @@ export default function PlaybooksScreen() {
         <EmptyState
           icon="book"
           title="No playbooks yet"
-          hint="Ask HomeOps to draft one — a school-morning routine, a bill-triage checklist — or create one on the web app."
+          hint="Ask Famili to draft one — a school-morning routine, a bill-triage checklist — or create one on the web app."
         />
       ) : (
         <>
@@ -193,7 +193,7 @@ export default function PlaybooksScreen() {
 
           <Rise index={riseIdx}>
             <T kind="caption" center color={colors.textFaint} style={{ marginTop: spacing.sm }}>
-              Read them here — edit in Ask HomeOps or on the web app.
+              Read them here — edit in Ask Famili or on the web app.
             </T>
           </Rise>
         </>

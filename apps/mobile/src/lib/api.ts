@@ -1,4 +1,4 @@
-// Mobile API client for the HomeOps backend. Native can't use same-origin
+// Mobile API client for the FamiliOS backend. Native can't use same-origin
 // cookies, so it authenticates with a bearer token (issued by POST /api/session
 // when the `x-homeops-bearer` header is set) stored in expo-secure-store. The
 // backend still owns OAuth exchange, the AES token vault, and approvals.

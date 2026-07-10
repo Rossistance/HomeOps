@@ -175,7 +175,7 @@ export default function ActivityScreen() {
           <Rise index={1}>
             <SectionHeader title="Run history" />
             {history.length === 0 ? (
-              <Card><T kind="sub">No server runs yet — fire an automation or ask HomeOps to do something.</T></Card>
+              <Card><T kind="sub">No server runs yet — fire an automation or ask Famili to do something.</T></Card>
             ) : (
               <Card padded={false}>
                 {history.map((r, i) => {

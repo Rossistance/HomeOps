@@ -51,7 +51,7 @@ function friendly(error?: string, message?: string): string {
   if (message) return message;
   switch (error) {
     case "insufficient_role": case "forbidden": return "You don't have permission for that — ask a household adult.";
-    case "network": return "Couldn't reach HomeOps — check your connection.";
+    case "network": return "Couldn't reach FamiliOS — check your connection.";
     default: return `Something went wrong${error ? ` (${error})` : ""}.`;
   }
 }
@@ -166,7 +166,7 @@ export default function TasksScreen() {
   const load = useCallback(async () => {
     const [tks, mems] = await Promise.all([api.tasks(), api.members()]);
     if (mems.length === 0 && !(await api.health())) {
-      setError("The HomeOps server didn't answer.");
+      setError("The FamiliOS server didn't answer.");
     } else {
       setError(null);
       setTasks(tks);
@@ -332,7 +332,7 @@ export default function TasksScreen() {
         <EmptyState
           icon="checklist"
           title="No tasks yet"
-          hint={canAdd ? "Add one above, or ask HomeOps to plan your week — chores, errands and groceries all land here." : "Tasks your household adds will show up here."}
+          hint={canAdd ? "Add one above, or ask Famili to plan your week — chores, errands and groceries all land here." : "Tasks your household adds will show up here."}
         />
       ) : null}
 

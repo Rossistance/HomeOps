@@ -108,7 +108,7 @@ export default function InboxScreen() {
       api.health(), api.approvals(), api.notifications(), api.conversations(),
     ]);
     if (!health?.ok) {
-      setError("The HomeOps backend didn't answer.");
+      setError("The FamiliOS backend didn't answer.");
       setLoaded(true);
       return;
     }
@@ -175,7 +175,7 @@ export default function InboxScreen() {
   const sendTest = useCallback(async () => {
     setTesting(true);
     setTestResult(null);
-    const r = await api.notify({ methodType: "In-App", title: "HomeOps test", body: "Test notification from your phone — delivery is working." });
+    const r = await api.notify({ methodType: "In-App", title: "FamiliOS test", body: "Test notification from your phone — delivery is working." });
     setTesting(false);
     setTestResult(r.delivered
       ? { text: "Delivered — it's at the top of the list.", ok: true }
@@ -377,8 +377,8 @@ export default function InboxScreen() {
               <EmptyState
                 icon="bubble.left.and.bubble.right"
                 title="No conversations yet"
-                hint="Chats you start with Ask HomeOps appear here — on every device."
-                action={{ title: "Ask HomeOps", onPress: () => router.push("/(ask)") }}
+                hint="Chats you start with Ask Famili appear here — on every device."
+                action={{ title: "Ask Famili", onPress: () => router.push("/(ask)") }}
               />
             </Rise>
           ) : (

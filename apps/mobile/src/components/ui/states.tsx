@@ -29,7 +29,7 @@ export function ErrorState({ message, onRetry }: { message?: string; onRetry?: (
     <Animated.View entering={FadeIn.duration(240).reduceMotion(ReduceMotion.System)}>
       <Card style={{ alignItems: "center", gap: spacing.sm, paddingVertical: spacing.xl }}>
         <Sym name="wifi.exclamationmark" size={26} color={colors.coral} />
-        <T kind="h3" color={colors.text} center>Couldn't reach HomeOps</T>
+        <T kind="h3" color={colors.text} center>Couldn't reach FamiliOS</T>
         <T kind="sub" center selectable style={{ maxWidth: 300 }}>{message ?? "Check your connection and try again."}</T>
         {onRetry ? <View style={{ marginTop: spacing.sm }}><Button title="Try again" icon="arrow.clockwise" onPress={onRetry} /></View> : null}
       </Card>

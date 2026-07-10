@@ -103,8 +103,8 @@ function friendly(error?: string, message?: string): string {
   if (message) return message;
   switch (error) {
     case "insufficient_role": return "Only an Owner or Adult Admin can change automations.";
-    case "invalid_target": return "This automation has no agent or skill to run — rebuild it in Ask HomeOps.";
-    case "network": return "Couldn't reach HomeOps — check your connection.";
+    case "invalid_target": return "This automation has no agent or skill to run — rebuild it in Ask Famili.";
+    case "network": return "Couldn't reach FamiliOS — check your connection.";
     default: return `Something went wrong${error ? ` (${error})` : ""}.`;
   }
 }
@@ -126,7 +126,7 @@ export default function AutomationsScreen() {
   const load = useCallback(async () => {
     const [trs, rns, ags] = await Promise.all([api.triggers(), api.runs(), api.agents()]);
     if (trs.length === 0 && rns.length === 0 && !(await api.health())) {
-      setError("The HomeOps server didn't answer.");
+      setError("The FamiliOS server didn't answer.");
     } else {
       setError(null);
       setTriggers(trs as TriggerX[]);
@@ -216,8 +216,8 @@ export default function AutomationsScreen() {
         <EmptyState
           icon="arrow.triangle.2.circlepath"
           title="No automations yet"
-          hint={'Ask HomeOps to schedule something — like "every morning at 7, brief me on today" — and it lands here as a trigger.'}
-          action={{ title: "Ask HomeOps", onPress: () => router.push("/(ask)") }}
+          hint={'Ask Famili to schedule something — like "every morning at 7, brief me on today" — and it lands here as a trigger.'}
+          action={{ title: "Ask Famili", onPress: () => router.push("/(ask)") }}
         />
       ) : null}
 

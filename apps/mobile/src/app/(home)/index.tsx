@@ -85,11 +85,15 @@ export default function TodayScreen() {
   const bills = tasks.filter((t) => t.type === "bill" && t.status !== "done").slice(0, 4);
   const hasGroceries = tasks.some((t) => t.type === "list" && t.listName === "Groceries");
 
+  // Meals and Tasks sit up front (not buried in Settings) — the two most-used
+  // everyday surfaces after the calendar.
   const quickActions = [
+    { title: "Meals", icon: "fork.knife", fg: colors.sage, bg: colors.sageBg, go: () => router.push("/meals") },
+    { title: "Tasks & Lists", icon: "checklist", fg: colors.lavender, bg: colors.lavenderBg, go: () => router.push("/tasks") },
+    { title: "Assign chore", icon: "checkmark", fg: colors.amber, bg: colors.amberBg, go: () => setChoreOpen(true) },
     { title: "New agent", icon: "plus", fg: colors.ember, bg: colors.emberBg, go: () => router.push("/(agents)?create=1") },
     { title: "Upload", icon: "square.and.arrow.up", fg: colors.sky, bg: colors.skyBg, go: () => router.push("/(library)?upload=1") },
-    { title: "Assign chore", icon: "checkmark", fg: colors.sage, bg: colors.sageBg, go: () => setChoreOpen(true) },
-    { title: "Connect", icon: "link", fg: colors.lavender, bg: colors.lavenderBg, go: () => router.push("/connections") },
+    { title: "Connect", icon: "link", fg: colors.textMuted, bg: colors.surfaceSunken, go: () => router.push("/connections") },
   ];
 
   return (
@@ -194,11 +198,11 @@ export default function TodayScreen() {
             </PressableScale>
           </Rise>
 
-          {/* quick actions */}
+          {/* quick actions — 2×3 grid; Meals + Tasks lead */}
           <Rise index={3}>
-            <View style={{ flexDirection: "row", gap: spacing.sm }}>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
               {quickActions.map((a) => (
-                <PressableCard key={a.title} onPress={a.go} padded={false} style={{ flex: 1, alignItems: "center", paddingVertical: 12, gap: 7 }} accessibilityRole="button" accessibilityLabel={a.title}>
+                <PressableCard key={a.title} onPress={a.go} padded={false} style={{ flexBasis: "30%", flexGrow: 1, alignItems: "center", paddingVertical: 12, gap: 7 }} accessibilityRole="button" accessibilityLabel={a.title}>
                   <SymTile name={a.icon} color={a.fg} bg={a.bg} size={40} iconSize={18} />
                   <T kind="detail" color={colors.textSecondary} numberOfLines={1} style={{ fontSize: 11.5 }}>{a.title}</T>
                 </PressableCard>

@@ -365,11 +365,27 @@ export function recipeFromHtml(html, { title = "", url = "" } = {}) {
   return null;
 }
 
-/** Extract a structured recipe from a live page. */
+/** Extract a structured recipe from a live page. Search often lands on gallery /
+ * listicle pages ("25 easy weeknight dinners") that carry no Recipe JSON-LD of
+ * their own — those exist to link to real recipe pages, so before failing we
+ * follow up to three same-site recipe-looking links and extract from the first
+ * one that has structured data. */
 export async function extractRecipe(url) {
   const page = await readPage(url, { maxChars: 4000 });
   if (!page.ok) return page;
   const found = recipeFromHtml(page.html ?? "", { title: page.title, url: page.url });
   if (found) return { ok: true, ...found };
-  return { ok: false, error: "no_recipe_found", message: `No structured recipe data found at ${page.url}. The page text is available via web.read.`, title: page.title };
+
+  const host = (() => { try { return new URL(page.url).hostname; } catch { return null; } })();
+  const candidates = (page.links ?? [])
+    .filter((l) => /\/recipes?\//i.test(l.href) && !/\/(gallery|collection|roundup)\//i.test(l.href))
+    .filter((l) => { try { return new URL(l.href).hostname === host && l.href !== page.url; } catch { return false; } })
+    .slice(0, 3);
+  for (const c of candidates) {
+    const sub = await readPage(c.href, { maxChars: 4000 });
+    if (!sub.ok) continue;
+    const subFound = recipeFromHtml(sub.html ?? "", { title: sub.title, url: sub.url });
+    if (subFound) return { ok: true, ...subFound, via: page.url };
+  }
+  return { ok: false, error: "no_recipe_found", message: `No structured recipe data found at ${page.url}${candidates.length ? ` (also tried ${candidates.length} linked recipe page${candidates.length === 1 ? "" : "s"})` : ""}. The page text is available via web.read.`, title: page.title };
 }

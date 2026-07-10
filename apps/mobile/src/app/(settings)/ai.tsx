@@ -83,13 +83,13 @@ export default function SettingsScreen() {
   const activate = (p: AIProviderRec) => run(`${p.id}:active`, async () => {
     const r = await api.aiSetActive(p.id);
     if (r.error) { setNotice({ text: r.error === "insufficient_role" ? "Only an adult admin can set the active provider." : `Failed: ${r.error}`, ok: false }); return; }
-    setNotice({ text: `${p.name} is now the active provider for Ask HomeOps.`, ok: true });
+    setNotice({ text: `${p.name} is now the active provider for Ask Famili.`, ok: true });
     await load();
   });
 
   const sendTest = (p: AIProviderRec) => run(`${p.id}:chat`, async () => {
     setTestReply(null);
-    const r = await api.aiChat("Reply with one short sentence confirming you can hear HomeOps.", p.id);
+    const r = await api.aiChat("Reply with one short sentence confirming you can hear FamiliOS.", p.id);
     if (r.ok && r.text) setTestReply({ providerId: p.id, text: r.text.slice(0, 280), model: r.model, ok: true });
     else setTestReply({ providerId: p.id, text: r.message ?? r.error ?? "No reply.", ok: false });
     await load();
@@ -130,7 +130,7 @@ export default function SettingsScreen() {
       <SectionHeader title="AI providers" />
       <Rise index={0} style={{ gap: 4 }}>
         <T kind="sub">
-          Ask HomeOps needs one working provider. Status is verified by real probes — nothing shows as working until it is.
+          Ask Famili needs one working provider. Status is verified by real probes — nothing shows as working until it is.
         </T>
         {!isAdmin ? (
           <T kind="caption" color={colors.textFaint}>

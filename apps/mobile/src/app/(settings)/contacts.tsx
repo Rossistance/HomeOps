@@ -185,7 +185,7 @@ export default function ContactsScreen() {
   // the registry — reports the honest outcome (delivered / which service needs setup).
   const sendTest = async (c: ContactMethodRec) => {
     setBusy(`t:${c.id}`); setNotice(null);
-    const r = await api.notify({ methodId: c.id, title: "HomeOps test", body: `This is a test notification to your “${c.label}” contact method.` });
+    const r = await api.notify({ methodId: c.id, title: "FamiliOS test", body: `This is a test notification to your “${c.label}” contact method.` });
     setBusy(null);
     if (r.delivered) setNotice({ text: r.message ?? "Test delivered.", ok: true });
     else if (r.needsSetup) setNotice({ text: r.message ?? "That channel needs setup in Connections first.", ok: false });
@@ -274,7 +274,7 @@ export default function ContactsScreen() {
               <Well>
                 <T kind="sub">
                   {type === "In-App"
-                    ? "Notifications appear in HomeOps when this profile is signed in — no address needed."
+                    ? "Notifications appear in FamiliOS when this profile is signed in — no address needed."
                     : "Shown on the shared household dashboard — no address needed."}
                 </T>
               </Well>

@@ -1,7 +1,7 @@
 // Calendar — agenda-first home for the three-layer household calendar.
 // Top: a 14-day strip (dots mark days with plans; tap a day to focus it).
 // Middle: upcoming events as a timeline — time rail + card. Canonical
-// (HomeOps-layer) events open the form sheet to edit; synced (linked/public)
+// (FamiliOS-layer) events open the form sheet to edit; synced (linked/public)
 // events are read-only mirrors that expand inline instead.
 // Bottom: calendar subscriptions with sync status (feeds managed in Connections).
 import { useCallback, useMemo, useState } from "react";
@@ -209,8 +209,8 @@ export default function CalendarScreen() {
           icon="calendar"
           title="Nothing on the calendar yet"
           hint={canManage
-            ? "Add an event with the + button, subscribe to a school or team feed in Connections, or ask HomeOps to plan something."
-            : "Subscribe to a school or team feed in Connections, or ask HomeOps to plan something."}
+            ? "Add an event with the + button, subscribe to a school or team feed in Connections, or ask Famili to plan something."
+            : "Subscribe to a school or team feed in Connections, or ask Famili to plan something."}
           action={canManage ? { title: "New event", onPress: () => openCreate() } : undefined}
         />
       ) : selectedDay && visibleDays.length === 0 ? (
