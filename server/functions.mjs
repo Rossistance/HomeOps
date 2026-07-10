@@ -410,7 +410,7 @@ export function resolveRegisteredFunction(id) {
 }
 
 /* --------------------------- the real handlers -------------------------- */
-function externalActionsEnabled() { return getSettings().externalActionsEnabled !== false; }
+function externalActionsEnabled(householdId) { return getSettings(householdId).externalActionsEnabled !== false; }
 function mergeInput(fn, input) {
   return { ...(fn.config?.inputDefaults ?? {}), ...(input ?? {}) };
 }
@@ -421,7 +421,7 @@ function mergeInput(fn, input) {
 export async function runFunctionHandler(fn, input = {}, ctx = {}, opts = {}) {
   const action = functionAction(fn);
   const sideEffecting = ["Write", "Send", "Download"].includes(action);
-  if (sideEffecting && !externalActionsEnabled()) {
+  if (sideEffecting && !externalActionsEnabled(ctx.householdId)) {
     return { ok: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch." };
   }
   // A side-effecting TEST must be explicitly confirmed (the test really performs it).
@@ -615,7 +615,7 @@ export async function draftFunction({ description, session, providerId }) {
     input_schema: [{ key: "query", label: "Query", type: "text", required: false }],
     output_schema: [{ key: "result", label: "Result", type: "text" }],
   };
-  const pid = providerId || getSettings().aiActiveProvider;
+  const pid = providerId || getSettings(session?.householdId).aiActiveProvider;
   if (!pid) return { ok: true, draft: skeleton, fallback: true, message: "Drafted a skeleton (no AI provider configured). Refine it in the Function Builder." };
   const prompt = `You design FamiliOS "functions" — durable, executable capabilities. Draft ONE function definition for this capability. Never invent secrets or endpoints you're unsure of; a human will review and complete it.
 Capability needed: "${desc}"

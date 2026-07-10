@@ -387,7 +387,7 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
     appendAudit({ type: "tool.execute", ...base, ok: false, error: "approval_required" });
     return { ok: false, error: "approval_required", message: `${tool.name} is a ${tool.risk.toLowerCase()}-risk action and needs your approval.` };
   }
-  if ((tool.action === "Send" || tool.action === "Write" || tool.action === "Download") && getSettings().externalActionsEnabled === false) {
+  if ((tool.action === "Send" || tool.action === "Write" || tool.action === "Download") && getSettings(ctx.householdId).externalActionsEnabled === false) {
     appendAudit({ type: "tool.execute", ...base, ok: false, error: "external_actions_disabled" });
     return { ok: false, error: "external_actions_disabled", message: "External actions are turned off by the household kill switch." };
   }

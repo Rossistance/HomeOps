@@ -179,7 +179,7 @@ Return ONLY valid JSON (no markdown fences, no commentary):
   ]
 }`;
 
-  const pid = providerId || getSettings().aiActiveProvider;
+  const pid = providerId || getSettings(session?.householdId).aiActiveProvider;
   if (!pid) return { ok: false, error: "no_provider", message: "No AI provider configured — add one in Settings first." };
 
   const out = await providerChat(pid, { messages: [{ role: "user", content: prompt }] });

@@ -36,6 +36,19 @@ describe("cross-tenant isolation (storage engine)", () => {
     assert.deepEqual(engine.getDoc("hh-b", "idempotency.json", {}), {});
   });
 
+  it("C1.2: one household's kill switch / AI provider can never leak into another's", async () => {
+    // Through the store's own settings accessors (what engine.mjs/planner.mjs call),
+    // not just the raw engine: household A pauses external actions and picks a
+    // provider; household B must still read its own defaults.
+    process.env.HOMEOPS_DATA_DIR = dir;
+    const store = await import("../store.mjs");
+    store.setSettings({ externalActionsEnabled: false, aiActiveProvider: "openai" }, "hh-kill-a");
+    assert.equal(store.getSettings("hh-kill-a").externalActionsEnabled, false);
+    assert.equal(store.getSettings("hh-kill-a").aiActiveProvider, "openai");
+    assert.notEqual(store.getSettings("hh-kill-b").externalActionsEnabled, false, "B still allows external actions");
+    assert.equal(store.getSettings("hh-kill-b").aiActiveProvider, undefined, "B has no provider set");
+  });
+
   it("deleting in tenant B can never touch tenant A", () => {
     engine.putRecord("hh-a", "meals", "m1", { id: "m1", title: "lasagna" });
     engine.deleteRecord("hh-b", "meals", "m1"); // no-op in B

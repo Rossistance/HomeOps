@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   getConnectorConfig, setConnectorConfig, revokeConnector, getSecret,
   appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings, getDataRev,
-  quarantinedCollections, acknowledgeQuarantine,
+  quarantinedCollections, acknowledgeQuarantine, CURRENT_TENANT,
   createSession, deleteSession, deleteSessionsForActor, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
   getPushTokens, addPushToken, removePushToken,
@@ -158,7 +158,7 @@ async function readBody(req) {
   const raw = await readRaw(req);
   try { return raw ? JSON.parse(raw) : {}; } catch { return null; }
 }
-function externalActionsEnabled() { return getSettings().externalActionsEnabled !== false; }
+function externalActionsEnabled(householdId) { return getSettings(householdId).externalActionsEnabled !== false; }
 function audit(event, req, session) {
   appendAudit({
     ...event,
@@ -185,9 +185,10 @@ async function runJob(job, trigger = "schedule") {
   const readiness = c ? readinessOf(c) : "not_configured";
   const ready = ["connected", "authorized_write", "authorized_readonly", "local_only"].includes(readiness);
   setJobState(job.id, { lastRun: Date.now(), lastTrigger: trigger, running: true });
-  if (!externalActionsEnabled()) { setJobState(job.id, { running: false, lastStatus: "blocked_kill_switch" }); appendAudit({ type: "job.run", jobId: job.id, connectorId: job.connectorId, ok: false, error: "kill_switch", trigger }); return { ok: false, error: "external_actions_disabled" }; }
+  // Scheduler jobs run for the resident household until C1.3 makes loops per-tenant.
+  if (!externalActionsEnabled(CURRENT_TENANT)) { setJobState(job.id, { running: false, lastStatus: "blocked_kill_switch" }); appendAudit({ type: "job.run", jobId: job.id, connectorId: job.connectorId, ok: false, error: "kill_switch", trigger }); return { ok: false, error: "external_actions_disabled" }; }
   if (!ready) { setJobState(job.id, { running: false, lastStatus: `connector_${readiness}` }); appendAudit({ type: "job.run", jobId: job.id, connectorId: job.connectorId, ok: false, error: `connector_${readiness}`, trigger }); return { ok: false, error: `connector_${readiness}` }; }
-  const out = await executeTool(job.toolId, {}, { actorId: "scheduler" });
+  const out = await executeTool(job.toolId, {}, { actorId: "scheduler", householdId: CURRENT_TENANT });
   setJobState(job.id, { running: false, lastStatus: out.ok ? "success" : `error:${out.error}`, nextRun: Date.now() + job.intervalMs });
   appendAudit({ type: "job.run", jobId: job.id, connectorId: job.connectorId, ok: out.ok, error: out.ok ? undefined : out.error, trigger });
   // Connector-event triggers (Slice 6): fire only when the poll returns NEW data
@@ -264,7 +265,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         ok: true, version: VERSION, time: new Date().toISOString(), runtime: "node-http", node: process.version, env: IS_PROD ? "production" : "development",
         browserRuntime: !!(browserHealth && browserHealth.ok),
-        externalActionsEnabled: externalActionsEnabled(),
+        externalActionsEnabled: externalActionsEnabled(CURRENT_TENANT),
         webhookBaseUrl: (process.env.HOMEOPS_PUBLIC_URL || `http://localhost:${PORT}`).split(",")[0].trim().replace(/\/$/, ""),
         authRequired: true,
       }, req);
@@ -430,7 +431,7 @@ const server = http.createServer(async (req, res) => {
         // are public knowledge, so elevated sign-in with no PIN configured would hand
         // Owner to anyone who finds the URL. HOMEOPS_BOOTSTRAP_PIN (env) seeds the gate
         // before the first login; a PIN set later in Settings takes precedence.
-        let pinHash = getSettings().ownerPinHash;
+        let pinHash = getSettings(CURRENT_TENANT).ownerPinHash; // login predates a session: resident household
         if (!pinHash && process.env.HOMEOPS_BOOTSTRAP_PIN) {
           pinHash = crypto.createHash("sha256").update(String(process.env.HOMEOPS_BOOTSTRAP_PIN)).digest("hex");
         }
@@ -478,7 +479,7 @@ const server = http.createServer(async (req, res) => {
       : true;
     if (path === "/api/profiles" && method === "GET") {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
-      const pinSet = !!(getSettings().ownerPinHash || process.env.HOMEOPS_BOOTSTRAP_PIN);
+      const pinSet = !!(getSettings(CURRENT_TENANT).ownerPinHash || process.env.HOMEOPS_BOOTSTRAP_PIN);
       const profiles = listMembers({ householdId: "local" }).filter((m) => !m.archived).map((m) => ({
         actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null,
         pinRequired: pinSet && (m.role === "Owner" || m.role === "Adult Admin"),
@@ -486,7 +487,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         profiles,
         claimed: profiles.some((p) => !SEED_ACTOR_IDS.includes(p.actorId)),
-        householdName: getSettings().householdName ?? null,
+        householdName: getSettings(CURRENT_TENANT).householdName ?? null,
       }, req);
     }
     // Claim the household: replace the demo Harper roster with YOUR owner profile.
@@ -510,7 +511,7 @@ const server = http.createServer(async (req, res) => {
       for (const m of live) putMember({ actorId: m.actorId, archived: true });
       const owner = putMember({ actorId, displayName: ownerName, role: "Owner", relationship: body.relationship ?? "Account owner", householdId: "local" });
       const claimedName = String(body.householdName ?? "").trim();
-      if (claimedName) setSettings({ householdName: claimedName.slice(0, 60) });
+      if (claimedName) setSettings({ householdName: claimedName.slice(0, 60) }, CURRENT_TENANT);
       const s = createSession({ actorId, actorName: ownerName, role: "Owner", householdId: "local" });
       audit({ type: "household.claim", ok: true, actorId, archivedDemo: live.length }, req, s);
       const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
@@ -565,7 +566,7 @@ const server = http.createServer(async (req, res) => {
      * and invites. Any member can read it; renaming is Owner-only. ---- */
     if (path === "/api/household" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      return json(res, 200, { household: { id: g.session.householdId, name: getSettings().householdName ?? null } }, req);
+      return json(res, 200, { household: { id: g.session.householdId, name: getSettings(g.session.householdId).householdName ?? null } }, req);
     }
     if (path === "/api/household" && method === "PATCH") {
       const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -573,7 +574,7 @@ const server = http.createServer(async (req, res) => {
       const name = String(body.name ?? "").trim();
       if (!name) return json(res, 400, { error: "name_required" }, req);
       if (name.length > 60) return json(res, 400, { error: "name_too_long", message: "Keep the household name under 60 characters." }, req);
-      setSettings({ householdName: name });
+      setSettings({ householdName: name }, g.session.householdId);
       audit({ type: "household.rename", ok: true, name }, req, g.session);
       return json(res, 200, { household: { id: g.session.householdId, name } }, req);
     }
@@ -791,7 +792,7 @@ const server = http.createServer(async (req, res) => {
 
       if (platform) {
         // Provider-platform tool → run against THIS actor's connected account.
-        if (!externalActionsEnabled() && ["Write", "Send", "Download"].includes(platform.tool.action)) return json(res, 423, { ok: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch." }, req);
+        if (!externalActionsEnabled(g.session.householdId) && ["Write", "Send", "Download"].includes(platform.tool.action)) return json(res, 423, { ok: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch." }, req);
         const accounts = listAccountsFor(g.session.householdId, g.session.actorId).filter((a) => a.provider === platform.provider.id);
         const account = body.accountId ? accounts.find((a) => a.id === body.accountId) : accounts[0];
         if (!account) { audit({ type: "tool.execute", toolId, ok: false, error: "no_account" }, req, g.session); return json(res, 422, { ok: false, error: "not_connected", message: `Connect your ${platform.provider.name} account to use this tool.` }, req); }
@@ -983,7 +984,7 @@ const server = http.createServer(async (req, res) => {
       audit({ type: "event.update", eventId: ev.id, ok: true }, req, g.session);
       // Auto-sync: a local edit to a Google-linked event mirrors to Google immediately
       // (server-triggered, no approval) when the household enabled calendar auto-sync.
-      if (getSettings().calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled()) {
+      if (getSettings(g.session.householdId).calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
         void pushEventToGoogle({ ev: updated, householdId: g.session.householdId, actorId: g.session.actorId })
           .then((r) => appendAudit({ type: "calendar.autopush", eventId: updated.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) }))
           .catch(() => {});
@@ -1159,7 +1160,7 @@ const server = http.createServer(async (req, res) => {
       const existing = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id)[0];
       if (existing) {
         const updated = patchEvent(existing.id, { title, startAt, notes });
-        if (getSettings().calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled()) {
+        if (getSettings(g.session.householdId).calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
           void pushEventToGoogle({ ev: updated, householdId: g.session.householdId, actorId: g.session.actorId })
             .then((r) => appendAudit({ type: "calendar.autopush", eventId: updated.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) })).catch(() => {});
         }
@@ -1226,7 +1227,7 @@ const server = http.createServer(async (req, res) => {
       // Approval-first by default. When the household turned on calendar auto-sync,
       // Google pushes are pre-authorized (an explicit Adult Admin setting) and the
       // gate is skipped — the audit log still records every write.
-      const autoSync = getSettings().calendarAutoSync === true;
+      const autoSync = getSettings(g.session.householdId).calendarAutoSync === true;
       if (!autoSync) {
         if (!body.approvalId) {
           const a = createApproval({ actorId: g.session.actorId, householdId: g.session.householdId, connectorId: "google", toolId: "calendar.create", input, risk: "Medium", category: "Calendar", preview: `${gid ? "Update" : "Add"} “${ev.title}” ${gid ? "on" : "to"} Google Calendar`, source: "executable" });
@@ -2091,7 +2092,7 @@ const server = http.createServer(async (req, res) => {
     const oauthStartMatch = path.match(/^\/api\/oauth\/([^/]+)\/start$/);
     if (oauthStartMatch && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!externalActionsEnabled()) return json(res, 423, { ok: false, error: "external_actions_disabled" }, req);
+      if (!externalActionsEnabled(g.session.householdId)) return json(res, 423, { ok: false, error: "external_actions_disabled" }, req);
       const provider = connectorProviderById(oauthStartMatch[1]);
       if (!provider) return json(res, 404, { ok: false, error: "unknown_provider" }, req);
       if (!providerConfigured(provider)) return json(res, 422, { ok: false, error: "not_configured_by_deployment", message: `This deployment has not set ${provider.clientIdEnv} / ${provider.clientSecretEnv}.` }, req);
@@ -2126,7 +2127,7 @@ const server = http.createServer(async (req, res) => {
     /* ---- Browser automation (honest handshake) ---- */
     if (path === "/api/browser/session" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!externalActionsEnabled()) return json(res, 423, { ok: false, error: "external_actions_disabled" }, req);
+      if (!externalActionsEnabled(g.session.householdId)) return json(res, 423, { ok: false, error: "external_actions_disabled" }, req);
       const h = await healthCheck("browser");
       audit({ type: "browser.session", ok: h.ok, error: h.ok ? undefined : h.status }, req, g.session);
       if (!h.ok) return json(res, 422, { ok: false, status: "runtime_unavailable", message: "No executable browser automation runtime is connected. Set BROWSER_RUNTIME_URL to a reachable runtime to enable." }, req);
@@ -2136,20 +2137,20 @@ const server = http.createServer(async (req, res) => {
     /* ---- Settings (kill switch, owner PIN) — admin only ---- */
     if (path === "/api/settings" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const s = getSettings();
+      const s = getSettings(g.session.householdId);
       return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true } }, req);
     }
     if (path === "/api/settings" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const prev = getSettings();
+      const prev = getSettings(g.session.householdId);
       const patch = {};
       if (typeof body.externalActionsEnabled === "boolean") patch.externalActionsEnabled = body.externalActionsEnabled;
       // Calendar auto-sync: Adult Admin opt-in that pre-authorizes Google Calendar
       // pushes (no per-event approvals) and turns on the server-triggered two-way sweep.
       if (typeof body.calendarAutoSync === "boolean") patch.calendarAutoSync = body.calendarAutoSync;
       if (typeof body.ownerPin === "string" && body.ownerPin) patch.ownerPinHash = crypto.createHash("sha256").update(body.ownerPin).digest("hex");
-      const next = setSettings(patch);
+      const next = setSettings(patch, g.session.householdId);
       audit({ type: "settings.update", ok: true, changed: Object.keys(patch), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
       return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true } }, req);
     }
@@ -2157,20 +2158,20 @@ const server = http.createServer(async (req, res) => {
     /* ---- AI providers ---- */
     if (path === "/api/ai/providers" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      return json(res, 200, { providers: listAIProviders() }, req);
+      return json(res, 200, { providers: listAIProviders(g.session.householdId) }, req);
     }
     const aiCfg = path.match(/^\/api\/ai\/providers\/([^/]+)\/config$/);
     if (aiCfg && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       if (!aiProviderById(aiCfg[1])) return json(res, 404, { error: "unknown_provider" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const p = setProviderConfig(aiCfg[1], body);
+      const p = setProviderConfig(aiCfg[1], body, g.session.householdId);
       audit({ type: "ai.config", providerId: aiCfg[1], ok: true }, req, g.session);
       return json(res, 200, { provider: p }, req);
     }
     if (aiCfg && method === "DELETE") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const p = revokeProvider(aiCfg[1]); if (!p) return json(res, 404, { error: "unknown_provider" }, req);
+      const p = revokeProvider(aiCfg[1], g.session.householdId); if (!p) return json(res, 404, { error: "unknown_provider" }, req);
       audit({ type: "ai.revoke", providerId: aiCfg[1], ok: true }, req, g.session);
       return json(res, 200, { provider: p }, req);
     }
@@ -2191,14 +2192,14 @@ const server = http.createServer(async (req, res) => {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       if (body.providerId && !aiProviderById(body.providerId)) return json(res, 404, { error: "unknown_provider" }, req);
-      setActiveProvider(body.providerId ?? null);
+      setActiveProvider(body.providerId ?? null, g.session.householdId);
       audit({ type: "ai.active", providerId: body.providerId ?? null, ok: true }, req, g.session);
       return json(res, 200, { activeProvider: body.providerId ?? null }, req);
     }
     if (path === "/api/ai/chat" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const id = body.providerId || getSettings().aiActiveProvider;
+      const id = body.providerId || getSettings(g.session.householdId).aiActiveProvider;
       if (!id) return json(res, 400, { error: "no_provider", message: "No AI provider selected." }, req);
       const out = await providerChat(id, { messages: body.messages ?? [], model: body.model });
       audit({ type: "ai.chat", providerId: id, ok: out.ok, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
@@ -2613,10 +2614,12 @@ server.listen(PORT, () => {
     // no approvals — pull Google-side edits into pushed events AND push local edits back,
     // so both calendars mirror each other without anyone opening the app. Conflicts
     // (both sides changed) still flag for human review — auto-sync never clobbers.
-    if (getSettings().calendarAutoSync === true && externalActionsEnabled()) {
+    {
       const googleSubs = listSubscriptions((s) => s.source === "google");
       const seen = new Set();
       for (const sub of googleSubs) {
+        // Auto-sync is a per-household opt-in — gate each subscription on ITS household.
+        if (getSettings(sub.householdId).calendarAutoSync !== true || !externalActionsEnabled(sub.householdId)) continue;
         const key = `${sub.householdId}:${sub.createdBy}`;
         if (seen.has(key)) continue; seen.add(key);
         try {

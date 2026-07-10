@@ -175,13 +175,19 @@ export function addWebhookEvent(id, event) {
   return all[id][0];
 }
 
-/* ---- Settings (kill switch for all external write actions) ---- */
-export function getSettings() {
-  return readJSON("settings.json", { externalActionsEnabled: true });
+/* ---- Settings (kill switch, active AI provider, household prefs) ----
+ * Household-scoped (C1.2): every call site passes the household it acts for —
+ * a run's kill switch or AI provider must NEVER resolve from another family's
+ * settings. Omitting householdId falls back to the resident household, which
+ * is only correct for boot/bootstrap paths that predate a session. */
+export function getSettings(householdId) {
+  return engine.getDoc(householdId ?? TENANT, "settings.json", { externalActionsEnabled: true });
 }
-export function setSettings(patch) {
-  const next = { ...getSettings(), ...patch };
-  writeJSON("settings.json", next);
+export function setSettings(patch, householdId) {
+  const t = householdId ?? TENANT;
+  const next = { ...getSettings(t), ...patch };
+  engine.putDoc(t, "settings.json", next);
+  if (t === TENANT) bumpRev("settings.json"); // rev poll is per resident household until C1.4
   return next;
 }
 

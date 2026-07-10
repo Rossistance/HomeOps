@@ -328,7 +328,7 @@ export const INTERNAL_FUNCTIONS = {
       }
       // 4) Google push — only when the household pre-authorized it (calendar auto-sync).
       let google = { pushed: false };
-      if (event && getSettings().calendarAutoSync === true) {
+      if (event && getSettings(ctx.householdId).calendarAutoSync === true) {
         const r = await pushEventToGoogle({ ev: event, householdId: ctx.householdId, actorId: ctx.actorId });
         google = r.ok ? { pushed: true, googleEventId: r.googleEventId, action: r.action } : { pushed: false, error: r.error };
       }

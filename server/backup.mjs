@@ -109,14 +109,16 @@ export function pruneBackups() {
 
 /** Called from the periodic sweep: nightly snapshot + weekly Owner notice. */
 export async function backupTick() {
-  const s = getSettings();
+  // Backup cadence bookkeeping lives on the resident household's settings; the
+  // snapshot itself covers every tenant. Per-tenant cadence comes with C1.6.
+  const s = getSettings(CURRENT_TENANT);
   const now = Date.now();
   const lastBackupAt = Number(s.lastBackupAt ?? 0);
   if (now - lastBackupAt < 24 * 3600000) return;
   try {
     const name = createBackup();
     pruneBackups();
-    setSettings({ lastBackupAt: now });
+    setSettings({ lastBackupAt: now }, CURRENT_TENANT);
     const lastNoticeAt = Number(s.lastBackupNoticeAt ?? 0);
     if (now - lastNoticeAt >= 7 * 86400000) {
       const owner = listMembers({ householdId: "local" }).find((m) => !m.archived && m.role === "Owner");
@@ -126,7 +128,7 @@ export async function backupTick() {
         body: `Your household data is snapshotted nightly (${name}). Download a copy anytime from the web app's backups panel.`,
         to: null,
       });
-      setSettings({ lastBackupNoticeAt: now });
+      setSettings({ lastBackupNoticeAt: now }, CURRENT_TENANT);
     }
   } catch (e) {
     appendAudit({ type: "backup.failed", ok: false, error: String(e?.message ?? e) });

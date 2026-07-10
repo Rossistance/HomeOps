@@ -57,7 +57,7 @@ export function providerReadiness(p) {
   return "configured";
 }
 
-export function publicProvider(p) {
+export function publicProvider(p, householdId) {
   const cfg = getConnectorConfig(cfgId(p.id));
   const h = getHealth(cfgId(p.id));
   return {
@@ -69,15 +69,15 @@ export function publicProvider(p) {
     readiness: providerReadiness(p),
     // Verified health is distinct from static readiness — the client renders both truthfully.
     health: h ? { ok: !!h.ok, status: h.status ?? (h.ok ? "reachable" : "unreachable"), at: h.at ?? null, latencyMs: h.latencyMs ?? null } : null,
-    active: getSettings().aiActiveProvider === p.id,
+    active: getSettings(householdId).aiActiveProvider === p.id,
     updatedAt: cfg.updatedAt,
   };
 }
-export function listProviders() {
-  return AI_PROVIDERS.map(publicProvider);
+export function listProviders(householdId) {
+  return AI_PROVIDERS.map((p) => publicProvider(p, householdId));
 }
 
-export function setProviderConfig(id, body) {
+export function setProviderConfig(id, body, householdId) {
   const p = aiProviderById(id);
   if (!p) return null;
   const fields = {};
@@ -86,17 +86,17 @@ export function setProviderConfig(id, body) {
   const secrets = {};
   if (typeof body.apiKey === "string") secrets.apiKey = body.apiKey;
   setConnectorConfig(cfgId(id), fields, secrets);
-  return publicProvider(p);
+  return publicProvider(p, householdId);
 }
-export function revokeProvider(id) {
+export function revokeProvider(id, householdId) {
   const p = aiProviderById(id);
   if (!p) return null;
   revokeConnector(cfgId(id));
-  if (getSettings().aiActiveProvider === id) setSettings({ aiActiveProvider: null });
-  return publicProvider(p);
+  if (getSettings(householdId).aiActiveProvider === id) setSettings({ aiActiveProvider: null }, householdId);
+  return publicProvider(p, householdId);
 }
-export function setActiveProvider(id) {
-  setSettings({ aiActiveProvider: id });
+export function setActiveProvider(id, householdId) {
+  setSettings({ aiActiveProvider: id }, householdId);
   return id;
 }
 
@@ -120,6 +120,7 @@ export function bootstrapAIFromEnv() {
     const body = { apiKey: String(key).trim() };
     if (process.env.HOMEOPS_AI_MODEL) body.model = String(process.env.HOMEOPS_AI_MODEL).trim();
     setProviderConfig(s.id, body);
+    // Boot-time bootstrap configures the resident household (env keys are per-deployment).
     if (!getSettings().aiActiveProvider) setActiveProvider(s.id);
     applied.push(s.id);
   }

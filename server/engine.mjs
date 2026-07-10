@@ -51,7 +51,7 @@ function summarize(result) {
   const s = typeof result === "string" ? result : JSON.stringify(result);
   return s.slice(0, 200);
 }
-function externalActionsEnabled() { return getSettings().externalActionsEnabled !== false; }
+function externalActionsEnabled(householdId) { return getSettings(householdId).externalActionsEnabled !== false; }
 
 /* ---- Agentic step execution (data flows BETWEEN steps) ----
  * Two engine capabilities that turn a static plan into a working run:
@@ -65,7 +65,7 @@ function externalActionsEnabled() { return getSettings().externalActionsEnabled 
 const REASONING_SYS = `You execute ONE reasoning step inside a household automation run. Use the run goal, this step's instruction, and prior step results. Be decisive and concrete. Respond with ONLY a JSON object: {"text": string, "data": object|null}. "text" = 1-3 sentence human summary of what you determined. "data" = machine-usable output later steps may need (ids, lists, selections), e.g. {"messageIds": ["abc","def"]}. COMPLETENESS IS MANDATORY: process EVERY item in the prior results, not a sample — if 200 items are present, your selection must consider all 200, and "data" must list every qualifying item's id. Use ONLY real values from prior results — never invent ids. No prose outside the JSON.`;
 const FILL_SYS = `You fill the input fields for ONE tool step inside a household automation run, using prior step results. Respond with ONLY a JSON object mapping input keys to STRING values. Rules: keep any provided non-empty value unless it contains a {{template}}; join lists into comma-separated strings; when a prior reasoning step selected a set of items, include EVERY selected id — never a sample or truncation; use ONLY real values from prior results or the run goal — NEVER invent ids or addresses. If a required value truly cannot be determined, set it to "".`;
 
-function activeAiProvider() { return getSettings().aiActiveProvider || null; }
+function activeAiProvider(householdId) { return getSettings(householdId).aiActiveProvider || null; }
 
 // Item 11 (second half): AUTOMATIC memory-writing. After a run completes, one AI pass
 // judges whether the outcome contains a durable household fact/preference/routine worth
@@ -79,7 +79,7 @@ Respond with ONLY JSON: {"remember": boolean, "text": string, "type": "fact"|"pr
 async function proposeRunMemory(runId) {
   const run = getRun(runId);
   if (!run || run.status !== "completed") return;
-  const provider = activeAiProvider();
+  const provider = activeAiProvider(run.householdId);
   if (!provider) return;
   const material = run.steps
     .filter((s) => s.status === "succeeded")
@@ -165,7 +165,7 @@ function deterministicFill(run, stepIndex, step, schema) {
   return changed ? filled : null;
 }
 async function fillStepInput(run, stepIndex, step, schema) {
-  const provider = activeAiProvider();
+  const provider = activeAiProvider(run.householdId);
   if (!provider) return { filled: null, note: "No AI provider connected — used the plan's original input." };
   const user = `Run goal: ${run.goal ?? run.plan?.title ?? ""}\nPlan summary: ${run.plan?.summary ?? ""}\n\nTool: ${step.toolId}\nStep: ${step.title}${step.detail ? ` — ${step.detail}` : ""}\nInput schema: ${JSON.stringify(schema)}\nCurrent input: ${JSON.stringify(step.input ?? {})}\n\nPrior step results (JSON): ${priorResultsJSON(run, stepIndex)}`;
   const out = await providerChat(provider, { messages: [{ role: "system", content: FILL_SYS }, { role: "user", content: user }] }).catch(() => null);
@@ -233,7 +233,7 @@ async function execResolved(resolved, input, ctx, approvalId) {
     return await runFunctionHandler(resolved.fn, input, { householdId: ctx.householdId, actorId: ctx.actorId, runId: ctx.runId, accountId: ctx.accountId }, { approvalConsumed: !!approvalId });
   }
   if (resolved.kind === "provider") {
-    if (!externalActionsEnabled() && ["Write", "Send", "Download"].includes(resolved.action)) {
+    if (!externalActionsEnabled(ctx.householdId) && ["Write", "Send", "Download"].includes(resolved.action)) {
       return { ok: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch." };
     }
     const accounts = listAccountsFor(ctx.householdId, ctx.actorId).filter((a) => a.provider === resolved.provider.id);
@@ -248,7 +248,7 @@ async function execResolved(resolved, input, ctx, approvalId) {
   }
   // connector tool — executeTool re-checks readiness + kill switch; we pass the
   // consumed-approval flag so gated connector tools (http.post/sms.send) run.
-  return await executeTool(resolved.tool.id, input, { actorId: ctx.actorId, requestId: ctx.runId, approvalConsumed: !!approvalId, approvalId });
+  return await executeTool(resolved.tool.id, input, { actorId: ctx.actorId, householdId: ctx.householdId, requestId: ctx.runId, approvalConsumed: !!approvalId, approvalId });
 }
 
 const WAITING_CONNECTOR_RE = /not_configured|not_connected|not_authorized|connector_|runtime_unavailable/;
@@ -372,7 +372,7 @@ async function _drive(runId) {
     // Reasoning step (no tool) — the LLM works over prior step results and stores
     // {text, data}; later steps draw on `data` (e.g. which message ids to act on).
     if (!step.toolId) {
-      const provider = activeAiProvider();
+      const provider = activeAiProvider(run.householdId);
       if (!provider) {
         patchRunStep(runId, i, { status: "succeeded", detail: `${step.detail || "Reasoning step"} (no AI provider connected — reasoning skipped)`, finishedAt: Date.now() });
         patchRun(runId, { cursor: i + 1 });

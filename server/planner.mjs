@@ -35,8 +35,8 @@ const MINIAPP_TYPES = ["Chore Board", "Trip Planner", "Budget Snapshot", "Grocer
 const RISKS = ["Low", "Medium", "High", "Sensitive"];
 const EXECUTABLE = ["connected", "authorized_write", "authorized_readonly", "local_only"];
 
-function activeProviderId(explicit) {
-  return explicit || getSettings().aiActiveProvider || null;
+function activeProviderId(explicit, householdId) {
+  return explicit || getSettings(householdId).aiActiveProvider || null;
 }
 
 /** The full, live tool catalog with per-actor connectedness — the planner's menu. */
@@ -161,7 +161,7 @@ JSON shape:
 
 export async function planFromGoal({ goal, session, providerId } = {}) {
   if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe what you want first." };
-  const id = activeProviderId(providerId);
+  const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then try plain-English generation." };
   const catalog = toolCatalog(session);
   const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
@@ -270,7 +270,7 @@ export function buildServerContext(session, clientContext) {
 
 export async function assistantRespond({ message, context, session, providerId, history } = {}) {
   if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
-  const id = activeProviderId(providerId);
+  const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
   const catalog = toolCatalog(session);
   const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
@@ -350,7 +350,7 @@ function normalizeBuild(b) {
  */
 export async function assistantStream({ message, context, session, providerId, history } = {}, onToken) {
   if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
-  const id = activeProviderId(providerId);
+  const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
   const catalog = toolCatalog(session);
   const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
@@ -388,7 +388,7 @@ const EVOLVE_SYS = `You are FamiliOS' improvement engine. Given a run trace, pro
 - "after": improved agent instructions (if the trace includes an agent) or a one-line tool-usage tip otherwise. Keep it practical, safe, and family-appropriate.`;
 
 export async function proposeEvolution({ trace, session, providerId } = {}) {
-  const id = activeProviderId(providerId);
+  const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider" };
   if (!trace || typeof trace !== "object") return { ok: false, error: "empty_trace" };
   const out = await providerChat(id, { messages: [{ role: "system", content: EVOLVE_SYS }, { role: "user", content: `Run trace (JSON): ${JSON.stringify(trace).slice(0, 4000)}` }] });
@@ -412,7 +412,7 @@ Generate realistic, useful starter content (3-8 items) inferred from the request
 
 export async function generateMiniApp({ goal, type, session, providerId } = {}) {
   if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe the mini app you want." };
-  const id = activeProviderId(providerId);
+  const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers to generate mini apps." };
   const user = `Allowed types: ${MINIAPP_TYPES.join(", ")}.${type ? ` Preferred type: ${type}.` : ""}\nRequest: ${String(goal).trim()}`;
   const out = await providerChat(id, { messages: [{ role: "system", content: MINIAPP_SYS }, { role: "user", content: user }] });
@@ -429,7 +429,7 @@ Write 4-8 concrete, ordered steps. requiredConnections name real services (e.g. 
 
 export async function generatePlaybook({ goal, session, providerId } = {}) {
   if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe the playbook you want." };
-  const id = activeProviderId(providerId);
+  const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers to generate playbooks." };
   const out = await providerChat(id, { messages: [{ role: "system", content: PLAYBOOK_SYS }, { role: "user", content: `Request: ${String(goal).trim()}` }] });
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
