@@ -1276,6 +1276,27 @@ const server = http.createServer(async (req, res) => {
       deleteConversationRec(c.id);
       return json(res, 200, { ok: true }, req);
     }
+    // Append a run-result note to a conversation the actor owns. This is how a
+    // finished plan run reports back INTO the chat it was launched from (web +
+    // iOS both use it), so results/artifacts live in the thread durably instead
+    // of only on the Activity screen.
+    const convMsg = path.match(/^\/api\/conversations\/([^/]+)\/messages$/);
+    if (convMsg && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const c = getConversation(convMsg[1]);
+      if (!c || c.householdId !== g.session.householdId || c.actorId !== g.session.actorId) return json(res, 404, { error: "not_found" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const text = String(body.text ?? "").trim();
+      if (!text) return json(res, 400, { error: "text_required" }, req);
+      c.messages.push({
+        role: "assistant", text: text.slice(0, 8000), at: new Date().toISOString(),
+        kind: body.kind === "run_result" ? "run_result" : "note",
+        ...(body.runId ? { runId: String(body.runId).slice(0, 64) } : {}),
+      });
+      c.updatedAt = new Date().toISOString();
+      putConversation(c);
+      return json(res, 200, { conversation: c }, req);
+    }
 
     /* ---- Memory & artifacts (read; written by runs) — household-scoped ---- */
     if (path === "/api/memory" && method === "GET") {

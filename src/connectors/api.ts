@@ -705,6 +705,9 @@ export const backend = {
   async profiles(): Promise<{ profiles: { actorId: string; displayName: string; role: string; relationship: string | null; pinRequired: boolean }[]; claimed: boolean; householdName?: string | null } | null> {
     try { return await req("/profiles"); } catch { return null; }
   },
+  async appendConversationMessage(id: string, body: { text: string; kind?: string; runId?: string }): Promise<{ conversation?: ServerConversation; error?: string }> {
+    try { return await req(`/conversations/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
   async household(): Promise<{ id: string; name: string | null } | null> {
     try { return (await req<{ household: { id: string; name: string | null } }>("/household")).household ?? null; } catch { return null; }
   },

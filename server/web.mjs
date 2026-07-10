@@ -7,6 +7,7 @@
 // fetching (which covers search engines and recipe sites).
 import { safeFetch } from "./net.mjs";
 import { renderPage, browserAvailable } from "./browser.mjs";
+import { getSecret } from "./store.mjs";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const FETCH_HEADERS = { "user-agent": UA, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "accept-language": "en-US,en;q=0.9" };
@@ -103,6 +104,58 @@ async function searchTavily(q, maxResults) {
   } catch { return { error: "tavily: bad_json" }; }
 }
 
+// OpenAI web search: the household's existing OpenAI key (env or the key saved
+// in Settings → AI Providers) powers real search via the Responses API's
+// web_search tool. No browser, no scraping, works on any host — this is what
+// keeps Ask runs alive on small instances where Chromium can't run.
+function openAIKey() {
+  const env = (process.env.OPENAI_API_KEY || "").trim();
+  if (env) return env;
+  try { return (getSecret("ai.openai", "apiKey") || "").trim() || null; } catch { return null; }
+}
+
+async function searchOpenAI(q, maxResults) {
+  const key = openAIKey();
+  if (!key) return null;
+  const call = (toolType) => safeFetch(
+    "https://api.openai.com/v1/responses",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        tools: [{ type: toolType }],
+        tool_choice: { type: toolType },
+        input: `Web search: ${q}\nReturn a short answer that cites sources.`,
+      }),
+    },
+    { timeoutMs: 25_000, maxBytes: 2_000_000 },
+  );
+  // Tool name differs across API generations; try the current one, fall back once.
+  let r = await call("web_search_preview");
+  if (r.ok && !r.httpOk && r.status === 400) r = await call("web_search");
+  if (!r.ok || !r.httpOk) return { error: `openai: ${r.error ?? r.status}` };
+  try {
+    const j = JSON.parse(r.text);
+    const results = [];
+    const seen = new Set();
+    for (const item of j.output ?? []) {
+      for (const part of item.content ?? []) {
+        // url_citation annotations carry {url, title}; the text itself is the summary.
+        for (const a of part.annotations ?? []) {
+          const u = a.url ?? a.url_citation?.url;
+          const t = a.title ?? a.url_citation?.title ?? "";
+          if (u && /^https?:\/\//.test(u) && !seen.has(u)) {
+            seen.add(u);
+            results.push({ title: String(t).slice(0, 160) || u, url: u, snippet: String(part.text ?? "").slice(0, 240) });
+          }
+        }
+      }
+    }
+    return results.length ? { results: results.slice(0, maxResults) } : { error: "openai: no cited results" };
+  } catch { return { error: "openai: bad_json" }; }
+}
+
 // DDG "lite" endpoint: plain table markup on separate infra — sometimes
 // reachable when html.duckduckgo.com tarpits a hosted IP.
 function parseDuckDuckGoLite(html) {
@@ -161,13 +214,15 @@ export async function searchWeb(query, { maxResults = 8 } = {}) {
   const attempts = [];
 
   // 1) Keyed APIs first — the only reliable path from hosted/datacenter IPs.
-  for (const [engine, fn] of [["brave", searchBrave], ["tavily", searchTavily]]) {
+  // The OpenAI tier reuses the household's existing AI key, so a deployment
+  // with a working assistant automatically has working search.
+  for (const [engine, fn] of [["brave", searchBrave], ["tavily", searchTavily], ["openai", searchOpenAI]]) {
     const r = await fn(q, maxResults);
     if (r === null) continue; // key not configured
     if (r.results) return { ok: true, engine, query: q, results: r.results.slice(0, maxResults) };
     attempts.push(r.error);
   }
-  const anyKey = !!(process.env.BRAVE_SEARCH_API_KEY || process.env.TAVILY_API_KEY);
+  const anyKey = !!(process.env.BRAVE_SEARCH_API_KEY || process.env.TAVILY_API_KEY || openAIKey());
 
   // 2) DuckDuckGo HTML
   const ddg = await safeFetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, { headers: FETCH_HEADERS }, { timeoutMs: 10_000, maxBytes: 2_000_000 });

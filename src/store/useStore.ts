@@ -42,7 +42,7 @@ import { pushActivity, executeAgentRun, subagentDefsFor, processFile } from "@/l
 import { parseAgentPrompt, buildWorkflowPlan, routeToAgent, detectApprovalGates } from "@/lib/ai";
 import { buildSearchIndex, search } from "@/lib/search";
 import { getAdvancedMode, setAdvancedMode } from "@/lib/prefs";
-import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerMemory, type ServerAgent, type ServerContactMethod } from "@/connectors/api";
+import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact } from "@/connectors/api";
 
 /** A plan shape the live runner can execute (AgentPlan satisfies this). */
 export interface RunnableStep { toolId: string | null; title: string; detail: string; input: Record<string, unknown>; requiresApproval: boolean }
@@ -1132,6 +1132,36 @@ export const useStore = create<Store>((set, get) => {
       commit((d) => { const cc = d.conversations?.find((x) => x.id === conversationId); const mm = cc?.messages.find((x) => x.id === messageId); if (mm) mm.status = "running"; });
       const runId = await get().runPlan({ title: m.plan.title, summary: m.plan.summary, steps: m.plan.steps }, { label: "Ask FamiliOS" });
       commit((d) => { const cc = d.conversations?.find((x) => x.id === conversationId); const mm = cc?.messages.find((x) => x.id === messageId); if (mm) { mm.runId = runId; mm.status = "done"; } });
+      if (!runId) return;
+      // The run's results come back INTO this chat (runPlan already polled to a
+      // terminal/parked state): outcome + step outputs + artifacts, persisted
+      // server-side so it survives hydration and shows on every device.
+      const run = get().data.runs.find((r) => r.id === runId);
+      if (!run) return;
+      const done = run.steps.filter((s) => s.status === "done").length;
+      const artifacts = await backend.artifacts(`?runId=${encodeURIComponent(runId)}`).catch(() => [] as ServerArtifact[]);
+      const stepLines = run.steps
+        .filter((s) => s.detail && s.status === "done")
+        .slice(0, 4)
+        .map((s) => `- **${s.label}**: ${String(s.detail).slice(0, 220)}`);
+      const artLines = (artifacts ?? []).slice(0, 3).map((a) => `**${a.title}**${a.body ? `\n\n${a.body.slice(0, 700)}` : ""}`);
+      const header =
+        run.status === "Completed" ? `Done — **${run.triggerLabel || m.plan.title}** finished (${done}/${run.steps.length} steps).`
+        : run.status === "Waiting for Approval" ? `**${m.plan.title}** is paused — a step needs your approval (check Approvals). It resumes automatically once you decide.`
+        : run.status === "Failed" ? `**${m.plan.title}** didn't finish: ${run.outputSummary ?? "a step failed."}`
+        : `**${m.plan.title}** is running — results will land in Activity.`;
+      const text = [header, ...stepLines, ...artLines].join("\n\n");
+      const saved = await backend.appendConversationMessage(conversationId, { text, kind: "run_result", runId });
+      if (saved.conversation) {
+        const sc = saved.conversation;
+        commit((d) => {
+          const cc = d.conversations?.find((x) => x.id === conversationId);
+          if (cc) {
+            cc.messages.push({ id: `${sc.id}-m${sc.messages.length - 1}`, role: "assistant", text, createdAt: nowISO(), status: "answered" });
+            cc.updatedAt = nowISO();
+          }
+        });
+      }
     },
     deleteConversation: (id) => {
       commit((d) => { if (d.conversations) d.conversations = d.conversations.filter((c) => c.id !== id); });

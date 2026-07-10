@@ -266,8 +266,11 @@ export default function AskScreen() {
         ? `Done — **${activeRun.planTitle}** finished (${done}/${activeRun.steps.length} steps).${stepLines.length ? `\n\n${stepLines.join("\n")}` : ""}${artLines.length ? `\n\n${artLines.join("\n\n")}` : ""}`
         : `**${activeRun.planTitle}** didn't finish — ${activeRun.steps.find((s) => s.status === "blocked")?.output ?? "a step failed."} You can adjust the plan and try again.`;
       setMsgs((m) => [...m, { id: `run-${activeRun.id}`, role: "assistant", text, error: activeRun.status === "failed" }]);
+      // Persist into the server-durable thread so the result survives app
+      // restarts and shows on the web too.
+      if (conversationId) void api.appendConversationMessage(conversationId, { text, kind: "run_result", runId: activeRun.id });
     })();
-  }, [activeRun]);
+  }, [activeRun, conversationId]);
 
   const runBuild = useCallback(async (msgId: string, build: ChatBuild) => {
     setBuildingId(msgId);
