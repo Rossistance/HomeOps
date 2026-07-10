@@ -9,3 +9,6 @@ server/.data/
 
 # Legacy build archives — kept on disk, never in git
 *.zip
+
+# Tenancy spike scratch output
+server/spike/out/
