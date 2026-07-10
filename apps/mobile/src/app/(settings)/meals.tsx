@@ -8,6 +8,7 @@ import Animated, { FadeOut, LinearTransition, ReduceMotion, useAnimatedStyle, us
 import { Stack, useFocusEffect } from "expo-router";
 import { api, type Meal, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic, type HearthColors } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
 // still shadows the ui/ directory until old screens are deleted centrally.
@@ -70,6 +71,7 @@ export default function MealsScreen() {
     setPhase("ready");
   }, []);
   useFocusEffect(useCallback(() => { if (session) void load(); }, [session, load]));
+  useRevSync(useCallback(() => { void load(); }, [load]));
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
   const week = useMemo(() => Array.from({ length: 7 }, (_, i) => {

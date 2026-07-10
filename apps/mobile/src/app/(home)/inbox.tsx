@@ -7,6 +7,7 @@ import { Alert, View } from "react-native";
 import { router } from "expo-router";
 import { api, type ApprovalRec, type ConversationRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, riskColor, statusColor, tapHaptic } from "@/theme";
 // NOTE: "/index" is deliberate — the legacy src/components/ui.tsx still exists
 // until the old screens are deleted, and it shadows the ui/ directory on the
@@ -135,6 +136,7 @@ export default function InboxScreen() {
   }, []);
 
   useEffect(() => { if (session) void load(); }, [session, load]);
+  useRevSync(useCallback(() => { void load(); }, [load]));
   // 30s tick keeps expiry countdowns and time-ago labels honest while open.
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 30_000);

@@ -16,6 +16,12 @@ export function useRevSync(reload: () => void): void {
       const tick = async () => {
         const rev = await api.rev();
         if (!alive || rev == null) return;
+        // Back online: flush any offline-queued writes before comparing state.
+        const { replayQueue, queuedCount } = await import("@/lib/offline-queue");
+        if ((await queuedCount()) > 0) {
+          const r = await replayQueue();
+          if (r.sent > 0) { reload(); lastRev.current = null; return; }
+        }
         if (lastRev.current != null && rev !== lastRev.current) reload();
         lastRev.current = rev;
       };

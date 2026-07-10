@@ -8,6 +8,7 @@ import { Alert, Pressable, TextInput, View } from "react-native";
 import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withSequence, withSpring } from "react-native-reanimated";
 import { api, type MemberRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic, type HearthColors } from "@/theme";
 // "ui/index" (not "ui"): the legacy src/components/ui.tsx still shadows the ui/
 // directory until the old screens are all ported — this resolves the new system.
@@ -175,6 +176,7 @@ export default function TasksScreen() {
     setLoading(false);
   }, []);
   useEffect(() => { if (session) void load(); }, [session, load]);
+  useRevSync(useCallback(() => { void load(); }, [load]));
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
   const open = useMemo(() => tasks.filter((t) => t.status !== "done"), [tasks]);

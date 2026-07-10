@@ -6,6 +6,7 @@ import { Alert, View } from "react-native";
 import { useFocusEffect } from "expo-router";
 import { api, type AuditEvent, type MemoryRec, type RunRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { useRevSync } from "@/lib/rev-sync";
 import { useRun } from "@/lib/run-context";
 import { useTheme, statusColor, tapHaptic } from "@/theme";
 import { humanDetail } from "@/lib/format";
@@ -82,6 +83,7 @@ export default function ActivityScreen() {
   }, []);
 
   useFocusEffect(useCallback(() => { if (session) void load(); }, [session, load]));
+  useRevSync(useCallback(() => { void load(); }, [load]));
   const onRefresh = useCallback(async () => {
     setRefreshing(true); setNotice(null); await load(); setRefreshing(false);
   }, [load]);

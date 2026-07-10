@@ -129,6 +129,11 @@ export interface AIHealthResult { ok: boolean; status?: string; latencyMs?: numb
 
 interface Res<T> { status: number; ok: boolean; data: T }
 
+// Mutations safe to queue offline and replay later: quick idempotent-ish
+// family writes where losing the tap is worse than a late apply.
+const OFFLINE_QUEUEABLE = (path: string, method?: string) =>
+  (method === "PATCH" && /^\/tasks\//.test(path)) || (method === "POST" && path === "/tasks");
+
 async function req<T = unknown>(path: string, init?: RequestInit): Promise<Res<T>> {
   const headers: Record<string, string> = { "content-type": "application/json", ...(init?.headers as Record<string, string> | undefined) };
   if (token) headers["authorization"] = `Bearer ${token}`;
@@ -136,6 +141,13 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<Res<T
   try {
     res = await fetch(`${API_URL}/api${path}`, { ...init, headers });
   } catch (e) {
+    if (OFFLINE_QUEUEABLE(path, init?.method)) {
+      // Fire-and-remember: the tap is preserved and replays when back online.
+      const { enqueue } = await import("@/lib/offline-queue");
+      let body: unknown; try { body = init?.body ? JSON.parse(String(init.body)) : undefined; } catch { body = undefined; }
+      void enqueue({ path, method: init?.method ?? "POST", body });
+      return { status: 0, ok: false, data: { error: "queued_offline", message: "You're offline — this change is saved and will sync automatically." } as unknown as T };
+    }
     return { status: 0, ok: false, data: { error: "network", message: String((e as Error)?.message ?? e) } as unknown as T };
   }
   const text = await res.text();

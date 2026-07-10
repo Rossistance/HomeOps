@@ -975,7 +975,10 @@ const server = http.createServer(async (req, res) => {
       // editing them would blur source-of-truth, so we refuse and tell the client to copy.
       if (ev.layer && ev.layer !== "canonical") return json(res, 409, { error: "read_only_layer", message: "This event is synced from an external calendar and can't be edited here — copy it to a FamiliOS event first." }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const { id, householdId, createdBy, createdAt, ...patch } = body; // never reassign identity/ownership-of-record
+      const { id, householdId, createdBy, createdAt, ifUpdatedAt, ...patch } = body; // never reassign identity/ownership-of-record
+      if (ifUpdatedAt && ev.updatedAt && ifUpdatedAt !== ev.updatedAt) {
+        return json(res, 409, { error: "stale_write", message: "This event changed on another device — refresh and try again.", current: ev }, req);
+      }
       const updated = patchEvent(ev.id, patch);
       audit({ type: "event.update", eventId: ev.id, ok: true }, req, g.session);
       // Auto-sync: a local edit to a Google-linked event mirrors to Google immediately
@@ -1026,10 +1029,13 @@ const server = http.createServer(async (req, res) => {
       if (!canSeeEntity(tk, g.session)) return json(res, 403, { error: "forbidden" }, req);
       // A child may complete a task assigned to them; broader edits need an adult/owner.
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const onlyStatus = Object.keys(body).every((k) => ["status"].includes(k));
+      const onlyStatus = Object.keys(body).every((k) => ["status", "ifUpdatedAt"].includes(k));
       const mayEdit = isAdultRole(g.session.role) || tk.createdBy === g.session.actorId || (onlyStatus && tk.assignedMemberId === g.session.actorId);
       if (!mayEdit) return json(res, 403, { error: "forbidden" }, req);
-      const { id, householdId, createdBy, createdAt, ...patch } = body;
+      const { id, householdId, createdBy, createdAt, ifUpdatedAt, ...patch } = body;
+      if (ifUpdatedAt && tk.updatedAt && ifUpdatedAt !== tk.updatedAt) {
+        return json(res, 409, { error: "stale_write", message: "This task changed on another device — refresh and try again.", current: tk }, req);
+      }
       const updated = patchTask(tk.id, patch);
       audit({ type: "task.update", taskId: tk.id, ok: true }, req, g.session);
       return json(res, 200, { task: updated }, req);
@@ -1081,7 +1087,13 @@ const server = http.createServer(async (req, res) => {
       if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       if (!canSeeEntity(m, g.session) || (!isAdultRole(g.session.role) && m.createdBy !== g.session.actorId)) return json(res, 403, { error: "forbidden" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const { id, householdId, createdBy, createdAt, ...patch } = body;
+      const { id, householdId, createdBy, createdAt, ifUpdatedAt, ...patch } = body;
+      // Optional optimistic-concurrency guard: two devices editing the same
+      // record no longer silently clobber each other — the stale one gets a 409
+      // and refetches. Opt-in field, so existing clients are unaffected.
+      if (ifUpdatedAt && m.updatedAt && ifUpdatedAt !== m.updatedAt) {
+        return json(res, 409, { error: "stale_write", message: "This was changed on another device — refresh and try again.", current: m }, req);
+      }
       const updated = patchMeal(m.id, patch);
       audit({ type: "meal.update", mealId: m.id, ok: true }, req, g.session);
       return json(res, 200, { meal: updated }, req);
