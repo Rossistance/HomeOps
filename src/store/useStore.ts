@@ -299,6 +299,8 @@ export interface Store extends UIState {
   bootstrapSession: () => Promise<void>;
   loginAs: (memberId: string, pin?: string, fallback?: { displayName: string; role: string }) => Promise<boolean>;
   logout: () => Promise<void>;
+  loginWithEmail: (email: string, password: string) => Promise<boolean>;
+  signupHousehold: (input: { email: string; password: string; ownerName: string; householdName?: string; inviteToken?: string }) => Promise<boolean>;
   currentRole: () => Role;
   canAccess: (screen: ScreenId) => boolean;
 
@@ -617,6 +619,41 @@ export const useStore = create<Store>((set, get) => {
       await backend.logout();
       set({ session: null });
       toast({ kind: "info", title: "Signed out", message: "Pick a profile to continue." });
+    },
+    // C1.4 self-serve identity: email sign-in / household creation. On success the
+    // server session carries the (possibly brand-new) householdId and every API
+    // call is scoped to THAT household — the server roster becomes the truth on
+    // the next hydrate.
+    loginWithEmail: async (email: string, password: string) => {
+      set({ authBusy: true });
+      const r = await backend.loginEmail(email, password);
+      if (!r.session) {
+        set({ authBusy: false, session: null });
+        toast({ kind: "error", title: "Sign-in failed", message: r.error === "invalid_credentials" ? "Wrong email or password." : r.message ?? "The backend is unreachable." });
+        return false;
+      }
+      set({ session: r.session, authBusy: false, needsOnboarding: false });
+      void get().loadBackend();
+      void get().hydrateFromServer();
+      return true;
+    },
+    signupHousehold: async (input: { email: string; password: string; ownerName: string; householdName?: string; inviteToken?: string }) => {
+      set({ authBusy: true });
+      const r = await backend.signup(input);
+      if (!r.session) {
+        set({ authBusy: false, session: null });
+        const msg = r.error === "email_taken" ? "That email already has an account — sign in instead."
+          : r.error === "invalid_invite" ? "That invite code is invalid, used, or expired."
+          : r.error === "weak_password" ? "Use a password of at least 8 characters."
+          : r.message ?? "The backend is unreachable.";
+        toast({ kind: "error", title: "Couldn't create the account", message: msg });
+        return false;
+      }
+      set({ session: r.session, authBusy: false, needsOnboarding: false });
+      toast({ kind: "success", title: input.inviteToken ? "Welcome to the household!" : "Your household is ready", message: input.inviteToken ? "You've joined — everything the family shares is here." : "You're the Owner. Invite your family from Settings whenever you're ready." });
+      void get().loadBackend();
+      void get().hydrateFromServer();
+      return true;
     },
     currentRole: () => get().session?.role as Role ?? get().currentMember().role,
     canAccess: (screen) => screenAllowedForRole(screen, (get().session?.role as Role) ?? get().currentMember().role),

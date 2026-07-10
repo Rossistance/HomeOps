@@ -23,6 +23,41 @@ export function Lock() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // C1.4 email identity: sign in / create-or-join a household of your own.
+  const [emailMode, setEmailMode] = useState<null | "signin" | "create">(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [ownerName, setOwnerName] = useState("");
+  const [newHouseholdName, setNewHouseholdName] = useState("");
+  const [inviteToken, setInviteToken] = useState("");
+  const [invitePreview, setInvitePreview] = useState<{ householdName: string | null; role: string } | null>(null);
+
+  useEffect(() => {
+    const t = inviteToken.trim();
+    if (!t) { setInvitePreview(null); return; }
+    void api.invitePreview(t).then((inv) => setInvitePreview(inv ? { householdName: inv.householdName, role: inv.role } : null));
+  }, [inviteToken]);
+
+  const submitEmail = async () => {
+    setBusy(true); setErr(null);
+    const r = emailMode === "signin"
+      ? await api.loginEmail(email.trim(), password)
+      : await api.signup({
+          email: email.trim(), password, ownerName: ownerName.trim(),
+          ...(inviteToken.trim() ? { inviteToken: inviteToken.trim() } : { householdName: newHouseholdName.trim() || undefined }),
+        });
+    setBusy(false);
+    if (r.error) {
+      setErr(r.error === "invalid_credentials" ? "Wrong email or password."
+        : r.error === "email_taken" ? "That email already has an account — sign in instead."
+        : r.error === "invalid_invite" ? "That invite code is invalid, used, or expired."
+        : r.error === "weak_password" ? "Use a password of at least 8 characters."
+        : r.error === "network" ? `Can't reach the server at ${api.url}.`
+        : r.message ?? String(r.error));
+      return;
+    }
+    if (r.session) setSession(r.session);
+  };
 
   const load = useCallback(async () => {
     setLoadErr(null);
@@ -155,6 +190,61 @@ export function Lock() {
             ) : null}
 
             {err ? <View style={{ marginTop: spacing.md }}><Notice text={err} ok={false} /></View> : null}
+
+            {/* ── Email identity: your own household, separate from this one ── */}
+            {!emailMode ? (
+              <View style={{ marginTop: spacing.xl, alignItems: "center", gap: spacing.sm }}>
+                <T kind="sub" center>Not part of this household?</T>
+                <View style={{ flexDirection: "row", gap: spacing.lg }}>
+                  <PressableCard onPress={() => { setEmailMode("signin"); setErr(null); }} style={{ paddingVertical: 10, paddingHorizontal: 16 }}>
+                    <T kind="subMedium" color={colors.ember}>Sign in with email</T>
+                  </PressableCard>
+                  <PressableCard onPress={() => { setEmailMode("create"); setErr(null); }} style={{ paddingVertical: 10, paddingHorizontal: 16 }}>
+                    <T kind="subMedium" color={colors.ember}>Create or join</T>
+                  </PressableCard>
+                </View>
+              </View>
+            ) : (
+              <Rise index={(profiles?.length ?? 0) + 2}>
+                <Card style={{ marginTop: spacing.xl }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                    <T kind="eyebrow">{emailMode === "signin" ? "Sign in with email" : inviteToken.trim() ? "Join a household" : "Create your household"}</T>
+                    <PressableCard onPress={() => setEmailMode(emailMode === "signin" ? "create" : "signin")} style={{ paddingVertical: 4, paddingHorizontal: 8, borderWidth: 0, backgroundColor: "transparent" }}>
+                      <T kind="caption" color={colors.textMuted}>{emailMode === "signin" ? "New here?" : "Have an account?"}</T>
+                    </PressableCard>
+                  </View>
+                  {emailMode === "create" ? (
+                    <>
+                      <TextInput value={ownerName} onChangeText={setOwnerName} placeholder="Your name" placeholderTextColor={colors.textFaint} autoCapitalize="words" style={{ marginTop: spacing.md, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} />
+                      <TextInput value={inviteToken} onChangeText={setInviteToken} placeholder="Invite code (optional)" placeholderTextColor={colors.textFaint} autoCapitalize="none" autoCorrect={false} style={{ marginTop: spacing.sm, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} />
+                      {invitePreview ? (
+                        <T kind="caption" color={colors.sage} style={{ marginTop: spacing.xs }}>Joining {invitePreview.householdName ?? "a household"} as {invitePreview.role}.</T>
+                      ) : inviteToken.trim() ? (
+                        <T kind="caption" color={colors.amber} style={{ marginTop: spacing.xs }}>That code doesn&apos;t look valid — check it or clear it to start fresh.</T>
+                      ) : (
+                        <TextInput value={newHouseholdName} onChangeText={setNewHouseholdName} placeholder="Household name (optional)" placeholderTextColor={colors.textFaint} autoCapitalize="words" style={{ marginTop: spacing.sm, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} />
+                      )}
+                    </>
+                  ) : null}
+                  <TextInput value={email} onChangeText={setEmail} placeholder="you@example.com" placeholderTextColor={colors.textFaint} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" inputMode="email" style={{ marginTop: spacing.sm, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} />
+                  <TextInput value={password} onChangeText={setPassword} placeholder="Password (8+ characters)" placeholderTextColor={colors.textFaint} secureTextEntry autoCapitalize="none" style={{ marginTop: spacing.sm, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} />
+                  <View style={{ marginTop: spacing.md, gap: spacing.sm }}>
+                    <Button
+                      title={emailMode === "signin" ? "Sign in" : inviteToken.trim() ? "Join household" : "Create household"}
+                      variant="ember" full loading={busy}
+                      disabled={busy || !email.trim() || password.length < 8 || (emailMode === "create" && !ownerName.trim())}
+                      onPress={() => void submitEmail()}
+                    />
+                    <Button title="Cancel" variant="ghost" full onPress={() => { setEmailMode(null); setErr(null); }} />
+                  </View>
+                  {emailMode === "create" && !inviteToken.trim() ? (
+                    <T kind="caption" color={colors.textFaint} style={{ marginTop: spacing.sm }}>
+                      Your household gets its own private space — completely separate from every other family&apos;s.
+                    </T>
+                  ) : null}
+                </Card>
+              </Rise>
+            )}
 
             <T kind="caption" center selectable color={colors.textFaint} style={{ marginTop: spacing.xl }}>
               API · {api.url}

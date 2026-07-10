@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Alert, ScrollView, TextInput, View } from "react-native";
 import { api } from "@/lib/api";
+import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 import {
   T, Well, SymTile, PressableScale, HSheet, SheetCTA, Notice, Sym, useConfirmFlash,
@@ -39,6 +40,7 @@ export function InviteSheet({ visible, onClose, householdName, onInvited }: {
 }) {
   const { colors, spacing } = useTheme();
   const { flash, show } = useConfirmFlash();
+  const { session } = useSession();
   const [step, setStep] = useState(0);
   const [name, setName] = useState("");
   const [roleKey, setRoleKey] = useState<string>("adult");
@@ -46,24 +48,58 @@ export function InviteSheet({ visible, onClose, householdName, onInvited }: {
   const [contact, setContact] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  // Identity households (email sign-in, hh_*) invite with a JOIN CODE: the
+  // person creates their own login and lands in this household with the chosen
+  // role. The resident device-shared household keeps its profile-record flow.
+  const identityHousehold = !!session?.householdId?.startsWith("hh_");
+  const [joinCode, setJoinCode] = useState<string | null>(null);
 
   useEffect(() => {
-    if (visible) { setStep(0); setName(""); setRoleKey("adult"); setMethod("Phone/Text"); setContact(""); setNote(null); setBusy(false); }
+    if (visible) { setStep(0); setName(""); setRoleKey("adult"); setMethod("Phone/Text"); setContact(""); setNote(null); setBusy(false); setJoinCode(null); }
   }, [visible]);
 
   const role = ROLE_CARDS.find((r) => r.key === roleKey) ?? ROLE_CARDS[0];
   const first = name.trim().split(" ")[0] || "there";
   const household = householdName ?? "our household";
 
+  // Identity households mint the join code when the send step opens, so the
+  // preview shows exactly what will be sent.
+  useEffect(() => {
+    if (!visible || step !== 2 || !identityHousehold || joinCode) return;
+    void api.createInvite({ displayName: name.trim() || "Family member", role: role.serverRole }).then((r) => {
+      if (r.invite) setJoinCode(r.invite.token);
+      else setNote(r.error === "insufficient_role" ? "Only an Owner or Adult Admin can invite members." : "Couldn't create a join code — try again.");
+    });
+  }, [visible, step, identityHousehold, joinCode, name, role.serverRole]);
+
   const preview = useMemo(() =>
-    `Hi ${name.trim() ? first : "there"} — you've been added to ${household} on FamiliOS. ${role.line}\n\nInstall the app from the TestFlight invite that's on its way, then pick your name on the welcome screen.`,
-  [name, first, household, role]);
+    identityHousehold
+      ? `Hi ${name.trim() ? first : "there"} — you're invited to ${household} on FamiliOS. ${role.line}\n\nOpen the app (or the web app), choose "Create or join", and enter join code ${joinCode ?? "…"} with your own email and password.`
+      : `Hi ${name.trim() ? first : "there"} — you've been added to ${household} on FamiliOS. ${role.line}\n\nInstall the app from the TestFlight invite that's on its way, then pick your name on the welcome screen.`,
+  [identityHousehold, name, first, household, role, joinCode]);
 
   const canNext = step === 0 ? name.trim().length > 0 : step === 1 ? true : contact.trim().length > 0;
 
   async function sendInvite() {
     if (busy) return;
     setBusy(true); setNote(null);
+    if (identityHousehold) {
+      // Identity household: the join CODE is the invite — the person creates
+      // their own login and the member record appears when they redeem it.
+      if (!joinCode) { setBusy(false); setNote("The join code isn't ready yet — give it a second and try again."); return; }
+      const sent = await api.notify({ methodType: method, to: contact.trim(), title: `You're invited to ${household}`, body: preview });
+      setBusy(false);
+      if (!sent.ok || sent.needsSetup) {
+        Alert.alert(
+          "Share the join code",
+          `The invite message couldn't be sent${sent.needsSetup ? ` (${method === "Email" ? "email" : "texting"} isn't set up yet)` : ""}. Share this code with ${first} directly:\n\n${joinCode}\n\nIt works for 7 days and can be used once.`,
+          [{ text: "Done", onPress: () => { onInvited(); onClose(); } }],
+        );
+        return;
+      }
+      show("send", () => { onInvited(); onClose(); });
+      return;
+    }
     // 1) The real invite: a member record. Their profile exists from this moment.
     const created = await api.createMember({ displayName: name.trim(), role: role.serverRole, relationship: role.relationship });
     if (!created.member) {

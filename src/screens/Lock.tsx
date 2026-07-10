@@ -23,12 +23,41 @@ const initialsOf = (name: string) => name.split(" ").map((p) => p[0]).slice(0, 2
 export function Lock() {
   const data = useStore((s) => s.data);
   const loginAs = useStore((s) => s.loginAs);
+  const loginWithEmail = useStore((s) => s.loginWithEmail);
+  const signupHousehold = useStore((s) => s.signupHousehold);
   const authBusy = useStore((s) => s.authBusy);
   const [pinFor, setPinFor] = useState<string | null>(null);
   const [pin, setPin] = useState("");
   const [serverProfiles, setServerProfiles] = useState<LockProfile[] | null>(null);
   const [householdName, setHouseholdName] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
+  // C1.4 email identity: sign in / create-or-join a household of your own.
+  const [emailMode, setEmailMode] = useState<null | "signin" | "create">(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [ownerName, setOwnerName] = useState("");
+  const [newHouseholdName, setNewHouseholdName] = useState("");
+  const [inviteToken, setInviteToken] = useState("");
+  const [invitePreview, setInvitePreview] = useState<{ householdName: string | null; role: string } | null>(null);
+
+  // An invite link (?invite=CODE) drops the person straight into the join form.
+  useEffect(() => {
+    const code = new URLSearchParams(window.location.search).get("invite");
+    if (code) { setInviteToken(code); setEmailMode("create"); }
+  }, []);
+  useEffect(() => {
+    const t = inviteToken.trim();
+    if (!t) { setInvitePreview(null); return; }
+    void backend.invitePreview(t).then((inv) => setInvitePreview(inv ? { householdName: inv.householdName, role: inv.role } : null));
+  }, [inviteToken]);
+
+  const submitEmail = async () => {
+    if (emailMode === "signin") { await loginWithEmail(email.trim(), password); return; }
+    await signupHousehold({
+      email: email.trim(), password, ownerName: ownerName.trim(),
+      ...(inviteToken.trim() ? { inviteToken: inviteToken.trim() } : { householdName: newHouseholdName.trim() || undefined }),
+    });
+  };
 
   useEffect(() => {
     void backend.profiles().then((r) => {
@@ -103,6 +132,63 @@ export function Lock() {
               <Button variant="ember" disabled={authBusy || !pin} onClick={() => { const p = members.find((m) => m.id === pinFor); if (p) void choose(p); }}><Icon name="LogIn" size={16} /> Sign in</Button>
               <Button variant="ghost" onClick={() => { setPinFor(null); setPin(""); }}>Cancel</Button>
             </div>
+          </Card>
+        )}
+
+        {/* ───────────── Email identity: your own household on this server ───────────── */}
+        {!emailMode ? (
+          <p className="mt-6 text-center text-sm text-ink-500">
+            Not part of this household?{" "}
+            <button className="font-semibold text-ember-600 underline-offset-2 hover:underline" onClick={() => setEmailMode("signin")}>Sign in with email</button>
+            {" · "}
+            <button className="font-semibold text-ember-600 underline-offset-2 hover:underline" onClick={() => setEmailMode("create")}>Create or join a household</button>
+          </p>
+        ) : (
+          <Card className="card-pad mx-auto mt-6 max-w-sm animate-slide-up">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="flex items-center gap-2 text-sm font-semibold text-ink-800">
+                <Icon name={emailMode === "signin" ? "LogIn" : "House"} size={15} className="text-ember-600" />
+                {emailMode === "signin" ? "Sign in with email" : inviteToken ? "Join a household" : "Create your household"}
+              </p>
+              <button className="text-xs text-ink-400 hover:text-ink-600" onClick={() => setEmailMode(emailMode === "signin" ? "create" : "signin")}>
+                {emailMode === "signin" ? "New here?" : "Have an account?"}
+              </button>
+            </div>
+            {emailMode === "create" && (
+              <>
+                <Field label="Your name">
+                  <TextInput value={ownerName} placeholder="e.g. Jordan" onChange={(e) => setOwnerName(e.target.value)} />
+                </Field>
+                <Field label="Invite code (optional)">
+                  <TextInput value={inviteToken} placeholder="Paste a code to join an existing household" onChange={(e) => setInviteToken(e.target.value)} />
+                </Field>
+                {invitePreview ? (
+                  <p className="mb-2 text-xs text-sage-700">Joining <strong>{invitePreview.householdName ?? "a household"}</strong> as {invitePreview.role}.</p>
+                ) : inviteToken.trim() ? (
+                  <p className="mb-2 text-xs text-amber-600">That code doesn't look valid — check it or leave it blank to start fresh.</p>
+                ) : (
+                  <Field label="Household name (optional)">
+                    <TextInput value={newHouseholdName} placeholder="e.g. The Jordans" onChange={(e) => setNewHouseholdName(e.target.value)} />
+                  </Field>
+                )}
+              </>
+            )}
+            <Field label="Email">
+              <TextInput type="email" value={email} placeholder="you@example.com" onChange={(e) => setEmail(e.target.value)} />
+            </Field>
+            <Field label="Password">
+              <TextInput type="password" value={password} placeholder="At least 8 characters" onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void submitEmail(); }} />
+            </Field>
+            <div className="mt-3 flex gap-2">
+              <Button variant="ember" disabled={authBusy || !email.trim() || password.length < 8 || (emailMode === "create" && !ownerName.trim())} onClick={() => void submitEmail()}>
+                <Icon name={emailMode === "signin" ? "LogIn" : "Sparkles"} size={16} />
+                {emailMode === "signin" ? "Sign in" : inviteToken.trim() ? "Join household" : "Create household"}
+              </Button>
+              <Button variant="ghost" onClick={() => setEmailMode(null)}>Cancel</Button>
+            </div>
+            {emailMode === "create" && !inviteToken.trim() && (
+              <p className="mt-2 text-[11px] leading-relaxed text-ink-400">Your household gets its own private space on this server — completely separate from every other family's.</p>
+            )}
           </Card>
         )}
 

@@ -179,6 +179,29 @@ export const api = {
   async logout(): Promise<void> {
     try { await req("/session", { method: "DELETE" }); } finally { await setToken(null); }
   },
+  /* ---- self-serve identity (C1.4): email sign-in, household create/join ---- */
+  async loginEmail(email: string, password: string): Promise<{ session?: Session; token?: string; error?: string; message?: string }> {
+    const r = await req<{ session?: Session; token?: string; error?: string; message?: string }>("/login", {
+      method: "POST", headers: { "x-homeops-bearer": "1" }, body: JSON.stringify({ email, password }),
+    });
+    if (r.data?.token) await setToken(r.data.token);
+    return r.data ?? { error: "network" };
+  },
+  async signup(input: { email: string; password: string; ownerName: string; householdName?: string; inviteToken?: string }): Promise<{ session?: Session; token?: string; error?: string; message?: string }> {
+    const r = await req<{ session?: Session; token?: string; error?: string; message?: string }>("/signup", {
+      method: "POST", headers: { "x-homeops-bearer": "1" }, body: JSON.stringify(input),
+    });
+    if (r.data?.token) await setToken(r.data.token);
+    return r.data ?? { error: "network" };
+  },
+  async invitePreview(token: string): Promise<{ householdName: string | null; displayName: string; role: string } | null> {
+    const r = await req<{ invite: { householdName: string | null; displayName: string; role: string } }>(`/invites/${encodeURIComponent(token)}/preview`);
+    return r.ok ? (r.data?.invite ?? null) : null;
+  },
+  async createInvite(input: { displayName: string; role: string }): Promise<{ invite?: { token: string; role: string; expiresAt: number }; error?: string }> {
+    const r = await req<{ invite?: { token: string; role: string; expiresAt: number }; error?: string }>("/invites", { method: "POST", body: JSON.stringify(input) });
+    return r.data ?? { error: "network" };
+  },
   async health(): Promise<{ ok: boolean; version?: string; runtime?: string; externalActionsEnabled?: boolean } | null> {
     const r = await req<{ ok: boolean; version?: string; runtime?: string; externalActionsEnabled?: boolean }>("/health");
     return r.ok ? r.data : null;

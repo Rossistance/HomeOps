@@ -456,6 +456,34 @@ export const backend = {
     try { await req("/session", { method: "DELETE", mutation: true }); } catch { /* ignore */ } finally { setCsrf(null); }
   },
 
+  /* ---- self-serve identity (C1.4): stranger households ---- */
+  async loginEmail(email: string, password: string): Promise<{ session?: Session; error?: string; message?: string }> {
+    try {
+      const r = await req<{ session?: Session; error?: string; message?: string }>("/login", { method: "POST", body: JSON.stringify({ email, password }) });
+      if (r.session) setCsrf(r.session.csrf);
+      return r;
+    } catch { return { error: "backend_unreachable" }; }
+  },
+  async signup(input: { email: string; password: string; ownerName: string; householdName?: string; inviteToken?: string }): Promise<{ session?: Session; error?: string; message?: string }> {
+    try {
+      const r = await req<{ session?: Session; error?: string; message?: string }>("/signup", { method: "POST", body: JSON.stringify(input) });
+      if (r.session) setCsrf(r.session.csrf);
+      return r;
+    } catch { return { error: "backend_unreachable" }; }
+  },
+  async invitePreview(token: string): Promise<{ householdName: string | null; displayName: string; role: string } | null> {
+    try { return (await req<{ invite: { householdName: string | null; displayName: string; role: string } }>(`/invites/${encodeURIComponent(token)}/preview`)).invite ?? null; } catch { return null; }
+  },
+  async createInvite(input: { displayName: string; role: string }): Promise<{ invite?: { token: string; displayName: string; role: string; expiresAt: number }; error?: string }> {
+    try { return await req(`/invites`, { method: "POST", body: JSON.stringify(input), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async listInvites(): Promise<{ token: string; displayName: string; role: string; expiresAt: number }[]> {
+    try { return (await req<{ invites: { token: string; displayName: string; role: string; expiresAt: number }[] }>(`/invites`)).invites ?? []; } catch { return []; }
+  },
+  async revokeInvite(token: string): Promise<boolean> {
+    try { await req(`/invites/${encodeURIComponent(token)}`, { method: "DELETE", mutation: true }); return true; } catch { return false; }
+  },
+
   async health(): Promise<BackendHealth | null> {
     try { return await req<BackendHealth>("/health"); } catch { return null; }
   },

@@ -89,6 +89,51 @@ export function completePasswordReset(t, newPassword) {
   return all[key];
 }
 
+/* ---- Household invites (join an EXISTING household by code) ----
+ * An Adult Admin mints a short-lived invite naming the person and their role;
+ * whoever redeems it at signup lands in THAT household instead of creating a
+ * new one. Owner can never be granted by invite. */
+const INVITES = "invites.json"; // { [token]: invite } in _system
+const INVITE_TTL_MS = 7 * 24 * 3600000;
+export const INVITABLE_ROLES = ["Adult Admin", "Adult Member", "Limited Member", "Child View", "Guest/Helper"];
+
+export function createInvite({ householdId, householdName, displayName, role, invitedBy }) {
+  if (!INVITABLE_ROLES.includes(role)) return { error: "invalid_role" };
+  const name = String(displayName ?? "").trim();
+  if (!name) return { error: "display_name_required" };
+  const all = sysDoc(INVITES, {});
+  const t = crypto.randomBytes(6).toString("hex");
+  all[t] = { token: t, householdId, householdName: householdName ?? null, displayName: name, role, invitedBy, createdAt: Date.now(), expiresAt: Date.now() + INVITE_TTL_MS, usedAt: null };
+  putSysDoc(INVITES, all);
+  appendAudit({ type: "invite.created", role, invitedBy });
+  return { invite: all[t] };
+}
+export function getInvite(t) {
+  const inv = sysDoc(INVITES, {})[String(t ?? "").trim().toLowerCase()] ?? null;
+  if (!inv || inv.usedAt || inv.expiresAt < Date.now()) return null;
+  return inv;
+}
+export function listInvites(householdId) {
+  return Object.values(sysDoc(INVITES, {})).filter((i) => i.householdId === householdId && !i.usedAt && i.expiresAt > Date.now());
+}
+export function revokeInvite(t, householdId) {
+  const all = sysDoc(INVITES, {});
+  const key = String(t ?? "").trim().toLowerCase();
+  if (!all[key] || all[key].householdId !== householdId) return false;
+  delete all[key];
+  putSysDoc(INVITES, all);
+  return true;
+}
+export function consumeInvite(t) {
+  const all = sysDoc(INVITES, {});
+  const key = String(t ?? "").trim().toLowerCase();
+  const inv = all[key];
+  if (!inv || inv.usedAt || inv.expiresAt < Date.now()) return null;
+  all[key] = { ...inv, usedAt: Date.now() };
+  putSysDoc(INVITES, all);
+  return inv;
+}
+
 export function deleteIdentity(email) {
   const key = normEmail(email);
   const all = sysDoc(IDENTITIES, {});

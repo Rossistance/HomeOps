@@ -223,6 +223,7 @@ import { runWithRequestContext } from "./tenant-context.mjs";
 import {
   createIdentity, verifyCredentials, consumeVerifyToken, beginPasswordReset, completePasswordReset,
   deleteIdentity, deleteIdentitiesForHousehold, listIdentitiesForHousehold, validEmail, validPassword,
+  createInvite, getInvite, listInvites, revokeInvite, consumeInvite,
 } from "./identity.mjs";
 const server = http.createServer((req, res) => {
   runWithRequestContext(() => handleRequest(req, res)).catch(() => { try { res.writeHead(500); res.end(); } catch { /* socket gone */ } });
@@ -546,16 +547,27 @@ const handleRequest = async (req, res) => {
       if (!validEmail(email)) return json(res, 400, { error: "invalid_email" }, req);
       if (!validPassword(body.password)) return json(res, 400, { error: "weak_password", message: "Use at least 8 characters." }, req);
       if (!ownerName) return json(res, 400, { error: "owner_name_required" }, req);
-      const householdId = "hh_" + crypto.randomBytes(6).toString("hex");
-      const actorId = "m-owner";
+      // Invite redemption: join the inviter's EXISTING household with the
+      // invited role instead of creating a new one. Consume-once; never Owner.
+      let householdId, actorId, role, relationship;
+      const invite = body.inviteToken ? getInvite(body.inviteToken) : null;
+      if (body.inviteToken && !invite) return json(res, 400, { error: "invalid_invite", message: "That invite code is invalid, used, or expired — ask for a new one." }, req);
+      if (invite) {
+        householdId = invite.householdId; actorId = "m-" + crypto.randomBytes(4).toString("hex");
+        role = invite.role; relationship = "Invited member";
+      } else {
+        householdId = "hh_" + crypto.randomBytes(6).toString("hex"); actorId = "m-owner";
+        role = "Owner"; relationship = "Account owner";
+      }
       const made = createIdentity({ email, password: body.password, householdId, actorId, displayName: ownerName });
       if (made.error) return json(res, 409, { error: "email_taken", message: "An account with this email already exists — sign in instead." }, req);
+      if (invite) consumeInvite(invite.token);
       await runWithTenant(householdId, () => {
-        putMember({ actorId, displayName: ownerName, role: "Owner", relationship: "Account owner", householdId });
-        setSettings({ householdName: String(body.householdName ?? "").trim().slice(0, 60) || `${ownerName}'s household` }, householdId);
-        appendAudit({ type: "household.signup", email, actorId });
+        putMember({ actorId, displayName: ownerName, role, relationship, householdId });
+        if (!invite) setSettings({ householdName: String(body.householdName ?? "").trim().slice(0, 60) || `${ownerName}'s household` }, householdId);
+        appendAudit({ type: invite ? "household.join" : "household.signup", email, actorId, role });
       });
-      const s = createSession({ actorId, actorName: ownerName, role: "Owner", householdId });
+      const s = createSession({ actorId, actorName: ownerName, role, householdId });
       const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
       const wantToken = req.headers["x-homeops-bearer"] === "1";
       // Honest verification status: sending needs an email channel this fresh
@@ -601,6 +613,37 @@ const handleRequest = async (req, res) => {
       deleteSessionsForActor(idn.actorId, idn.householdId); // every device re-authenticates
       return json(res, 200, { ok: true }, req);
     }
+    /* ---- Household invites: join codes for existing households ---- */
+    if (path === "/api/invites" && method === "POST") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const made = createInvite({
+        householdId: g.session.householdId, householdName: getSettings(g.session.householdId).householdName ?? null,
+        displayName: body.displayName, role: body.role ?? "Adult Member", invitedBy: g.session.actorId,
+      });
+      if (made.error) return json(res, 400, { error: made.error }, req);
+      audit({ type: "invite.created", role: made.invite.role, ok: true }, req, g.session);
+      return json(res, 200, { invite: made.invite }, req);
+    }
+    if (path === "/api/invites" && method === "GET") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      return json(res, 200, { invites: listInvites(g.session.householdId) }, req);
+    }
+    const invOne = path.match(/^\/api\/invites\/([a-z0-9]+)$/);
+    if (invOne && method === "DELETE") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const had = revokeInvite(invOne[1], g.session.householdId);
+      return json(res, had ? 200 : 404, had ? { ok: true } : { error: "not_found" }, req);
+    }
+    // Pre-auth preview so the signup screen can show what's being joined.
+    const invPreview = path.match(/^\/api\/invites\/([a-z0-9]+)\/preview$/);
+    if (invPreview && method === "GET") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const inv = getInvite(invPreview[1]);
+      if (!inv) return json(res, 404, { error: "invalid_invite" }, req);
+      return json(res, 200, { invite: { householdName: inv.householdName, displayName: inv.displayName, role: inv.role } }, req);
+    }
+
     /* Apple 5.1.1(v) account deletion. An Owner deletes the WHOLE household —
      * physically: the tenant database directory is removed. A non-owner member
      * deletes their own identity and is archived from the roster. Requires the

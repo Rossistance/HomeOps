@@ -140,6 +140,33 @@ test("Apple 5.1.1(v): owner deletion removes the household's database; neighbors
   assert.ok(gone.some((x) => x.householdId === hixon.householdId));
 });
 
+test("invite flow: a code joins the inviter's household with the invited role — never Owner, never twice", async () => {
+  const host = await signup("hosts@example.com", "Hana", "Invite Hosts");
+  const owner = await host.req("/api/invites", { method: "POST", body: JSON.stringify({ displayName: "Grandpa Joe", role: "Owner" }) });
+  assert.equal(owner.status, 400, "Owner can never be granted by invite");
+  const made = await host.req("/api/invites", { method: "POST", body: JSON.stringify({ displayName: "Grandpa Joe", role: "Limited Member" }) });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  const token = made.data.invite.token;
+
+  // Pre-auth preview shows what's being joined.
+  const preview = await (await ctx.fetch(`/api/invites/${token}/preview`)).json();
+  assert.equal(preview.invite.householdName, "Invite Hosts");
+  assert.equal(preview.invite.role, "Limited Member");
+
+  // Redeeming joins the EXISTING household instead of creating one.
+  const joiner = await ctx.fetch("/api/signup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "joe@example.com", password: "grandpa joe phrase", ownerName: "Joe", inviteToken: token }) });
+  assert.equal(joiner.status, 200);
+  const jdata = await joiner.json();
+  assert.equal(jdata.session.householdId, host.householdId, "joined the host household");
+  assert.equal(jdata.session.role, "Limited Member");
+  const roster = await host.req("/api/members");
+  assert.ok(roster.data.members.some((m) => m.displayName === "Joe" && m.role === "Limited Member"));
+
+  // Consume-once.
+  const reuse = await ctx.fetch("/api/signup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "second@example.com", password: "another passphrase", ownerName: "Second", inviteToken: token }) });
+  assert.equal(reuse.status, 400, "a used invite is dead");
+});
+
 test("deletion requires the correct password", async () => {
   const maria = await ctx.fetch("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "maria@example.com", password: "brand new passphrase" }) });
   const cookie = (maria.headers.get("set-cookie") || "").split(";")[0];
