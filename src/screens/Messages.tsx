@@ -235,13 +235,14 @@ function ApprovalCard({ approval: a, expanded, onToggle }: { approval: ApprovalR
               {!editing && !askMode && <>
                 <Button variant="success" onClick={() => approve(a.id)}><Icon name="Check" size={15} /> Approve</Button>
                 <Button variant="danger" onClick={() => deny(a.id)}><Icon name="X" size={15} /> Deny</Button>
-                {/* Edit / Ask-for-changes are meaningless for a server-driven run gate —
-                    the server executes the frozen step input on approval. Hide them so the
-                    edit isn't silently dropped and the run can't be left hanging. */}
-                {!a.serverManaged && <>
-                  <Button variant="secondary" onClick={() => setEditing(true)}><Icon name="Pencil" size={14} /> Edit before approval</Button>
-                  <Button variant="ghost" onClick={() => setAskMode(true)}><Icon name="MessageCircleQuestion" size={14} /> Ask for changes</Button>
-                </>}
+                {/* "Edit before approval" only rewrites the preview text — meaningless for a
+                    server-driven run gate, which executes the frozen step input. So it stays
+                    limited to legacy client gates. "Ask for changes", by contrast, is fully
+                    wired for server-managed gates: it re-plans from the original steps + your
+                    feedback and starts a revised run (store `askAgentForChanges`). It was
+                    previously hidden here, so users could never reach that loop. */}
+                {!a.serverManaged && <Button variant="secondary" onClick={() => setEditing(true)}><Icon name="Pencil" size={14} /> Edit before approval</Button>}
+                <Button variant="ghost" onClick={() => setAskMode(true)}><Icon name="MessageCircleQuestion" size={14} /> Ask for changes</Button>
               </>}
               {editing && <><Button variant="success" onClick={() => { approve(a.id, edited); setEditing(false); }}><Icon name="Check" size={15} /> Approve edited</Button><Button variant="ghost" onClick={() => setEditing(false)}>Cancel</Button></>}
               {askMode && <><Button variant="primary" disabled={!note.trim()} onClick={() => { askChanges(a.id, note.trim()); setAskMode(false); setNote(""); }}>Send to agent</Button><Button variant="ghost" onClick={() => setAskMode(false)}>Cancel</Button></>}

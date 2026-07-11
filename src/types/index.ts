@@ -457,6 +457,10 @@ export interface FileAsset {
   dataUrl?: string; // for genuinely uploaded files
   folder: string; // Uploads, Reports, Exports, Reference, Generated...
   createdByAgentId?: string;
+  /** Present when this file is backed by a durable server blob (POST /api/files). */
+  serverId?: string;
+  /** Number of pages/sides stored on the server (e.g. front+back of an ID card). */
+  pageCount?: number;
 }
 
 export interface KnowledgeItem {
@@ -473,6 +477,10 @@ export interface KnowledgeItem {
   agentEditableRequiresApproval: boolean;
   createdAt: string;
   updatedAt: string;
+  /** Present when this item is backed by the durable server Knowledge collection. */
+  serverId?: string;
+  /** "household" | "personal" — server visibility scope. */
+  visibility?: string;
 }
 
 export interface PlaybookStep {

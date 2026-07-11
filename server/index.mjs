@@ -24,6 +24,7 @@ import {
   listTasks, getTask, putTask, patchTask, deleteTaskRec,
   listSubscriptions, getSubscription, putSubscription, patchSubscription, deleteSubscriptionRec,
   listMeals, getMeal, putMeal, patchMeal, deleteMealRec,
+  listKnowledge, getKnowledge, addKnowledge, patchKnowledge, removeKnowledge,
   listConversations, getConversation, putConversation, appendConversationMessage, deleteConversationRec,
   canSeeEntity, listMemory, listArtifacts, getMemoryEntry, deleteMemoryEntry,
   listRiskOverrides, putRiskOverride, deleteRiskOverrideRec, getRiskOverride,
@@ -77,6 +78,17 @@ import { planFromGoal, generateMiniApp, generatePlaybook, assistantRespond, assi
 
 const PORT = Number(process.env.PORT || 8787);
 const VERSION = "1.2.0";
+// Per-member accent color: one of the app accent names, or a hex string. Optional and
+// back-compat — an unrecognized value is ignored (never stored) rather than erroring.
+const MEMBER_COLORS = ["ink", "sage", "coral", "amber", "sky", "lavender"];
+function normalizeMemberColor(v) {
+  if (v == null) return undefined;
+  const s = String(v).trim();
+  if (!s) return undefined;
+  if (MEMBER_COLORS.includes(s)) return s;
+  if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(s)) return s;
+  return undefined;
+}
 const APP_ORIGIN = ALLOWED_ORIGINS[0] || "http://localhost:5173";
 const ROOT_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const STATIC_DIR = process.env.HOMEOPS_STATIC_DIR || join(ROOT_DIR, "dist");
@@ -845,7 +857,7 @@ const handleRequest = async (req, res) => {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const members = listMembers({ householdId: g.session.householdId }).filter((m) => !m.archived).map((m) => ({
         actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null,
-        spaceIds: m.spaceIds ?? [], isCurrentUser: m.actorId === g.session.actorId,
+        color: m.color ?? null, spaceIds: m.spaceIds ?? [], isCurrentUser: m.actorId === g.session.actorId,
       }));
       return json(res, 200, { members }, req);
     }
@@ -860,9 +872,10 @@ const handleRequest = async (req, res) => {
       const actorId = String(body.actorId ?? ("m-" + crypto.randomBytes(4).toString("hex"))).trim();
       if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(actorId)) return json(res, 400, { error: "bad_actor_id" }, req);
       if (getMember(actorId)) return json(res, 409, { error: "actor_exists" }, req);
-      const m = putMember({ actorId, displayName, role: body.role, relationship: body.relationship ?? null, householdId: g.session.householdId });
+      const color = normalizeMemberColor(body.color);
+      const m = putMember({ actorId, displayName, role: body.role, relationship: body.relationship ?? null, householdId: g.session.householdId, ...(color !== undefined ? { color } : {}) });
       audit({ type: "member.create", memberId: actorId, role: body.role, ok: true }, req, g.session);
-      return json(res, 200, { member: { actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null } }, req);
+      return json(res, 200, { member: { actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null, color: m.color ?? null } }, req);
     }
     const memberOne = path.match(/^\/api\/members\/([^/]+)$/);
     if (memberOne && method === "PATCH") {
@@ -873,6 +886,11 @@ const handleRequest = async (req, res) => {
       const patch = {};
       if (body.displayName != null) { const n = String(body.displayName).trim(); if (!n) return json(res, 400, { error: "name_required" }, req); patch.displayName = n; }
       if (body.relationship !== undefined) patch.relationship = body.relationship;
+      // Color: an explicit null/"" clears it; a valid accent name or hex sets it; anything else is ignored.
+      if (body.color !== undefined) {
+        if (body.color === null || body.color === "") patch.color = null;
+        else { const c = normalizeMemberColor(body.color); if (c) patch.color = c; }
+      }
       if (body.role != null) {
         if (!VALID_ROLES.includes(body.role)) return json(res, 400, { error: "bad_role", valid: VALID_ROLES }, req);
         const owners = listMembers({ householdId: g.session.householdId }).filter((x) => !x.archived && x.role === "Owner");
@@ -881,7 +899,7 @@ const handleRequest = async (req, res) => {
       }
       const updated = putMember({ actorId: m.actorId, ...patch });
       audit({ type: "member.update", memberId: m.actorId, fields: Object.keys(patch), ok: true }, req, g.session);
-      return json(res, 200, { member: { actorId: updated.actorId, displayName: updated.displayName, role: updated.role, relationship: updated.relationship ?? null } }, req);
+      return json(res, 200, { member: { actorId: updated.actorId, displayName: updated.displayName, role: updated.role, relationship: updated.relationship ?? null, color: updated.color ?? null } }, req);
     }
     if (memberOne && method === "DELETE") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -1382,6 +1400,74 @@ const handleRequest = async (req, res) => {
       });
       audit({ type: "meal.to_calendar", mealId: m.id, eventId: ev.id, action: "created", ok: true }, req, g.session);
       return json(res, 200, { ok: true, event: ev, action: "created" }, req);
+    }
+
+    /* ---- Knowledge (KN): user-authored household knowledge ----
+     * A real CRUD collection the family owns (custom instructions, family facts,
+     * preferences, rules, reference notes) — distinct from auto-generated memory.
+     * Mirrors meals: Limited Member+ creates; adult OR the creator edits/deletes;
+     * "personal" items are visible only to the creator + adults. Tenant-scoped. */
+    if (path === "/api/knowledge" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const items = listKnowledge((k) => k.householdId === g.session.householdId)
+        // household → everyone; personal → creator + adults only.
+        .filter((k) => k.createdBy === g.session.actorId || k.visibility !== "personal" || isAdultRole(g.session.role))
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+      return json(res, 200, { items }, req);
+    }
+    if (path === "/api/knowledge" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      if (!String(body.title ?? "").trim()) return json(res, 400, { error: "title_required" }, req);
+      const item = addKnowledge({
+        id: "kn_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        title: String(body.title).trim(),
+        // `type` is a free string (client uses "Custom Instruction","Family Fact","Preference","Rule","Reference Note").
+        type: typeof body.type === "string" && body.type.trim() ? body.type.trim() : "Reference Note",
+        content: typeof body.content === "string" ? body.content : "",
+        tags: Array.isArray(body.tags) ? body.tags.map(String).filter(Boolean).slice(0, 20) : [],
+        visibility: body.visibility === "personal" ? "personal" : "household",
+        sensitive: !!body.sensitive,
+        fileIds: Array.isArray(body.fileIds) ? body.fileIds.map(String).slice(0, 50) : [],
+        createdBy: g.session.actorId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      });
+      audit({ type: "knowledge.create", knowledgeId: item.id, ok: true }, req, g.session);
+      return json(res, 200, { item }, req);
+    }
+    const knowledgeOne = path.match(/^\/api\/knowledge\/([^/]+)$/);
+    if (knowledgeOne && (method === "PATCH" || method === "POST")) {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const k = getKnowledge(knowledgeOne[1]);
+      if (!k || k.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!isAdultRole(g.session.role) && k.createdBy !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const { ifUpdatedAt } = body;
+      // Optional optimistic-concurrency guard (same as meals): a stale write 409s and refetches.
+      if (ifUpdatedAt && k.updatedAt && ifUpdatedAt !== k.updatedAt) {
+        return json(res, 409, { error: "stale_write", message: "This was changed on another device — refresh and try again.", current: k }, req);
+      }
+      // Never trust the client for id/household/createdBy/timestamps — build the patch from writable fields only.
+      const patch = {};
+      if (body.title !== undefined) { const t = String(body.title).trim(); if (!t) return json(res, 400, { error: "title_required" }, req); patch.title = t; }
+      if (body.type !== undefined) patch.type = typeof body.type === "string" && body.type.trim() ? body.type.trim() : k.type;
+      if (body.content !== undefined) patch.content = typeof body.content === "string" ? body.content : "";
+      if (body.tags !== undefined) patch.tags = Array.isArray(body.tags) ? body.tags.map(String).filter(Boolean).slice(0, 20) : [];
+      if (body.visibility !== undefined) patch.visibility = body.visibility === "personal" ? "personal" : "household";
+      if (body.sensitive !== undefined) patch.sensitive = !!body.sensitive;
+      if (body.fileIds !== undefined) patch.fileIds = Array.isArray(body.fileIds) ? body.fileIds.map(String).slice(0, 50) : [];
+      const updated = patchKnowledge(k.id, patch);
+      audit({ type: "knowledge.update", knowledgeId: k.id, ok: true }, req, g.session);
+      return json(res, 200, { item: updated }, req);
+    }
+    if (knowledgeOne && method === "DELETE") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const k = getKnowledge(knowledgeOne[1]);
+      if (!k || k.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!isAdultRole(g.session.role) && k.createdBy !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
+      removeKnowledge(k.id);
+      audit({ type: "knowledge.delete", knowledgeId: k.id, ok: true }, req, g.session);
+      return json(res, 200, { ok: true }, req);
     }
 
     /* ---- Calendar subscriptions (CAL): the read-only "linked" calendar layer ----
@@ -1915,23 +2001,49 @@ const handleRequest = async (req, res) => {
       if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const name = String(body.name ?? "").trim();
-      const b64 = String(body.contentBase64 ?? "");
       if (!name) return json(res, 400, { error: "name_required" }, req);
-      if (!b64) return json(res, 400, { error: "content_required" }, req);
-      if (b64.length > 7_000_000) return json(res, 413, { error: "too_large", message: "Files are capped at ~5 MB." }, req);
-      let buf;
-      try { buf = Buffer.from(b64, "base64"); } catch { return json(res, 400, { error: "bad_base64" }, req); }
-      if (!buf || buf.length === 0) return json(res, 400, { error: "bad_base64" }, req);
+      const CAP = 7_000_000; // ~5 MB of base64, enforced per page
+      // A logical file can carry multiple pages (front+back of an ID card, a multi-page
+      // scan). `pages: [{ name?, base64 }]` writes one blob per page; the classic single
+      // `contentBase64` upload is preserved verbatim as a 1-page file (full back-compat).
+      const hasPages = Array.isArray(body.pages) && body.pages.length > 0;
+      const pageBufs = [];
+      if (hasPages) {
+        if (body.pages.length > 20) return json(res, 400, { error: "too_many_pages", message: "Cap is 20 pages per file." }, req);
+        for (const p of body.pages) {
+          const pb64 = String(p?.base64 ?? "");
+          if (!pb64) return json(res, 400, { error: "content_required" }, req);
+          if (pb64.length > CAP) return json(res, 413, { error: "too_large", message: "Each page is capped at ~5 MB." }, req);
+          let buf;
+          try { buf = Buffer.from(pb64, "base64"); } catch { return json(res, 400, { error: "bad_base64" }, req); }
+          if (!buf || buf.length === 0) return json(res, 400, { error: "bad_base64" }, req);
+          pageBufs.push({ name: typeof p?.name === "string" && p.name.trim() ? p.name.trim() : null, buf });
+        }
+      } else {
+        const b64 = String(body.contentBase64 ?? "");
+        if (!b64) return json(res, 400, { error: "content_required" }, req);
+        if (b64.length > CAP) return json(res, 413, { error: "too_large", message: "Files are capped at ~5 MB." }, req);
+        let buf;
+        try { buf = Buffer.from(b64, "base64"); } catch { return json(res, 400, { error: "bad_base64" }, req); }
+        if (!buf || buf.length === 0) return json(res, 400, { error: "bad_base64" }, req);
+        pageBufs.push({ name: null, buf });
+      }
+      const id = "file_" + crypto.randomBytes(8).toString("hex");
+      // Page 0's blob lives under the record id (so a legacy single-page reader still works);
+      // extra pages get `<id>_p1`, `<id>_p2`, … . pageBlobIds indexes them in order.
+      const pageBlobIds = pageBufs.map((_, i) => (i === 0 ? id : `${id}_p${i}`));
+      const sizeBytes = pageBufs.reduce((n, p) => n + p.buf.length, 0);
       const rec = putFileRec({
-        id: "file_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        id, householdId: g.session.householdId,
         name, mime: typeof body.mime === "string" ? body.mime : "application/octet-stream",
-        sizeBytes: buf.length, tags: Array.isArray(body.tags) ? body.tags.map(String).slice(0, 10) : [],
+        sizeBytes, pageCount: pageBufs.length, pageBlobIds, pageNames: pageBufs.map((p) => p.name),
+        tags: Array.isArray(body.tags) ? body.tags.map(String).slice(0, 10) : [],
         visibility: body.visibility ?? "household", spaceId: body.spaceId ?? "sp-family",
         uploadedBy: g.session.actorId, source: body.source ?? "upload",
         createdAt: new Date().toISOString(),
       });
-      writeFileBlob(rec.id, buf);
-      audit({ type: "file.upload", fileId: rec.id, name, sizeBytes: buf.length, ok: true }, req, g.session);
+      pageBufs.forEach((p, i) => writeFileBlob(pageBlobIds[i], p.buf));
+      audit({ type: "file.upload", fileId: rec.id, name, sizeBytes, pageCount: pageBufs.length, ok: true }, req, g.session);
       return json(res, 200, { file: rec }, req);
     }
     const fileContent = path.match(/^\/api\/files\/([^/]+)\/content$/);
@@ -1939,9 +2051,15 @@ const handleRequest = async (req, res) => {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const f = getFileRec(fileContent[1]);
       if (!f || f.householdId !== g.session.householdId || !canSeeEntity(f, g.session)) return json(res, 404, { error: "not_found" }, req);
-      const buf = readFileBlob(f.id);
+      // Legacy/single-page files have no pageBlobIds — their single blob is under the record id.
+      const blobIds = Array.isArray(f.pageBlobIds) && f.pageBlobIds.length ? f.pageBlobIds : [f.id];
+      const page = parseInt(url.searchParams.get("page") ?? "0", 10);
+      const idx = Number.isFinite(page) ? page : 0;
+      if (idx < 0 || idx >= blobIds.length) return json(res, 404, { error: "page_not_found" }, req);
+      const buf = readFileBlob(blobIds[idx]);
       if (!buf) return json(res, 410, { error: "content_missing" }, req);
-      return json(res, 200, { name: f.name, mime: f.mime, contentBase64: buf.toString("base64") }, req);
+      const pageName = Array.isArray(f.pageNames) ? f.pageNames[idx] : null;
+      return json(res, 200, { name: pageName || f.name, mime: f.mime, page: idx, pageCount: f.pageCount ?? blobIds.length, contentBase64: buf.toString("base64") }, req);
     }
     const fileOne = path.match(/^\/api\/files\/([^/]+)$/);
     if (fileOne && method === "DELETE") {

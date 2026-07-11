@@ -18,6 +18,7 @@ import { Card, Well } from "@/components/ui/card";
 import { SectionHeader } from "@/components/ui/list";
 import { PressableScale } from "@/components/ui/pressable-scale";
 import { HScreen } from "@/components/ui/screen";
+import { HSheet, SheetCTA } from "@/components/ui/sheet";
 import { SkeletonCards } from "@/components/ui/skeleton";
 import { Rise } from "@/components/ui/stagger";
 import { EmptyState, ErrorState, Notice } from "@/components/ui/states";
@@ -54,6 +55,7 @@ export default function MealsScreen() {
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [slotFilter, setSlotFilter] = useState<Slot | null>(null);
+  const [editing, setEditing] = useState<Meal | null>(null);
 
   // Composer (opened from the header +)
   const [composerOpen, setComposerOpen] = useState(false);
@@ -370,6 +372,7 @@ export default function MealsScreen() {
                         busy={busy}
                         onGrocery={() => void toGrocery(m)}
                         onCalendar={() => void toCalendar(m)}
+                        onEdit={() => setEditing(m)}
                         onRemove={() => removeMeal(m)}
                       />
                     ))}
@@ -391,6 +394,7 @@ export default function MealsScreen() {
                     busy={busy}
                     onGrocery={() => void toGrocery(m)}
                     onCalendar={() => void toCalendar(m)}
+                    onEdit={() => setEditing(m)}
                     onRemove={() => removeMeal(m)}
                   />
                 ))}
@@ -399,17 +403,162 @@ export default function MealsScreen() {
           ) : null}
         </>
       )}
+
+      {/* Edit a meal in place — PATCHes the record, preserving mealId links. */}
+      <MealEditSheet
+        meal={editing}
+        visible={!!editing}
+        week={week}
+        todayKey={todayKey}
+        onClose={() => setEditing(null)}
+        onSaved={() => { setEditing(null); void load(); }}
+      />
     </HScreen>
   );
 }
 
+/** Edit-a-meal sheet: title/date/slot/time/servings/ingredients/recipe/notes.
+ *  PATCHes the existing meal (mealId back-references stay intact server-side). */
+function MealEditSheet({ meal, visible, week, todayKey, onClose, onSaved }: {
+  meal: Meal | null;
+  visible: boolean;
+  week: Date[];
+  todayKey: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { colors, spacing, type } = useTheme();
+  const [title, setTitle] = useState("");
+  const [date, setDate] = useState<string | null>(null);
+  const [slot, setSlot] = useState<Slot>("dinner");
+  const [time, setTime] = useState("");
+  const [servings, setServings] = useState("");
+  const [ingredients, setIngredients] = useState("");
+  const [recipeUrl, setRecipeUrl] = useState("");
+  const [notes, setNotes] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!meal) return;
+    setTitle(meal.title);
+    setDate(meal.date);
+    setSlot((SLOTS as readonly string[]).includes(meal.slot) ? (meal.slot as Slot) : "dinner");
+    setTime(meal.time ?? "");
+    setServings(meal.servings != null ? String(meal.servings) : "");
+    setIngredients(meal.ingredients.map((i) => i.item).join(", "));
+    setRecipeUrl(meal.recipeUrl ?? "");
+    setNotes(meal.notes ?? "");
+    setErr(null);
+  }, [meal]);
+
+  const inputStyle = [type.body, { color: colors.text, backgroundColor: colors.surfaceSunken, borderRadius: 12, borderCurve: "continuous" as const, paddingHorizontal: spacing.md, paddingVertical: 10 }];
+
+  const save = async () => {
+    if (!meal || !title.trim() || busy) return;
+    setBusy(true); setErr(null);
+    // Preserve `have` flags for ingredients whose names didn't change.
+    const prev = new Map(meal.ingredients.map((i) => [i.item, !!i.have]));
+    const names = ingredients.split(",").map((s) => s.trim()).filter(Boolean);
+    const ing = names.map((item) => ({ item, have: prev.get(item) ?? false }));
+    const t = time.trim();
+    const s = parseInt(servings, 10);
+    const r = await api.patchMeal(meal.id, {
+      title: title.trim(),
+      date,
+      slot,
+      time: /^([01]\d|2[0-3]):[0-5]\d$/.test(t) ? t : null,
+      servings: Number.isFinite(s) && s > 0 ? s : null,
+      ingredients: ing,
+      recipeUrl: recipeUrl.trim(),
+      notes: notes.trim(),
+      ifUpdatedAt: meal.updatedAt,
+    });
+    setBusy(false);
+    if (r.meal) { tapHaptic("success"); onSaved(); }
+    else if (r.error === "stale_write") setErr("This meal changed on another device — close and reopen to edit.");
+    else setErr(r.error === "forbidden" ? "You can only edit meals you added." : `Couldn't save: ${r.message ?? r.error ?? "unknown error"}`);
+  };
+
+  return (
+    <HSheet
+      visible={visible}
+      onClose={onClose}
+      title="Edit meal"
+      leftLabel="Cancel"
+      heightPct={0.9}
+      footer={<SheetCTA title={busy ? "Saving…" : "Save changes"} onPress={() => void save()} disabled={busy || !title.trim()} />}
+    >
+      <ScrollView contentContainerStyle={{ paddingHorizontal: spacing.xl, paddingBottom: spacing.lg, gap: spacing.md }} keyboardShouldPersistTaps="handled">
+        {err ? <Notice text={err} ok={false} /> : null}
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Meal</T>
+          <TextInput style={inputStyle} placeholder="Meal name" placeholderTextColor={colors.textFaint} value={title} onChangeText={setTitle} accessibilityLabel="Meal title" />
+        </View>
+
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Day</T>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: spacing.sm }} keyboardShouldPersistTaps="handled">
+            <Chip label="No date" selected={date === null} onPress={() => setDate(null)} />
+            {week.map((d) => {
+              const k = dayKey(d);
+              return (
+                <Chip
+                  key={k}
+                  label={k === todayKey ? "Today" : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" })}
+                  selected={date === k}
+                  onPress={() => setDate(k)}
+                />
+              );
+            })}
+          </ScrollView>
+        </View>
+
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Slot</T>
+          <ChipRow>
+            {SLOTS.map((s) => <Chip key={s} label={s} selected={slot === s} onPress={() => setSlot(s)} />)}
+          </ChipRow>
+        </View>
+
+        <View style={{ flexDirection: "row", gap: spacing.md }}>
+          <View style={{ flex: 1, gap: 6 }}>
+            <T kind="eyebrow">Time (HH:MM)</T>
+            <TextInput style={inputStyle} placeholder="18:00" placeholderTextColor={colors.textFaint} value={time} onChangeText={setTime} keyboardType="numbers-and-punctuation" accessibilityLabel="Meal time, 24-hour HH:MM" />
+          </View>
+          <View style={{ flex: 1, gap: 6 }}>
+            <T kind="eyebrow">Servings</T>
+            <TextInput style={inputStyle} placeholder="4" placeholderTextColor={colors.textFaint} value={servings} onChangeText={setServings} keyboardType="number-pad" accessibilityLabel="Servings" />
+          </View>
+        </View>
+
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Ingredients</T>
+          <TextInput style={inputStyle} placeholder="Comma-separated" placeholderTextColor={colors.textFaint} value={ingredients} onChangeText={setIngredients} accessibilityLabel="Ingredients, comma-separated" />
+        </View>
+
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Recipe link</T>
+          <TextInput style={inputStyle} placeholder="https://…" placeholderTextColor={colors.textFaint} value={recipeUrl} onChangeText={setRecipeUrl} autoCapitalize="none" autoCorrect={false} keyboardType="url" accessibilityLabel="Recipe URL" />
+        </View>
+
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Notes</T>
+          <TextInput style={[inputStyle, { minHeight: 72 }]} placeholder="Prep notes, sides, reminders…" placeholderTextColor={colors.textFaint} value={notes} onChangeText={setNotes} multiline accessibilityLabel="Meal notes" />
+        </View>
+      </ScrollView>
+    </HSheet>
+  );
+}
+
 /** One planned meal: slot badge, ingredient preview, and the action row. */
-function MealCard({ m, canManage, busy, onGrocery, onCalendar, onRemove }: {
+function MealCard({ m, canManage, busy, onGrocery, onCalendar, onEdit, onRemove }: {
   m: Meal;
   canManage: boolean;
   busy: string | null;
   onGrocery: () => void;
   onCalendar: () => void;
+  onEdit: () => void;
   onRemove: () => void;
 }) {
   const { colors, spacing } = useTheme();
@@ -476,6 +625,16 @@ function MealCard({ m, canManage, busy, onGrocery, onCalendar, onRemove }: {
             <Button small title="Calendar" icon="calendar.badge.plus" loading={busy === `c:${m.id}`} onPress={onCalendar} />
           ) : null}
           <View style={{ flex: 1 }} />
+          <PressableScale
+            haptic="select"
+            hitSlop={8}
+            onPress={onEdit}
+            accessibilityRole="button"
+            accessibilityLabel={`Edit ${m.title}`}
+            style={{ padding: 8 }}
+          >
+            <Sym name="pencil" size={17} color={colors.textMuted} />
+          </PressableScale>
           <PressableScale
             haptic="warning"
             hitSlop={8}

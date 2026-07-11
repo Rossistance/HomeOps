@@ -392,7 +392,7 @@ export interface ServerTask {
   visibility: string; notes: string; listName?: string; source: string; createdBy: string;
   createdAt: string; updatedAt: string; mealId?: string | null;
 }
-export interface ServerMember { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean }
+export interface ServerMember { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean; color?: string | null }
 export interface CalendarSubscription { id: string; name: string; url: string | null; source: string; lastSyncAt: number | null; lastResult: { imported?: number; updated?: number; removed?: number; error?: string } | null; eventCount: number; createdAt: number }
 export interface CalendarSync { ok: boolean; imported?: number; updated?: number; removed?: number; total?: number; error?: string }
 export interface MealIngredient { item: string; have?: boolean }
@@ -408,6 +408,10 @@ export interface CatalogTool {
   riskOverridden?: boolean; defaultRisk?: string; defaultRequiresApproval?: boolean;
 }
 export interface ServerArtifact { id: string; householdId: string; runId?: string; kind: string; title: string; body?: string; createdAt: number }
+/* ---- Durable files (server-owned blobs; multi-page for front+back of IDs) ---- */
+export interface ServerFile { id: string; householdId: string; name: string; mime: string; sizeBytes: number; pageCount?: number; pageBlobIds?: string[]; pageNames?: (string | null)[]; tags: string[]; visibility: string; spaceId: string; uploadedBy: string; source: string; createdAt: string }
+/* ---- Server-owned Knowledge (user-authored, editable, durable) ---- */
+export interface ServerKnowledge { id: string; householdId: string; title: string; type: string; content: string; tags: string[]; visibility: "household" | "personal"; sensitive: boolean; fileIds: string[]; createdBy: string; createdAt: string; updatedAt: string }
 /* ---- Interactive email review (item 3): per-message label changes from a run ---- */
 export interface EmailReviewMessage { id: string; subject: string; from: string; snippet: string; added: string[]; removed: string[] }
 export interface EmailReviewLabel { id: string; name: string; type: string }
@@ -755,7 +759,7 @@ export const backend = {
   async createMemberRemote(body: { displayName: string; role: string; relationship?: string | null; actorId?: string }): Promise<{ member?: { actorId: string; displayName: string; role: string; relationship: string | null }; error?: string; message?: string }> {
     try { return await req("/members", { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
-  async updateMemberRemote(actorId: string, patch: { displayName?: string; role?: string; relationship?: string | null }): Promise<{ member?: { actorId: string; displayName: string; role: string; relationship: string | null }; error?: string; message?: string }> {
+  async updateMemberRemote(actorId: string, patch: { displayName?: string; role?: string; relationship?: string | null; color?: string | null }): Promise<{ member?: { actorId: string; displayName: string; role: string; relationship: string | null; color?: string | null }; error?: string; message?: string }> {
     try { return await req(`/members/${encodeURIComponent(actorId)}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
   async archiveMemberRemote(actorId: string): Promise<{ ok?: boolean; error?: string; message?: string }> {
@@ -782,6 +786,32 @@ export const backend = {
   // approval-gated calendar push route from the Calendar screen.
   async mealToCalendar(id: string): Promise<{ ok: boolean; event?: ServerEvent; action?: "created" | "updated"; error?: string; message?: string }> {
     try { return await req(`/meals/${id}/to-calendar`, { method: "POST", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  /* ---- durable files (server blobs; supports multi-page front+back uploads) ---- */
+  async files(): Promise<ServerFile[]> {
+    try { return (await req<{ files: ServerFile[] }>("/files")).files ?? []; } catch { return []; }
+  },
+  async uploadFile(body: { name: string; mime?: string; contentBase64?: string; pages?: { name?: string; base64: string }[]; tags?: string[]; visibility?: string; spaceId?: string; source?: string }): Promise<{ file?: ServerFile; error?: string; message?: string }> {
+    try { return await req("/files", { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async fileContent(id: string, page = 0): Promise<{ name?: string; mime?: string; page?: number; pageCount?: number; contentBase64?: string; error?: string }> {
+    try { return await req(`/files/${id}/content?page=${page}`); } catch { return { error: "backend_unreachable" }; }
+  },
+  async deleteFileRemote(id: string): Promise<{ ok?: boolean; error?: string }> {
+    try { return await req(`/files/${id}`, { method: "DELETE", mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  /* ---- server-owned Knowledge (durable, editable, visibility-scoped) ---- */
+  async knowledge(): Promise<ServerKnowledge[]> {
+    try { return (await req<{ items: ServerKnowledge[] }>("/knowledge")).items ?? []; } catch { return []; }
+  },
+  async createKnowledge(body: { title: string; type?: string; content?: string; tags?: string[]; visibility?: string; sensitive?: boolean; fileIds?: string[] }): Promise<{ item?: ServerKnowledge; error?: string }> {
+    try { return await req("/knowledge", { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async patchKnowledge(id: string, patch: Partial<ServerKnowledge>): Promise<{ item?: ServerKnowledge; error?: string }> {
+    try { return await req(`/knowledge/${id}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async deleteKnowledge(id: string): Promise<{ ok?: boolean; error?: string }> {
+    try { return await req(`/knowledge/${id}`, { method: "DELETE", mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
   /* ---- calendar subscriptions (the read-only "linked" calendar layer) ---- */
   async calendarSubscriptions(): Promise<CalendarSubscription[]> {

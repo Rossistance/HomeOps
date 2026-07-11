@@ -248,6 +248,19 @@ export function Tag({ children }: { children: ReactNode }) {
   return <span className="inline-flex items-center rounded-lg bg-surface-sunken px-2 py-0.5 text-xs font-medium text-ink-600">{children}</span>;
 }
 
+/** Stacked, per-person colored dots — the "who is this for" cue used on calendar items.
+ *  Each person's `color` is an accent-palette key (their member color / avatarColor). */
+export function MemberDots({ members, max = 5 }: { members: { id?: string; name?: string; color: string }[]; max?: number }) {
+  if (!members.length) return null;
+  return (
+    <span className="flex shrink-0 -space-x-1" title={members.map((m) => m.name).filter(Boolean).join(", ")}>
+      {members.slice(0, max).map((m, i) => (
+        <span key={m.id ?? i} className={cn("h-2.5 w-2.5 rounded-full ring-2 ring-surface-raised", ACCENT_SOLID[m.color] ?? ACCENT_SOLID.gray)} />
+      ))}
+    </span>
+  );
+}
+
 /* ------------------------------- Modal ---------------------------------- */
 
 export function Modal({

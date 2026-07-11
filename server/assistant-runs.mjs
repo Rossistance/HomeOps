@@ -101,24 +101,39 @@ async function repairFailedRun(run) {
   });
 }
 
-function offerToSaveAgent(run) {
+function offerToSaveAgent(run, { repaired } = {}) {
   const plan = { title: run.title, summary: run.summary, steps: run.steps };
+  const text = repaired
+    ? `The improved plan worked. If the results look right, I can save this as a reusable helper so next time it's one tap.`
+    : `That worked. Want me to save "${run.title}" as a reusable helper, so next time it's one tap?`;
+  const guidance = repaired
+    ? `Verified working ${new Date().toISOString().slice(0, 10)} after an automatic repair. Follow these exact steps.`
+    : `Verified working ${new Date().toISOString().slice(0, 10)} from a live run. Follow these exact steps.`;
   appendToConversation(run, {
     kind: "build",
-    text: `The improved plan worked. If the results look right, I can save this as a reusable helper so next time it's one tap.`,
+    text,
     build: {
       summary: `Save "${run.title}" as a reusable helper`,
       skill: {
         name: String(plan.title).slice(0, 80),
-        description: String(plan.summary || `Repaired and verified from a live run.`).slice(0, 400),
+        description: String(plan.summary || `Verified from a live run.`).slice(0, 400),
         domain: "Family",
-        planner_guidance: `Verified working ${new Date().toISOString().slice(0, 10)} after an automatic repair. Follow these exact steps.`,
+        planner_guidance: guidance,
         risk_level: "Low",
         steps: run.steps.map((s, i) => ({ step_id: `s${i + 1}`, name: s.title, tool_id: s.toolId, approval_required: !!s.requiresApproval, input_mapping: {} })),
       },
       agent: { name: String(plan.title).slice(0, 80), purpose: String(plan.summary || plan.title).slice(0, 200), instructions: `Run the "${plan.title}" skill when asked.` },
     },
   });
+}
+
+// Only nudge "save as a helper" when the run genuinely DID something reusable: it used at
+// least one real tool and had more than one step. Trivial one-shot answers don't get a nag,
+// and a run that came from an already-saved skill/agent is skipped (nothing new to save).
+function worthSavingAsHelper(run) {
+  if (run.sourceRef?.skillId || run.sourceRef?.agentId || run.sourceRef?.savedFrom) return false;
+  const toolSteps = run.steps.filter((s) => s.toolId).length;
+  return toolSteps >= 1 && run.steps.length >= 2;
 }
 
 /** Wire the hooks. Called once at boot. */
@@ -131,7 +146,11 @@ export function registerAssistantRunHooks() {
     if (run.status === "failed" && !run.sourceRef.isRepair) {
       await repairFailedRun(run).catch((e) => appendAudit({ type: "run.auto_repair", ok: false, fromRunId: run.id, error: String(e?.message ?? e) }));
     } else if (run.status === "completed" && run.sourceRef.isRepair) {
-      offerToSaveAgent(run);
+      offerToSaveAgent(run, { repaired: true });
+    } else if (run.status === "completed" && !run.sourceRef.isRepair && worthSavingAsHelper(run)) {
+      // 3. Learn from ordinary success too — not only after a repair. If a plain chat-driven
+      //    run genuinely did something reusable, offer to save it as a helper right in the thread.
+      offerToSaveAgent(run, { repaired: false });
     } else if (run.status === "failed" && run.sourceRef.isRepair) {
       appendToConversation(run, { kind: "status", text: "The corrected plan failed too — I'm not going to keep guessing. The full traces are in Activity, and I've filed an improvement proposal with what I learned." });
     }

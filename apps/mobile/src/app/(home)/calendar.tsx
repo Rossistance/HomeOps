@@ -5,11 +5,11 @@
 // events are read-only mirrors that expand inline instead.
 // Bottom: calendar subscriptions with sync status (feeds managed in Connections).
 import { useCallback, useMemo, useState } from "react";
-import { ScrollView, View } from "react-native";
+import { Alert, ScrollView, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type CalendarSubscription, type EventRec, type MemberRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { useTheme } from "@/theme";
+import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
 // still shadows the ui/ directory until old screens are deleted centrally.
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +37,34 @@ function fmtTime(iso: string | null): string | null {
   return isNaN(+d) ? null : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
+/** Full date+time for the conflict cards (falls back to "No date"). */
+function fmtStamp(iso: string | null | undefined): string {
+  if (!iso) return "No date";
+  const d = new Date(iso);
+  return isNaN(+d) ? "No date" : d.toLocaleString();
+}
+
+/** A pull flagged this canonical event: both FamiliOS and Google changed it since
+ * the last push/merge. The user picks which version to keep. */
+const conflictOf = (e: EventRec) => e.provenance?.conflict ?? null;
+
+/** Map a family member's color (accent name or hex) to a concrete theme color, so each
+ * person's calendar items are color-coded consistently (matches the web app + avatars). */
+function memberAccent(colors: ReturnType<typeof useTheme>["colors"], name?: string | null): string | null {
+  if (!name) return null;
+  if (name.startsWith("#")) return name;
+  switch (name) {
+    case "sage": return colors.sage;
+    case "coral": return colors.coral;
+    case "amber": return colors.amber;
+    case "sky": return colors.sky;
+    case "lavender": return colors.lavender;
+    case "ember": return colors.ember;
+    case "ink": return colors.textSecondary;
+    default: return null;
+  }
+}
+
 function dayTitle(k: string, todayKey: string): string {
   const label = new Date(`${k}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
   return k === todayKey ? `Today · ${label}` : label;
@@ -55,6 +83,7 @@ export default function CalendarScreen() {
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [syncing, setSyncing] = useState<string | null>(null);
+  const [pulling, setPulling] = useState(false);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
 
   const load = useCallback(async () => {
@@ -70,10 +99,51 @@ export default function CalendarScreen() {
 
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
+  const conflictCount = useMemo(() => events.filter((e) => conflictOf(e)).length, [events]);
+
+  // Pull Google-side edits back into pushed canonical events (the merge-back half of
+  // two-way sync). Clean edits merge; both-sides-changed flags a conflict to review.
+  const pullEdits = useCallback(async () => {
+    setPulling(true); setNotice(null);
+    const r = await api.pullGoogleEdits();
+    setPulling(false);
+    if (r.ok) {
+      await load();
+      const bits = [
+        r.merged ? `${r.merged} merged` : null,
+        r.conflicts ? `${r.conflicts} conflict${r.conflicts === 1 ? "" : "s"} to review` : null,
+        r.unlinked ? `${r.unlinked} unlinked` : null,
+      ].filter(Boolean);
+      setNotice({
+        text: `Checked ${r.checked ?? 0} pushed event${(r.checked ?? 0) === 1 ? "" : "s"}. ${bits.length ? bits.join(" · ") : "Everything already matches Google."}`,
+        ok: !r.conflicts,
+      });
+    } else {
+      setNotice({
+        text: r.error === "no_account"
+          ? "Connect your Google account (with calendar access) in Connections first."
+          : r.error === "insufficient_role"
+            ? "Pulling Google edits needs Adult Member or higher."
+            : `Couldn't pull Google edits: ${r.message ?? r.error ?? "unknown error"}`,
+        ok: false,
+      });
+    }
+  }, [load]);
+
   const nameOf = useCallback(
     (id: string | null) => (id ? members.find((m) => m.actorId === id)?.displayName ?? null : null),
     [members],
   );
+  // Per-member calendar color: the server-set color if any, else a deterministic accent
+  // hashed from the name — the SAME fallback the web app uses, so a member is the same color
+  // on iOS and web even before anyone picks one.
+  const colorOf = useCallback((id: string | null) => {
+    const m = id ? members.find((x) => x.actorId === id) : null;
+    if (!m) return null;
+    if (m.color) return memberAccent(colors, m.color);
+    const AV = ["ember", "sage", "sky", "lavender", "amber", "ink"];
+    return memberAccent(colors, AV[[...m.displayName].reduce((a, c) => a + c.charCodeAt(0), 0) % AV.length]);
+  }, [members, colors]);
 
   // Upcoming = anything undated or starting within the last 12h onward (ported).
   const upcoming = useMemo(() => [...events]
@@ -202,6 +272,28 @@ export default function CalendarScreen() {
         </ScrollView>
       </Rise>
 
+      {/* Two-way Google sync: pull edits made on the Google side back into pushed events. */}
+      {canManage ? (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
+          <Button
+            small
+            variant="neutral"
+            icon="arrow.down.circle"
+            title={pulling ? "Checking…" : "Pull Google edits"}
+            loading={pulling}
+            onPress={() => void pullEdits()}
+          />
+          {conflictCount > 0 ? (
+            <Badge
+              label={`${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`}
+              fg={colors.coral}
+              bg={colors.coralBg}
+              icon="exclamationmark.triangle.fill"
+            />
+          ) : null}
+        </View>
+      ) : null}
+
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
 
       {nothingAtAll ? (
@@ -233,6 +325,9 @@ export default function CalendarScreen() {
                     key={e.id}
                     e={e}
                     nameOf={nameOf}
+                    colorOf={colorOf}
+                    canManage={canManage}
+                    onChanged={load}
                     expanded={expanded === e.id}
                     onToggle={() => setExpanded(expanded === e.id ? null : e.id)}
                   />
@@ -249,6 +344,9 @@ export default function CalendarScreen() {
                     key={e.id}
                     e={e}
                     nameOf={nameOf}
+                    colorOf={colorOf}
+                    canManage={canManage}
+                    onChanged={load}
                     expanded={expanded === e.id}
                     onToggle={() => setExpanded(expanded === e.id ? null : e.id)}
                   />
@@ -288,9 +386,12 @@ export default function CalendarScreen() {
 }
 
 /** One agenda entry: time rail on the left, event card on the right. */
-function EventItem({ e, nameOf, expanded, onToggle }: {
+function EventItem({ e, nameOf, colorOf, canManage, onChanged, expanded, onToggle }: {
   e: EventRec;
   nameOf: (id: string | null) => string | null;
+  colorOf: (id: string | null) => string | null;
+  canManage: boolean;
+  onChanged: () => Promise<void> | void;
   expanded: boolean;
   onToggle: () => void;
 }) {
@@ -301,6 +402,22 @@ function EventItem({ e, nameOf, expanded, onToggle }: {
   const driver = nameOf(e.driverId);
   const bring = e.whatToBring;
   const checklistDone = e.checklist.filter((c) => c.done).length;
+  const conflict = conflictOf(e);
+  // Per-member color coding: a left accent stripe in the first participant's color, and a
+  // stacked colored dot per participant (uncolored members fall back to a neutral dot).
+  const memberColors = e.participantIds.map((id) => colorOf(id)).filter(Boolean) as string[];
+  const stripe = memberColors[0] ?? null;
+  const dots = e.participantIds.map((id) => colorOf(id) ?? colors.textFaint);
+  const [resolving, setResolving] = useState<"google" | "local" | null>(null);
+
+  // Both sides changed since the last sync — the user picks the version to keep.
+  const resolve = async (choice: "google" | "local") => {
+    setResolving(choice);
+    const r = await api.resolveEventConflict(e.id, choice);
+    setResolving(null);
+    if (r.ok) { tapHaptic("success"); await onChanged(); }
+    else Alert.alert("Couldn't resolve", r.message ?? (r.error === "insufficient_role" ? "Adults only." : r.error ?? "Try again."));
+  };
 
   return (
     <View style={{ flexDirection: "row", gap: spacing.md }}>
@@ -310,17 +427,19 @@ function EventItem({ e, nameOf, expanded, onToggle }: {
         {end ? <T kind="caption" color={colors.textFaint}>{end}</T> : null}
       </View>
 
+      <View style={{ flex: 1, gap: spacing.sm }}>
       <PressableCard
-        style={{ flex: 1 }}
         haptic={canonical ? "light" : "select"}
         onPress={canonical ? () => router.push({ pathname: "/event-form", params: { id: e.id } }) : onToggle}
         accessibilityRole="button"
         accessibilityLabel={canonical
           ? `${e.title}, ${start ?? "no time"}. Edit event`
           : `${e.title}, ${start ?? "no time"}. ${expanded ? "Collapse" : "Expand"} details`}
+        style={stripe ? { borderLeftWidth: 3, borderLeftColor: stripe } : undefined}
       >
         <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
           <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={2}>{e.title}</T>
+          {conflict ? <Badge label="Sync conflict" fg={colors.coral} bg={colors.coralBg} icon="exclamationmark.triangle.fill" /> : null}
           {e.layer === "linked" ? <Badge label="Synced" fg={colors.sky} bg={colors.skyBg} icon="arrow.triangle.2.circlepath" /> : null}
           {e.layer === "public" ? <Badge label="Public" fg={colors.textMuted} bg={colors.surfaceSunken} icon="globe" /> : null}
           {canonical ? <Sym name="chevron.right" size={12} color={colors.textFaint} /> : null}
@@ -337,7 +456,12 @@ function EventItem({ e, nameOf, expanded, onToggle }: {
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: spacing.sm }}>
             {driver ? <Badge label={driver} fg={colors.textMuted} bg={colors.surfaceSunken} icon="car.fill" /> : null}
             {e.participantIds.length > 0 ? (
-              <Badge label={String(e.participantIds.length)} fg={colors.textMuted} bg={colors.surfaceSunken} icon="person.2.fill" />
+              <View style={{ flexDirection: "row", alignItems: "center" }} accessibilityLabel={`${e.participantIds.length} ${e.participantIds.length === 1 ? "person" : "people"}`}>
+                {dots.slice(0, 5).map((c, i) => (
+                  <View key={i} style={{ width: 11, height: 11, borderRadius: 6, backgroundColor: c, borderWidth: 1.5, borderColor: colors.surface, marginLeft: i === 0 ? 0 : -4 }} />
+                ))}
+                {e.participantIds.length > 5 ? <T kind="caption" color={colors.textFaint} style={{ marginLeft: 4 }}>+{e.participantIds.length - 5}</T> : null}
+              </View>
             ) : null}
             {bring.slice(0, 2).map((w, i) => (
               <Badge key={`${w.item}-${i}`} label={w.item} fg={colors.amber} bg={colors.amberBg} icon="bag.fill" />
@@ -368,6 +492,39 @@ function EventItem({ e, nameOf, expanded, onToggle }: {
           </View>
         ) : null}
       </PressableCard>
+
+      {/* Sync conflict: both sides changed — pick the version to keep (mirrors web's
+          EventDrawer conflict handling). Nothing is overwritten until you choose. */}
+      {conflict ? (
+        <View style={{ gap: spacing.sm, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.coral, borderRadius: 16, borderCurve: "continuous", borderLeftWidth: 3, padding: spacing.md }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <Sym name="exclamationmark.triangle.fill" size={13} color={colors.coral} />
+            <T kind="subMedium" color={colors.text} style={{ flex: 1 }}>This event changed in two places</T>
+          </View>
+          <T kind="detail">
+            Edited here and in Google Calendar since the last sync. Pick the version to keep.
+          </T>
+          <View style={{ gap: 4 }}>
+            <T kind="caption" color={colors.textFaint}>FAMILIOS VERSION</T>
+            <T kind="sub" color={colors.textSecondary}>{e.title} · {fmtStamp(e.startAt)}{e.location ? ` · ${e.location}` : ""}</T>
+            <T kind="caption" color={colors.textFaint} style={{ marginTop: 4 }}>GOOGLE VERSION</T>
+            <T kind="sub" color={colors.textSecondary}>{conflict.google.title ?? e.title} · {fmtStamp(conflict.google.startAt)}{conflict.google.location ? ` · ${conflict.google.location}` : ""}</T>
+          </View>
+          {canManage ? (
+            <View style={{ flexDirection: "row", gap: spacing.sm }}>
+              <View style={{ flex: 1 }}>
+                <Button small variant="ember" icon="house.fill" title="Keep ours" loading={resolving === "local"} disabled={!!resolving} onPress={() => void resolve("local")} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Button small variant="neutral" icon="arrow.down.circle" title="Use Google" loading={resolving === "google"} disabled={!!resolving} onPress={() => void resolve("google")} />
+              </View>
+            </View>
+          ) : (
+            <T kind="detail">An adult can resolve this conflict.</T>
+          )}
+        </View>
+      ) : null}
+      </View>
     </View>
   );
 }

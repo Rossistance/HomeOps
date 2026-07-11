@@ -9,7 +9,7 @@ import { readAsStringAsync } from "expo-file-system/legacy";
 import { api } from "@/lib/api";
 import { useTheme } from "@/theme";
 import {
-  T, Chip, ChipRow, Well, Row, SymTile, PressableScale, Sym, HSheet, SheetCTA, Notice, useConfirmFlash,
+  T, Button, Chip, ChipRow, Well, Row, SymTile, PressableScale, Sym, HSheet, SheetCTA, Notice, useConfirmFlash,
 } from "@/components/ui";
 
 const MAX_BYTES = 5 * 1024 * 1024;
@@ -28,12 +28,14 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
   const { colors, spacing } = useTheme();
   const { flash, show } = useConfirmFlash();
   const [file, setFile] = useState<Picked | null>(null);
+  // Optional 2nd page (e.g. the back of an ID) — uploaded as ONE logical file.
+  const [backPage, setBackPage] = useState<Picked | null>(null);
   const [space, setSpace] = useState<string>(SPACES[0]);
   const [sensitive, setSensitive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  function reset() { setFile(null); setSpace(SPACES[0]); setSensitive(false); setBusy(false); setNote(null); }
+  function reset() { setFile(null); setBackPage(null); setSpace(SPACES[0]); setSensitive(false); setBusy(false); setNote(null); }
   function close() { reset(); onClose(); }
 
   async function fromDocument() {
@@ -44,37 +46,77 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
       const a = res.assets[0];
       if ((a.size ?? 0) > MAX_BYTES) { setNote("That file is over the 5 MB cap."); return; }
       const b64 = await readAsStringAsync(a.uri, { encoding: "base64" });
+      setBackPage(null); // documents are single-page
       setFile({ name: a.name ?? "document", base64: b64, mime: a.mimeType ?? "application/octet-stream", size: a.size ?? Math.round(b64.length * 0.75) });
     } catch (e) {
       setNote(`Couldn't read that file: ${String((e as Error)?.message ?? e)}`);
     }
   }
 
+  // Convert a picked image asset into a Picked (or set a note + return null on failure).
+  function toPicked(a: ImagePicker.ImagePickerAsset, label: string): Picked | null {
+    if (!a.base64) { setNote("Couldn't read that photo."); return null; }
+    if (a.base64.length * 0.75 > MAX_BYTES) { setNote("That photo is over the 5 MB cap."); return null; }
+    return {
+      name: a.fileName ?? `${label}-${Date.now()}.jpg`,
+      base64: a.base64, mime: a.mimeType ?? "image/jpeg",
+      size: Math.round(a.base64.length * 0.75),
+    };
+  }
+
+  // Camera captures one page; the library allows selecting up to two at once (multi).
+  async function pickImages(camera: boolean, multi: boolean): Promise<ImagePicker.ImagePickerAsset[] | null> {
+    if (camera) {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) { setNote("Camera access was denied."); return null; }
+    } else {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) { setNote("Photo library access was denied."); return null; }
+    }
+    const opts: ImagePicker.ImagePickerOptions = {
+      mediaTypes: ["images"], base64: true, quality: 0.8,
+      allowsMultipleSelection: !camera && multi, selectionLimit: 2,
+    };
+    const res = camera
+      ? await ImagePicker.launchCameraAsync(opts).catch(() => ImagePicker.launchImageLibraryAsync(opts))
+      : await ImagePicker.launchImageLibraryAsync(opts);
+    if (res.canceled || !res.assets?.length) return null;
+    return res.assets;
+  }
+
+  // First page. Library multi-select can fill front + back in one pass.
   async function fromImages(camera: boolean) {
     setNote(null);
     try {
-      if (camera) {
-        const perm = await ImagePicker.requestCameraPermissionsAsync();
-        if (!perm.granted) { setNote("Camera access was denied."); return; }
-      } else {
-        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (!perm.granted) { setNote("Photo library access was denied."); return; }
-      }
-      const opts: ImagePicker.ImagePickerOptions = { mediaTypes: ["images"], base64: true, quality: 0.8 };
-      const res = camera
-        ? await ImagePicker.launchCameraAsync(opts).catch(() => ImagePicker.launchImageLibraryAsync(opts))
-        : await ImagePicker.launchImageLibraryAsync(opts);
-      if (res.canceled || !res.assets?.[0]?.base64) return;
-      const a = res.assets[0];
-      if (a.base64!.length * 0.75 > MAX_BYTES) { setNote("That photo is over the 5 MB cap."); return; }
-      setFile({
-        name: a.fileName ?? `${camera ? "scan" : "photo"}-${Date.now()}.jpg`,
-        base64: a.base64!, mime: a.mimeType ?? "image/jpeg",
-        size: Math.round(a.base64!.length * 0.75),
-      });
+      const assets = await pickImages(camera, true);
+      if (!assets) return;
+      const first = toPicked(assets[0], camera ? "scan" : "photo");
+      if (!first) return;
+      setFile(first);
+      const second = assets[1] ? toPicked(assets[1], "back") : null;
+      setBackPage(second);
     } catch (e) {
       setNote(`Couldn't read that photo: ${String((e as Error)?.message ?? e)}`);
     }
+  }
+
+  // Add the second page (e.g. the back of an ID) after the front is set.
+  async function addBackPage(camera: boolean) {
+    setNote(null);
+    try {
+      const assets = await pickImages(camera, false);
+      if (!assets) return;
+      const back = toPicked(assets[0], "back");
+      if (back) setBackPage(back);
+    } catch (e) {
+      setNote(`Couldn't read that photo: ${String((e as Error)?.message ?? e)}`);
+    }
+  }
+
+  // Removing the front promotes the back to front (so there's never a back with no front).
+  function removeFront() {
+    if (backPage) { setFile(backPage); setBackPage(null); }
+    else setFile(null);
   }
 
   async function submit() {
@@ -83,10 +125,13 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
     const tags: string[] = [];
     if (space !== SPACES[0]) tags.push(spaceTag(space));
     if (sensitive) tags.push("sensitive");
+    // Two pages → one logical multi-page file (contentBase64 stays the first-page blob).
+    const pages = backPage ? [{ base64: file.base64 }, { base64: backPage.base64 }] : undefined;
     const r = await api.uploadFile({
       name: file.name, contentBase64: file.base64, mime: file.mime,
       tags: tags.length ? tags : undefined,
       visibility: sensitive ? "private" : undefined,
+      pages,
     });
     setBusy(false);
     if (!r.file) {
@@ -109,8 +154,8 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
           {!file ? (
             <>
               <View style={{ gap: 2 }}>
-                <Row icon="camera" iconColor={colors.ember} iconBg={colors.emberBg} title="Scan a paper form" subtitle="Use the camera" chevron onPress={() => void fromImages(true)} />
-                <Row icon="photo" iconColor={colors.sky} iconBg={colors.skyBg} title="Choose from Photos" subtitle="Receipts, forms, snapshots" chevron onPress={() => void fromImages(false)} />
+                <Row icon="camera" iconColor={colors.ember} iconBg={colors.emberBg} title="Scan a paper form" subtitle="Use the camera · add a back page after" chevron onPress={() => void fromImages(true)} />
+                <Row icon="photo" iconColor={colors.sky} iconBg={colors.skyBg} title="Choose from Photos" subtitle="Pick up to 2 (front & back)" chevron onPress={() => void fromImages(false)} />
                 <Row icon="folder" iconColor={colors.amber} iconBg={colors.amberBg} title="Browse Files" subtitle="PDFs and documents" chevron onPress={() => void fromDocument()} last />
               </View>
               <T kind="detail" center>
@@ -119,15 +164,16 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
             </>
           ) : (
             <>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, padding: 13, borderRadius: 16, borderCurve: "continuous", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}>
-                <SymTile name="doc.text" color={colors.ember} bg={colors.emberBg} size={40} iconSize={18} />
-                <View style={{ flex: 1, gap: 2 }}>
-                  <T kind="rowTitle" numberOfLines={1}>{file.name}</T>
-                  <T kind="detail">{fmtSize(file.size)}</T>
-                </View>
-                <PressableScale onPress={() => setFile(null)} hitSlop={10} accessibilityRole="button" accessibilityLabel="Remove file">
-                  <Sym name="xmark" size={15} color={colors.textFaint} />
-                </PressableScale>
+              <View style={{ gap: spacing.sm }}>
+                <FileTile picked={file} label={backPage ? "Front" : undefined} onRemove={removeFront} />
+                {backPage ? <FileTile picked={backPage} label="Back" onRemove={() => setBackPage(null)} /> : null}
+                {file.mime.startsWith("image/") && !backPage ? (
+                  <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                    <View style={{ flex: 1 }}><Button small variant="neutral" icon="camera" title="Scan back" onPress={() => void addBackPage(true)} /></View>
+                    <View style={{ flex: 1 }}><Button small variant="neutral" icon="photo" title="Add back" onPress={() => void addBackPage(false)} /></View>
+                  </View>
+                ) : null}
+                {backPage ? <T kind="detail" center>Front &amp; back upload together as one document.</T> : null}
               </View>
 
               <View style={{ gap: 8 }}>
@@ -155,5 +201,24 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
       </HSheet>
       {flash}
     </>
+  );
+}
+
+/** One picked page (front or back). Image pages show a photo glyph. */
+function FileTile({ picked, label, onRemove }: { picked: Picked; label?: string; onRemove: () => void }) {
+  const { colors, spacing } = useTheme();
+  const isImg = picked.mime.startsWith("image/");
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, padding: 13, borderRadius: 16, borderCurve: "continuous", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}>
+      <SymTile name={isImg ? "photo" : "doc.text"} color={colors.ember} bg={colors.emberBg} size={40} iconSize={18} />
+      <View style={{ flex: 1, gap: 2 }}>
+        {label ? <T kind="caption" color={colors.textFaint}>{label.toUpperCase()}</T> : null}
+        <T kind="rowTitle" numberOfLines={1}>{picked.name}</T>
+        <T kind="detail">{fmtSize(picked.size)}</T>
+      </View>
+      <PressableScale onPress={onRemove} hitSlop={10} accessibilityRole="button" accessibilityLabel={`Remove ${label ?? "file"}`}>
+        <Sym name="xmark" size={15} color={colors.textFaint} />
+      </PressableScale>
+    </View>
   );
 }

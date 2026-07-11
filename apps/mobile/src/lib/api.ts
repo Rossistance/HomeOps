@@ -72,10 +72,18 @@ export interface OAuthStartResult { ok?: boolean; url?: string; error?: string; 
 // Server-owned family data (mirrors the web client). The backend returns these already
 // role/visibility-filtered for the bearer session's actor, so a child's device never
 // receives adults-only items — no client-side hiding required.
+// A pull flagged this event: both FamiliOS and Google changed it since the last push/merge.
+export interface SyncConflict {
+  at: number; googleUpdated: string | null;
+  google: { title?: string; startAt?: string | null; endAt?: string | null; location?: string };
+}
+// Sync bookkeeping carried on a canonical event (mirrors the web's event.provenance).
+export interface EventProvenance { googleEventId?: string; conflict?: SyncConflict; [k: string]: unknown }
 export interface EventRec {
   id: string; title: string; startAt: string | null; endAt: string | null; location: string;
   driverId: string | null; participantIds: string[]; whatToBring: { item: string; memberId: string | null }[];
   checklist: { text: string; done: boolean }[]; visibility: string; layer: "canonical" | "linked" | "public"; category: string;
+  notes?: string; source?: string; provenance?: EventProvenance;
 }
 export interface TaskRec {
   id: string; title: string; type: string; status: string; dueAt: string | null;
@@ -88,6 +96,7 @@ export interface MealIngredient { item: string; have?: boolean }
 export interface Meal {
   id: string; householdId: string; date: string | null; time?: string | null; slot: string; title: string; notes: string;
   ingredients: MealIngredient[]; visibility: string; source: string; createdBy: string; createdAt: string; updatedAt: string;
+  servings?: number | null; recipeUrl?: string; instructions?: string[];
 }
 export interface CalendarSubscription {
   id: string; name: string; url: string | null; source: string; lastSyncAt: number | null;
@@ -99,6 +108,23 @@ export interface CalendarSync { ok: boolean; imported?: number; updated?: number
 export interface FileRec {
   id: string; householdId: string; name: string; mime: string; sizeBytes: number;
   tags: string[]; visibility: string; spaceId: string; uploadedBy: string; source: string; createdAt: string;
+  // Multi-page uploads (front/back of an ID, etc.) — one logical file, N page blobs.
+  pageBlobIds?: string[]; pageCount?: number;
+}
+// Server-durable knowledge items (household memory the user writes + curates).
+export interface KnowledgeRec {
+  id: string; householdId: string; title: string; type: string; content: string;
+  tags: string[]; visibility: "household" | "personal"; sensitive: boolean; fileIds: string[];
+  createdBy: string; createdAt: string; updatedAt: string;
+}
+// Server evolution registry — improvement proposals mined from real run traces
+// (mirror of the web's ServerEvolution; read-only on the Today "what I learned" card).
+export interface EvolutionRec {
+  id: string; kind: "skill" | "agent" | "tool" | "function"; householdId?: string;
+  agentId?: string | null; agentName?: string | null; skillId?: string | null; runId?: string;
+  status: "pending" | "accepted" | "rejected"; source: string;
+  title: string; reason: string; summary: string; after?: string; risk?: "Low" | "Medium" | "High";
+  createdAt: number;
 }
 export interface MemoryRec { id: string; scope: string; type: string; text: string; createdAt: number; source?: { runId?: string; actorId?: string } }
 export interface PlaybookRec {
@@ -107,7 +133,7 @@ export interface PlaybookRec {
   archived: boolean; system: boolean; createdAt: string;
 }
 export interface ArtifactRec { id: string; runId?: string; kind: string; title: string; body?: string; createdAt: number }
-export interface MemberRec { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean }
+export interface MemberRec { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean; color?: string | null }
 // Contact methods — the server-owned delivery registry (per-member email/phone/in-app/
 // dashboard entries with verified + opt-in state and a per-agent allowlist). Same
 // records the web Contacts tab manages; the server enforces the role gates.
@@ -396,6 +422,14 @@ export const api = {
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
+  // Edit an existing meal (title/date/slot/time/servings/ingredients/recipe/notes). The
+  // server preserves mealId back-references (groceries/calendar stay linked). 403 => forbidden;
+  // 409 => stale_write (another device won) when ifUpdatedAt is supplied.
+  async patchMeal(id: string, patch: Partial<Pick<Meal, "title" | "date" | "slot" | "time" | "notes" | "visibility" | "servings" | "recipeUrl" | "instructions">> & { ingredients?: (string | MealIngredient)[]; ifUpdatedAt?: string }): Promise<{ meal?: Meal; error?: string; message?: string; current?: Meal }> {
+    const r = await req<{ meal?: Meal; error?: string; message?: string; current?: Meal }>(`/meals/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+    if (r.status === 403) return { error: "forbidden" };
+    return r.data ?? { error: "network" };
+  },
   async deleteMeal(id: string): Promise<{ ok?: boolean; unlinkedGroceries?: number; error?: string }> {
     const r = await req<{ ok?: boolean; unlinkedGroceries?: number; error?: string }>(`/meals/${encodeURIComponent(id)}`, { method: "DELETE" });
     if (r.status === 403) return { error: "insufficient_role" };
@@ -422,7 +456,10 @@ export const api = {
     const r = await req<{ files: FileRec[] }>("/files");
     return r.data?.files ?? [];
   },
-  async uploadFile(body: { name: string; contentBase64: string; mime?: string; tags?: string[]; visibility?: string }): Promise<{ file?: FileRec; error?: string; message?: string }> {
+  // `pages` (optional) uploads a multi-page logical file (e.g. front + back of an ID) —
+  // contentBase64 stays the primary/first-page blob for back-compat; the server files
+  // the extra pages and returns pageBlobIds[]/pageCount on the record.
+  async uploadFile(body: { name: string; contentBase64: string; mime?: string; tags?: string[]; visibility?: string; pages?: { name?: string; base64: string }[] }): Promise<{ file?: FileRec; error?: string; message?: string }> {
     const r = await req<{ file?: FileRec; error?: string; message?: string }>("/files", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };
     if (r.status === 413) return { error: "too_large" };
@@ -451,6 +488,32 @@ export const api = {
     const r = await req<{ artifacts: ArtifactRec[] }>("/artifacts");
     return r.data?.artifacts ?? [];
   },
+  // Server evolution registry — improvement proposals mined from run traces (route is
+  // singular /evolution; mirrors the web backend). Read-only surfacing on Today.
+  async evolutions(): Promise<EvolutionRec[]> {
+    const r = await req<{ evolutions: EvolutionRec[] }>("/evolution");
+    return r.data?.evolutions ?? [];
+  },
+  /* ---- Knowledge — server-durable household knowledge items (create/edit/delete) ---- */
+  async knowledge(): Promise<KnowledgeRec[]> {
+    const r = await req<{ items: KnowledgeRec[] }>("/knowledge");
+    return r.data?.items ?? [];
+  },
+  async createKnowledge(body: { title: string; type: string; content: string; tags?: string[]; visibility?: "household" | "personal"; sensitive?: boolean; fileIds?: string[] }): Promise<{ item?: KnowledgeRec; error?: string; message?: string }> {
+    const r = await req<{ item?: KnowledgeRec; error?: string; message?: string }>("/knowledge", { method: "POST", body: JSON.stringify(body) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async patchKnowledge(id: string, patch: Partial<Pick<KnowledgeRec, "title" | "type" | "content" | "tags" | "visibility" | "sensitive" | "fileIds">> & { ifUpdatedAt?: string }): Promise<{ item?: KnowledgeRec; error?: string; message?: string; current?: KnowledgeRec }> {
+    const r = await req<{ item?: KnowledgeRec; error?: string; message?: string; current?: KnowledgeRec }>(`/knowledge/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async deleteKnowledge(id: string): Promise<{ ok?: boolean; error?: string }> {
+    const r = await req<{ ok?: boolean; error?: string }>(`/knowledge/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
   // Calendar subscriptions — the read-only "linked" layer (ICS feeds, pasted .ics, Google).
   async calendarSubscriptions(): Promise<CalendarSubscription[]> {
     const r = await req<{ subscriptions: CalendarSubscription[] }>("/calendar/subscriptions");
@@ -477,6 +540,29 @@ export const api = {
   },
   async deleteCalendarSubscription(id: string): Promise<{ ok?: boolean; removedEvents?: number; error?: string }> {
     const r = await req<{ ok?: boolean; removedEvents?: number; error?: string }>(`/calendar/subscriptions/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  /* ---- Two-way Google Calendar sync (canonical events only; approval-gated push) ---- */
+  // Push a FamiliOS canonical event TO Google. Approval-first: with no approvalId the
+  // server returns { needsApproval, approval } — decide it, then call again WITH the id.
+  // A stored provenance.googleEventId turns re-pushes into updates.
+  async pushEventToGoogle(id: string, approvalId?: string): Promise<{ ok?: boolean; needsApproval?: boolean; approval?: ApprovalRec; googleEventId?: string; action?: string; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; needsApproval?: boolean; approval?: ApprovalRec; googleEventId?: string; action?: string; error?: string; message?: string }>(`/calendar/push/${encodeURIComponent(id)}`, { method: "POST", body: JSON.stringify(approvalId ? { approvalId } : {}) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  // Pull Google-side edits back into pushed events. Clean edits merge; both-sides-changed
+  // flags provenance.conflict for review; Google deletions unlink (FamiliOS stays canonical).
+  async pullGoogleEdits(): Promise<{ ok?: boolean; checked?: number; merged?: number; conflicts?: number; unlinked?: number; errors?: number; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; checked?: number; merged?: number; conflicts?: number; unlinked?: number; errors?: number; error?: string; message?: string }>("/calendar/pull-google-edits", { method: "POST", body: "{}" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  // Resolve a flagged pull conflict: adopt Google's version ("google") or keep the
+  // FamiliOS one ("local", then re-push to update Google). Clears the flag either way.
+  async resolveEventConflict(id: string, choice: "google" | "local"): Promise<{ ok?: boolean; event?: EventRec; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; event?: EventRec; error?: string; message?: string }>(`/events/${encodeURIComponent(id)}/resolve-conflict`, { method: "POST", body: JSON.stringify({ choice }) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
@@ -559,6 +645,12 @@ export const api = {
   },
   async getRun(id: string): Promise<{ run?: RunRec; error?: string }> {
     const r = await req<{ run?: RunRec; error?: string }>(`/runs/${encodeURIComponent(id)}`);
+    return r.data ?? { error: "network" };
+  },
+  // Cancel a run in place (used by "Ask for changes": the stale run is stopped before
+  // its revised replacement is dispatched). Terminal runs return unchanged (idempotent).
+  async cancelRun(id: string): Promise<{ run?: RunRec; error?: string }> {
+    const r = await req<{ run?: RunRec; error?: string }>(`/runs/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}" });
     return r.data ?? { error: "network" };
   },
 

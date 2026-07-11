@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "@/store/useStore";
-import { PageHeader, Card, Button, Badge, Drawer, Field, TextInput, TextArea, Select } from "@/components/ui";
+import { PageHeader, Card, Button, Badge, Drawer, Field, TextInput, TextArea, Select, MemberDots } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { backend, type ServerEvent, type BackendApproval } from "@/connectors/api";
+
+/** A calendar item's per-member colored dots (the "color-coded per user" cue). */
+type MemberDot = { id: string; color: string; name: string };
 
 const dayKey = (iso: string) => new Date(iso).toISOString().slice(0, 10);
 /** Render event notes with clickable links (recipe URLs, mini-app references). */
@@ -30,6 +33,7 @@ export function Calendar() {
   const members = useStore((s) => s.data.members);
   const canManage = ["Owner", "Adult Admin", "Adult Member", "Limited Member"].includes(role ?? "");
   const nameOf = (id?: string | null) => (id ? members.find((m) => m.id === id)?.displayName ?? id : null);
+  const dotsFor = (ev: ServerEvent): MemberDot[] => (ev.participantIds ?? []).map((id) => ({ id, color: members.find((m) => m.id === id)?.avatarColor ?? "gray", name: nameOf(id) ?? "" }));
 
   const [events, setEvents] = useState<ServerEvent[]>([]);
   const [selected, setSelected] = useState<ServerEvent | null>(null);
@@ -117,7 +121,7 @@ export function Calendar() {
       )}
 
       {view === "month" ? (
-        <MonthGrid byDay={byDayAll} nameOf={nameOf} onOpen={setSelected} />
+        <MonthGrid byDay={byDayAll} nameOf={nameOf} dotsFor={dotsFor} onOpen={setSelected} />
       ) : upcoming.length === 0 ? (
         <Card className="card-pad"><p className="text-sm text-ink-400">Nothing on the calendar yet. Add an event, subscribe to a calendar in Connections, or connect Google.</p></Card>
       ) : (
@@ -125,10 +129,10 @@ export function Calendar() {
           {days.map((k) => (
             <Card key={k} className="card-pad">
               <p className="mb-2 font-display text-sm font-semibold text-ink-900">{new Date(k + "T00:00:00").toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}{k === new Date().toISOString().slice(0, 10) && <span className="ml-2 text-xs font-normal text-ember-600">Today</span>}</p>
-              <ul className="space-y-1.5">{byDay[k].map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} onOpen={() => setSelected(e)} />)}</ul>
+              <ul className="space-y-1.5">{byDay[k].map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} dots={dotsFor(e)} onOpen={() => setSelected(e)} />)}</ul>
             </Card>
           ))}
-          {byDay["undated"] && <Card className="card-pad"><p className="mb-2 font-display text-sm font-semibold text-ink-900">No date set</p><ul className="space-y-1.5">{byDay["undated"].map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} onOpen={() => setSelected(e)} />)}</ul></Card>}
+          {byDay["undated"] && <Card className="card-pad"><p className="mb-2 font-display text-sm font-semibold text-ink-900">No date set</p><ul className="space-y-1.5">{byDay["undated"].map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} dots={dotsFor(e)} onOpen={() => setSelected(e)} />)}</ul></Card>}
         </div>
       )}
 
@@ -140,7 +144,7 @@ export function Calendar() {
 }
 
 /* ---- Month grid (Phase 3): a 7-column month with per-day event chips ---- */
-function MonthGrid({ byDay, nameOf, onOpen }: { byDay: Record<string, ServerEvent[]>; nameOf: (id?: string | null) => string | null; onOpen: (e: ServerEvent) => void }) {
+function MonthGrid({ byDay, nameOf, dotsFor, onOpen }: { byDay: Record<string, ServerEvent[]>; nameOf: (id?: string | null) => string | null; dotsFor: (ev: ServerEvent) => MemberDot[]; onOpen: (e: ServerEvent) => void }) {
   const today = new Date();
   const [cursor, setCursor] = useState({ y: today.getFullYear(), m: today.getMonth() });
   const [selDay, setSelDay] = useState<string | null>(null);
@@ -189,7 +193,7 @@ function MonthGrid({ byDay, nameOf, onOpen }: { byDay: Record<string, ServerEven
           <p className="mb-2 font-display text-sm font-semibold text-ink-900">{new Date(selDay + "T00:00:00").toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}</p>
           {(byDay[selDay] ?? []).length === 0
             ? <p className="text-sm text-ink-400">Nothing scheduled this day.</p>
-            : <ul className="space-y-1.5">{(byDay[selDay] ?? []).map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} onOpen={() => onOpen(e)} />)}</ul>}
+            : <ul className="space-y-1.5">{(byDay[selDay] ?? []).map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} dots={dotsFor(e)} onOpen={() => onOpen(e)} />)}</ul>}
         </Card>
       )}
     </div>
@@ -201,16 +205,17 @@ function layerBadge(ev: ServerEvent) {
   if (ev.layer === "public") return <Badge color="gray">Public</Badge>;
   return null;
 }
-function EventRow({ ev, driver, onOpen }: { ev: ServerEvent; driver: string | null; onOpen: () => void }) {
+function EventRow({ ev, driver, dots, onOpen }: { ev: ServerEvent; driver: string | null; dots: MemberDot[]; onOpen: () => void }) {
   const time = ev.startAt && !isNaN(+new Date(ev.startAt)) ? new Date(ev.startAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : null;
   return (
     <li>
-      <button onClick={onOpen} className="flex w-full items-start gap-2.5 rounded-xl border border-ink-900/[0.05] bg-surface-sunken/50 px-3 py-2 text-left transition-colors hover:border-ember-200" aria-label={`Open ${ev.title}`}>
-        <Icon name="Calendar" size={14} className="mt-0.5 shrink-0 text-ink-400" />
+      <button onClick={onOpen} className="flex w-full items-center gap-2.5 rounded-xl border border-ink-900/[0.05] bg-surface-sunken/50 px-3 py-2 text-left transition-colors hover:border-ember-200" aria-label={`Open ${ev.title}`}>
+        <Icon name="Calendar" size={14} className="shrink-0 text-ink-400" />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-ink-800">{ev.title} {layerBadge(ev)} {conflictOf(ev) && <Badge color="coral"><Icon name="AlertTriangle" size={10} /> Sync conflict</Badge>}</p>
           <p className="truncate text-xs text-ink-500">{time ?? "All day"}{ev.location ? ` · ${ev.location}` : ""}{driver ? ` · Driver: ${driver}` : ""}{ev.source && ev.layer === "linked" ? ` · ${ev.source}` : ""}</p>
         </div>
+        <MemberDots members={dots} />
         <Icon name="ChevronRight" size={15} className="shrink-0 text-ink-300" />
       </button>
     </li>

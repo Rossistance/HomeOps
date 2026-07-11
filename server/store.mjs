@@ -357,7 +357,11 @@ export function deleteSessionsForActor(actorId, householdId) {
 /* ---- Household members (server-owned role source of truth) ----
  * Authority is NEVER taken from the client. A session's effective role is resolved
  * from this registry by actorId. members.json is seeded on boot (seed.mjs) and is
- * the only place a member's role may be changed (by an authorized server path). */
+ * the only place a member's role may be changed (by an authorized server path).
+ * MemberRec = { actorId, householdId, displayName, role, relationship, spaceIds?,
+ *   color?, archived?, createdAt, updatedAt } — `color` is an optional per-member
+ *   accent (one of the app accent names, or a hex string), stored as-is and back-
+ *   compat (members without it are unaffected). */
 export function listMembers({ householdId } = {}) {
   const all = Object.values(readJSON("members.json", {}));
   return householdId ? all.filter((m) => m.householdId === householdId) : all;
@@ -822,6 +826,17 @@ export const putMeal = (m) => _meals.put(m);
 export const patchMeal = (id, patch) => _meals.patch(id, patch);
 export const deleteMealRec = (id) => _meals.remove(id);
 
+// Knowledge — user-authored household knowledge (custom instructions, family facts,
+// preferences, rules, reference notes). Distinct from the auto-generated, read-only
+// memory/artifacts above: this is a real CRUD collection the family owns and edits.
+// Visibility-scoped ("household" | "personal") and tenant-scoped like meals/events.
+const _knowledge = keyedCollection("knowledge.json");
+export const listKnowledge = (filter) => _knowledge.list(filter);
+export const getKnowledge = (id) => _knowledge.get(id);
+export const addKnowledge = (k) => _knowledge.put(k);
+export const patchKnowledge = (id, patch) => _knowledge.patch(id, patch);
+export const removeKnowledge = (id) => _knowledge.remove(id);
+
 // Calendar subscriptions (ICS feeds) — the source records for the read-only "linked"
 // calendar layer. Synced events are stored in events.json with layer:"linked".
 const _subs = keyedCollection("calendar_subscriptions.json");
@@ -859,8 +874,12 @@ export function readFileBlob(id) {
   return fs.existsSync(p) ? fs.readFileSync(p) : null;
 }
 export function deleteFileRec(id) {
+  // A multi-page file has one blob per page (pageBlobIds); a legacy/single-page file
+  // stores its single blob under the record id. Remove every backing blob so nothing leaks.
+  const rec = _files.get(id);
   _files.remove(id);
-  try { fs.unlinkSync(join(filesDir(), `${id}.bin`)); } catch { /* already gone */ }
+  const blobIds = Array.isArray(rec?.pageBlobIds) && rec.pageBlobIds.length ? rec.pageBlobIds : [id];
+  for (const bid of blobIds) { try { fs.unlinkSync(join(filesDir(), `${bid}.bin`)); } catch { /* already gone */ } }
 }
 
 /* ---- Server-durable assistant conversations (P1.1) ----

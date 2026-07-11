@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useStore } from "@/store/useStore";
-import { PageHeader, Card, Button, IconButton, Badge, Avatar, Tabs, Drawer, Modal, Field, TextInput, TextArea, Select, Toggle, EmptyState, ACCENT_BG } from "@/components/ui";
+import { PageHeader, Card, Button, IconButton, Badge, Avatar, Tabs, Drawer, Modal, Field, TextInput, TextArea, Select, Toggle, EmptyState, ACCENT_BG, ACCENT_SOLID } from "@/components/ui";
+import { cn } from "@/lib/cn";
 import { Icon } from "@/components/Icon";
 import { backend, type ServerMember, type ServerContactMethod } from "@/connectors/api";
 import type { Role, Space, SpaceType } from "@/types";
@@ -10,6 +11,9 @@ import type { Role, Space, SpaceType } from "@/types";
  * the roster so the web and mobile views can never drift apart again. */
 const AVATAR_ACCENTS = ["ember", "sage", "sky", "lavender", "amber", "ink"] as const;
 const avatarColor = (name: string) => AVATAR_ACCENTS[[...name].reduce((a, c) => a + c.charCodeAt(0), 0) % AVATAR_ACCENTS.length];
+// The six selectable member colors (map to the shared accent palette used for avatars,
+// calendar dots, and badges). Kept in sync with the server's accepted color names.
+const MEMBER_COLORS = ["ink", "sage", "coral", "amber", "sky", "lavender"] as const;
 const initialsOf = (name: string) => name.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 
 function useServerMembers() {
@@ -169,6 +173,16 @@ function Members() {
     await reload();
   };
 
+  // Per-member color — durable on the server, so each family member's calendar items and
+  // avatars are color-coded consistently across web and iOS.
+  const changeColor = async (m: ServerMember, color: string) => {
+    setBusyId(m.actorId); setError(null);
+    const r = await backend.updateMemberRemote(m.actorId, { color });
+    setBusyId(null);
+    if (r.error) setError(friendly(r.error, r.message));
+    await reload();
+  };
+
   return (
     <div>
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -185,7 +199,7 @@ function Members() {
             return (
               <Card key={m.actorId} className="card-pad">
                 <div className="flex items-start gap-3">
-                  <Avatar initials={initialsOf(m.displayName)} color={avatarColor(m.displayName)} size={44} />
+                  <Avatar initials={initialsOf(m.displayName)} color={m.color ?? avatarColor(m.displayName)} size={44} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2"><p className="font-display text-lg font-semibold text-ink-900">{m.displayName}</p>{m.isCurrentUser && <Badge color="sky">You</Badge>}</div>
                     <p className="text-xs text-ink-500">{m.relationship ?? m.role}</p>
@@ -195,6 +209,17 @@ function Members() {
                   )}
                 </div>
                 <div className="mt-3 space-y-2">
+                  <Field label="Calendar color">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {MEMBER_COLORS.map((c) => {
+                        const active = (m.color ?? avatarColor(m.displayName)) === c;
+                        return (
+                          <button key={c} onClick={() => void changeColor(m, c)} disabled={busyId === m.actorId} aria-label={`Set ${m.displayName}'s color to ${c}`} aria-pressed={active}
+                            className={cn("h-6 w-6 rounded-full ring-2 ring-offset-2 ring-offset-surface-raised transition-transform hover:scale-110", ACCENT_SOLID[c], active ? "ring-ink-700" : "ring-transparent")} />
+                        );
+                      })}
+                    </div>
+                  </Field>
                   <Field label="Role">
                     <Select value={m.role} onChange={(e) => void changeRole(m, e.target.value)} disabled={m.role === "Owner" || busyId === m.actorId}>
                       {ROLES.map((r) => <option key={r}>{r}</option>)}

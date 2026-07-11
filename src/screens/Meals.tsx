@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "@/store/useStore";
-import { PageHeader, Card, Button, Badge, Field, TextInput, Select } from "@/components/ui";
+import { PageHeader, Card, Button, Badge, Field, TextInput, Select, Modal } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { backend, type Meal, type ServerTask } from "@/connectors/api";
 
@@ -17,6 +17,7 @@ export function Meals() {
   const [meals, setMeals] = useState<Meal[]>([]);
   const [groceries, setGroceries] = useState<ServerTask[]>([]);
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<Meal | null>(null);
   // Composer
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(dayKey(new Date()));
@@ -60,7 +61,20 @@ export function Meals() {
     const n = r.unlinkedGroceries ?? 0;
     toast({ kind: "info", title: "Meal removed", message: n > 0 ? `${n} grocery item${n === 1 ? "" : "s"} from this meal stayed on your list, just unlinked.` : undefined });
   };
+  // Edit an existing meal via the real PATCH endpoint — preserves the mealId links to any
+  // already-created grocery items / calendar event (delete+recreate would break them).
+  const saveEdit = async (id: string, patch: Partial<Meal>) => {
+    setBusy(true); const r = await backend.updateMeal(id, patch); setBusy(false);
+    if (r.meal) { setEditing(null); await load(); toast({ kind: "success", title: "Meal updated", message: "Any linked grocery items and calendar event are kept." }); }
+    else toast({ kind: "error", title: "Couldn't update meal", message: r.error === "insufficient_role" ? "Adults only." : r.error });
+  };
   const toggleGrocery = async (t: ServerTask) => { const next = t.status === "done" ? "todo" : "done"; setGroceries((g) => g.map((x) => x.id === t.id ? { ...x, status: next } : x)); await backend.updateTaskRemote(t.id, { status: next }); };
+  const renameGrocery = async (t: ServerTask, title: string) => {
+    const name = title.trim(); if (!name || name === t.title) return;
+    setGroceries((g) => g.map((x) => x.id === t.id ? { ...x, title: name } : x)); // optimistic
+    const r = await backend.updateTaskRemote(t.id, { title: name });
+    if (r.error) { await load(); toast({ kind: "error", title: "Couldn't rename", message: r.error === "insufficient_role" ? "Ask an adult to rename this item." : r.error }); }
+  };
   const removeGrocery = async (t: ServerTask) => {
     setGroceries((g) => g.filter((x) => x.id !== t.id)); // optimistic
     const r = await backend.deleteTaskRemote(t.id);
@@ -102,7 +116,7 @@ export function Meals() {
                   <p className="text-sm text-ink-400">No meals planned.</p>
                 ) : (
                   <ul className="space-y-1.5">
-                    {dayMeals.map((m) => <MealRow key={m.id} meal={m} canManage={canManage} busy={busy} onGrocery={() => toGrocery(m)} onCalendar={() => toCalendar(m)} onRemove={() => removeMeal(m)} />)}
+                    {dayMeals.map((m) => <MealRow key={m.id} meal={m} canManage={canManage} busy={busy} onGrocery={() => toGrocery(m)} onCalendar={() => toCalendar(m)} onRemove={() => removeMeal(m)} onEdit={() => setEditing(m)} />)}
                   </ul>
                 )}
               </Card>
@@ -111,7 +125,7 @@ export function Meals() {
           {(byDay["unscheduled"]?.length ?? 0) > 0 && (
             <Card className="card-pad">
               <p className="mb-2 font-display text-sm font-semibold text-ink-900">Unscheduled</p>
-              <ul className="space-y-1.5">{byDay["unscheduled"].map((m) => <MealRow key={m.id} meal={m} canManage={canManage} busy={busy} onGrocery={() => toGrocery(m)} onCalendar={() => toCalendar(m)} onRemove={() => removeMeal(m)} />)}</ul>
+              <ul className="space-y-1.5">{byDay["unscheduled"].map((m) => <MealRow key={m.id} meal={m} canManage={canManage} busy={busy} onGrocery={() => toGrocery(m)} onCalendar={() => toCalendar(m)} onRemove={() => removeMeal(m)} onEdit={() => setEditing(m)} />)}</ul>
             </Card>
           )}
         </div>
@@ -124,25 +138,48 @@ export function Meals() {
           ) : (
             <ul className="space-y-1">
               {groceries.map((t) => (
-                <li key={t.id} className="group flex items-center">
-                  <button onClick={() => toggleGrocery(t)} className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-1.5 py-1 text-left text-sm hover:bg-surface-sunken/60" aria-label={`Toggle ${t.title}`}>
-                    <Icon name={t.status === "done" ? "CheckCircle2" : "Circle"} size={15} className={`shrink-0 ${t.status === "done" ? "text-sage-500" : "text-ink-300"}`} />
-                    <span className={`truncate ${t.status === "done" ? "text-ink-400 line-through" : "text-ink-700"}`}>{t.title}</span>
-                  </button>
-                  <button onClick={() => removeGrocery(t)} aria-label={`Remove ${t.title}`} className="shrink-0 rounded-lg p-1.5 text-ink-300 opacity-0 transition-opacity hover:bg-coral-50 hover:text-coral-600 group-hover:opacity-100 focus-visible:opacity-100">
-                    <Icon name="X" size={13} />
-                  </button>
-                </li>
+                <GroceryRow key={t.id} task={t} onToggle={() => toggleGrocery(t)} onRename={(name) => renameGrocery(t, name)} onRemove={() => removeGrocery(t)} />
               ))}
             </ul>
           )}
         </Card>
       </div>
+
+      {editing && <EditMealModal meal={editing} busy={busy} onClose={() => setEditing(null)} onSave={saveEdit} />}
     </div>
   );
 }
 
-function MealRow({ meal, canManage, busy, onGrocery, onCalendar, onRemove }: { meal: Meal; canManage: boolean; busy: boolean; onGrocery: () => void; onCalendar: () => void; onRemove: () => void }) {
+/** A grocery row that can be toggled done, renamed inline (double-click or the pencil),
+ *  or removed — rename PATCHes the underlying list-task so it persists to the server. */
+function GroceryRow({ task, onToggle, onRename, onRemove }: { task: ServerTask; onToggle: () => void; onRename: (name: string) => void; onRemove: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(task.title);
+  const commit = () => { setEditing(false); onRename(value); };
+  if (editing) {
+    return (
+      <li className="flex items-center gap-1">
+        <TextInput autoFocus value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") { setEditing(false); setValue(task.title); } }} onBlur={commit} className="!py-1 text-sm" aria-label={`Rename ${task.title}`} />
+      </li>
+    );
+  }
+  return (
+    <li className="group flex items-center">
+      <button onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-1.5 py-1 text-left text-sm hover:bg-surface-sunken/60" aria-label={`Toggle ${task.title}`}>
+        <Icon name={task.status === "done" ? "CheckCircle2" : "Circle"} size={15} className={`shrink-0 ${task.status === "done" ? "text-sage-500" : "text-ink-300"}`} />
+        <span onDoubleClick={(e) => { e.stopPropagation(); setValue(task.title); setEditing(true); }} className={`truncate ${task.status === "done" ? "text-ink-400 line-through" : "text-ink-700"}`}>{task.title}</span>
+      </button>
+      <button onClick={() => { setValue(task.title); setEditing(true); }} aria-label={`Rename ${task.title}`} className="shrink-0 rounded-lg p-1.5 text-ink-300 opacity-0 transition-opacity hover:bg-surface-sunken hover:text-ink-600 group-hover:opacity-100 focus-visible:opacity-100">
+        <Icon name="Pencil" size={12} />
+      </button>
+      <button onClick={onRemove} aria-label={`Remove ${task.title}`} className="shrink-0 rounded-lg p-1.5 text-ink-300 opacity-0 transition-opacity hover:bg-coral-50 hover:text-coral-600 group-hover:opacity-100 focus-visible:opacity-100">
+        <Icon name="X" size={13} />
+      </button>
+    </li>
+  );
+}
+
+function MealRow({ meal, canManage, busy, onGrocery, onCalendar, onRemove, onEdit }: { meal: Meal; canManage: boolean; busy: boolean; onGrocery: () => void; onCalendar: () => void; onRemove: () => void; onEdit: () => void }) {
   // Each meal is selectable: expanding reveals the full ingredient list, extracted
   // step-by-step instructions, and the recipe source link.
   const [open, setOpen] = useState(false);
@@ -184,10 +221,44 @@ function MealRow({ meal, canManage, busy, onGrocery, onCalendar, onRemove }: { m
           <div className="mt-1.5 flex flex-wrap gap-2">
             {meal.ingredients.some((i) => !i.have) && <Button size="sm" variant="secondary" disabled={busy} onClick={onGrocery}><Icon name="ShoppingCart" size={12} /> Send to groceries</Button>}
             {meal.date && <Button size="sm" variant="secondary" disabled={busy} onClick={onCalendar}><Icon name="CalendarPlus" size={12} /> Add to calendar</Button>}
+            <Button size="sm" variant="ghost" disabled={busy} onClick={onEdit}><Icon name="Pencil" size={12} /> Edit</Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={onRemove}><Icon name="Trash2" size={12} /></Button>
           </div>
         )}
       </div>
     </li>
+  );
+}
+
+/** Edit an existing meal. Converts the ingredient objects to a comma list for editing and
+ *  back to {item, have} on save (preserving each item's existing "have" flag by name), then
+ *  PATCHes via backend.updateMeal — keeping the meal's id and all its links intact. */
+function EditMealModal({ meal, busy, onClose, onSave }: { meal: Meal; busy: boolean; onClose: () => void; onSave: (id: string, patch: Partial<Meal>) => void }) {
+  const [title, setTitle] = useState(meal.title);
+  const [date, setDate] = useState(meal.date ?? "");
+  const [slot, setSlot] = useState<(typeof SLOTS)[number]>((SLOTS as readonly string[]).includes(meal.slot) ? (meal.slot as (typeof SLOTS)[number]) : "dinner");
+  const [time, setTime] = useState(meal.time ?? "");
+  const [servings, setServings] = useState(meal.servings ? String(meal.servings) : "");
+  const [ingredients, setIngredients] = useState(meal.ingredients.map((i) => i.item).join(", "));
+  const [recipeUrl, setRecipeUrl] = useState(meal.recipeUrl ?? "");
+  const save = () => {
+    if (!title.trim()) return;
+    const haveByItem = new Map(meal.ingredients.map((i) => [i.item.toLowerCase(), i.have]));
+    const ing = ingredients.split(",").map((s) => s.trim()).filter(Boolean).map((item) => ({ item, have: haveByItem.get(item.toLowerCase()) ?? false }));
+    const n = parseInt(servings, 10);
+    onSave(meal.id, { title: title.trim(), date: date || null, slot, time: time || null, servings: Number.isFinite(n) && n > 0 ? n : null, ingredients: ing, recipeUrl: recipeUrl.trim() });
+  };
+  return (
+    <Modal open onClose={onClose} title="Edit meal" icon="UtensilsCrossed" footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="ember" disabled={busy || !title.trim()} onClick={save}><Icon name="Check" size={15} /> Save changes</Button></>}>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+        <Field label="Meal" className="sm:col-span-2"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
+        <Field label="Day"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Slot"><Select value={slot} onChange={(e) => setSlot(e.target.value as (typeof SLOTS)[number])}>{SLOTS.map((s) => <option key={s} value={s}>{s}</option>)}</Select></Field>
+        <Field label="Ingredients (comma-separated)" className="sm:col-span-4"><TextInput value={ingredients} onChange={(e) => setIngredients(e.target.value)} /></Field>
+        <Field label="Time" hint="Optional"><TextInput type="time" value={time} onChange={(e) => setTime(e.target.value)} /></Field>
+        <Field label="Servings"><TextInput type="number" min={1} value={servings} onChange={(e) => setServings(e.target.value)} /></Field>
+        <Field label="Recipe link" className="sm:col-span-2"><TextInput type="url" value={recipeUrl} onChange={(e) => setRecipeUrl(e.target.value)} /></Field>
+      </div>
+    </Modal>
   );
 }

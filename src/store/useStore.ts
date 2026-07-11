@@ -42,11 +42,17 @@ import { pushActivity, executeAgentRun, subagentDefsFor, processFile } from "@/l
 import { parseAgentPrompt, buildWorkflowPlan, routeToAgent, detectApprovalGates } from "@/lib/ai";
 import { buildSearchIndex, search } from "@/lib/search";
 import { getAdvancedMode, setAdvancedMode } from "@/lib/prefs";
-import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact } from "@/connectors/api";
+import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge } from "@/connectors/api";
 
 /** A plan shape the live runner can execute (AgentPlan satisfies this). */
 export interface RunnableStep { toolId: string | null; title: string; detail: string; input: Record<string, unknown>; requiresApproval: boolean }
 export interface RunnablePlan { title?: string; summary?: string; steps: RunnableStep[] }
+
+/** Local knowledge id → the in-flight create's promise (resolving to the server id, or
+ *  undefined if the create failed). A very-fast edit/delete on a just-created item awaits
+ *  this instead of silently no-op'ing — which otherwise reverted edits on the next hydrate
+ *  and orphaned server rows on delete. */
+const knowledgeServerIdPending = new Map<string, Promise<string | undefined>>();
 
 /* ---- Server run → local projection (the SERVER is the source of truth; the
    client mirrors its durable runs into the existing AutomationRun shape) ---- */
@@ -419,6 +425,7 @@ export interface Store extends UIState {
 
   /* files + knowledge */
   uploadFiles: (files: File[], spaceId?: string) => Promise<string[]>;
+  uploadIdCard: (front: File, back: File, name?: string, spaceId?: string) => Promise<string | null>;
   addSampleFile: (input: Partial<FileAsset> & { name: string }) => string;
   updateFile: (id: string, patch: Partial<FileAsset>) => void;
   deleteFile: (id: string) => void;
@@ -1332,9 +1339,29 @@ export const useStore = create<Store>((set, get) => {
     // from the server member registry (the client can render but never mint roles). If the
     // backend is offline this is a no-op and the local-first cache continues to render.
     hydrateFromServer: async () => {
-      const [events, tasks, members, conversations, memory, serverAgents, contactMethods, household] = await Promise.all([
-        backend.events(), backend.tasks(), backend.members(), backend.conversations(), backend.memory(), backend.agents(), backend.contactMethods(), backend.household(),
+      const [events, tasks, members, conversations, memory, serverAgents, contactMethods, household, files, knowledge] = await Promise.all([
+        backend.events(), backend.tasks(), backend.members(), backend.conversations(), backend.memory(), backend.agents(), backend.contactMethods(), backend.household(), backend.files(), backend.knowledge(),
       ]);
+      const mimeToType = (mime: string, name: string): FileAsset["type"] => {
+        const ext = (name.split(".").pop() ?? "").toUpperCase();
+        const byExt: Record<string, FileAsset["type"]> = { PDF: "PDF", DOCX: "DOCX", TXT: "TXT", MD: "MD", CSV: "CSV", XLSX: "XLSX", PNG: "Image", JPG: "Image", JPEG: "Image", GIF: "Image", ZIP: "ZIP", MP3: "Audio", MP4: "Video" };
+        if (byExt[ext]) return byExt[ext];
+        if (mime.startsWith("image")) return "Image"; if (mime.startsWith("audio")) return "Audio"; if (mime.startsWith("video")) return "Video";
+        if (mime.includes("pdf")) return "PDF"; return "TXT";
+      };
+      const mapFile = (f: ServerFile): FileAsset => ({
+        id: f.id, serverId: f.id, name: f.name, type: mimeToType(f.mime ?? "", f.name), sizeBytes: f.sizeBytes ?? 0,
+        tags: f.tags ?? [], ownerMemberId: f.uploadedBy, spaceId: f.spaceId ?? "sp-family", uploadedAt: f.createdAt,
+        linkedAgentIds: [], linkedWorkflowIds: [], summary: `${f.pageCount && f.pageCount > 1 ? `${f.pageCount}-page ` : ""}file synced from your household.`,
+        detectedDates: [], detectedTasks: [], sensitive: (f.visibility === "personal") || /tax|medical|ssn|passport|id|bank|legal/i.test(f.name),
+        searchIndexed: false, folder: "Uploads", pageCount: f.pageCount,
+      });
+      const mapKnowledge = (k: ServerKnowledge): KnowledgeItem => ({
+        id: k.id, serverId: k.id, title: k.title, type: (k.type as KnowledgeItem["type"]) || "Reference Note", content: k.content ?? "",
+        fileAssetIds: k.fileIds ?? [], tags: k.tags ?? [], spaceId: "sp-family", createdBy: k.createdBy,
+        sensitive: !!k.sensitive, visibility: k.visibility, agentReadable: true, agentEditableRequiresApproval: true,
+        createdAt: k.createdAt, updatedAt: k.updatedAt,
+      });
       const mapEvent = (e: ServerEvent): CalendarEvent => ({
         id: e.id, serverId: e.id, title: e.title, startAt: e.startAt ?? "", endAt: e.endAt ?? undefined,
         location: e.location || undefined, spaceId: e.spaceId, memberIds: e.participantIds ?? [],
@@ -1404,7 +1431,7 @@ export const useStore = create<Store>((set, get) => {
               displayName: sm.displayName,
               role: sm.role as Member["role"],
               relationship: sm.relationship ?? local?.relationship ?? "",
-              avatarColor: local?.avatarColor ?? AV[[...sm.displayName].reduce((a, c) => a + c.charCodeAt(0), 0) % AV.length],
+              avatarColor: sm.color || local?.avatarColor || AV[[...sm.displayName].reduce((a, c) => a + c.charCodeAt(0), 0) % AV.length],
               initials: local?.initials ?? sm.displayName.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase(),
               spaceIds: local?.spaceIds ?? sm.spaceIds ?? [],
               isCurrentUser: sm.isCurrentUser,
@@ -1426,6 +1453,15 @@ export const useStore = create<Store>((set, get) => {
         // human manually added. Server-wins by id; purely local entries are preserved.
         const memIds = new Set(memory.map((m) => m.id));
         d.memories = [...memory.map(mapMemory), ...d.memories.filter((m) => !memIds.has(m.serverId ?? m.id))];
+        // Durable files (server blobs). This is the fix for "uploads aren't durable": web now
+        // reads the same /api/files the iOS app writes to, so uploads survive refresh/device-
+        // switch and show up in the shared Library. Server-wins by id; purely local files
+        // (offline / mid-upload) are preserved until they get a serverId.
+        const fileIds = new Set(files.map((f) => f.id));
+        d.files = [...files.map(mapFile), ...d.files.filter((f) => !fileIds.has(f.serverId ?? f.id))];
+        // Server-owned Knowledge (user-authored, editable, durable). Server-wins by id.
+        const kIds = new Set(knowledge.map((k) => k.id));
+        d.knowledge = [...knowledge.map(mapKnowledge), ...d.knowledge.filter((k) => !kIds.has(k.serverId ?? k.id))];
         // Server-registry agents (incl. chat-built ones that exist ONLY server-side).
         mergeServerAgents(d, serverAgents, { connectors: get().connectors, providers: get().providers, actorId: get().session?.actorId });
       });
@@ -2171,32 +2207,40 @@ export const useStore = create<Store>((set, get) => {
     /* --------------------------- files + knowledge ------------------------ */
     uploadFiles: async (files, spaceId) => {
       const ids: string[] = [];
+      let durableCount = 0;
       for (const file of files) {
         const id = uid("file");
         ids.push(id);
         const isText = /\.(txt|md|csv|json)$/i.test(file.name) || file.type.startsWith("text");
-        let previewContent: string | undefined;
-        let dataUrl: string | undefined;
-        if (isText) {
-          previewContent = await file.text().catch(() => undefined);
-        } else if (file.type.startsWith("image")) {
-          dataUrl = await new Promise<string | undefined>((res) => {
-            const reader = new FileReader();
-            reader.onload = () => res(reader.result as string);
-            reader.onerror = () => res(undefined);
-            reader.readAsDataURL(file);
-          });
-        }
+        // Read the raw bytes once as a data URL — this drives the image preview AND gives the
+        // base64 we POST to the durable server so the upload survives refresh/device-switch and
+        // lands in the shared Library (the old code only ever wrote to local IndexedDB). Text
+        // files also get a text preview for on-device date/task detection.
+        const dataUrl = await new Promise<string | undefined>((res) => {
+          const reader = new FileReader();
+          reader.onload = () => res(reader.result as string);
+          reader.onerror = () => res(undefined);
+          reader.readAsDataURL(file);
+        });
+        const base64 = dataUrl && dataUrl.includes(",") ? dataUrl.split(",")[1] : undefined;
+        const previewContent = isText ? await file.text().catch(() => undefined) : undefined;
         const ext = (file.name.split(".").pop() ?? "").toUpperCase();
         const typeMap: Record<string, FileAsset["type"]> = { PDF: "PDF", DOCX: "DOCX", TXT: "TXT", MD: "MD", CSV: "CSV", XLSX: "XLSX", PNG: "Image", JPG: "Image", JPEG: "Image", GIF: "Image", ZIP: "ZIP", MP3: "Audio", MP4: "Video" };
         const dates = previewContent ? Array.from(previewContent.matchAll(/\b(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{2}-\d{2})\b/g)).map((m) => m[0]).slice(0, 5) : [];
         const tasks = previewContent
           ? previewContent.split(/\n/).filter((l) => /(due|sign|return|pay|bring|submit|deadline)/i.test(l)).map((l) => l.trim().slice(0, 80)).slice(0, 5)
           : [];
+        // Durable server copy (best-effort — the local record still renders if the runtime is offline).
+        let serverId: string | undefined;
+        if (base64) {
+          const up = await backend.uploadFile({ name: file.name, mime: file.type || "application/octet-stream", contentBase64: base64, spaceId, source: "upload" });
+          if (up.file) { serverId = up.file.id; durableCount++; }
+        }
         commit((d) => {
           const sid = spaceId ?? d.spaces.find((s) => s.type === "Personal")?.id ?? d.spaces[0].id;
           const f: FileAsset = {
             id,
+            serverId,
             name: file.name,
             type: typeMap[ext] ?? "TXT",
             sizeBytes: file.size,
@@ -2212,7 +2256,7 @@ export const useStore = create<Store>((set, get) => {
             sensitive: /tax|medical|ssn|passport|id|bank|legal/i.test(file.name),
             searchIndexed: false,
             previewContent,
-            dataUrl,
+            dataUrl: file.type.startsWith("image") ? dataUrl : undefined,
             folder: "Uploads",
           };
           d.files.unshift(f);
@@ -2220,8 +2264,43 @@ export const useStore = create<Store>((set, get) => {
           processFile(d, id);
         });
       }
-      toast({ kind: "success", title: `${files.length} file${files.length > 1 ? "s" : ""} processed`, message: "Summaries and detected items are ready." });
+      toast(durableCount === files.length
+        ? { kind: "success", title: `${files.length} file${files.length > 1 ? "s" : ""} saved`, message: "Stored in your household Library — available on every device." }
+        : { kind: "warn", title: `${files.length} file${files.length > 1 ? "s" : ""} added locally`, message: "Start the FamiliOS runtime to store them durably across devices." });
       return ids;
+    },
+    // Front + back of an ID card (or any 2-sided doc) as ONE durable file: both images are
+    // stored as pages of a single server record (POST /api/files with `pages`), not two
+    // separate files. Retrieve a side with backend.fileContent(id, pageIndex).
+    uploadIdCard: async (front, back, name, spaceId) => {
+      const toB64 = (f: File) => new Promise<string | undefined>((res) => {
+        const reader = new FileReader();
+        reader.onload = () => { const u = reader.result as string; res(u.includes(",") ? u.split(",")[1] : undefined); };
+        reader.onerror = () => res(undefined);
+        reader.readAsDataURL(f);
+      });
+      const [fb, bb] = await Promise.all([toB64(front), toB64(back)]);
+      if (!fb || !bb) { toast({ kind: "error", title: "Couldn't read images", message: "Please choose two image files." }); return null; }
+      const up = await backend.uploadFile({
+        name: name || "ID card", mime: front.type || "image/jpeg", spaceId, source: "upload",
+        tags: ["ID", "Uploaded"], visibility: "personal",
+        pages: [{ name: "Front", base64: fb }, { name: "Back", base64: bb }],
+      });
+      if (!up.file) { toast({ kind: "error", title: "Couldn't save", message: up.error === "backend_unreachable" ? "Start the FamiliOS runtime to store files." : (up.message ?? up.error) }); return null; }
+      const id = uid("file");
+      const frontDataUrl = `data:${front.type || "image/jpeg"};base64,${fb}`;
+      commit((d) => {
+        const sid = spaceId ?? d.spaces.find((s) => s.type === "Personal")?.id ?? d.spaces[0].id;
+        d.files.unshift({
+          id, serverId: up.file!.id, name: up.file!.name, type: "Image", sizeBytes: up.file!.sizeBytes ?? front.size + back.size,
+          tags: ["ID", "Uploaded"], ownerMemberId: d.members.find((m) => m.isCurrentUser)?.id ?? d.members[0].id, spaceId: sid,
+          uploadedAt: nowISO(), linkedAgentIds: [], linkedWorkflowIds: [], summary: "2-page document (front & back).",
+          detectedDates: [], detectedTasks: [], sensitive: true, searchIndexed: false, dataUrl: frontDataUrl, folder: "Uploads", pageCount: 2,
+        });
+        pushActivity(d, { actorType: "user", actorId: "user", actorName: "You", actionType: "file.uploaded", description: `Uploaded ${up.file!.name} (front & back)`, entityType: "file", entityId: id, spaceId: sid, status: "success" });
+      });
+      toast({ kind: "success", title: "ID card saved", message: "Front and back stored as one document." });
+      return id;
     },
     addSampleFile: (input) => {
       const id = uid("file");
@@ -2256,8 +2335,11 @@ export const useStore = create<Store>((set, get) => {
         if (f) Object.assign(f, patch);
       }),
     deleteFile: (id) => {
+      const f = get().data.files.find((x) => x.id === id);
+      // Remove the durable server blob too, so a delete on web actually clears it everywhere
+      // (not just this browser's copy).
+      if (f?.serverId) void backend.deleteFileRemote(f.serverId);
       commit((d) => {
-        const f = d.files.find((x) => x.id === id);
         d.files = d.files.filter((x) => x.id !== id);
         if (f) pushActivity(d, { actorType: "user", actorId: "user", actorName: "You", actionType: "file.deleted", description: `Deleted ${f.name}`, entityType: "file", entityId: id, spaceId: f.spaceId, status: "warning" });
       });
@@ -2272,37 +2354,57 @@ export const useStore = create<Store>((set, get) => {
       commit((d) => processFile(d, id));
       toast({ kind: "success", title: "File processed" });
     },
+    // Knowledge items are now server-owned (durable, editable, visibility-scoped) — the old
+    // versions only ever wrote to this browser's IndexedDB, so nothing survived a refresh or
+    // showed up on another device. These create/patch/delete against /api/knowledge and mirror
+    // the result locally; the id we store is the server id so edits/deletes address the record.
     createKnowledgeItem: (input) => {
       const id = uid("know");
-      commit((d) => {
-        d.knowledge.unshift({
-          id,
-          title: input.title,
-          type: input.type ?? "Reference Note",
-          content: input.content ?? "",
-          fileAssetIds: input.fileAssetIds ?? [],
-          tags: input.tags ?? [],
-          spaceId: input.spaceId ?? d.spaces[0].id,
-          createdBy: d.members.find((m) => m.isCurrentUser)?.displayName ?? "You",
-          sensitive: input.sensitive ?? false,
-          agentReadable: input.agentReadable ?? true,
-          agentEditableRequiresApproval: input.agentEditableRequiresApproval ?? true,
-          createdAt: nowISO(),
-          updatedAt: nowISO(),
-        });
-      });
+      const createdBy = get().data.members.find((m) => m.isCurrentUser)?.displayName ?? "You";
+      const item: KnowledgeItem = {
+        id, serverId: undefined, title: input.title, type: input.type ?? "Reference Note", content: input.content ?? "",
+        fileAssetIds: input.fileAssetIds ?? [], tags: input.tags ?? [], spaceId: input.spaceId ?? get().data.spaces[0].id,
+        createdBy, sensitive: input.sensitive ?? false, visibility: input.sensitive ? "personal" : "household",
+        agentReadable: input.agentReadable ?? true, agentEditableRequiresApproval: input.agentEditableRequiresApproval ?? true,
+        createdAt: nowISO(), updatedAt: nowISO(),
+      };
+      commit((d) => { d.knowledge.unshift(item); });
+      const pending = backend.createKnowledge({ title: item.title, type: item.type, content: item.content, tags: item.tags, visibility: item.visibility, sensitive: item.sensitive, fileIds: item.fileAssetIds })
+        .then((r) => {
+          if (r.item) { commit((d) => { const k = d.knowledge.find((x) => x.id === id); if (k) k.serverId = r.item!.id; }); return r.item.id; }
+          toast({ kind: "warn", title: "Saved locally only", message: r.error === "backend_unreachable" ? "Start the FamiliOS runtime to sync knowledge across devices." : (r.error ?? "The server rejected this item.") });
+          return undefined;
+        })
+        .finally(() => { knowledgeServerIdPending.delete(id); });
+      knowledgeServerIdPending.set(id, pending);
       toast({ kind: "success", title: "Knowledge added" });
       return id;
     },
-    updateKnowledgeItem: (id, patch) =>
-      commit((d) => {
-        const k = d.knowledge.find((x) => x.id === id);
-        if (k) Object.assign(k, patch, { updatedAt: nowISO() });
-      }),
+    // Resolve the server id even for an item whose create POST hasn't returned yet, so a
+    // fast edit/delete on a fresh item still reaches the server (no silent revert / orphan).
+    updateKnowledgeItem: (id, patch) => {
+      commit((d) => { const k = d.knowledge.find((x) => x.id === id); if (k) Object.assign(k, patch, { updatedAt: nowISO() }); });
+      void (async () => {
+        let sid = get().data.knowledge.find((x) => x.id === id)?.serverId;
+        if (!sid && knowledgeServerIdPending.has(id)) sid = await knowledgeServerIdPending.get(id);
+        if (!sid) return; // create failed / local-only — nothing to patch server-side
+        const p: Partial<ServerKnowledge> = {};
+        if (patch.title !== undefined) p.title = patch.title;
+        if (patch.type !== undefined) p.type = patch.type;
+        if (patch.content !== undefined) p.content = patch.content;
+        if (patch.tags !== undefined) p.tags = patch.tags;
+        if (patch.sensitive !== undefined) { p.sensitive = patch.sensitive; p.visibility = patch.sensitive ? "personal" : "household"; }
+        await backend.patchKnowledge(sid, p);
+      })();
+    },
     deleteKnowledgeItem: (id) => {
-      commit((d) => {
-        d.knowledge = d.knowledge.filter((x) => x.id !== id);
-      });
+      const existing = get().data.knowledge.find((x) => x.id === id);
+      commit((d) => { d.knowledge = d.knowledge.filter((x) => x.id !== id); });
+      void (async () => {
+        let sid = existing?.serverId;
+        if (!sid && knowledgeServerIdPending.has(id)) sid = await knowledgeServerIdPending.get(id);
+        if (sid) await backend.deleteKnowledge(sid); // waits out an in-flight create so the row isn't orphaned
+      })();
       toast({ kind: "info", title: "Knowledge item removed" });
     },
 

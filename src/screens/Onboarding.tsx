@@ -4,6 +4,7 @@ import { Button, Card, Field, TextInput } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { brand } from "@/brand";
 import { importBackup } from "@/storage/backup";
+import { setAdvancedMode } from "@/lib/prefs";
 
 /**
  * First-run onboarding. A fresh, no-data launch lands here (no auto-seeded
@@ -51,8 +52,12 @@ export function Onboarding() {
               <Field label="Household name"><TextInput value={household} placeholder="The Rivera Family" onChange={(e) => setHousehold(e.target.value)} /></Field>
               <Field label="Your name (owner)"><TextInput value={owner} placeholder="Your name" onChange={(e) => setOwner(e.target.value)} /></Field>
             </div>
+            <div className="mt-4 flex items-start gap-2 rounded-2xl border border-sky-200/70 bg-sky-50 px-3.5 py-2.5 text-xs text-sky-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
+              <Icon name="Sparkles" size={15} className="mt-0.5 shrink-0" />
+              <span>You'll start in <strong>Simple mode</strong> — just Ask {brand.name}, Helpers, Automations, and the family essentials. Turn on <strong>Advanced tools</strong> (Skills &amp; Functions) anytime in Settings.</span>
+            </div>
             <div className="mt-4 flex justify-end">
-              <Button variant="ember" disabled={busy || !owner.trim()} onClick={async () => { setBusy(true); await complete("blank", { householdName: household, ownerName: owner }); }}>
+              <Button variant="ember" disabled={busy || !owner.trim()} onClick={async () => { setBusy(true); setAdvancedMode(false); await complete("blank", { householdName: household, ownerName: owner }); }}>
                 <Icon name="Check" size={15} /> Create household
               </Button>
             </div>

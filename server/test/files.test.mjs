@@ -59,3 +59,50 @@ test("a child cannot delete an adult's file; an adult can", async () => {
   const gone = await adult.req(`/api/files/${f.id}/content`);
   assert.equal(gone.status, 404);
 });
+
+// Multi-page uploads (item 4): front+back of an ID card as ONE logical file, each page a
+// separate blob, retrievable independently via ?page=N. Single-base64 uploads stay 1-page.
+test("a 2-page upload stores each page as its own blob and fetches back per page", async () => {
+  const up = await adult.req("/api/files", { method: "POST", body: JSON.stringify({
+    name: "id-card", mime: "image/png",
+    pages: [{ name: "front", base64: b64("FRONT-of-card") }, { name: "back", base64: b64("BACK-of-card") }],
+  }) });
+  assert.equal(up.status, 200);
+  const f = up.data.file;
+  assert.equal(f.pageCount, 2);
+  assert.equal(f.pageBlobIds.length, 2);
+  assert.equal(f.sizeBytes, Buffer.byteLength("FRONT-of-card") + Buffer.byteLength("BACK-of-card"), "sizeBytes sums the pages");
+
+  // Page 0 is the default.
+  const p0 = await adult.req(`/api/files/${f.id}/content`);
+  assert.equal(p0.status, 200);
+  assert.equal(p0.data.page, 0);
+  assert.equal(p0.data.pageCount, 2);
+  assert.equal(Buffer.from(p0.data.contentBase64, "base64").toString("utf8"), "FRONT-of-card");
+
+  // Page 1 by query.
+  const p1 = await adult.req(`/api/files/${f.id}/content?page=1`);
+  assert.equal(p1.status, 200);
+  assert.equal(Buffer.from(p1.data.contentBase64, "base64").toString("utf8"), "BACK-of-card");
+
+  // Out-of-range page 404s.
+  const p2 = await adult.req(`/api/files/${f.id}/content?page=2`);
+  assert.equal(p2.status, 404);
+  assert.equal(p2.data.error, "page_not_found");
+});
+
+test("a single-base64 upload is a 1-page file (back-compat)", async () => {
+  const up = await adult.req("/api/files", { method: "POST", body: JSON.stringify({ name: "single.txt", contentBase64: b64("just one") }) });
+  assert.equal(up.status, 200);
+  assert.equal(up.data.file.pageCount, 1);
+  const p0 = await adult.req(`/api/files/${up.data.file.id}/content`);
+  assert.equal(Buffer.from(p0.data.contentBase64, "base64").toString("utf8"), "just one");
+  const p1 = await adult.req(`/api/files/${up.data.file.id}/content?page=1`);
+  assert.equal(p1.status, 404, "there is no second page");
+});
+
+test("an oversized page is refused with 413 (per-page cap)", async () => {
+  const big = "A".repeat(7_000_001);
+  const r = await adult.req("/api/files", { method: "POST", body: JSON.stringify({ name: "big", pages: [{ base64: b64("ok") }, { base64: big }] }) });
+  assert.equal(r.status, 413);
+});

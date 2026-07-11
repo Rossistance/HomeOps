@@ -39,6 +39,10 @@ export const PROVIDERS = [
       { key: "gmail.modify", oauthScope: "https://www.googleapis.com/auth/gmail.modify", label: "Organize inbox (labels, archive)", risk: "High", enablesTools: ["gmail.listLabels", "gmail.modifyLabels"] },
       { key: "calendar", oauthScope: "https://www.googleapis.com/auth/calendar.events", label: "Manage calendar events", risk: "Medium", enablesTools: ["calendar.list", "calendar.create"] },
       { key: "drive", oauthScope: "https://www.googleapis.com/auth/drive.readonly", label: "Read Google Drive", risk: "Medium", enablesTools: ["drive.list"] },
+      // Google Home / Nest (SDM) lives here as a permission ON the Google connector, so you grant
+      // it alongside Gmail/Calendar/Drive. Actual device calls still need a Device Access project
+      // id (HOMEOPS_SDM_PROJECT_ID) — the tools fail closed with a setup hint until it's set.
+      { key: "smarthome", oauthScope: "https://www.googleapis.com/auth/sdm.service", label: "Google Home devices (Nest thermostats, cameras)", risk: "High", enablesTools: ["smarthome.listDevices", "smarthome.setThermostat"] },
     ],
     identity: async (api) => { const r = await api("https://www.googleapis.com/oauth2/v2/userinfo"); return { externalAccountId: r.json?.id ?? r.json?.email, displayName: r.json?.email ?? "Google account" }; },
     health: async (api) => { const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/profile"); return { ok: r.ok, status: r.ok ? "healthy" : "error", detail: r.json?.emailAddress }; },
@@ -156,6 +160,29 @@ export const PROVIDERS = [
         } },
       { id: "drive.list", name: "List recent files", action: "Read", risk: "Medium", requiresApproval: false, scopes: ["drive"], inputs: [],
         run: async (api) => { const r = await api("https://www.googleapis.com/drive/v3/files?pageSize=10&orderBy=modifiedTime desc&fields=files(id,name,mimeType,modifiedTime)"); return { count: (r.json.files ?? []).length, files: (r.json.files ?? []).map((f) => ({ id: f.id, name: f.name, type: f.mimeType, modified: f.modifiedTime })) }; } },
+      // Google Home / Nest (SDM). Needs a Device Access project id (HOMEOPS_SDM_PROJECT_ID);
+      // fails closed with a setup hint until it's set — never fakes success.
+      { id: "smarthome.listDevices", name: "List Google Home devices", action: "Read", risk: "Low", requiresApproval: false, scopes: ["smarthome"], inputs: [],
+        run: async (api) => {
+          const projectId = env("HOMEOPS_SDM_PROJECT_ID");
+          if (!projectId) throw new Error("Google Home isn't set up yet — set HOMEOPS_SDM_PROJECT_ID to your Device Access project id (from the SDM Device Access console).");
+          const r = await api(`https://smartdevicemanagement.googleapis.com/v1/enterprises/${projectId}/devices`);
+          if (!r.ok) throw new Error(r.json?.error?.message ?? "Couldn't list Google Home devices.");
+          return { count: (r.json?.devices ?? []).length, devices: (r.json?.devices ?? []).map((d) => ({ name: d.name, type: d.type, room: d.parentRelations?.[0]?.displayName ?? null })) };
+        } },
+      { id: "smarthome.setThermostat", name: "Set thermostat", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["smarthome"],
+        inputs: [{ key: "deviceId", label: "Device id (from List devices)", type: "text", required: true }, { key: "celsius", label: "Heat setpoint °C", type: "text", required: true }],
+        run: async (api, input) => {
+          const projectId = env("HOMEOPS_SDM_PROJECT_ID");
+          if (!projectId) throw new Error("Google Home isn't set up yet — set HOMEOPS_SDM_PROJECT_ID to your Device Access project id (from the SDM Device Access console).");
+          if (!input.deviceId) throw new Error("Provide a `deviceId` (use List devices first).");
+          const celsius = Number(input.celsius);
+          if (!Number.isFinite(celsius)) throw new Error("Provide a numeric `celsius` heat setpoint.");
+          const command = { command: "sdm.devices.commands.ThermostatTemperatureSetpoint.SetHeat", params: { heatCelsius: celsius } };
+          const r = await api(`https://smartdevicemanagement.googleapis.com/v1/enterprises/${projectId}/devices/${encodeURIComponent(input.deviceId)}:executeCommand`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(command) });
+          if (!r.ok) throw new Error(r.json?.error?.message ?? "Thermostat command failed");
+          return { ok: true, deviceId: input.deviceId, heatCelsius: celsius };
+        } },
     ],
   },
 
@@ -319,6 +346,54 @@ export const PROVIDERS = [
         run: async (api, input) => { if (!input.title) throw new Error("Provide task `title`."); const r = await api("https://api.ticktick.com/open/v1/task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: input.title, projectId: input.projectId || undefined }) }); if (!r.ok) throw new Error("Create failed"); return { created: true, id: r.json.id, title: r.json.title }; } },
     ],
   },
+
+  // ---- Smart Home ------------------------------------------------------------
+  // Amazon Alexa is its own isolated provider (its own Login-with-Amazon OAuth client).
+  // Google Home is NOT here — it's a permission (the `smarthome`/SDM scope + tools) ON the
+  // `google` provider above, so you grant it alongside Gmail/Calendar. Either way, the device
+  // APIs need MORE than the OAuth token — Alexa a Skill-Messaging / event-gateway endpoint,
+  // Google Home a Device Access *project id* — so every tool fails CLOSED with a clear
+  // "needs setup" error when that piece isn't configured, and never fakes success.
+  {
+    id: "amazon-alexa",
+    name: "Amazon Alexa",
+    category: "Smart Home",
+    authType: "oauth2",
+    authUrl: "https://www.amazon.com/ap/oa",
+    tokenUrl: "https://api.amazon.com/auth/o2/token",
+    usePKCE: true, scopeSeparator: " ", refresh: "rotating",
+    tokenAuth: "body", tokenStyle: "form",
+    clientIdEnv: "HOMEOPS_OAUTH_ALEXA_CLIENT_ID",
+    clientSecretEnv: "HOMEOPS_OAUTH_ALEXA_CLIENT_SECRET",
+    scopes: [
+      { key: "profile", oauthScope: "profile", label: "Amazon profile (identity)", risk: "Low", enablesTools: [] },
+      { key: "alexa", oauthScope: "alexa::async_event:write", label: "Announce to & manage Alexa devices", risk: "Medium", enablesTools: ["alexa.announce", "alexa.listDevices"] },
+    ],
+    // Login with Amazon profile endpoint → { user_id, name, email }.
+    identity: async (api) => { const r = await api("https://api.amazon.com/user/profile"); return { externalAccountId: r.json?.user_id, displayName: r.json?.name ?? r.json?.email ?? "Amazon account" }; },
+    health: async (api) => { const r = await api("https://api.amazon.com/user/profile"); return { ok: r.ok, status: r.ok ? "healthy" : "error", detail: r.json?.email }; },
+    tools: [
+      { id: "alexa.listDevices", name: "List Alexa devices", action: "Read", risk: "Low", requiresApproval: false, scopes: ["alexa"], inputs: [],
+        run: async (api) => {
+          const base = env("HOMEOPS_ALEXA_ENDPOINT");
+          if (!base) throw new Error("Alexa isn't set up yet — set HOMEOPS_ALEXA_ENDPOINT to your Alexa Skill-Messaging / event-gateway base URL to reach devices.");
+          const r = await api(`${base.replace(/\/$/, "")}/v1/devices`);
+          if (!r.ok) throw new Error(r.json?.error?.message ?? r.text ?? "Couldn't list Alexa devices.");
+          return { count: (r.json?.devices ?? []).length, devices: (r.json?.devices ?? []).map((d) => ({ id: d.deviceSerialNumber ?? d.id, name: d.accountName ?? d.name, type: d.deviceType ?? d.type })) };
+        } },
+      { id: "alexa.announce", name: "Announce on Alexa", action: "Send", risk: "Medium", requiresApproval: true, scopes: ["alexa"],
+        inputs: [{ key: "message", label: "Announcement", type: "textarea", required: true }, { key: "device", label: "Target device id (blank = all)", type: "text" }],
+        run: async (api, input) => {
+          const base = env("HOMEOPS_ALEXA_ENDPOINT");
+          if (!base) throw new Error("Alexa isn't set up yet — set HOMEOPS_ALEXA_ENDPOINT to your Alexa Skill-Messaging / event-gateway base URL to send announcements.");
+          if (!input.message) throw new Error("Provide a `message` to announce.");
+          const r = await api(`${base.replace(/\/$/, "")}/v1/announcements`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: String(input.message), target: input.device || "all" }) });
+          if (!r.ok) throw new Error(r.json?.error?.message ?? r.text ?? "Alexa announcement failed");
+          return { announced: true, target: input.device || "all" };
+        } },
+    ],
+  },
+
 ];
 
 export function providerById(id) {

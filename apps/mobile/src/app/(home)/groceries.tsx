@@ -1,7 +1,7 @@
 // Groceries — the shared list (tasks of type "list" on the Groceries list).
 // Cart progress, quick-add, check-off, and a share sheet that routes outside
 // sends through the planner (so they land in approvals like everything else).
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Alert, StyleSheet, TextInput, View } from "react-native";
 import { useFocusEffect } from "expo-router";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
@@ -90,6 +90,33 @@ export default function GroceriesScreen() {
     ]);
   };
 
+  // Inline rename: an uncontrolled TextInput (value in a ref) so keystrokes don't
+  // re-render the list and steal the input's focus.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const editRef = useRef("");
+
+  const beginEdit = (t: TaskRec) => { editRef.current = t.title; setEditingId(t.id); };
+  const cancelEdit = () => { setEditingId(null); editRef.current = ""; };
+  const saveEdit = async (t: TaskRec) => {
+    const title = editRef.current.trim();
+    setEditingId(null);
+    if (!title || title === t.title) return;
+    setItems((list) => list.map((x) => (x.id === t.id ? { ...x, title } : x))); // optimistic
+    const r = await api.updateTask(t.id, { title });
+    if (r.error) {
+      await load();
+      Alert.alert("Couldn't rename", r.error === "insufficient_role" ? "Ask an adult to rename this item." : "Something went wrong — try again.");
+    }
+  };
+
+  const itemMenu = (t: TaskRec) => {
+    Alert.alert(t.title, undefined, [
+      { text: "Rename", onPress: () => beginEdit(t) },
+      { text: "Remove", style: "destructive", onPress: () => remove(t) },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  };
+
   async function sendCopy() {
     if (!sharePhone.trim() || shareBusy) return;
     setShareBusy(true);
@@ -112,6 +139,7 @@ export default function GroceriesScreen() {
 
   const ItemRow = ({ t, i }: { t: TaskRec; i: number }) => {
     const isDone = t.status === "done";
+    const editing = editingId === t.id;
     return (
       <View
         style={{
@@ -120,22 +148,45 @@ export default function GroceriesScreen() {
           borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator,
         }}
       >
-        <PressableScale onPress={() => void toggle(t)} haptic={null} hitSlop={10} accessibilityRole="checkbox" accessibilityState={{ checked: isDone }} accessibilityLabel={t.title}>
+        <PressableScale onPress={() => void toggle(t)} haptic={null} hitSlop={10} disabled={editing} accessibilityRole="checkbox" accessibilityState={{ checked: isDone }} accessibilityLabel={t.title}>
           <View
             style={{
               width: 26, height: 26, borderRadius: 13, alignItems: "center", justifyContent: "center",
               borderWidth: isDone ? 0 : 1.5, borderColor: colors.textFaint,
               backgroundColor: isDone ? colors.ember : "transparent",
+              opacity: editing ? 0.4 : 1,
             }}
           >
             {isDone && <Sym name="checkmark" size={14} color={colors.onEmber} />}
           </View>
         </PressableScale>
-        <PressableScale onLongPress={() => remove(t)} haptic={null} style={{ flex: 1 }}>
-          <T kind="rowTitle" color={isDone ? colors.textFaint : colors.text} style={isDone ? { textDecorationLine: "line-through" } : undefined}>
-            {t.title}
-          </T>
-        </PressableScale>
+        {editing ? (
+          <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+            <TextInput
+              defaultValue={editRef.current || t.title}
+              onChangeText={(v) => { editRef.current = v; }}
+              onSubmitEditing={() => void saveEdit(t)}
+              autoFocus
+              returnKeyType="done"
+              placeholder="Item name"
+              placeholderTextColor={colors.textFaint}
+              style={{ flex: 1, color: colors.text, fontSize: 15, paddingVertical: 4 }}
+              accessibilityLabel={`Rename ${t.title}`}
+            />
+            <PressableScale onPress={() => void saveEdit(t)} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Save name">
+              <Sym name="checkmark.circle.fill" size={22} color={colors.ember} />
+            </PressableScale>
+            <PressableScale onPress={cancelEdit} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Cancel rename">
+              <Sym name="xmark.circle.fill" size={22} color={colors.textFaint} />
+            </PressableScale>
+          </View>
+        ) : (
+          <PressableScale onLongPress={() => itemMenu(t)} haptic={null} style={{ flex: 1 }} accessibilityHint="Long press to rename or remove">
+            <T kind="rowTitle" color={isDone ? colors.textFaint : colors.text} style={isDone ? { textDecorationLine: "line-through" } : undefined}>
+              {t.title}
+            </T>
+          </PressableScale>
+        )}
       </View>
     );
   };

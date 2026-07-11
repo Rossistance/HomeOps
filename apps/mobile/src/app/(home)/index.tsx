@@ -7,7 +7,7 @@ import { StyleSheet, View } from "react-native";
 import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { api, type ApprovalRec, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
+import { api, type ApprovalRec, type EventRec, type EvolutionRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, riskColor } from "@/theme";
 import {
@@ -51,17 +51,24 @@ export default function TodayScreen() {
   const [events, setEvents] = useState<EventRec[]>([]);
   const [tasks, setTasks] = useState<TaskRec[]>([]);
   const [members, setMembers] = useState<MemberRec[]>([]);
+  const [memory, setMemory] = useState<MemoryRec[]>([]);
+  const [evolutions, setEvolutions] = useState<EvolutionRec[]>([]);
+  const [runs, setRuns] = useState<RunRec[]>([]);
   const [openApproval, setOpenApproval] = useState<ApprovalRec | null>(null);
   const [choreOpen, setChoreOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [householdName, setHouseholdName] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [h, aps, evts, tks, mem, hh] = await Promise.all([
+    const [h, aps, evts, tks, mem, hh, memries, evos, rns] = await Promise.all([
       api.health(), api.approvals(), api.events(), api.tasks(), api.members(), api.household(),
+      api.memory(), api.evolutions(), api.runs(),
     ]);
     setOffline(!h);
-    if (h) { setApprovals(aps); setEvents(evts); setTasks(tks); setMembers(mem); setHouseholdName(hh?.name ?? null); }
+    if (h) {
+      setApprovals(aps); setEvents(evts); setTasks(tks); setMembers(mem); setHouseholdName(hh?.name ?? null);
+      setMemory(memries); setEvolutions(evos); setRuns(rns);
+    }
     setLoading(false);
   }, []);
 
@@ -86,6 +93,23 @@ export default function TodayScreen() {
     .slice(0, 3);
   const bills = tasks.filter((t) => t.type === "bill" && t.status !== "done").slice(0, 4);
   const hasGroceries = tasks.some((t) => t.type === "list" && t.listName === "Groceries");
+
+  // "What I learned" — recent things Famili picked up: new memories, improvement
+  // proposals waiting on review, and freshly completed runs. Newest, capped at 4.
+  const learnings = useMemo(() => {
+    const out: { key: string; icon: string; fg: string; bg: string; title: string; subtitle: string }[] = [];
+    for (const m of [...memory].sort((a, b) => b.createdAt - a.createdAt).slice(0, 2)) {
+      out.push({ key: `m-${m.id}`, icon: "lightbulb.fill", fg: colors.amber, bg: colors.amberBg, title: m.text, subtitle: `New memory · ${new Date(m.createdAt).toLocaleDateString()}` });
+    }
+    for (const e of evolutions.filter((e) => e.status === "pending").slice(0, 2)) {
+      out.push({ key: `e-${e.id}`, icon: "wand.and.stars", fg: colors.lavender, bg: colors.lavenderBg, title: e.title || "Improvement proposal", subtitle: `Improvement proposal${e.risk ? ` · ${e.risk} risk` : ""}` });
+    }
+    for (const r of runs.filter((r) => ["completed", "succeeded"].includes(r.status)).slice(0, 2)) {
+      const done = r.steps.filter((s) => ["done", "completed", "succeeded"].includes(s.status)).length;
+      out.push({ key: `r-${r.id}`, icon: "checkmark.circle.fill", fg: colors.sage, bg: colors.sageBg, title: r.title || "Run completed", subtitle: `Completed · ${done}/${r.steps.length} step${r.steps.length === 1 ? "" : "s"}` });
+    }
+    return out.slice(0, 4);
+  }, [memory, evolutions, runs, colors]);
 
   // Meals and Tasks sit up front (not buried in Settings) — the two most-used
   // everyday surfaces after the calendar.
@@ -345,6 +369,31 @@ export default function TodayScreen() {
                       )}
                     </View>
                     {b.amount != null && <T kind="rowTitle">${b.amount.toFixed(2)}</T>}
+                  </View>
+                ))}
+              </Card>
+            </Rise>
+          )}
+
+          {/* what I learned — recent memories, proposals, and completed runs */}
+          {learnings.length > 0 && (
+            <Rise index={8}>
+              <SectionHeader title="What I learned" trailing={<SeeAll label="Activity" onPress={() => router.push("/activity")} />} />
+              <Card padded={false}>
+                {learnings.map((l, i) => (
+                  <View
+                    key={l.key}
+                    style={{
+                      flexDirection: "row", alignItems: "center", gap: spacing.md,
+                      paddingHorizontal: spacing.lg, paddingVertical: 13,
+                      borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator,
+                    }}
+                  >
+                    <SymTile name={l.icon} color={l.fg} bg={l.bg} size={36} iconSize={17} />
+                    <View style={{ flex: 1, gap: 2 }}>
+                      <T kind="rowTitle" numberOfLines={2}>{l.title}</T>
+                      <T kind="detail" numberOfLines={1}>{l.subtitle}</T>
+                    </View>
                   </View>
                 ))}
               </Card>

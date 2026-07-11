@@ -6,12 +6,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Switch, TextInput, View } from "react-native";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
-import { api, type EventRec, type MemberRec } from "@/lib/api";
+import { api, type ApprovalRec, type EventRec, type MemberRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
 // still shadows the ui/ directory until old screens are deleted centrally.
-import { Chip, ChipRow } from "@/components/ui/badge";
+import { Badge, Chip, ChipRow } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Well } from "@/components/ui/card";
 import { SectionHeader } from "@/components/ui/list";
@@ -123,8 +123,11 @@ export default function EventFormScreen() {
   const [bring, setBring] = useState<{ item: string; memberId: string | null }[]>([]);
   const [bringInput, setBringInput] = useState("");
 
-  const [busy, setBusy] = useState<"save" | "delete" | null>(null);
+  const [busy, setBusy] = useState<"save" | "delete" | "push" | null>(null);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
+  // Google push (canonical events only) — approval-gated exactly as web does it.
+  const [googleEventId, setGoogleEventId] = useState<string | null>(null);
+  const [pushApproval, setPushApproval] = useState<ApprovalRec | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -136,6 +139,7 @@ export default function EventFormScreen() {
           setNotFound(true);
         } else {
           setReadOnly(e.layer !== "canonical");
+          setGoogleEventId(e.provenance?.googleEventId ?? null);
           setTitle(e.title);
           setLocation(e.location ?? "");
           setDriverId(e.driverId);
@@ -209,6 +213,55 @@ export default function EventFormScreen() {
         },
       ],
     );
+  };
+
+  // Push this canonical event TO Google. Approval-first: the first call returns a
+  // pending approval; approving it and pushing again (with the id) does the write.
+  const push = async (approvalId?: string) => {
+    if (!id) return;
+    setBusy("push"); setNotice(null);
+    const r = await api.pushEventToGoogle(id, approvalId);
+    setBusy(null);
+    if (r.ok) {
+      setPushApproval(null);
+      if (r.googleEventId) setGoogleEventId(r.googleEventId);
+      tapHaptic("success");
+      setNotice({ text: `Google Calendar ${r.action ?? "updated"}.`, ok: true });
+    } else if (r.needsApproval && r.approval) {
+      setPushApproval(r.approval);
+    } else {
+      setNotice({
+        text: r.error === "insufficient_role"
+          ? "Pushing to Google needs Adult Member or higher."
+          : r.error === "connect_google_first" || r.error === "calendar_scope_missing"
+            ? (r.message ?? "Connect your Google account with calendar access in Connections first.")
+            : r.error === "no_start"
+              ? "Give the event a start time before pushing it to Google."
+              : `Couldn't push: ${r.message ?? r.error ?? "unknown error"}`,
+        ok: false,
+      });
+    }
+  };
+  // One tap once the panel is shown: approve through the same server gate, then
+  // immediately execute the push with the consumed approval.
+  const approveAndPush = async () => {
+    if (!pushApproval) return;
+    setBusy("push");
+    const d = await api.decideApproval(pushApproval.id, true);
+    if (d.error || !d.approval) {
+      setBusy(null);
+      setNotice({ text: `Couldn't approve: ${d.error === "insufficient_role" ? "adults only" : d.error ?? "approval failed"}.`, ok: false });
+      return;
+    }
+    await push(pushApproval.id);
+  };
+  const denyPush = async () => {
+    if (!pushApproval) return;
+    setBusy("push");
+    await api.decideApproval(pushApproval.id, false);
+    setBusy(null);
+    setPushApproval(null);
+    setNotice({ text: "Push cancelled.", ok: true });
   };
 
   const inputStyle = useMemo(() => ([
@@ -394,6 +447,24 @@ export default function EventFormScreen() {
       {/* Actions */}
       {!readOnly && canManage ? (
         <View style={{ marginTop: spacing.lg, gap: spacing.md }}>
+          {/* Inline Google-push approval (mirrors web's one-step approve & push). */}
+          {pushApproval ? (
+            <Well style={{ gap: spacing.sm, borderLeftWidth: 3, borderLeftColor: colors.amber }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                <T kind="rowTitle" style={{ flex: 1 }}>Push “{title.trim() || "this event"}” to your Google Calendar?</T>
+                <Badge label={`${pushApproval.risk} risk`} fg={colors.amber} bg={colors.amberBg} />
+              </View>
+              {pushApproval.preview ? <T kind="sub" color={colors.textSecondary}>{pushApproval.preview}</T> : null}
+              <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                <View style={{ flex: 1 }}>
+                  <Button title="Approve & push" small variant="success" icon="checkmark" loading={busy === "push"} onPress={() => void approveAndPush()} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button title="Deny" small variant="danger" icon="xmark" disabled={busy === "push"} onPress={() => void denyPush()} />
+                </View>
+              </View>
+            </Well>
+          ) : null}
           <Button
             title={isEdit ? "Save changes" : "Add event"}
             variant="ember"
@@ -402,6 +473,17 @@ export default function EventFormScreen() {
             disabled={!canSave}
             onPress={() => void save()}
           />
+          {isEdit ? (
+            <Button
+              title={googleEventId ? "Update in Google" : "Push to Google"}
+              variant="neutral"
+              icon="arrow.up.circle"
+              full
+              loading={busy === "push" && !pushApproval}
+              disabled={busy !== null || !!pushApproval}
+              onPress={() => void push()}
+            />
+          ) : null}
           {isEdit ? (
             <Button
               title="Delete event"

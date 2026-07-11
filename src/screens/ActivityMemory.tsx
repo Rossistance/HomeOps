@@ -3,7 +3,7 @@ import { useStore } from "@/store/useStore";
 import { PageHeader, Card, Button, IconButton, Badge, Tabs, Modal, Field, TextInput, TextArea, Select, Toggle, EmptyState, StatusDot } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { relativeTime, fmtDateTime } from "@/lib/dates";
-import { backend, type ServerEvolution } from "@/connectors/api";
+import { backend, type ServerEvolution, type AuditEvent } from "@/connectors/api";
 import type { ActivityLogEntry, MemoryEntry, MemoryType, ScreenId, Route, EvolutionProposal } from "@/types";
 
 export function ActivityMemory() {
@@ -47,6 +47,33 @@ function entityRoute(e: ActivityLogEntry): Route | null {
   }
 }
 
+/** One normalized row for the unified activity feed, whether it came from the server's
+ *  real audit trail or a locally-recorded client action. */
+interface ActivityRow { id: string; timestamp: string; actorName: string; actionType: string; description: string; status: string; spaceId?: string; route: Route | null; source: "server" | "local" }
+
+function localRow(e: ActivityLogEntry): ActivityRow {
+  return { id: e.id, timestamp: e.timestamp, actorName: e.actorName, actionType: e.actionType, description: e.description, status: e.status, spaceId: e.spaceId, route: entityRoute(e), source: "local" };
+}
+
+// Map the server's raw audit event into the same display shape. This is the fix for the
+// web/mobile divergence: web previously showed ONLY client-local `pushActivity` entries
+// (this browser tab, this session) and never pulled the server's real, cross-device audit
+// trail — so actions on mobile, by the server itself (auto-repair, auto-memory), or in
+// another tab were invisible here. `backend.audit()` existed but went unused on web.
+function serverRow(a: AuditEvent): ActivityRow {
+  const desc = `${a.type}${a.toolId ? ` · ${a.toolId}` : ""}${a.ok ? "" : a.error ? ` — ${a.error}` : " — failed"}`;
+  return {
+    id: a.id,
+    timestamp: a.at,
+    actorName: a.actorName ?? a.actorId ?? "System",
+    actionType: a.type,
+    description: desc,
+    status: a.ok ? "success" : "error",
+    route: a.connectorId ? { screen: "connections", params: { id: a.connectorId } } : null,
+    source: "server",
+  };
+}
+
 function ActivityLog() {
   const data = useStore((s) => s.data);
   const navigate = useStore((s) => s.navigate);
@@ -54,9 +81,23 @@ function ActivityLog() {
   const [status, setStatus] = useState("all");
   const [space, setSpace] = useState("all");
   const [q, setQ] = useState("");
+  const [server, setServer] = useState<AuditEvent[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const types = useMemo(() => Array.from(new Set(data.activity.map((e) => e.actionType))).sort(), [data.activity]);
-  const list = data.activity.filter((e) =>
+  const load = useCallback(async () => { setLoading(true); const evs = await backend.audit(200); setServer(evs); setLoading(false); }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  // Merge server audit (source of truth, cross-device) with local entries, deduped by id
+  // (server wins), newest first.
+  const merged = useMemo(() => {
+    const serverRows = server.map(serverRow);
+    const seen = new Set(serverRows.map((r) => r.id));
+    const localRows = data.activity.filter((e) => !seen.has(e.id)).map(localRow);
+    return [...serverRows, ...localRows].sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp));
+  }, [server, data.activity]);
+
+  const types = useMemo(() => Array.from(new Set(merged.map((e) => e.actionType))).sort(), [merged]);
+  const list = merged.filter((e) =>
     (type === "all" || e.actionType === type) && (status === "all" || e.status === status) && (space === "all" || e.spaceId === space) &&
     (!q || e.description.toLowerCase().includes(q.toLowerCase()) || e.actorName.toLowerCase().includes(q.toLowerCase())),
   );
@@ -68,23 +109,21 @@ function ActivityLog() {
         <Select value={type} onChange={(e) => setType(e.target.value)} className="!w-auto"><option value="all">All actions</option>{types.map((t) => <option key={t} value={t}>{t}</option>)}</Select>
         <Select value={status} onChange={(e) => setStatus(e.target.value)} className="!w-auto"><option value="all">All statuses</option><option>success</option><option>info</option><option>warning</option><option>error</option><option>pending</option></Select>
         <Select value={space} onChange={(e) => setSpace(e.target.value)} className="!w-auto"><option value="all">All spaces</option>{data.spaces.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</Select>
+        <IconButton icon={loading ? "Loader2" : "RefreshCw"} label="Refresh from server" className={loading ? "animate-spin" : ""} onClick={() => void load()} />
       </div>
-      {list.length === 0 ? <EmptyState icon="Activity" title="No matching activity" message="Adjust filters or take an action to populate the log." /> : (
+      {list.length === 0 ? <EmptyState icon="Activity" title={loading ? "Loading activity…" : "No matching activity"} message={loading ? "Pulling the household's audit trail from the server." : "Adjust filters or take an action to populate the log."} /> : (
         <Card className="card-pad">
           <ol className="relative ml-1 space-y-1 border-l border-ink-900/10 pl-5">
-            {list.map((e) => {
-              const route = entityRoute(e);
-              return (
-                <li key={e.id} className="group relative flex items-start gap-3 rounded-2xl px-3 py-2.5 transition-colors hover:bg-surface-overlay">
-                  <span className={`absolute -left-[27px] top-3 h-2.5 w-2.5 shrink-0 rounded-full border-2 border-surface-raised bg-${STATUS_COLOR[e.status] ?? "sky"}-500`} />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm text-ink-800">{e.description}</p>
-                    <p className="text-xs text-ink-400">{e.actorName} · <span className="font-mono">{e.actionType}</span> · <span title={fmtDateTime(e.timestamp)}>{relativeTime(e.timestamp)}</span></p>
-                  </div>
-                  {route && <button onClick={() => navigate(route.screen as ScreenId, route.params)} className="shrink-0 text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">View</button>}
-                </li>
-              );
-            })}
+            {list.map((e) => (
+              <li key={e.id} className="group relative flex items-start gap-3 rounded-2xl px-3 py-2.5 transition-colors hover:bg-surface-overlay">
+                <span className={`absolute -left-[27px] top-3 h-2.5 w-2.5 shrink-0 rounded-full border-2 border-surface-raised bg-${STATUS_COLOR[e.status] ?? "sky"}-500`} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-ink-800">{e.description}</p>
+                  <p className="text-xs text-ink-400">{e.actorName} · <span className="font-mono">{e.actionType}</span> · <span title={fmtDateTime(e.timestamp)}>{relativeTime(e.timestamp)}</span>{e.source === "server" && <span className="ml-1 text-sage-500" title="From the server audit trail">· synced</span>}</p>
+                </div>
+                {e.route && <button onClick={() => navigate(e.route!.screen as ScreenId, e.route!.params)} className="shrink-0 text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">View</button>}
+              </li>
+            ))}
           </ol>
         </Card>
       )}

@@ -10,6 +10,7 @@ import { InlineApprovals } from "@/components/InlineApprovals";
 import { ExecutionMonitor } from "@/components/runs/ExecutionMonitor";
 import { ServerTriggersPanel } from "@/components/triggers/ServerTriggers";
 import { relativeTime, fmtDateTime } from "@/lib/dates";
+import { useAdvancedMode } from "@/lib/prefs";
 import { PlanPreview, useConnectables } from "@/screens/Agents";
 import type { Automation, TriggerType, WorkflowPlan, WorkflowTemplate } from "@/types";
 import type { AgentPlan } from "@/connectors/api";
@@ -17,33 +18,44 @@ import type { AgentPlan } from "@/connectors/api";
 const TRIGGER_TYPES: TriggerType[] = ["Manual", "Schedule", "Webhook", "RSS Feed", "Email Received", "Email Label Applied", "Text Message Received", "Email Reply Received", "Calendar Event Created", "Calendar Event Changed", "File Changed", "Agent-to-Agent"];
 const AUTO_STATUSES: Automation["status"][] = ["active", "paused", "draft", "error"];
 
-const TABS = [
+// The low-level surfaces (raw Triggers, Browser Workflows, Background Jobs) are power-user
+// tools; they're gated behind Advanced Mode so a new household sees only the everyday tabs
+// (Automations, Live, Workflow Builder, Templates, Run History). Same toggle that gates
+// Skills/Functions in the nav — keeps "simple by default" consistent across the app.
+const TABS: { id: string; label: string; icon: string; advanced?: boolean }[] = [
   { id: "automations", label: "Automations", icon: "Workflow" },
-  { id: "triggers", label: "Triggers", icon: "Zap" },
+  { id: "triggers", label: "Triggers", icon: "Zap", advanced: true },
   { id: "monitor", label: "Live", icon: "Activity" },
   { id: "builder", label: "Workflow Builder", icon: "Sparkles" },
   { id: "templates", label: "Templates", icon: "LayoutGrid" },
-  { id: "browser", label: "Browser Workflows", icon: "Globe" },
-  { id: "sandbox", label: "Background Jobs", icon: "Clock" },
+  { id: "browser", label: "Browser Workflows", icon: "Globe", advanced: true },
+  { id: "sandbox", label: "Background Jobs", icon: "Clock", advanced: true },
   { id: "history", label: "Run History", icon: "History" },
 ];
 
 export function Automations() {
   const data = useStore((s) => s.data);
   const params = useStore((s) => s.route.params);
+  const [advanced] = useAdvancedMode();
   const [tab, setTab] = useState("automations");
   const [editId, setEditId] = useState<string | null>(null);
   const [templateId, setTemplateId] = useState<string | null>(null);
+  const visibleTabs = TABS.filter((t) => advanced || !t.advanced);
 
   useEffect(() => {
     if (params?.tab && TABS.some((t) => t.id === params.tab)) setTab(params.tab);
     if (params?.id) { setTab("automations"); setEditId(params.id); }
   }, [params?.tab, params?.id]);
 
+  // If Advanced Mode is turned off while on a now-hidden power tab, fall back to the list.
+  useEffect(() => {
+    if (!visibleTabs.some((t) => t.id === tab)) setTab("automations");
+  }, [advanced, tab, visibleTabs]);
+
   return (
     <div className="animate-fade-in">
       <PageHeader title="Automations" subtitle="Triggers, workflow plans, browser & sandbox runs — all in one place." icon="Workflow" />
-      <Tabs tabs={TABS.map((t) => ({ ...t, count: t.id === "automations" ? data.automations.length : t.id === "templates" ? workflowTemplates.length : undefined }))} active={tab} onChange={setTab} />
+      <Tabs tabs={visibleTabs.map((t) => ({ ...t, count: t.id === "automations" ? data.automations.length : t.id === "templates" ? workflowTemplates.length : undefined }))} active={tab} onChange={setTab} />
       <div className="pt-5">
         {tab === "automations" && <AutomationsList onEdit={setEditId} />}
         {tab === "triggers" && <ServerTriggersPanel />}

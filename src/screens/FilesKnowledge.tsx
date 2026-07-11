@@ -35,6 +35,7 @@ function Files() {
   const [spaceId, setSpaceId] = useState("all");
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  const [idOpen, setIdOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { if (params?.file) setSelected(params.file); if (params?.new) inputRef.current?.click(); }, [params?.file, params?.new]);
@@ -58,7 +59,10 @@ function Files() {
           <Select value={folder} onChange={(e) => setFolder(e.target.value)} className="!w-auto">{folders.map((f) => <option key={f} value={f}>{f}</option>)}</Select>
           <Select value={spaceId} onChange={(e) => setSpaceId(e.target.value)} className="!w-auto"><option value="all">All spaces</option>{data.spaces.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</Select>
         </div>
-        <Button variant="ember" onClick={() => inputRef.current?.click()}><Icon name="Upload" size={16} /> Upload</Button>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" onClick={() => setIdOpen(true)}><Icon name="IdCard" size={16} /> ID (front & back)</Button>
+          <Button variant="ember" onClick={() => inputRef.current?.click()}><Icon name="Upload" size={16} /> Upload</Button>
+        </div>
       </div>
 
       <div onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onPick(e.dataTransfer.files); }} className="well mb-4 border-dashed px-4 py-3 text-center text-sm text-ink-400">
@@ -81,7 +85,45 @@ function Files() {
         </div>
       )}
       {sel && <FileDrawer file={sel} onClose={() => setSelected(null)} />}
+      {idOpen && <IdCardModal spaceId={spaceId === "all" ? undefined : spaceId} onClose={() => setIdOpen(false)} />}
     </div>
+  );
+}
+
+/** Capture the front AND back of an ID card (or any 2-sided document) and store them as ONE
+ *  durable, multi-page file — not two separate uploads. */
+function IdCardModal({ spaceId, onClose }: { spaceId?: string; onClose: () => void }) {
+  const uploadIdCard = useStore((s) => s.uploadIdCard);
+  const [front, setFront] = useState<File | null>(null);
+  const [back, setBack] = useState<File | null>(null);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (!front || !back) return;
+    setBusy(true);
+    await uploadIdCard(front, back, name.trim() || undefined, spaceId);
+    setBusy(false);
+    onClose();
+  };
+  const SidePicker = ({ label, file, onPick }: { label: string; file: File | null; onPick: (f: File | null) => void }) => (
+    <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-ink-900/15 bg-surface-sunken/60 px-4 py-6 text-center transition-colors hover:border-ember-300">
+      <Icon name={file ? "CheckCircle2" : "ImagePlus"} size={22} className={file ? "text-sage-500" : "text-ink-400"} />
+      <span className="text-sm font-semibold text-ink-700">{label}</span>
+      <span className="max-w-[10rem] truncate text-xs text-ink-400">{file ? file.name : "Choose an image"}</span>
+      <input type="file" accept="image/*" className="hidden" onChange={(e) => onPick(e.target.files?.[0] ?? null)} />
+    </label>
+  );
+  return (
+    <Modal open onClose={onClose} title="Upload ID (front & back)" icon="IdCard" footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="ember" disabled={!front || !back || busy} onClick={save}><Icon name={busy ? "Loader2" : "Check"} size={15} className={busy ? "animate-spin" : ""} /> Save as one document</Button></>}>
+      <div className="space-y-3">
+        <Field label="Document name" hint="e.g. Driver's license, Insurance card"><TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="Driver's license" /></Field>
+        <div className="grid grid-cols-2 gap-3">
+          <SidePicker label="Front" file={front} onPick={setFront} />
+          <SidePicker label="Back" file={back} onPick={setBack} />
+        </div>
+        <p className="text-xs text-ink-400">Both sides are stored as pages of a single, sensitive file — kept in your household Library.</p>
+      </div>
+    </Modal>
   );
 }
 
@@ -94,9 +136,19 @@ function FileDrawer({ file: f, onClose }: { file: FileAsset; onClose: () => void
   const updateFile = useStore((s) => s.updateFile);
   const requestApproval = useStore((s) => s.requestApproval);
   const [tag, setTag] = useState("");
+  const [backUrl, setBackUrl] = useState<string | null>(null);
+  const [loadingBack, setLoadingBack] = useState(false);
   const owner = data.members.find((m) => m.id === f.ownerMemberId);
   const space = data.spaces.find((s) => s.id === f.spaceId);
   const agents = data.agents.filter((a) => f.linkedAgentIds.includes(a.id));
+  const multiPage = (f.pageCount ?? 1) > 1 && !!f.serverId;
+  const showBack = async () => {
+    if (!f.serverId) return;
+    setLoadingBack(true);
+    const r = await backend.fileContent(f.serverId, 1);
+    setLoadingBack(false);
+    if (r.contentBase64) setBackUrl(`data:${r.mime ?? "image/jpeg"};base64,${r.contentBase64}`);
+  };
 
   return (
     <Drawer open onClose={onClose} width="max-w-2xl" title={f.name} icon="FileText"
@@ -117,6 +169,13 @@ function FileDrawer({ file: f, onClose }: { file: FileAsset; onClose: () => void
           <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-2xl bg-ink-900 p-3 text-xs text-sage-100 shadow-e1">{f.previewContent}</pre>
         ) : (
           <div className="well flex h-32 items-center justify-center border-dashed text-ink-400"><Icon name="FileText" size={28} /></div>
+        )}
+        {multiPage && (
+          <div className="space-y-2">
+            {backUrl ? <img src={backUrl} alt={`${f.name} — back`} className="max-h-72 w-full rounded-2xl border border-ink-900/[0.06] object-contain" /> : (
+              <Button variant="secondary" size="sm" disabled={loadingBack} onClick={showBack}><Icon name={loadingBack ? "Loader2" : "FlipHorizontal2"} size={14} className={loadingBack ? "animate-spin" : ""} /> {loadingBack ? "Loading…" : `Show back (page 2 of ${f.pageCount})`}</Button>
+            )}
+          </div>
         )}
 
         {f.summary && <Block label="Summary">{f.summary}</Block>}

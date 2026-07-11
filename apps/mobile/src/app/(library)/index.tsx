@@ -2,17 +2,19 @@
 // recent documents with badges, search, inline preview, plus the read-only
 // knowledge the agents have accumulated. Uploads run through the Upload sheet.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, ScrollView, Switch, TextInput, View } from "react-native";
 import { Image } from "expo-image";
 import { useLocalSearchParams } from "expo-router";
-import { api, type ArtifactRec, type FileRec, type MemoryRec } from "@/lib/api";
+import { api, type ArtifactRec, type FileRec, type KnowledgeRec, type MemoryRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 import {
-  Badge, Button, Card, EmptyState, HScreen, MarkdownText, Notice, PressableScale, Rise,
-  SectionHeader, SkeletonCards, Sym, SymTile, T, Well,
+  Badge, Button, Card, Chip, ChipRow, EmptyState, HScreen, HSheet, MarkdownText, Notice, PressableScale, Rise,
+  SectionHeader, SheetCTA, SkeletonCards, Sym, SymTile, T, Well,
 } from "@/components/ui";
 import { UploadSheet } from "@/components/sheets/upload-sheet";
+
+const KTYPES = ["note", "reference", "contact", "medical", "instructions"] as const;
 
 const fmtSize = (b: number) => (b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
 const isTextMime = (mime: string) => mime.startsWith("text/") || /json|csv|markdown/.test(mime);
@@ -45,6 +47,9 @@ export default function LibraryScreen() {
   const [files, setFiles] = useState<FileRec[]>([]);
   const [memory, setMemory] = useState<MemoryRec[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactRec[]>([]);
+  const [knowledge, setKnowledge] = useState<KnowledgeRec[]>([]);
+  const [kOpen, setKOpen] = useState(false);
+  const [editingK, setEditingK] = useState<KnowledgeRec | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -57,8 +62,8 @@ export default function LibraryScreen() {
   const [expandedArtifact, setExpandedArtifact] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [f, m, a] = await Promise.all([api.files(), api.memory(), api.artifacts()]);
-    setFiles(f); setMemory(m); setArtifacts(a);
+    const [f, m, a, k] = await Promise.all([api.files(), api.memory(), api.artifacts(), api.knowledge()]);
+    setFiles(f); setMemory(m); setArtifacts(a); setKnowledge(k);
     setLoaded(true);
   }, []);
   useEffect(() => { if (session) void load(); }, [session, load]);
@@ -121,6 +126,23 @@ export default function LibraryScreen() {
     ]);
   };
 
+  const removeKnowledge = async (k: KnowledgeRec) => {
+    setKnowledge((list) => list.filter((x) => x.id !== k.id)); // optimistic
+    const r = await api.deleteKnowledge(k.id);
+    if (r.error) {
+      await load();
+      setNotice({ text: r.error === "insufficient_role" ? "You can't delete this knowledge item." : `Couldn't delete: ${r.error}`, ok: false });
+    } else {
+      setNotice({ text: `“${k.title}” removed.`, ok: true });
+    }
+  };
+  const confirmRemoveK = (k: KnowledgeRec) => {
+    Alert.alert(`Remove “${k.title}”?`, "This deletes it from the household knowledge.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Remove", style: "destructive", onPress: () => void removeKnowledge(k) },
+    ]);
+  };
+
   const badgeFor = (f: FileRec) => {
     const sensitive = f.visibility === "private" || f.tags.includes("sensitive");
     if (sensitive) return { label: "Sensitive", fg: colors.lavender, bg: colors.lavenderBg };
@@ -140,7 +162,7 @@ export default function LibraryScreen() {
               <PressableScale key={t} onPress={() => { tapHaptic("select"); setTab(t); }} haptic={null}
                 style={{ flex: 1, paddingVertical: 7, borderRadius: 9, borderCurve: "continuous", alignItems: "center", backgroundColor: tab === t ? colors.surface : "transparent" }}>
                 <T kind="caption" color={tab === t ? colors.text : colors.textSecondary} style={{ fontSize: 12.5 }}>
-                  {t === "files" ? `Files (${files.length})` : `Knowledge (${memory.length + artifacts.length})`}
+                  {t === "files" ? `Files (${files.length})` : `Knowledge (${knowledge.length + memory.length + artifacts.length})`}
                 </T>
               </PressableScale>
             ))}
@@ -150,6 +172,13 @@ export default function LibraryScreen() {
               style={{ flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.emberBg, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999 }}>
               <Sym name="square.and.arrow.up" size={13} color={colors.ember} />
               <T kind="subMedium" color={colors.ember}>Upload</T>
+            </PressableScale>
+          )}
+          {canUpload && tab === "knowledge" && (
+            <PressableScale onPress={() => { setEditingK(null); setKOpen(true); }} haptic="select" accessibilityRole="button" accessibilityLabel="New knowledge"
+              style={{ flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.emberBg, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999 }}>
+              <Sym name="plus" size={13} color={colors.ember} />
+              <T kind="subMedium" color={colors.ember}>New</T>
             </PressableScale>
           )}
         </View>
@@ -284,6 +313,43 @@ export default function LibraryScreen() {
         </>
       ) : (
         <>
+          <SectionHeader title="Knowledge" />
+          <Rise index={0}>
+            <T kind="sub">Facts, preferences, and instructions you want Famili to remember.</T>
+          </Rise>
+          {knowledge.length === 0 ? (
+            <EmptyState
+              icon="book"
+              title="No knowledge yet"
+              hint={canUpload ? "Save allergies, sizes, account notes, house rules — anything Famili should know." : "Adults can add household knowledge here."}
+              action={canUpload ? { title: "Add knowledge", onPress: () => { setEditingK(null); setKOpen(true); } } : undefined}
+            />
+          ) : (
+            knowledge.map((k, i) => (
+              <Rise key={k.id} index={Math.min(i + 1, 8)}>
+                <Card style={{ gap: spacing.sm }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                    <Badge label={k.type || "note"} fg={colors.sky} bg={colors.skyBg} />
+                    {k.visibility === "personal" ? <Badge label="Personal" fg={colors.textMuted} bg={colors.surfaceSunken} icon="lock" /> : null}
+                    {k.sensitive ? <Badge label="Sensitive" fg={colors.lavender} bg={colors.lavenderBg} icon="checkmark.shield" /> : null}
+                    <View style={{ flex: 1 }} />
+                    <PressableScale onPress={() => { setEditingK(k); setKOpen(true); }} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel={`Edit ${k.title}`} style={{ padding: 4 }}>
+                      <Sym name="pencil" size={15} color={colors.textMuted} />
+                    </PressableScale>
+                    <PressableScale onPress={() => confirmRemoveK(k)} haptic="warning" hitSlop={8} accessibilityRole="button" accessibilityLabel={`Delete ${k.title}`} style={{ padding: 4 }}>
+                      <Sym name="trash" size={15} color={colors.textFaint} />
+                    </PressableScale>
+                  </View>
+                  <PressableScale onPress={() => { setEditingK(k); setKOpen(true); }} haptic="select" accessibilityRole="button" accessibilityLabel={`Edit ${k.title}`} style={{ gap: 4 }}>
+                    <T kind="rowTitle">{k.title}</T>
+                    {k.content ? <T kind="sub" numberOfLines={3}>{k.content}</T> : null}
+                    {k.tags.length > 0 ? <T kind="caption" color={colors.textFaint}>{k.tags.map((t) => `#${t}`).join(" ")}</T> : null}
+                  </PressableScale>
+                </Card>
+              </Rise>
+            ))
+          )}
+
           <SectionHeader title="Memory" />
           <Rise index={1}>
             <T kind="sub">What Famili has learned from real runs — read-only here.</T>
@@ -339,6 +405,106 @@ export default function LibraryScreen() {
       )}
 
       <UploadSheet visible={uploadOpen} onClose={() => setUploadOpen(false)} onUploaded={() => void load()} />
+      <KnowledgeSheet
+        item={editingK}
+        visible={kOpen}
+        onClose={() => setKOpen(false)}
+        onSaved={() => { setKOpen(false); setEditingK(null); void load(); }}
+      />
     </HScreen>
+  );
+}
+
+/** Create / edit a knowledge item (title, type, content, tags, visibility, sensitive).
+ *  New when item is null; edit PATCHes the existing record. */
+function KnowledgeSheet({ item, visible, onClose, onSaved }: {
+  item: KnowledgeRec | null;
+  visible: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { colors, spacing, type } = useTheme();
+  const [title, setTitle] = useState("");
+  const [ktype, setKtype] = useState<string>("note");
+  const [content, setContent] = useState("");
+  const [tags, setTags] = useState("");
+  const [visibility, setVisibility] = useState<"household" | "personal">("household");
+  const [sensitive, setSensitive] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    setTitle(item?.title ?? "");
+    setKtype(item?.type ?? "note");
+    setContent(item?.content ?? "");
+    setTags((item?.tags ?? []).join(", "));
+    setVisibility(item?.visibility ?? "household");
+    setSensitive(item?.sensitive ?? false);
+    setErr(null);
+  }, [visible, item]);
+
+  const inputStyle = [type.body, { color: colors.text, backgroundColor: colors.surfaceSunken, borderRadius: 12, borderCurve: "continuous" as const, paddingHorizontal: spacing.md, paddingVertical: 10 }];
+
+  const save = async () => {
+    if (!title.trim() || busy) return;
+    setBusy(true); setErr(null);
+    const tagList = tags.split(",").map((s) => s.trim()).filter(Boolean);
+    const body = { title: title.trim(), type: ktype, content: content.trim(), tags: tagList, visibility, sensitive };
+    const r = item
+      ? await api.patchKnowledge(item.id, { ...body, ifUpdatedAt: item.updatedAt })
+      : await api.createKnowledge(body);
+    setBusy(false);
+    if (r.item) { tapHaptic("success"); onSaved(); }
+    else if (r.error === "stale_write") setErr("This changed on another device — close and reopen to edit.");
+    else setErr(r.error === "insufficient_role" ? "Adding knowledge needs Limited Member or higher." : `Couldn't save: ${r.message ?? r.error ?? "unknown error"}`);
+  };
+
+  return (
+    <HSheet
+      visible={visible}
+      onClose={onClose}
+      title={item ? "Edit knowledge" : "New knowledge"}
+      leftLabel="Cancel"
+      heightPct={0.9}
+      footer={<SheetCTA title={busy ? "Saving…" : item ? "Save changes" : "Add knowledge"} onPress={() => void save()} disabled={busy || !title.trim()} />}
+    >
+      <ScrollView contentContainerStyle={{ paddingHorizontal: spacing.xl, paddingBottom: spacing.lg, gap: spacing.md }} keyboardShouldPersistTaps="handled">
+        {err ? <Notice text={err} ok={false} /> : null}
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Title</T>
+          <TextInput style={inputStyle} placeholder="e.g. Emma's peanut allergy" placeholderTextColor={colors.textFaint} value={title} onChangeText={setTitle} accessibilityLabel="Knowledge title" />
+        </View>
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Type</T>
+          <ChipRow>
+            {KTYPES.map((t) => <Chip key={t} label={t} selected={ktype === t} onPress={() => setKtype(t)} />)}
+          </ChipRow>
+        </View>
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Details</T>
+          <TextInput style={[inputStyle, { minHeight: 96 }]} placeholder="What should Famili remember?" placeholderTextColor={colors.textFaint} value={content} onChangeText={setContent} multiline accessibilityLabel="Knowledge details" />
+        </View>
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Tags</T>
+          <TextInput style={inputStyle} placeholder="Comma-separated" placeholderTextColor={colors.textFaint} value={tags} onChangeText={setTags} autoCapitalize="none" accessibilityLabel="Tags, comma-separated" />
+        </View>
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Who can see this</T>
+          <ChipRow>
+            <Chip label="Everyone" selected={visibility === "household"} onPress={() => setVisibility("household")} />
+            <Chip label="Just me" selected={visibility === "personal"} onPress={() => setVisibility("personal")} />
+          </ChipRow>
+        </View>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+          <SymTile name="checkmark.shield" color={colors.lavender} bg={colors.lavenderBg} size={36} iconSize={16} />
+          <View style={{ flex: 1 }}>
+            <T kind="rowTitle">Mark as sensitive</T>
+            <T kind="detail">Only household admins can open it</T>
+          </View>
+          <Switch value={sensitive} onValueChange={setSensitive} trackColor={{ true: colors.ember }} />
+        </View>
+      </ScrollView>
+    </HSheet>
   );
 }
