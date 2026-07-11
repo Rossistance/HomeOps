@@ -1,13 +1,14 @@
 // Calendar subscription sync: turn a calendar source — a Google Calendar (OAuth), an .ics
 // feed URL, or pasted .ics — into FamiliOS' read-only "linked" calendar-layer events. The
 // source is the source of truth: re-syncing updates matched events (by UID) and drops ones
-// that left it. These events are layer:"linked", so the events PATCH route refuses edits
-// (copy-to-edit). Only the READ direction is implemented (Google → FamiliOS); pushing FamiliOS
-// events into Google is a separate, approval-gated build.
+// that left it. ICS-fed events are layer:"linked" read-only mirrors (copy-to-edit);
+// google-sourced linked events are editable two-way (the PATCH route writes to Google
+// first via editLinkedGoogleEvent). Pushing canonical FamiliOS events into Google is the
+// separate, approval-gated pushEventToGoogle path.
 import crypto from "node:crypto";
 import { safeFetch } from "./net.mjs";
 import { parseICS, expandRecurring } from "./ics.mjs";
-import { listEvents, putEvent, patchEvent, deleteEventRec, getAccountRaw } from "./store.mjs";
+import { listEvents, putEvent, patchEvent, deleteEventRec, getAccountRaw, getSubscription } from "./store.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 
@@ -38,10 +39,12 @@ function resolveGoogleAccount(sub, session) {
  */
 export async function syncSubscription({ sub, icsText, session }) {
   let parsed;
+  let googleAccountId = null; // set for google-sourced subs so linked events can be edited two-way
   if (sub?.source === "google") {
     // Pull upcoming events from the actor's connected Google Calendar (next ~90 days).
     const account = resolveGoogleAccount(sub, session);
     if (!account) return { ok: false, error: "no_account" };
+    googleAccountId = account.id;
     const api = apiForAccount(account);
     const timeMin = new Date().toISOString();
     const timeMax = new Date(Date.now() + 90 * 864e5).toISOString();
@@ -78,8 +81,16 @@ export async function syncSubscription({ sub, icsText, session }) {
     if (!ev.startAt) continue;
     const uid = ev.uid || crypto.createHash("sha1").update(`${ev.title}|${ev.startAt}`).digest("hex");
     const fields = { title: ev.title, startAt: ev.startAt, endAt: ev.endAt, location: ev.location, allDay: ev.allDay };
+    // Google-sourced linked events carry the Google event id + account so in-app edits
+    // can write back to Google (two-way). ICS feeds stay read-only mirrors.
+    const gprov = googleAccountId ? { via: "google", googleEventId: uid, googleAccountId } : null;
     const prior = existing.get(uid);
-    if (prior) { patchEvent(prior.id, fields); existing.delete(uid); updated++; }
+    if (prior) {
+      // Backfill google provenance onto pre-existing linked events (created before two-way edits).
+      const needsProv = gprov && !prior.provenance?.googleEventId;
+      patchEvent(prior.id, needsProv ? { ...fields, provenance: { ...(prior.provenance ?? {}), ...gprov } } : fields);
+      existing.delete(uid); updated++;
+    }
     else {
       putEvent({
         id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: hh,
@@ -87,7 +98,7 @@ export async function syncSubscription({ sub, icsText, session }) {
         ownerId: null, backupOwnerId: null, whatToBring: [], checklist: [], travel: null, reminders: [],
         attachments: [], comments: [], mealImpact: null, visibility: "household", category: "Calendar",
         layer: "linked", status: "confirmed", source: sub?.name ?? "Subscribed calendar",
-        provenance: { via: "ics", subscriptionId: subId, uid },
+        provenance: { via: gprov ? "google" : "ics", subscriptionId: subId, uid, ...(gprov ?? {}) },
         createdBy: session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
       });
       imported++;
@@ -235,6 +246,77 @@ export async function pushEventToGoogle({ ev, householdId, actorId }) {
   if (!r.ok) return { ok: false, error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status, message: r.json?.error?.message ?? "Google rejected the write." };
   patchEvent(ev.id, { provenance: { ...(ev.provenance ?? {}), via: ev.provenance?.via ?? "user", googleEventId: r.json.id, googleAccountId: account.id, pushedAt: Date.now() } });
   return { ok: true, googleEventId: r.json.id, action: gid ? "updated" : "created" };
+}
+
+/** Resolve the Google account + event id behind a google-sourced LINKED event.
+ * Prefers the provenance stamped at sync time; falls back to the subscription's
+ * accountId + provenance.uid for events synced before two-way edits shipped. */
+function linkedGoogleTarget(ev, householdId) {
+  const p = ev?.provenance ?? {};
+  const gid = p.googleEventId ?? p.uid ?? null;
+  let account = p.googleAccountId ? getAccountRaw(p.googleAccountId) : null;
+  if (!account && p.subscriptionId) {
+    const sub = getSubscription(p.subscriptionId);
+    if (sub?.source === "google" && sub.accountId) account = getAccountRaw(sub.accountId);
+  }
+  if (!gid || !account || account.provider !== "google" || account.householdId !== householdId) return null;
+  if (!(account.scopes ?? []).some((s) => /calendar/i.test(String(s)))) return null;
+  return { account, gid };
+}
+
+/** True when a linked event originated in a connected Google Calendar and can be edited two-way. */
+export function isEditableLinkedGoogle(ev, householdId) {
+  return ev?.layer === "linked" && !!linkedGoogleTarget(ev, householdId);
+}
+
+/** Edit a google-originated linked event two-way: write to Google FIRST, and only
+ * mirror the patch locally once Google accepted it — so the next subscription
+ * re-sync (feed = source of truth) agrees instead of clobbering the local edit. */
+export async function editLinkedGoogleEvent({ ev, patch, householdId }) {
+  const target = linkedGoogleTarget(ev, householdId);
+  if (!target) return { ok: false, error: "not_linked_google" };
+  const merged = { ...ev, ...patch };
+  const end = merged.endAt ?? new Date(new Date(merged.startAt).getTime() + 3_600_000).toISOString();
+  const api = apiForAccount(target.account);
+  const r = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(target.gid)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ summary: merged.title, description: merged.notes ?? "", start: { dateTime: merged.startAt }, end: { dateTime: end }, location: merged.location ?? "" }),
+  });
+  if (!r.ok) return { ok: false, error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status, message: r.json?.error?.message ?? "Google rejected the edit." };
+  const updated = patchEvent(ev.id, { ...patch, provenance: { ...(ev.provenance ?? {}), googleEventId: target.gid, googleAccountId: target.account.id } });
+  return { ok: true, event: updated };
+}
+
+/** Delete a google-originated linked event on Google, then remove the local mirror.
+ * A 404/410 from Google (already gone there) still counts as success. */
+export async function deleteLinkedGoogleEvent({ ev, householdId }) {
+  const target = linkedGoogleTarget(ev, householdId);
+  if (!target) return { ok: false, error: "not_linked_google" };
+  const api = apiForAccount(target.account);
+  const r = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(target.gid)}`, { method: "DELETE" });
+  if (!r.ok && r.status !== 404 && r.status !== 410) {
+    return { ok: false, error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status, message: r.json?.error?.message ?? "Google rejected the delete." };
+  }
+  deleteEventRec(ev.id);
+  return { ok: true };
+}
+
+/** Best-effort Google-side delete of a CANONICAL event's pushed copy (meal cascade,
+ * auto-sync deletes). Never throws; returns false when there's nothing to delete. */
+export async function deleteGoogleCopy({ ev, householdId, actorId }) {
+  const gid = ev?.provenance?.googleEventId;
+  if (!gid) return { ok: false, error: "not_pushed" };
+  let account = ev.provenance?.googleAccountId ? getAccountRaw(ev.provenance.googleAccountId) : null;
+  if (!account || account.provider !== "google" || account.householdId !== householdId) {
+    account = listAccountsFor(householdId, actorId).find((a) => a.provider === "google" && (a.scopes ?? []).some((s) => /calendar/i.test(String(s)))) ?? null;
+  }
+  if (!account) return { ok: false, error: "no_account" };
+  try {
+    const api = apiForAccount(account);
+    const r = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(gid)}`, { method: "DELETE" });
+    return { ok: r.ok || r.status === 404 || r.status === 410 };
+  } catch { return { ok: false, error: "google_error" }; }
 }
 
 /**

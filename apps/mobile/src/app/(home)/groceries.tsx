@@ -47,7 +47,9 @@ export default function GroceriesScreen() {
     const [h, tks, mem, conns] = await Promise.all([api.health(), api.tasks(), api.members(), api.connectors()]);
     setOffline(!h);
     if (h) {
-      setItems(tks.filter((t) => t.type === "list" && t.listName === "Groceries"));
+      // Null listName defaults to Groceries — matching the Meals screens, so an item
+      // whose POST didn't persist listName still shows up here.
+      setItems(tks.filter((t) => t.type === "list" && (t.listName ?? "Groceries") === "Groceries"));
       setMembers(mem);
       setSmsLive(conns.some((c) => /sms|twilio|messag|text/i.test(`${c.id} ${c.name}`) && c.live));
     }

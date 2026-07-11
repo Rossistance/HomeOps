@@ -1,11 +1,11 @@
 // Meals — the family meal plan: a rolling week strip (dots mark planned days),
-// slot filter chips, meal cards with one-tap "→ groceries" / "→ calendar",
-// an add-meal composer (header +), and the shared grocery checklist
-// (list-tasks named "Groceries") with an animated strikethrough on check-off.
+// slot filter chips, meal cards with one-tap "→ groceries" / "→ calendar", and
+// an add-meal composer (header +). The grocery checklist lives on its own
+// Groceries screen; a link row here shows the open-item count.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Linking, ScrollView, TextInput, View } from "react-native";
 import Animated, { FadeOut, LinearTransition, ReduceMotion, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
-import { Stack, useFocusEffect } from "expo-router";
+import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type Meal, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
@@ -14,7 +14,7 @@ import { useTheme, tapHaptic, type HearthColors } from "@/theme";
 // still shadows the ui/ directory until old screens are deleted centrally.
 import { Badge, Chip, ChipRow } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, Well } from "@/components/ui/card";
+import { Card, PressableCard, Well } from "@/components/ui/card";
 import { SectionHeader } from "@/components/ui/list";
 import { PressableScale } from "@/components/ui/pressable-scale";
 import { HScreen } from "@/components/ui/screen";
@@ -22,7 +22,7 @@ import { HSheet, SheetCTA } from "@/components/ui/sheet";
 import { SkeletonCards } from "@/components/ui/skeleton";
 import { Rise } from "@/components/ui/stagger";
 import { EmptyState, ErrorState, Notice } from "@/components/ui/states";
-import { Sym } from "@/components/ui/symbol";
+import { Sym, SymTile } from "@/components/ui/symbol";
 import { T } from "@/components/ui/text";
 
 const MANAGE_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member"];
@@ -129,49 +129,34 @@ export default function MealsScreen() {
   };
 
   const removeMeal = (m: Meal) => {
+    const doDelete = async (deleteGroceries: boolean) => {
+      setBusy(`d:${m.id}`);
+      const r = await api.deleteMeal(m.id, { deleteGroceries });
+      setBusy(null);
+      if (r.error) setNotice({ text: r.error === "insufficient_role" ? "You can't remove this meal." : `Couldn't remove: ${r.error}`, ok: false });
+      else {
+        tapHaptic("success");
+        const bits = [
+          (r.removedEvents ?? 0) > 0 ? "calendar event removed" : null,
+          (r.removedGroceries ?? 0) > 0 ? `${r.removedGroceries} ingredient${r.removedGroceries === 1 ? "" : "s"} off the grocery list` : null,
+          (r.unlinkedGroceries ?? 0) > 0 ? `${r.unlinkedGroceries} grocery item${r.unlinkedGroceries === 1 ? "" : "s"} kept` : null,
+        ].filter(Boolean);
+        setNotice({ text: `Meal removed${bits.length ? ` — ${bits.join(", ")}` : ""}.`, ok: true });
+      }
+      await load();
+    };
     Alert.alert(
       "Remove meal?",
-      `“${m.title}” comes off the plan. Grocery items it added stay on your list.`,
+      `“${m.title}” comes off the plan and its calendar event is deleted. Also remove the ingredients it added to the grocery list?`,
       [
         { text: "Cancel", style: "cancel" },
-        {
-          text: "Remove", style: "destructive",
-          onPress: () => void (async () => {
-            setBusy(`d:${m.id}`);
-            const r = await api.deleteMeal(m.id);
-            setBusy(null);
-            if (r.error) setNotice({ text: r.error === "insufficient_role" ? "You can't remove this meal." : `Couldn't remove: ${r.error}`, ok: false });
-            else {
-              tapHaptic("success");
-              const n = r.unlinkedGroceries ?? 0;
-              setNotice({ text: n > 0 ? `Meal removed. ${n} grocery item${n === 1 ? "" : "s"} stayed on your list, just unlinked.` : "Meal removed.", ok: true });
-            }
-            await load();
-          })(),
-        },
+        { text: "Keep ingredients", style: "destructive", onPress: () => void doDelete(false) },
+        { text: "Remove ingredients too", style: "destructive", onPress: () => void doDelete(true) },
       ],
     );
   };
 
-  const toggleGrocery = async (t: TaskRec) => {
-    const next = t.status === "done" ? "todo" : "done";
-    tapHaptic("select");
-    setGroceries((g) => g.map((x) => (x.id === t.id ? { ...x, status: next } : x))); // optimistic
-    const r = await api.updateTask(t.id, { status: next });
-    if (r.error) {
-      setGroceries((g) => g.map((x) => (x.id === t.id ? { ...x, status: t.status } : x)));
-      setNotice({ text: `Couldn't update: ${r.error}`, ok: false });
-    }
-  };
 
-  const removeGrocery = async (t: TaskRec) => {
-    setGroceries((g) => g.filter((x) => x.id !== t.id)); // optimistic
-    const r = await api.deleteTask(t.id);
-    if (r.error) {
-      await load();
-      setNotice({ text: r.error === "insufficient_role" ? "Ask an adult to remove this item." : `Couldn't remove: ${r.error}`, ok: false });
-    }
-  };
 
   const openCount = groceries.filter((g) => g.status !== "done").length;
   const visibleDayKeys = selectedDay ? week.map(dayKey).filter((k) => k === selectedDay) : week.map(dayKey);
@@ -317,26 +302,21 @@ export default function MealsScreen() {
         </Rise>
       ) : null}
 
-      {/* Grocery checklist first — it's the thing you check in the store aisle. */}
+      {/* The grocery list lives on its own screen — one link row keeps it a tap away. */}
       <Rise index={2}>
-        <SectionHeader title={`Groceries${openCount > 0 ? ` · ${openCount} open` : ""}`} />
-        {groceries.length === 0 ? (
-          <Card>
-            <T kind="sub">Empty. Add ingredients from a meal below.</T>
-          </Card>
-        ) : (
-          <Card padded={false} style={{ paddingVertical: 4 }}>
-            {groceries.map((t, i) => (
-              <GroceryRow
-                key={t.id}
-                task={t}
-                divider={i > 0}
-                onToggle={() => void toggleGrocery(t)}
-                onRemove={() => void removeGrocery(t)}
-              />
-            ))}
-          </Card>
-        )}
+        <PressableCard
+          onPress={() => router.push("/groceries")}
+          accessibilityRole="button"
+          accessibilityLabel="Open grocery list"
+          style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}
+        >
+          <SymTile name="cart" color={colors.sage} bg={colors.sageBg} size={36} iconSize={17} />
+          <View style={{ flex: 1, gap: 2 }}>
+            <T kind="rowTitle">Grocery list</T>
+            <T kind="detail">{openCount > 0 ? `${openCount} item${openCount === 1 ? "" : "s"} to get` : "Nothing on the list"}</T>
+          </View>
+          <Sym name="chevron.right" size={13} color={colors.textFaint} />
+        </PressableCard>
       </Rise>
 
       {/* Week plan */}
@@ -648,64 +628,5 @@ function MealCard({ m, canManage, busy, onGrocery, onCalendar, onEdit, onRemove 
         </View>
       ) : null}
     </Card>
-  );
-}
-
-/** Grocery checklist row — the strike line sweeps across as an item is checked. */
-function GroceryRow({ task, divider, onToggle, onRemove }: {
-  task: TaskRec;
-  divider: boolean;
-  onToggle: () => void;
-  onRemove: () => void;
-}) {
-  const { colors, spacing } = useTheme();
-  const done = task.status === "done";
-  const strike = useSharedValue(done ? 1 : 0);
-  useEffect(() => {
-    strike.value = withTiming(done ? 1 : 0, { duration: 240, reduceMotion: ReduceMotion.System });
-  }, [done, strike]);
-  const strikeStyle = useAnimatedStyle(() => ({ width: `${strike.value * 100}%` }));
-
-  return (
-    <Animated.View
-      layout={LinearTransition.duration(200).reduceMotion(ReduceMotion.System)}
-      exiting={FadeOut.duration(160).reduceMotion(ReduceMotion.System)}
-      style={{
-        flexDirection: "row", alignItems: "center",
-        paddingHorizontal: spacing.lg,
-        borderTopWidth: divider ? 1 : 0, borderTopColor: colors.border,
-      }}
-    >
-      <PressableScale
-        haptic={null}
-        onPress={onToggle}
-        accessibilityRole="checkbox"
-        accessibilityState={{ checked: done }}
-        accessibilityLabel={task.title}
-        style={{ flexDirection: "row", alignItems: "center", flex: 1, paddingVertical: 11, gap: spacing.md }}
-      >
-        <Sym name={done ? "checkmark.circle.fill" : "circle"} size={20} color={done ? colors.sage : colors.textFaint} />
-        <View style={{ flex: 1, justifyContent: "center" }}>
-          <T kind="body" color={done ? colors.textFaint : colors.text}>{task.title}</T>
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              { position: "absolute", left: 0, top: "50%", height: 1.5, borderRadius: 1, backgroundColor: colors.textFaint },
-              strikeStyle,
-            ]}
-          />
-        </View>
-      </PressableScale>
-      <PressableScale
-        haptic="select"
-        hitSlop={8}
-        onPress={onRemove}
-        accessibilityRole="button"
-        accessibilityLabel={`Remove ${task.title}`}
-        style={{ padding: 8, marginLeft: 4 }}
-      >
-        <Sym name="xmark" size={13} color={colors.textFaint} />
-      </PressableScale>
-    </Animated.View>
   );
 }

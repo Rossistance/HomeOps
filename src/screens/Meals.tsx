@@ -59,7 +59,14 @@ export function Meals() {
   const removeMeal = async (m: Meal) => {
     setBusy(true); const r = await backend.deleteMeal(m.id); setBusy(false); await load();
     const n = r.unlinkedGroceries ?? 0;
-    toast({ kind: "info", title: "Meal removed", message: n > 0 ? `${n} grocery item${n === 1 ? "" : "s"} from this meal stayed on your list, just unlinked.` : undefined });
+    const evs = r.removedEvents ?? 0;
+    toast({
+      kind: "info", title: "Meal removed",
+      message: [
+        evs > 0 ? "Its calendar event was deleted too." : null,
+        n > 0 ? `${n} grocery item${n === 1 ? "" : "s"} stayed on your list, just unlinked.` : null,
+      ].filter(Boolean).join(" ") || undefined,
+    });
   };
   // Edit an existing meal via the real PATCH endpoint — preserves the mealId links to any
   // already-created grocery items / calendar event (delete+recreate would break them).

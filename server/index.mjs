@@ -40,7 +40,7 @@ import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { closeBrowser } from "./browser.mjs";
 import { runSkill, runAgent } from "./orchestrator.mjs";
 import { seedDefaults } from "./seed.mjs";
-import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes } from "./calendar.mjs";
+import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
 import { twilioAuthToken, twilioSignatureValid, handleInboundSms, twiml } from "./sms.mjs";
 import {
   createAgent, replaceAgent, partialUpdateAgent, deleteAgent, duplicateAgent,
@@ -88,6 +88,15 @@ function normalizeMemberColor(v) {
   if (MEMBER_COLORS.includes(s)) return s;
   if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(s)) return s;
   return undefined;
+}
+// Per-calendar-subscription accent: each connected calendar (a Google account's
+// calendar, an ICS feed, a pasted import) gets the next unused accent so its
+// events render as distinctly colored cards. Cycles when a household outgrows
+// the palette.
+const SUB_COLORS = ["sky", "sage", "amber", "lavender", "coral", "ember"];
+function nextSubscriptionColor(householdId) {
+  const used = listSubscriptions((s) => s.householdId === householdId).map((s) => s.color).filter(Boolean);
+  return SUB_COLORS.find((c) => !used.includes(c)) ?? SUB_COLORS[used.length % SUB_COLORS.length];
 }
 const APP_ORIGIN = ALLOWED_ORIGINS[0] || "http://localhost:5173";
 const ROOT_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1192,14 +1201,32 @@ const handleRequest = async (req, res) => {
       if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       // Only an adult, the owner, or a participant may edit; others can't even see it.
       if (!canSeeEntity(ev, g.session) || (!isAdultRole(g.session.role) && ev.ownerId !== g.session.actorId)) return json(res, 403, { error: "forbidden" }, req);
-      // Three-layer calendar: only canonical (FamiliOS-owned) events are editable. Linked
-      // (read-only synced) and public (ICS subscription) events are externally owned —
-      // editing them would blur source-of-truth, so we refuse and tell the client to copy.
-      if (ev.layer && ev.layer !== "canonical") return json(res, 409, { error: "read_only_layer", message: "This event is synced from an external calendar and can't be edited here — copy it to a FamiliOS event first." }, req);
+      // Three-layer calendar: canonical (FamiliOS-owned) events are always editable.
+      // Linked events that originated in a connected Google Calendar are editable
+      // TWO-WAY: the edit is written to Google first, then mirrored locally, so the
+      // source of truth (Google) moves with us. ICS-fed linked/public events remain
+      // read-only mirrors — editing them would blur source-of-truth, so we refuse
+      // and tell the client to copy.
+      const linkedGoogle = ev.layer === "linked" && isEditableLinkedGoogle(ev, g.session.householdId);
+      if (ev.layer && ev.layer !== "canonical" && !linkedGoogle) return json(res, 409, { error: "read_only_layer", message: "This event is synced from an external calendar and can't be edited here — copy it to a FamiliOS event first." }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const { id, householdId, createdBy, createdAt, ifUpdatedAt, ...patch } = body; // never reassign identity/ownership-of-record
       if (ifUpdatedAt && ev.updatedAt && ifUpdatedAt !== ev.updatedAt) {
         return json(res, 409, { error: "stale_write", message: "This event changed on another device — refresh and try again.", current: ev }, req);
+      }
+      if (linkedGoogle) {
+        // Google-owned fields only — participants/checklists etc. stay FamiliOS-local
+        // concepts and are patched on the mirror without touching Google.
+        const { title, startAt, endAt, location, notes, ...localOnly } = patch;
+        const gPatch = Object.fromEntries(Object.entries({ title, startAt, endAt, location, notes }).filter(([, v]) => v !== undefined));
+        if (Object.keys(gPatch).length > 0) {
+          if (!externalActionsEnabled(g.session.householdId)) return json(res, 423, { error: "external_actions_disabled" }, req);
+          const r = await editLinkedGoogleEvent({ ev, patch: gPatch, householdId: g.session.householdId });
+          audit({ type: "event.update", eventId: ev.id, ok: r.ok, target: "google-linked", ...(r.ok ? {} : { error: r.error }) }, req, g.session);
+          if (!r.ok) return json(res, 422, { error: r.error, message: r.message ?? "Couldn't update the event in Google Calendar." }, req);
+        }
+        const updated = Object.keys(localOnly).length > 0 ? patchEvent(ev.id, localOnly) : getEvent(ev.id);
+        return json(res, 200, { event: updated }, req);
       }
       const updated = patchEvent(ev.id, patch);
       audit({ type: "event.update", eventId: ev.id, ok: true }, req, g.session);
@@ -1217,6 +1244,15 @@ const handleRequest = async (req, res) => {
       const ev = getEvent(eventOne[1]);
       if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       if (!isAdultRole(g.session.role) && ev.ownerId !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
+      // Google-linked events delete two-way (Google first, then the local mirror) —
+      // deleting only the mirror would just re-import on the next subscription sync.
+      if (ev.layer === "linked" && isEditableLinkedGoogle(ev, g.session.householdId)) {
+        if (!externalActionsEnabled(g.session.householdId)) return json(res, 423, { error: "external_actions_disabled" }, req);
+        const r = await deleteLinkedGoogleEvent({ ev, householdId: g.session.householdId });
+        audit({ type: "event.delete", eventId: ev.id, ok: r.ok, target: "google-linked", ...(r.ok ? {} : { error: r.error }) }, req, g.session);
+        if (!r.ok) return json(res, 422, { error: r.error, message: r.message ?? "Couldn't delete the event in Google Calendar." }, req);
+        return json(res, 200, { ok: true, google: "deleted" }, req);
+      }
       deleteEventRec(ev.id);
       audit({ type: "event.delete", eventId: ev.id, ok: true }, req, g.session);
       return json(res, 200, { ok: true }, req);
@@ -1326,17 +1362,29 @@ const handleRequest = async (req, res) => {
       if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       if (!isAdultRole(g.session.role) && m.createdBy !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
       deleteMealRec(m.id);
-      // Grocery items carry a real mealId back-reference (not just a note string) —
-      // unlink (never silently delete) so a still-wanted grocery item survives its
-      // source meal being removed, but the UI/data no longer claims a stale relationship.
+      // Grocery items carry a real mealId back-reference. Default: unlink (a
+      // still-wanted item survives its source meal). With ?groceries=delete the
+      // caller opted to remove the meal's ingredients from the list too.
+      const dropGroceries = url.searchParams.get("groceries") === "delete";
       const linked = listTasks((t) => t.householdId === g.session.householdId && t.mealId === m.id);
-      for (const t of linked) patchTask(t.id, { mealId: null, notes: t.notes === `For ${m.title}` ? "" : t.notes });
-      // Calendar events get the same treatment: keep the event (it may already be on
-      // Google), just drop the stale meal link (item 5).
+      let removedGroceries = 0;
+      for (const t of linked) {
+        if (dropGroceries) { deleteTaskRec(t.id); removedGroceries++; }
+        else patchTask(t.id, { mealId: null, notes: t.notes === `For ${m.title}` ? "" : t.notes });
+      }
+      // The meal's calendar event goes with the meal — including the pushed Google
+      // copy (best-effort; without it the next subscription sync would resurrect it).
       const linkedEvents = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id);
-      for (const e of linkedEvents) patchEvent(e.id, { mealId: null });
-      audit({ type: "meal.delete", mealId: m.id, unlinkedGroceries: linked.length, unlinkedEvents: linkedEvents.length, ok: true }, req, g.session);
-      return json(res, 200, { ok: true, unlinkedGroceries: linked.length, unlinkedEvents: linkedEvents.length }, req);
+      for (const e of linkedEvents) {
+        if (e.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
+          void deleteGoogleCopy({ ev: e, householdId: g.session.householdId, actorId: g.session.actorId })
+            .then((r) => appendAudit({ type: "calendar.googledelete", eventId: e.id, ok: r.ok }))
+            .catch(() => {});
+        }
+        deleteEventRec(e.id);
+      }
+      audit({ type: "meal.delete", mealId: m.id, removedEvents: linkedEvents.length, removedGroceries, unlinkedGroceries: dropGroceries ? 0 : linked.length, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, removedEvents: linkedEvents.length, removedGroceries, unlinkedGroceries: dropGroceries ? 0 : linked.length }, req);
     }
     const mealGrocery = path.match(/^\/api\/meals\/([^/]+)\/to-grocery$/);
     if (mealGrocery && method === "POST") {
@@ -1476,7 +1524,7 @@ const handleRequest = async (req, res) => {
      * Creating a subscription is an Adult Member+ action; reads are household-scoped. */
     if (path === "/api/calendar/subscriptions" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const subs = listSubscriptions((s) => s.householdId === g.session.householdId).map((s) => ({ id: s.id, name: s.name, url: s.url ?? null, source: s.source, lastSyncAt: s.lastSyncAt ?? null, lastResult: s.lastResult ?? null, eventCount: s.eventCount ?? 0, createdAt: s.createdAt }));
+      const subs = listSubscriptions((s) => s.householdId === g.session.householdId).map((s) => ({ id: s.id, name: s.name, url: s.url ?? null, source: s.source, color: s.color ?? null, lastSyncAt: s.lastSyncAt ?? null, lastResult: s.lastResult ?? null, eventCount: s.eventCount ?? 0, createdAt: s.createdAt }));
       return json(res, 200, { subscriptions: subs }, req);
     }
     if (path === "/api/calendar/subscriptions" && method === "POST") {
@@ -1487,6 +1535,7 @@ const handleRequest = async (req, res) => {
       const sub = putSubscription({
         id: "sub_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         name: String(body.name ?? "Subscribed calendar").slice(0, 80), url: String(body.url).trim(), source: "url",
+        color: nextSubscriptionColor(g.session.householdId),
         createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
       });
       const r = await syncSubscription({ sub, session: g.session });
@@ -1574,6 +1623,7 @@ const handleRequest = async (req, res) => {
         sub = putSubscription({
           id: "sub_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
           name: `Google Calendar (${account.displayName ?? "primary"})`, url: null, source: "google", accountId: account.id,
+          color: nextSubscriptionColor(g.session.householdId),
           createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
         });
       }
@@ -1591,6 +1641,7 @@ const handleRequest = async (req, res) => {
       const sub = putSubscription({
         id: "sub_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         name: String(body.name ?? "Imported calendar").slice(0, 80), url: null, source: "import",
+        color: nextSubscriptionColor(g.session.householdId),
         icsText: String(body.ics).slice(0, 200_000), // kept so a re-sync can re-parse the pasted feed
         createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
       });

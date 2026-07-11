@@ -111,7 +111,10 @@ export interface Meal {
   servings?: number | null; recipeUrl?: string; instructions?: string[];
 }
 export interface CalendarSubscription {
-  id: string; name: string; url: string | null; source: string; lastSyncAt: number | null;
+  id: string; name: string; url: string | null; source: string;
+  /** Per-calendar accent (name or hex) — each connected calendar's events render as distinctly colored cards. */
+  color?: string | null;
+  lastSyncAt: number | null;
   lastResult: { imported?: number; updated?: number; removed?: number; error?: string } | null;
   eventCount: number; createdAt: number;
 }
@@ -377,7 +380,7 @@ export const api = {
     const r = await req<{ events: EventRec[] }>("/events");
     return r.data?.events ?? [];
   },
-  async createEvent(body: Partial<EventRec> & { title: string }): Promise<{ event?: EventRec; error?: string }> {
+  async createEvent(body: Partial<EventRec> & { title: string }): Promise<{ event?: EventRec; error?: string; message?: string }> {
     const r = await req<{ event?: EventRec; error?: string }>("/events", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
@@ -442,8 +445,11 @@ export const api = {
     if (r.status === 403) return { error: "forbidden" };
     return r.data ?? { error: "network" };
   },
-  async deleteMeal(id: string): Promise<{ ok?: boolean; unlinkedGroceries?: number; error?: string }> {
-    const r = await req<{ ok?: boolean; unlinkedGroceries?: number; error?: string }>(`/meals/${encodeURIComponent(id)}`, { method: "DELETE" });
+  /** Deleting a meal removes its calendar event too; pass deleteGroceries to
+   *  also drop the ingredients it added to the grocery list. */
+  async deleteMeal(id: string, opts?: { deleteGroceries?: boolean }): Promise<{ ok?: boolean; removedEvents?: number; removedGroceries?: number; unlinkedGroceries?: number; error?: string }> {
+    const qs = opts?.deleteGroceries ? "?groceries=delete" : "";
+    const r = await req<{ ok?: boolean; removedEvents?: number; removedGroceries?: number; unlinkedGroceries?: number; error?: string }>(`/meals/${encodeURIComponent(id)}${qs}`, { method: "DELETE" });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
@@ -674,7 +680,7 @@ export const api = {
   },
 
   /* ---- Events (edit/delete) ---- */
-  async updateEvent(id: string, patch: Record<string, unknown>): Promise<{ event?: EventRec; error?: string }> {
+  async updateEvent(id: string, patch: Record<string, unknown>): Promise<{ event?: EventRec; error?: string; message?: string }> {
     const r = await req<{ event?: EventRec; error?: string }>(`/events/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };

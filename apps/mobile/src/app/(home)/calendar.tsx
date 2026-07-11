@@ -1,14 +1,15 @@
-// Calendar — agenda-first home for the three-layer household calendar.
-// Top: a 14-day strip (dots mark days with plans; tap a day to focus it).
-// Middle: upcoming events as a timeline — time rail + card. Canonical
-// (FamiliOS-layer) events open the form sheet to edit; synced (linked/public)
-// events are read-only mirrors that expand inline instead.
+// Calendar — home for the three-layer household calendar, in two views:
+// Agenda (default): a 14-day strip, then upcoming events as a timeline.
+// Month: a paging grid to look any number of months out; tap a day for its plans.
+// Canonical events and Google-linked events open the form sheet to edit (Google
+// edits write back two-way); ICS-fed events are read-only mirrors that expand
+// inline. Each subscribed calendar gets its own accent color on its cards.
 // Bottom: calendar subscriptions with sync status (feeds managed in Connections).
 import { useCallback, useMemo, useState } from "react";
 import { Alert, ScrollView, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type CalendarSubscription, type EventRec, type MemberRec } from "@/lib/api";
-import { memberColor } from "@/lib/member-colors";
+import { memberAccent, memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
@@ -65,6 +66,12 @@ export default function CalendarScreen() {
   const [subs, setSubs] = useState<CalendarSubscription[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  // Agenda (timeline) is the default; month is a paging grid so you can look a
+  // few months out. The grid cursor always sits on the 1st of the shown month.
+  const [view, setView] = useState<"agenda" | "month">("agenda");
+  const [monthCursor, setMonthCursor] = useState<Date>(() => {
+    const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d;
+  });
   const [expanded, setExpanded] = useState<string | null>(null);
   const [syncing, setSyncing] = useState<string | null>(null);
   const [pulling, setPulling] = useState(false);
@@ -122,6 +129,23 @@ export default function CalendarScreen() {
     (id: string | null) => memberColor(colors, id ? members.find((x) => x.actorId === id) : null),
     [members, colors],
   );
+  // Per-calendar color coding: every subscription (each connected Google account's
+  // calendar, each ICS feed) gets its own accent, so synced events read as distinctly
+  // colored cards. Server-assigned color wins; a deterministic id-hash fills gaps.
+  const SUB_AV = ["sky", "sage", "amber", "lavender", "coral", "ember"];
+  const subColorOf = useCallback((e: EventRec) => {
+    const subId = typeof e.provenance?.subscriptionId === "string" ? e.provenance.subscriptionId : null;
+    if (!subId) return null;
+    const sub = subs.find((s) => s.id === subId);
+    if (sub?.color) return memberAccent(colors, sub.color);
+    return memberAccent(colors, SUB_AV[[...subId].reduce((a, c) => a + c.charCodeAt(0), 0) % SUB_AV.length]);
+  }, [subs, colors]);
+  /** The single accent a whole event card keys off: first participant's color for
+   * FamiliOS events, the source calendar's color for synced ones. */
+  const accentOf = useCallback(
+    (e: EventRec) => e.participantIds.map((id) => colorOf(id)).find(Boolean) ?? subColorOf(e),
+    [colorOf, subColorOf],
+  );
 
   // Upcoming = anything undated or starting within the last 12h onward (ported).
   const upcoming = useMemo(() => [...events]
@@ -144,6 +168,33 @@ export default function CalendarScreen() {
   const visibleDays = selectedDay ? dayKeys.filter((k) => k === selectedDay) : dayKeys;
   const showUndated = !selectedDay && (byDay["undated"]?.length ?? 0) > 0;
   const nothingAtAll = dayKeys.length === 0 && !byDay["undated"];
+
+  // Month grid wants EVERY dated event (including ones earlier in the shown month),
+  // not just the upcoming window the agenda uses.
+  const byDayAll = useMemo(() => {
+    const map: Record<string, EventRec[]> = {};
+    for (const e of events) {
+      if (!e.startAt || isNaN(+new Date(e.startAt))) continue;
+      (map[dayKey(new Date(e.startAt))] ??= []).push(e);
+    }
+    for (const k of Object.keys(map)) map[k].sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
+    return map;
+  }, [events]);
+  // 6 fixed weeks (42 cells) starting on Sunday — nulls pad days outside the month.
+  const monthCells = useMemo(() => {
+    const first = new Date(monthCursor);
+    const cells: (Date | null)[] = [];
+    for (let i = 0; i < first.getDay(); i++) cells.push(null);
+    const days = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+    for (let d = 1; d <= days; d++) cells.push(new Date(first.getFullYear(), first.getMonth(), d));
+    while (cells.length % 7 !== 0) cells.push(null);
+    return cells;
+  }, [monthCursor]);
+  const shiftMonth = useCallback((delta: number) => {
+    tapHaptic("select");
+    setMonthCursor((c) => new Date(c.getFullYear(), c.getMonth() + delta, 1));
+    setSelectedDay(null);
+  }, []);
 
   const openCreate = useCallback((date?: string) => {
     router.push(date ? { pathname: "/event-form", params: { date } } : "/event-form");
@@ -205,7 +256,87 @@ export default function CalendarScreen() {
     <HScreen refreshing={refreshing} onRefresh={() => void onRefresh()}>
       {header}
 
+      {/* Agenda ⇄ Month view toggle */}
+      <Rise index={0}>
+        <View style={{ flexDirection: "row", gap: spacing.sm }}>
+          {(["agenda", "month"] as const).map((v) => (
+            <PressableScale
+              key={v}
+              haptic="select"
+              onPress={() => { setView(v); setSelectedDay(null); }}
+              accessibilityRole="button"
+              accessibilityState={{ selected: view === v }}
+              accessibilityLabel={`${v} view`}
+              style={{
+                paddingHorizontal: 14, paddingVertical: 7, borderRadius: 999,
+                backgroundColor: view === v ? colors.ember : colors.surface,
+                borderWidth: 1, borderColor: view === v ? "transparent" : colors.border,
+              }}
+            >
+              <T kind="subMedium" color={view === v ? colors.onEmber : colors.textSecondary}>
+                {v === "agenda" ? "Agenda" : "Month"}
+              </T>
+            </PressableScale>
+          ))}
+        </View>
+      </Rise>
+
+      {/* Month grid — page any number of months out; tap a day to see its plans. */}
+      {view === "month" ? (
+        <Rise index={0}>
+          <Card style={{ gap: spacing.sm }}>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+              <PressableScale haptic="select" hitSlop={10} onPress={() => shiftMonth(-1)} accessibilityRole="button" accessibilityLabel="Previous month">
+                <Sym name="chevron.left" size={16} color={colors.ember} />
+              </PressableScale>
+              <T kind="bodyMedium">{monthCursor.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</T>
+              <PressableScale haptic="select" hitSlop={10} onPress={() => shiftMonth(1)} accessibilityRole="button" accessibilityLabel="Next month">
+                <Sym name="chevron.right" size={16} color={colors.ember} />
+              </PressableScale>
+            </View>
+            <View style={{ flexDirection: "row" }}>
+              {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
+                <T key={i} kind="caption" color={colors.textFaint} style={{ flex: 1, textAlign: "center" }}>{d}</T>
+              ))}
+            </View>
+            <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
+              {monthCells.map((d, i) => {
+                if (!d) return <View key={i} style={{ width: `${100 / 7}%`, height: 44 }} />;
+                const k = dayKey(d);
+                const dayEvents = byDayAll[k] ?? [];
+                const isToday = k === todayKey;
+                const isSelected = k === selectedDay;
+                return (
+                  <PressableScale
+                    key={i}
+                    haptic="select"
+                    onPress={() => setSelectedDay(isSelected ? null : k)}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: isSelected }}
+                    accessibilityLabel={`${dayTitle(k, todayKey)}${dayEvents.length ? `, ${dayEvents.length} events` : ""}`}
+                    style={{ width: `${100 / 7}%`, height: 44, alignItems: "center", justifyContent: "center", gap: 2 }}
+                  >
+                    <View style={{
+                      width: 28, height: 28, borderRadius: 14, alignItems: "center", justifyContent: "center",
+                      backgroundColor: isSelected ? colors.ember : isToday ? colors.emberBg : "transparent",
+                    }}>
+                      <T kind="subMedium" color={isSelected ? colors.onEmber : isToday ? colors.ember : colors.textSecondary}>{d.getDate()}</T>
+                    </View>
+                    <View style={{ flexDirection: "row", gap: 2, height: 4 }}>
+                      {dayEvents.slice(0, 3).map((e, j) => (
+                        <View key={j} style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: accentOf(e) ?? colors.ember }} />
+                      ))}
+                    </View>
+                  </PressableScale>
+                );
+              })}
+            </View>
+          </Card>
+        </Rise>
+      ) : null}
+
       {/* 14-day strip — dots mark days with plans; tap toggles a one-day focus. */}
+      {view === "agenda" ? (
       <Rise index={0}>
         <ScrollView
           horizontal
@@ -249,6 +380,7 @@ export default function CalendarScreen() {
           })}
         </ScrollView>
       </Rise>
+      ) : null}
 
       {/* Two-way Google sync: pull edits made on the Google side back into pushed events. */}
       {canManage ? (
@@ -274,7 +406,36 @@ export default function CalendarScreen() {
 
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
 
-      {nothingAtAll ? (
+      {view === "month" ? (
+        !selectedDay ? (
+          <T kind="sub" color={colors.textFaint} style={{ textAlign: "center" }}>Tap a day to see its plans.</T>
+        ) : (byDayAll[selectedDay]?.length ?? 0) === 0 ? (
+          <EmptyState
+            icon="calendar"
+            title="Nothing planned this day"
+            action={canManage ? { title: "Add event", onPress: () => openCreate(selectedDay) } : undefined}
+          />
+        ) : (
+          <Rise index={1}>
+            <SectionHeader title={dayTitle(selectedDay, todayKey)} />
+            <View style={{ gap: spacing.sm }}>
+              {byDayAll[selectedDay].map((e) => (
+                <EventItem
+                  key={e.id}
+                  e={e}
+                  nameOf={nameOf}
+                  colorOf={colorOf}
+                  subColor={subColorOf(e)}
+                  canManage={canManage}
+                  onChanged={load}
+                  expanded={expanded === e.id}
+                  onToggle={() => setExpanded(expanded === e.id ? null : e.id)}
+                />
+              ))}
+            </View>
+          </Rise>
+        )
+      ) : nothingAtAll ? (
         <EmptyState
           icon="calendar"
           title="Nothing on the calendar yet"
@@ -304,6 +465,7 @@ export default function CalendarScreen() {
                     e={e}
                     nameOf={nameOf}
                     colorOf={colorOf}
+                    subColor={subColorOf(e)}
                     canManage={canManage}
                     onChanged={load}
                     expanded={expanded === e.id}
@@ -323,6 +485,7 @@ export default function CalendarScreen() {
                     e={e}
                     nameOf={nameOf}
                     colorOf={colorOf}
+                    subColor={subColorOf(e)}
                     canManage={canManage}
                     onChanged={load}
                     expanded={expanded === e.id}
@@ -364,10 +527,12 @@ export default function CalendarScreen() {
 }
 
 /** One agenda entry: time rail on the left, event card on the right. */
-function EventItem({ e, nameOf, colorOf, canManage, onChanged, expanded, onToggle }: {
+function EventItem({ e, nameOf, colorOf, subColor, canManage, onChanged, expanded, onToggle }: {
   e: EventRec;
   nameOf: (id: string | null) => string | null;
   colorOf: (id: string | null) => string | null;
+  /** The source calendar's accent for synced events (per-subscription color coding). */
+  subColor: string | null;
   canManage: boolean;
   onChanged: () => Promise<void> | void;
   expanded: boolean;
@@ -375,16 +540,20 @@ function EventItem({ e, nameOf, colorOf, canManage, onChanged, expanded, onToggl
 }) {
   const { colors, spacing } = useTheme();
   const canonical = e.layer === "canonical";
+  // Google-originated linked events are editable two-way (server writes to Google
+  // first) — they open the form like canonical ones. ICS/public stay expand-only.
+  const editable = canonical || (e.layer === "linked" && !!e.provenance?.googleEventId);
   const start = fmtTime(e.startAt);
   const end = fmtTime(e.endAt);
   const driver = nameOf(e.driverId);
   const bring = e.whatToBring;
   const checklistDone = e.checklist.filter((c) => c.done).length;
   const conflict = conflictOf(e);
-  // Per-member color coding: a left accent stripe in the first participant's color, and a
-  // stacked colored dot per participant (uncolored members fall back to a neutral dot).
+  // Color coding: a left accent stripe in the first participant's color (FamiliOS
+  // events) or the source calendar's color (synced events), and a stacked colored
+  // dot per participant (uncolored members fall back to a neutral dot).
   const memberColors = e.participantIds.map((id) => colorOf(id)).filter(Boolean) as string[];
-  const stripe = memberColors[0] ?? null;
+  const stripe = memberColors[0] ?? subColor ?? null;
   const dots = e.participantIds.map((id) => colorOf(id) ?? colors.textFaint);
   const [resolving, setResolving] = useState<"google" | "local" | null>(null);
 
@@ -407,10 +576,10 @@ function EventItem({ e, nameOf, colorOf, canManage, onChanged, expanded, onToggl
 
       <View style={{ flex: 1, gap: spacing.sm }}>
       <PressableCard
-        haptic={canonical ? "light" : "select"}
-        onPress={canonical ? () => router.push({ pathname: "/event-form", params: { id: e.id } }) : onToggle}
+        haptic={editable ? "light" : "select"}
+        onPress={editable ? () => router.push({ pathname: "/event-form", params: { id: e.id } }) : onToggle}
         accessibilityRole="button"
-        accessibilityLabel={canonical
+        accessibilityLabel={editable
           ? `${e.title}, ${start ?? "no time"}. Edit event`
           : `${e.title}, ${start ?? "no time"}. ${expanded ? "Collapse" : "Expand"} details`}
         style={stripe ? { borderLeftWidth: 3, borderLeftColor: stripe } : undefined}
@@ -418,9 +587,9 @@ function EventItem({ e, nameOf, colorOf, canManage, onChanged, expanded, onToggl
         <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
           <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={2}>{e.title}</T>
           {conflict ? <Badge label="Sync conflict" fg={colors.coral} bg={colors.coralBg} icon="exclamationmark.triangle.fill" /> : null}
-          {e.layer === "linked" ? <Badge label="Synced" fg={colors.sky} bg={colors.skyBg} icon="arrow.triangle.2.circlepath" /> : null}
+          {e.layer === "linked" ? <Badge label="Synced" fg={subColor ?? colors.sky} bg={colors.skyBg} icon="arrow.triangle.2.circlepath" /> : null}
           {e.layer === "public" ? <Badge label="Public" fg={colors.textMuted} bg={colors.surfaceSunken} icon="globe" /> : null}
-          {canonical ? <Sym name="chevron.right" size={12} color={colors.textFaint} /> : null}
+          {editable ? <Sym name="chevron.right" size={12} color={colors.textFaint} /> : null}
         </View>
 
         {e.location ? (

@@ -775,7 +775,7 @@ export const backend = {
   async updateMeal(id: string, patch: Partial<Meal>): Promise<{ meal?: Meal; error?: string }> {
     try { return await req(`/meals/${id}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
-  async deleteMeal(id: string): Promise<{ ok: boolean; unlinkedGroceries?: number; unlinkedEvents?: number; error?: string }> {
+  async deleteMeal(id: string): Promise<{ ok: boolean; unlinkedGroceries?: number; removedEvents?: number; removedGroceries?: number; error?: string }> {
     try { return await req(`/meals/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
   },
   async mealToGrocery(id: string): Promise<{ ok: boolean; added?: number; error?: string }> {

@@ -102,6 +102,9 @@ export default function EventFormScreen() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
+  // Google-originated linked events are editable TWO-WAY: the server writes the
+  // edit to Google first, then mirrors it locally. ICS-fed events stay read-only.
+  const [linkedGoogle, setLinkedGoogle] = useState(false);
   const [members, setMembers] = useState<MemberRec[]>([]);
 
   // Fields
@@ -138,7 +141,9 @@ export default function EventFormScreen() {
         if (!e) {
           setNotFound(true);
         } else {
-          setReadOnly(e.layer !== "canonical");
+          const lg = e.layer === "linked" && !!e.provenance?.googleEventId;
+          setLinkedGoogle(lg);
+          setReadOnly(e.layer !== "canonical" && !lg);
           setGoogleEventId(e.provenance?.googleEventId ?? null);
           setTitle(e.title);
           setLocation(e.location ?? "");
@@ -188,7 +193,9 @@ export default function EventFormScreen() {
       setNotice({
         text: r.error === "insufficient_role"
           ? "Saving events needs Limited Member or higher."
-          : `Couldn't save: ${r.error ?? "unknown error"}`,
+          : r.error === "needs_reconnect"
+            ? "Your Google account needs reconnecting in Connections before this event can be edited."
+            : `Couldn't save: ${r.message ?? r.error ?? "unknown error"}`,
         ok: false,
       });
     }
@@ -198,7 +205,9 @@ export default function EventFormScreen() {
     if (!isEdit) return;
     Alert.alert(
       "Delete event?",
-      `“${title.trim() || "This event"}” will be removed from the household calendar.`,
+      linkedGoogle
+        ? `“${title.trim() || "This event"}” will be deleted from Google Calendar and the household calendar.`
+        : `“${title.trim() || "This event"}” will be removed from the household calendar.`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -303,6 +312,9 @@ export default function EventFormScreen() {
       ) : null}
       {readOnly ? (
         <Notice text="Synced from an external calendar — read-only here. Edit it at the source." ok={false} />
+      ) : null}
+      {linkedGoogle ? (
+        <Notice text="Synced from Google Calendar — changes you save here update it in Google too." ok />
       ) : null}
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
 
@@ -473,7 +485,7 @@ export default function EventFormScreen() {
             disabled={!canSave}
             onPress={() => void save()}
           />
-          {isEdit ? (
+          {isEdit && !linkedGoogle ? (
             <Button
               title={googleEventId ? "Update in Google" : "Push to Google"}
               variant="neutral"

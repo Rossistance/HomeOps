@@ -113,7 +113,7 @@ test("a meal pushes to the calendar as a linked canonical event (idempotent, slo
   assert.equal(r2.data.event.startAt, "2026-07-07T17:30:00", "explicit meal time wins over the slot default");
 });
 
-test("a dateless meal cannot be pushed; deleting a meal unlinks (not deletes) its event", async () => {
+test("a dateless meal cannot be pushed; deleting a meal deletes its calendar event", async () => {
   const dateless = (await adult.req("/api/meals", { method: "POST", body: JSON.stringify({ title: "Someday soup" }) })).data.meal;
   const bad = await adult.req(`/api/meals/${dateless.id}/to-calendar`, { method: "POST" });
   assert.equal(bad.status, 400);
@@ -122,8 +122,26 @@ test("a dateless meal cannot be pushed; deleting a meal unlinks (not deletes) it
   const meal = (await adult.req("/api/meals", { method: "POST", body: JSON.stringify({ title: "Tacos", date: "2026-07-08" }) })).data.meal;
   const ev = (await adult.req(`/api/meals/${meal.id}/to-calendar`, { method: "POST" })).data.event;
   const del = await adult.req(`/api/meals/${meal.id}`, { method: "DELETE" });
-  assert.equal(del.data.unlinkedEvents, 1);
+  assert.equal(del.data.removedEvents, 1);
   const after = (await adult.req("/api/events")).data.events.find((e) => e.id === ev.id);
-  assert.ok(after, "the calendar event SURVIVES the meal's deletion");
-  assert.equal(after.mealId ?? null, null, "but the stale meal link is cleared");
+  assert.equal(after, undefined, "the meal's calendar event is deleted with the meal");
+});
+
+test("deleting a meal keeps groceries by default, deletes them with ?groceries=delete", async () => {
+  // Default: unlink — items survive with the stale meal link cleared.
+  const keep = (await adult.req("/api/meals", { method: "POST", body: JSON.stringify({ title: "Chili", date: "2026-07-09", ingredients: [{ item: "Beans", have: false }] }) })).data.meal;
+  await adult.req(`/api/meals/${keep.id}/to-grocery`, { method: "POST" });
+  const delKeep = await adult.req(`/api/meals/${keep.id}`, { method: "DELETE" });
+  assert.equal(delKeep.data.unlinkedGroceries, 1);
+  assert.equal(delKeep.data.removedGroceries, 0);
+  const beans = (await adult.req("/api/tasks")).data.tasks.find((t) => t.title === "Beans");
+  assert.ok(beans, "grocery item survives by default");
+
+  // Opt-in cascade: the meal's ingredients leave the list with it.
+  const drop = (await adult.req("/api/meals", { method: "POST", body: JSON.stringify({ title: "Curry", date: "2026-07-10", ingredients: [{ item: "Coconut milk", have: false }] }) })).data.meal;
+  await adult.req(`/api/meals/${drop.id}/to-grocery`, { method: "POST" });
+  const delDrop = await adult.req(`/api/meals/${drop.id}?groceries=delete`, { method: "DELETE" });
+  assert.equal(delDrop.data.removedGroceries, 1);
+  const milk = (await adult.req("/api/tasks")).data.tasks.find((t) => t.title === "Coconut milk");
+  assert.equal(milk, undefined, "opt-in delete removes the meal's grocery items");
 });
