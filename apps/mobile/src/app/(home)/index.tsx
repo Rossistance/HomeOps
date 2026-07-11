@@ -9,7 +9,7 @@ import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type ApprovalRec, type EventRec, type EvolutionRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
-import { memberColor } from "@/lib/member-colors";
+import { fade, memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
 import { useTheme, riskColor } from "@/theme";
 import {
@@ -163,9 +163,13 @@ export default function TodayScreen() {
                 {members.map((m, i) => {
                   const kid = isKidMember(m);
                   const gp = !kid && isGrandparent(m);
+                  // Each member wears their calendar color (same memberColor as the
+                  // Calendar screen) so people are color-consistent across the app;
+                  // the old role tints only fill in for members with no derivable color.
+                  const accent = memberColor(colors, m);
                   const tint = kid ? KID_TINTS[i % KID_TINTS.length] : gp ? "lavender" : "ember";
-                  const fg = tint === "ember" ? colors.ember : colors[tint];
-                  const bg = tint === "ember" ? colors.emberBg : colors[`${tint}Bg`];
+                  const fg = accent ?? (tint === "ember" ? colors.ember : colors[tint]);
+                  const bg = accent ? fade(accent, 0.16) : tint === "ember" ? colors.emberBg : colors[`${tint}Bg`];
                   const initials = m.displayName.split(" ").map((p) => p[0]).slice(0, 2).join("");
                   const dest = kid ? "/kid" : gp ? "/grandparent" : null;
                   return (
@@ -348,8 +352,12 @@ export default function TodayScreen() {
               <SectionHeader title="Coming up" />
               <Card padded={false}>
                 {upcoming.map((e, i) => (
-                  <View
+                  <PressableScale
                     key={e.id}
+                    haptic="select"
+                    onPress={() => router.push({ pathname: "/event-form", params: { id: e.id } })}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open ${e.title}`}
                     style={{
                       flexDirection: "row", alignItems: "center", gap: spacing.md,
                       paddingHorizontal: spacing.lg, paddingVertical: 13,
@@ -365,7 +373,8 @@ export default function TodayScreen() {
                         {e.location ? ` · ${e.location}` : ""}
                       </T>
                     </View>
-                  </View>
+                    <Sym name="chevron.right" size={13} color={colors.textFaint} />
+                  </PressableScale>
                 ))}
               </Card>
             </Rise>

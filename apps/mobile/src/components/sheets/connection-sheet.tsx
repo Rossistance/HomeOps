@@ -83,11 +83,35 @@ export function ConnectionSheet({ service, visible, onClose, onChanged }: {
     }
   }
 
+  // Real in-app disconnect: revoke every one of YOUR accounts on this provider
+  // (DELETE /accounts/:id is ownership-checked server-side, so this never touches
+  // another family member's connection).
   function disconnect() {
     Alert.alert(
       `Disconnect ${service?.name}?`,
-      "Access is revoked from the provider's security settings. Open the web app's Connections page to fully remove the account.",
-      [{ text: "OK" }],
+      "FamiliOS deletes its saved access for your account. Agents lose this connection immediately; you can reconnect anytime.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Disconnect", style: "destructive",
+          onPress: () => void (async () => {
+            if (!service || busy) return;
+            setBusy(true); setNote(null);
+            try {
+              const providers = await api.providers();
+              const accounts = providers.find((p) => p.id === service.id)?.accounts ?? [];
+              if (accounts.length === 0) { setNote("No connected account of yours found on this service."); return; }
+              for (const a of accounts) {
+                const r = await api.deleteAccount(a.id);
+                if (r.error) { setNote(r.error === "forbidden" ? "Only the person who connected this account can disconnect it." : `Couldn't disconnect: ${r.error}`); return; }
+              }
+              show("connect", () => { onChanged(); onClose(); });
+            } finally {
+              setBusy(false);
+            }
+          })(),
+        },
+      ],
     );
   }
 

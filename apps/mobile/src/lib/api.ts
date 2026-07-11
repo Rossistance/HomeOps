@@ -53,7 +53,12 @@ export interface ConversationMessage {
   builtIds?: { skillId?: string; agentId?: string; triggerId?: string };
   runId?: string | null; status?: string;
 }
-export interface ConversationRec { id: string; title: string; messages: ConversationMessage[]; createdAt: string; updatedAt: string }
+export interface ConversationRec {
+  id: string; title: string; messages: ConversationMessage[]; createdAt: string; updatedAt: string;
+  /** Chat space: "personal" (private to its creator — the default) or "household" (family space, shared). */
+  visibility?: "personal" | "household";
+  actorId?: string;
+}
 // Durable server runs (read-only view) — used to enrich approval previews with the
 // gated step's REAL resolved input (the approval record itself only carries a hash).
 export interface RunStepRec { index: number; toolId: string | null; title: string; detail: string; status: string; approvalId: string | null; input: Record<string, unknown> }
@@ -90,7 +95,7 @@ export interface SyncConflict {
   google: { title?: string; startAt?: string | null; endAt?: string | null; location?: string };
 }
 // Sync bookkeeping carried on a canonical event (mirrors the web's event.provenance).
-export interface EventProvenance { googleEventId?: string; conflict?: SyncConflict; [k: string]: unknown }
+export interface EventProvenance { googleEventId?: string; subscriptionId?: string; alsoSubscriptionIds?: string[]; conflict?: SyncConflict; [k: string]: unknown }
 export interface EventRec {
   id: string; title: string; startAt: string | null; endAt: string | null; location: string;
   driverId: string | null; participantIds: string[]; whatToBring: { item: string; memberId: string | null }[];
@@ -277,8 +282,8 @@ export const api = {
     const r = await req<{ conversations: ConversationRec[] }>("/conversations");
     return r.data?.conversations ?? [];
   },
-  async createConversation(title: string): Promise<ConversationRec | null> {
-    const r = await req<{ conversation?: ConversationRec }>("/conversations", { method: "POST", body: JSON.stringify({ title }) });
+  async createConversation(title: string, visibility?: "personal" | "household"): Promise<ConversationRec | null> {
+    const r = await req<{ conversation?: ConversationRec }>("/conversations", { method: "POST", body: JSON.stringify({ title, visibility }) });
     return r.data?.conversation ?? null;
   },
   async conversation(id: string): Promise<ConversationRec | null> {
@@ -646,6 +651,12 @@ export const api = {
     });
     return r.data ?? { ok: false, error: "network" };
   },
+  /** Revoke a connected OAuth account (server deletes tokens; ownership-checked). */
+  async deleteAccount(id: string): Promise<{ ok?: boolean; error?: string }> {
+    const r = await req<{ ok?: boolean; error?: string }>(`/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (r.status === 403) return { error: "forbidden" };
+    return r.data ?? { error: "network" };
+  },
   async oauthStart(provider: string): Promise<OAuthStartResult> {
     const r = await req<OAuthStartResult>(`/oauth/${encodeURIComponent(provider)}/start`, {
       headers: { "x-homeops-mobile": "1" },
@@ -742,6 +753,9 @@ export const api = {
 /* ---- Records for the agents/automations surfaces (mirrors server publicAgent/publicTrigger) ---- */
 export interface AgentRec {
   id: string; name: string; purpose?: string; status: string; instructions?: string;
+  /** Agent space: "household" (family — shared, the default) or "personal" (only its creator sees/uses it). */
+  visibility?: "household" | "personal";
+  createdBy?: string | null;
   lastRunAt?: string | null; runCount?: number; toolIds?: string[]; createdAt?: string; updatedAt?: string;
 }
 export interface TriggerRec {

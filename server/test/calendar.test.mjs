@@ -22,6 +22,26 @@ DTEND:20260120T170000Z
 END:VEVENT
 END:VCALENDAR`;
 
+/** Unique two-event ICS per test — re-importing the SAME feed content under a new
+ * subscription now DEDUPES into the first subscription's events (shared-event
+ * merging), so tests that want independent events need distinct content. */
+function uniqueIcs(tag) {
+  return `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VEVENT
+UID:evt-1@${tag}
+SUMMARY:${tag} kickoff
+DTSTART:20260210T160000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-2@${tag}
+SUMMARY:${tag} wrap-up
+DTSTART:20260211T160000Z
+END:VEVENT
+END:VCALENDAR`;
+}
+
 test("parseICS reads VEVENTs, dates (all-day + UTC), and unescapes text", () => {
   const events = parseICS(ICS);
   assert.equal(events.length, 2);
@@ -73,8 +93,28 @@ test("importing an .ics creates read-only linked events, then re-import updates 
   assert.equal(after.length, 2, "still two — updated, not duplicated");
 });
 
+test("the same event arriving via two subscriptions merges into one card", async () => {
+  const ics = uniqueIcs("shared");
+  const a = (await adult.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Ross's calendar", ics }) })).data;
+  assert.equal(a.sync.imported, 2);
+  const b = (await adult.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Melissa's calendar", ics }) })).data;
+  assert.equal(b.sync.imported, 0, "second subscription creates no duplicates");
+  assert.equal(b.sync.merged, 2, "both events attached to the existing cards");
+  const events = (await adult.req("/api/events")).data.events.filter((e) => /shared (kickoff|wrap-up)/.test(e.title));
+  assert.equal(events.length, 2, "one card per real-world event");
+  for (const e of events) {
+    assert.equal(e.provenance.subscriptionId, a.subscription.id);
+    assert.deepEqual(e.provenance.alsoSubscriptionIds, [b.subscription.id], "second calendar rides along on the same card");
+  }
+  // Removing the OWNING subscription hands the card to the other one instead of deleting it.
+  await adult.req(`/api/calendar/subscriptions/${a.subscription.id}`, { method: "DELETE" });
+  const after = (await adult.req("/api/events")).data.events.filter((e) => /shared (kickoff|wrap-up)/.test(e.title));
+  for (const e of after) assert.equal(e.provenance.subscriptionId, b.subscription.id, "ownership transferred, event survives");
+  await adult.req(`/api/calendar/subscriptions/${b.subscription.id}`, { method: "DELETE" }); // cleanup
+});
+
 test("unsubscribing removes the subscription's linked events", async () => {
-  const imp = (await adult.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Sports", ics: ICS }) })).data;
+  const imp = (await adult.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Sports", ics: uniqueIcs("sports") }) })).data;
   const subId = imp.subscription.id;
   const before = (await adult.req("/api/events")).data.events.filter((e) => e.provenance?.subscriptionId === subId);
   assert.equal(before.length, 2);
@@ -119,7 +159,7 @@ test("a child cannot connect Google Calendar", async () => {
 /* ---- GC.3: push (FamiliOS → Google), approval-gated + deduped ---- */
 test("pushing a synced (linked) event is refused", async () => {
   // Import creates linked events; those can't be pushed back to Google.
-  const imp = (await adult.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ ics: ICS }) })).data;
+  const imp = (await adult.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ ics: uniqueIcs("pushcheck") }) })).data;
   const linked = (await adult.req("/api/events")).data.events.find((e) => e.provenance?.subscriptionId === imp.subscription.id);
   const r = await adult.req(`/api/calendar/push/${linked.id}`, { method: "POST" });
   assert.equal(r.status, 400);

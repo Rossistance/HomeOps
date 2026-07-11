@@ -33,6 +33,9 @@ function normalizeAgent(body, base = {}) {
     instructions: body.instructions ?? base.instructions ?? "",
     status: AGENT_STATUSES.includes(body.status) ? body.status : (base.status ?? "Draft"),
     spaceType: body.spaceType ?? base.spaceType ?? "Family",
+    // Personal-space agents are visible/usable only by their creator; family
+    // (household) agents — the default — are shared with everyone.
+    visibility: body.visibility === "personal" ? "personal" : body.visibility === "household" ? "household" : (base.visibility ?? "household"),
     skillIds: Array.isArray(body.skillIds) ? body.skillIds : (base.skillIds ?? []),
     allowedToolIds: Array.isArray(body.allowedToolIds) ? body.allowedToolIds : (base.allowedToolIds ?? []),
     allowedFunctionIds: Array.isArray(body.allowedFunctionIds) ? body.allowedFunctionIds : (base.allowedFunctionIds ?? []),
@@ -80,6 +83,7 @@ export function createAgent(body, session) {
   const agent = {
     id,
     householdId: session?.householdId ?? "local",
+    createdBy: session?.actorId ?? null,
     name: body.name ?? "Untitled agent",
     ...normalizeAgent(body),
     system: false,
@@ -228,12 +232,18 @@ export function isToolStepAllowed(agent, toolId, _session) {
   return { ok: true };
 }
 
+/** Personal agents exist only for the member who created them. */
+export function agentVisibleTo(a, session) {
+  if (!a) return false;
+  return !(a.visibility === "personal" && a.createdBy && a.createdBy !== session?.actorId);
+}
+
 /* ------------------------- orchestrator selection ----------------------- */
 // Pick the agent for a run. Explicit id wins (scope-checked). Otherwise the household's
 // default active agent, else any active agent, else the seeded household assistant.
 export function selectAgent({ agentId, session } = {}) {
   const hh = session?.householdId ?? "local";
-  const scoped = (a) => a && (a.householdId === hh || a.householdId === "local");
+  const scoped = (a) => a && (a.householdId === hh || a.householdId === "local") && agentVisibleTo(a, session);
   if (agentId) { const a = getAgent(agentId); return scoped(a) ? a : null; }
   const all = listAgents(scoped);
   return all.find((a) => a.id === "agt_household") ?? all.find((a) => a.status === "Active") ?? all[0] ?? null;
@@ -245,7 +255,7 @@ export function publicAgent(agent) {
 }
 export function listPublicAgents(session, { status } = {}) {
   const hh = session?.householdId ?? "local";
-  return listAgents((a) => a.householdId === hh || a.householdId === "local")
+  return listAgents((a) => (a.householdId === hh || a.householdId === "local") && agentVisibleTo(a, session))
     .filter((a) => !status || a.status === status)
     .map(publicAgent)
     .sort((a, b) => (b.updatedAt ?? 0) > (a.updatedAt ?? 0) ? 1 : -1);

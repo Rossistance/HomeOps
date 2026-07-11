@@ -9,7 +9,8 @@ import { useCallback, useMemo, useState } from "react";
 import { Alert, ScrollView, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type CalendarSubscription, type EventRec, type MemberRec } from "@/lib/api";
-import { memberAccent, memberColor } from "@/lib/member-colors";
+import { LinearGradient } from "expo-linear-gradient";
+import { fade, memberAccent, memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
@@ -133,18 +134,38 @@ export default function CalendarScreen() {
   // calendar, each ICS feed) gets its own accent, so synced events read as distinctly
   // colored cards. Server-assigned color wins; a deterministic id-hash fills gaps.
   const SUB_AV = ["sky", "sage", "amber", "lavender", "coral", "ember"];
-  const subColorOf = useCallback((e: EventRec) => {
-    const subId = typeof e.provenance?.subscriptionId === "string" ? e.provenance.subscriptionId : null;
-    if (!subId) return null;
+  const subColorForId = useCallback((subId: string) => {
     const sub = subs.find((s) => s.id === subId);
     if (sub?.color) return memberAccent(colors, sub.color);
     return memberAccent(colors, SUB_AV[[...subId].reduce((a, c) => a + c.charCodeAt(0), 0) % SUB_AV.length]);
   }, [subs, colors]);
+  /** Every source calendar this synced event appears on (a shared event carries the
+   * owning subscription plus any alsoSubscriptionIds) — one color per calendar. */
+  const subColorsOf = useCallback((e: EventRec) => {
+    const p = e.provenance ?? {};
+    const ids = [p.subscriptionId, ...((p.alsoSubscriptionIds as string[] | undefined) ?? [])]
+      .filter((x): x is string => typeof x === "string");
+    return ids.map(subColorForId).filter(Boolean) as string[];
+  }, [subColorForId]);
+  /** Whose event this is, for the card label: first participant for FamiliOS events,
+   * the calendar owner(s) for synced ones ("Ross" out of "Google Calendar (Ross)"). */
+  const ownerNameOf = useCallback((e: EventRec) => {
+    const member = e.participantIds.map((id) => nameOf(id)).find(Boolean);
+    if (member) return member;
+    const p = e.provenance ?? {};
+    const ids = [p.subscriptionId, ...((p.alsoSubscriptionIds as string[] | undefined) ?? [])]
+      .filter((x): x is string => typeof x === "string");
+    const names = ids
+      .map((id) => subs.find((s) => s.id === id)?.name)
+      .filter((n): n is string => !!n)
+      .map((n) => /\(([^)]+)\)/.exec(n)?.[1] ?? n);
+    return names.length ? names.join(" · ") : null;
+  }, [nameOf, subs]);
   /** The single accent a whole event card keys off: first participant's color for
    * FamiliOS events, the source calendar's color for synced ones. */
   const accentOf = useCallback(
-    (e: EventRec) => e.participantIds.map((id) => colorOf(id)).find(Boolean) ?? subColorOf(e),
-    [colorOf, subColorOf],
+    (e: EventRec) => e.participantIds.map((id) => colorOf(id)).find(Boolean) ?? subColorsOf(e)[0] ?? null,
+    [colorOf, subColorsOf],
   );
 
   // Upcoming = anything undated or starting within the last 12h onward (ported).
@@ -425,7 +446,8 @@ export default function CalendarScreen() {
                   e={e}
                   nameOf={nameOf}
                   colorOf={colorOf}
-                  subColor={subColorOf(e)}
+                  subColors={subColorsOf(e)}
+                  ownerName={ownerNameOf(e)}
                   canManage={canManage}
                   onChanged={load}
                   expanded={expanded === e.id}
@@ -465,7 +487,8 @@ export default function CalendarScreen() {
                     e={e}
                     nameOf={nameOf}
                     colorOf={colorOf}
-                    subColor={subColorOf(e)}
+                    subColors={subColorsOf(e)}
+                    ownerName={ownerNameOf(e)}
                     canManage={canManage}
                     onChanged={load}
                     expanded={expanded === e.id}
@@ -485,7 +508,8 @@ export default function CalendarScreen() {
                     e={e}
                     nameOf={nameOf}
                     colorOf={colorOf}
-                    subColor={subColorOf(e)}
+                    subColors={subColorsOf(e)}
+                    ownerName={ownerNameOf(e)}
                     canManage={canManage}
                     onChanged={load}
                     expanded={expanded === e.id}
@@ -527,12 +551,14 @@ export default function CalendarScreen() {
 }
 
 /** One agenda entry: time rail on the left, event card on the right. */
-function EventItem({ e, nameOf, colorOf, subColor, canManage, onChanged, expanded, onToggle }: {
+function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChanged, expanded, onToggle }: {
   e: EventRec;
   nameOf: (id: string | null) => string | null;
   colorOf: (id: string | null) => string | null;
-  /** The source calendar's accent for synced events (per-subscription color coding). */
-  subColor: string | null;
+  /** One accent per source calendar this event appears on (shared events carry several). */
+  subColors: string[];
+  /** Whose event this is — a member's name or the source calendar owner(s). */
+  ownerName: string | null;
   canManage: boolean;
   onChanged: () => Promise<void> | void;
   expanded: boolean;
@@ -549,11 +575,12 @@ function EventItem({ e, nameOf, colorOf, subColor, canManage, onChanged, expande
   const bring = e.whatToBring;
   const checklistDone = e.checklist.filter((c) => c.done).length;
   const conflict = conflictOf(e);
-  // Color coding: a left accent stripe in the first participant's color (FamiliOS
-  // events) or the source calendar's color (synced events), and a stacked colored
-  // dot per participant (uncolored members fall back to a neutral dot).
+  // Color coding: a bold left stripe + a gradient wash of the accent fading
+  // left→right into the card, in the first participant's color (FamiliOS events)
+  // or the source calendar's color (synced events). Shared events show one dot
+  // per calendar they appear on.
   const memberColors = e.participantIds.map((id) => colorOf(id)).filter(Boolean) as string[];
-  const stripe = memberColors[0] ?? subColor ?? null;
+  const stripe = memberColors[0] ?? subColors[0] ?? null;
   const dots = e.participantIds.map((id) => colorOf(id) ?? colors.textFaint);
   const [resolving, setResolving] = useState<"google" | "local" | null>(null);
 
@@ -582,15 +609,33 @@ function EventItem({ e, nameOf, colorOf, subColor, canManage, onChanged, expande
         accessibilityLabel={editable
           ? `${e.title}, ${start ?? "no time"}. Edit event`
           : `${e.title}, ${start ?? "no time"}. ${expanded ? "Collapse" : "Expand"} details`}
-        style={stripe ? { borderLeftWidth: 3, borderLeftColor: stripe } : undefined}
+        style={stripe ? { borderLeftWidth: 5, borderLeftColor: stripe, overflow: "hidden" } : undefined}
       >
+        {stripe ? (
+          <LinearGradient
+            colors={[fade(stripe, 0.22), fade(stripe, 0)]}
+            start={{ x: 0, y: 0.5 }} end={{ x: 0.8, y: 0.5 }}
+            style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0 }}
+            pointerEvents="none"
+          />
+        ) : null}
         <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
           <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={2}>{e.title}</T>
           {conflict ? <Badge label="Sync conflict" fg={colors.coral} bg={colors.coralBg} icon="exclamationmark.triangle.fill" /> : null}
-          {e.layer === "linked" ? <Badge label="Synced" fg={subColor ?? colors.sky} bg={colors.skyBg} icon="arrow.triangle.2.circlepath" /> : null}
+          {e.layer === "linked" ? <Badge label="Synced" fg={subColors[0] ?? colors.sky} bg={colors.skyBg} icon="arrow.triangle.2.circlepath" /> : null}
           {e.layer === "public" ? <Badge label="Public" fg={colors.textMuted} bg={colors.surfaceSunken} icon="globe" /> : null}
           {editable ? <Sym name="chevron.right" size={12} color={colors.textFaint} /> : null}
         </View>
+
+        {/* Whose event this is — member name or source calendar owner(s), one dot per calendar. */}
+        {ownerName ? (
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 5, marginTop: 3 }}>
+            {(memberColors.length ? memberColors : subColors).slice(0, 4).map((c, i) => (
+              <View key={i} style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c, marginLeft: i === 0 ? 0 : -3, borderWidth: 1, borderColor: colors.surface }} />
+            ))}
+            <T kind="caption" color={stripe ?? colors.textMuted} style={{ fontWeight: "600" }} numberOfLines={1}>{ownerName}</T>
+          </View>
+        ) : null}
 
         {e.location ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 5, marginTop: 4 }}>

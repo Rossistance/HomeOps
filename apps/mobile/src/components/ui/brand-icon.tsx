@@ -14,6 +14,8 @@ const BRAND_LOGOS: Record<string, number> = {
   notion: require("../../../assets/brands/notion.png"),
   todoist: require("../../../assets/brands/todoist.png"),
   ticktick: require("../../../assets/brands/ticktick.png"),
+  "amazon-alexa": require("../../../assets/brands/alexa.png"),
+  alexa: require("../../../assets/brands/alexa.png"),
 };
 
 /** Brand logo in a soft white tile (logos need a neutral backdrop in dark mode). */

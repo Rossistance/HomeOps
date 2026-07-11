@@ -20,6 +20,17 @@ export function memberAccent(colors: HearthColors, name?: string | null): string
   }
 }
 
+/** Apply an alpha to a #rgb/#rrggbb color (theme accents are hex). Non-hex
+ * colors pass through unchanged. */
+export function fade(color: string, alpha: number): string {
+  const m = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(color);
+  if (!m) return color;
+  let h = m[1];
+  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  const n = parseInt(h, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
 const FALLBACK_ACCENTS = ["ember", "sage", "sky", "lavender", "amber", "ink"];
 
 export function memberColor(colors: HearthColors, m: MemberRec | null | undefined): string | null {

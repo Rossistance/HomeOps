@@ -124,6 +124,49 @@ export default function AgentDetailScreen() {
         </Rise>
       )}
 
+      {/* Space: family agents are shared; personal agents exist only for you.
+          Color-coded to match chat spaces (ember = family, lavender = personal). */}
+      {canManage && (
+        <Rise index={2}>
+          <SectionHeader title="Space" />
+          <Card style={{ flexDirection: "row", gap: spacing.sm }}>
+            {([["household", "Family", colors.ember], ["personal", "Personal", colors.lavender]] as const).map(([key, label, tintC]) => {
+              const active = (agent.visibility ?? "household") === key;
+              return (
+                <PressableScale
+                  key={key}
+                  haptic="select"
+                  onPress={() => void (async () => {
+                    if (active) return;
+                    const prev = agent.visibility;
+                    setAgent({ ...agent, visibility: key });
+                    const r = await api.patchAgent(agent.id, { visibility: key });
+                    if (r.error) {
+                      setAgent({ ...agent, visibility: prev });
+                      Alert.alert("Couldn't move the agent", r.error === "insufficient_role" ? "Only an Owner or Adult Admin can do that." : "Something went wrong.");
+                    }
+                  })()}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={`${label} space`}
+                  style={{
+                    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+                    paddingVertical: 10, borderRadius: 12, borderCurve: "continuous",
+                    backgroundColor: active ? tintC : colors.surfaceSunken,
+                  }}
+                >
+                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: active ? colors.surface : tintC }} />
+                  <T kind="subMedium" color={active ? colors.surface : colors.textSecondary} style={{ fontWeight: "600" }}>{label}</T>
+                </PressableScale>
+              );
+            })}
+          </Card>
+          <T kind="caption" color={colors.textFaint}>
+            {(agent.visibility ?? "household") === "personal" ? "Only you can see and use this agent." : "Everyone in the household can see and use this agent."}
+          </T>
+        </Rise>
+      )}
+
       <Rise index={2}>
         <SectionHeader title="Runs on" />
         <Card padded={triggers.length === 0}>

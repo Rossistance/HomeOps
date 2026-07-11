@@ -45,7 +45,7 @@ import { twilioAuthToken, twilioSignatureValid, handleInboundSms, twiml } from "
 import {
   createAgent, replaceAgent, partialUpdateAgent, deleteAgent, duplicateAgent,
   rollbackAgent, listAgentVersions, agentContext, selectAgent, publicAgent, listPublicAgents,
-  deriveCapabilitiesFromSteps,
+  deriveCapabilitiesFromSteps, agentVisibleTo,
 } from "./agents.mjs";
 import { getAgent } from "./store.mjs";
 import {
@@ -97,6 +97,13 @@ const SUB_COLORS = ["sky", "sage", "amber", "lavender", "coral", "ember"];
 function nextSubscriptionColor(householdId) {
   const used = listSubscriptions((s) => s.householdId === householdId).map((s) => s.color).filter(Boolean);
   return SUB_COLORS.find((c) => !used.includes(c)) ?? SUB_COLORS[used.length % SUB_COLORS.length];
+}
+// Chat spaces: a conversation lives in its creator's PERSONAL space (private to
+// them — the long-standing behavior and the default) or in the FAMILY space
+// (visibility "household"), where any household member can read and continue it.
+function canSeeConversation(c, session) {
+  if (!c || c.householdId !== session.householdId) return false;
+  return c.actorId === session.actorId || c.visibility === "household";
 }
 const APP_ORIGIN = ALLOWED_ORIGINS[0] || "http://localhost:5173";
 const ROOT_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1678,7 +1685,7 @@ const handleRequest = async (req, res) => {
      * Threads/messages live server-side, scoped to the actor who owns them. */
     if (path === "/api/conversations" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const mine = listConversations((c) => c.householdId === g.session.householdId && c.actorId === g.session.actorId)
+      const mine = listConversations((c) => canSeeConversation(c, g.session))
         .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
       return json(res, 200, { conversations: mine }, req);
     }
@@ -1688,6 +1695,7 @@ const handleRequest = async (req, res) => {
       const c = putConversation({
         id: "conv_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId, actorId: g.session.actorId,
         title: String(body.title ?? "New chat").slice(0, 80), messages: [],
+        visibility: body.visibility === "household" ? "household" : "personal",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
       return json(res, 200, { conversation: c }, req);
@@ -1696,13 +1704,14 @@ const handleRequest = async (req, res) => {
     if (convOne && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const c = getConversation(convOne[1]);
-      if (!c || c.householdId !== g.session.householdId || c.actorId !== g.session.actorId) return json(res, 404, { error: "not_found" }, req);
+      if (!canSeeConversation(c, g.session)) return json(res, 404, { error: "not_found" }, req);
       return json(res, 200, { conversation: c }, req);
     }
     if (convOne && method === "DELETE") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const c = getConversation(convOne[1]);
-      if (!c || c.householdId !== g.session.householdId || c.actorId !== g.session.actorId) return json(res, 404, { error: "not_found" }, req);
+      if (!canSeeConversation(c, g.session)) return json(res, 404, { error: "not_found" }, req);
+      if (c.actorId !== g.session.actorId && !isAdultRole(g.session.role)) return json(res, 403, { error: "forbidden" }, req);
       deleteConversationRec(c.id);
       return json(res, 200, { ok: true }, req);
     }
@@ -1714,7 +1723,7 @@ const handleRequest = async (req, res) => {
     if (convMsg && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const c = getConversation(convMsg[1]);
-      if (!c || c.householdId !== g.session.householdId || c.actorId !== g.session.actorId) return json(res, 404, { error: "not_found" }, req);
+      if (!canSeeConversation(c, g.session)) return json(res, 404, { error: "not_found" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const text = String(body.text ?? "").trim();
       if (!text) return json(res, 400, { error: "text_required" }, req);
@@ -2354,7 +2363,7 @@ const handleRequest = async (req, res) => {
       if (method === "GET") {
         const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
         const a = getAgent(id);
-        if (!a || (a.householdId !== "local" && a.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
+        if (!a || (a.householdId !== "local" && a.householdId !== g.session.householdId) || !agentVisibleTo(a, g.session)) return json(res, 404, { error: "not_found" }, req);
         return json(res, 200, { agent: publicAgent(a) }, req);
       }
       if (method === "PUT" || method === "PATCH") {
@@ -2595,7 +2604,7 @@ const handleRequest = async (req, res) => {
       // Prior turns from the durable conversation ride into the model call —
       // otherwise the assistant forgets facts stated one message earlier.
       const histConv = body.conversationId ? getConversation(body.conversationId) : null;
-      const history = histConv && histConv.householdId === g.session.householdId && histConv.actorId === g.session.actorId ? histConv.messages : [];
+      const history = histConv && canSeeConversation(histConv, g.session) ? histConv.messages : [];
       const out = await assistantRespond({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history });
       // Do-requests EXECUTE immediately (C-intel): a plan from chat auto-starts as a
       // durable server run — no "Run plan" click. Approval-gated steps still pause
@@ -2620,7 +2629,7 @@ const handleRequest = async (req, res) => {
       // must not erase the exchange (that was the "history gone after refresh" bug).
       if (body.conversationId) {
         const conv = getConversation(body.conversationId);
-        if (conv && conv.householdId === g.session.householdId && conv.actorId === g.session.actorId) {
+        if (conv && canSeeConversation(conv, g.session)) {
           const at = new Date().toISOString();
           appendConversationMessage(conv.id, { role: "user", text: String(body.message), at });
           // `build` persisted too — otherwise a build-proposal card vanished on refresh
@@ -2644,7 +2653,7 @@ const handleRequest = async (req, res) => {
       let tokenCount = 0;
       try {
         const histConv = body.conversationId ? getConversation(body.conversationId) : null;
-        const history = histConv && histConv.householdId === g.session.householdId && histConv.actorId === g.session.actorId ? histConv.messages : [];
+        const history = histConv && canSeeConversation(histConv, g.session) ? histConv.messages : [];
         const out = await assistantStream(
           { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history },
           (_tok) => { tokenCount++; if (tokenCount % 4 === 0) res.write(`data: ${JSON.stringify({ type: "progress", tokens: tokenCount })}\n\n`); },
@@ -2671,7 +2680,7 @@ const handleRequest = async (req, res) => {
         // Failed turns persist as well (see POST /api/assistant).
         if (body.conversationId) {
           const conv = getConversation(body.conversationId);
-          if (conv && conv.householdId === g.session.householdId && conv.actorId === g.session.actorId) {
+          if (conv && canSeeConversation(conv, g.session)) {
             const at = new Date().toISOString();
             appendConversationMessage(conv.id, { role: "user", text: String(body.message), at });
             appendConversationMessage(conv.id, out.ok
@@ -2930,7 +2939,7 @@ function materializeBuild(spec, { session, req, emit = () => {} }) {
 function persistBuildOutcome(conversationId, session, out) {
   if (!conversationId) return;
   const conv = getConversation(conversationId);
-  if (!conv || conv.householdId !== session.householdId || conv.actorId !== session.actorId) return;
+  if (!canSeeConversation(conv, session)) return;
   const builtIds = { skillId: out.created?.skill?.id, agentId: out.created?.agent?.id, triggerId: out.created?.automation?.id };
   const msgs = [...(conv.messages ?? [])];
   for (let i = msgs.length - 1; i >= 0; i--) {

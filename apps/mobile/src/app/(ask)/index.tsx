@@ -56,6 +56,9 @@ export default function AskScreen() {
   // Server-durable thread: created on the first send so both turns persist and
   // the same conversation shows up on the web. Opening a recent chat resumes it.
   const [conversationId, setConversationId] = useState<string | null>(null);
+  // Chat space: personal (private to you — the default, how chats have always
+  // worked) or family (shared — any household member can read and continue it).
+  const [space, setSpace] = useState<"personal" | "household">("personal");
   const [recent, setRecent] = useState<ConversationRec[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [kbVisible, setKbVisible] = useState(false);
@@ -150,6 +153,7 @@ export default function AskScreen() {
     if (!c) return;
     instantScroll.current = true;
     setConversationId(c.id);
+    setSpace(c.visibility === "household" ? "household" : "personal");
     setMsgs(mapServerMessages(c));
   }, [busy, flushReveal, mapServerMessages]);
 
@@ -247,7 +251,7 @@ export default function AskScreen() {
     // First turn creates the durable server thread; later turns reuse it.
     let convId = conversationId;
     if (!convId) {
-      const c = await api.createConversation(t0.slice(0, 60));
+      const c = await api.createConversation(t0.slice(0, 60), space);
       if (c) {
         convId = c.id;
         setConversationId(c.id);
@@ -390,6 +394,39 @@ export default function AskScreen() {
             instantScroll.current = false;
           }}
         >
+          {/* Space toggle: where THIS chat lives. Personal = private to you;
+              Family = shared with the household. Locked once a thread exists
+              (the server owns the record's visibility from creation). */}
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            {([["personal", "Personal", colors.lavender], ["household", "Family", colors.ember]] as const).map(([key, label, tint]) => {
+              const active = space === key;
+              return (
+                <PressableScale
+                  key={key}
+                  haptic="select"
+                  disabled={!!conversationId}
+                  onPress={() => setSpace(key)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={`${label} space`}
+                  style={{
+                    flexDirection: "row", alignItems: "center", gap: 6,
+                    paddingHorizontal: 11, paddingVertical: 6, borderRadius: 999,
+                    backgroundColor: active ? tint : "transparent",
+                    borderWidth: 1, borderColor: active ? tint : colors.border,
+                    opacity: conversationId && !active ? 0.4 : 1,
+                  }}
+                >
+                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: active ? colors.surface : tint }} />
+                  <T kind="detail" color={active ? colors.surface : colors.textSecondary} style={{ fontWeight: "600" }}>{label}</T>
+                </PressableScale>
+              );
+            })}
+            <T kind="caption" color={colors.textFaint} style={{ flex: 1 }} numberOfLines={1}>
+              {space === "household" ? "Shared with the household" : "Only you can see this chat"}
+            </T>
+          </View>
+
           {/* Conversation switcher: recent chats as chips; long-press deletes. */}
           {recent.length > 0 ? (
             <ScrollView
@@ -404,6 +441,7 @@ export default function AskScreen() {
                 <ConvChip
                   key={c.id}
                   label={c.title || "Untitled chat"}
+                  dot={c.visibility === "household" ? colors.ember : colors.lavender}
                   selected={c.id === conversationId}
                   onPress={() => void openConversation(c.id)}
                   onLongPress={() => confirmDeleteConversation(c)}
@@ -600,8 +638,8 @@ export default function AskScreen() {
 
 /* ------------------------------ pieces ------------------------------ */
 
-function ConvChip({ label, icon = "bubble.left", selected, onPress, onLongPress, hint }: {
-  label: string; icon?: string; selected?: boolean; onPress?: () => void; onLongPress?: () => void; hint?: string;
+function ConvChip({ label, icon = "bubble.left", dot, selected, onPress, onLongPress, hint }: {
+  label: string; icon?: string; dot?: string; selected?: boolean; onPress?: () => void; onLongPress?: () => void; hint?: string;
 }) {
   const { colors, dark } = useTheme();
   return (
@@ -621,7 +659,11 @@ function ConvChip({ label, icon = "bubble.left", selected, onPress, onLongPress,
         maxWidth: 220,
       }}
     >
-      <Sym name={icon} size={12} color={selected ? colors.onEmber : colors.textFaint} />
+      {dot ? (
+        <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: selected ? colors.onEmber : dot }} />
+      ) : (
+        <Sym name={icon} size={12} color={selected ? colors.onEmber : colors.textFaint} />
+      )}
       <T kind="subMedium" color={selected ? colors.onEmber : colors.textSecondary} numberOfLines={1} style={{ flexShrink: 1 }}>
         {label}
       </T>

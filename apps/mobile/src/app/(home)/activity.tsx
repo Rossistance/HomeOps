@@ -122,7 +122,10 @@ export default function ActivityScreen() {
       : statusColor(colors, activeRun.status)
     : null;
 
-  const history = runs.slice(0, 12);
+  // Collapsed by default — the newest few runs; "Show all" expands to the full dozen.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const history = runs.slice(0, historyOpen ? 12 : 3);
+  const hiddenRuns = Math.min(runs.length, 12) - history.length;
 
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh}>
@@ -176,7 +179,14 @@ export default function ActivityScreen() {
           ) : null}
 
           <Rise index={1}>
-            <SectionHeader title="Run history" />
+            <SectionHeader
+              title="Run history"
+              trailing={runs.length > 3 ? (
+                <PressableScale onPress={() => { tapHaptic("select"); setHistoryOpen((v) => !v); }} haptic={null} hitSlop={8} accessibilityRole="button" accessibilityState={{ expanded: historyOpen }} accessibilityLabel={historyOpen ? "Show fewer runs" : "Show all runs"}>
+                  <T kind="subMedium" color={colors.ember}>{historyOpen ? "Show less" : `Show all${hiddenRuns > 0 ? ` (${hiddenRuns} more)` : ""}`}</T>
+                </PressableScale>
+              ) : undefined}
+            />
             {history.length === 0 ? (
               <Card><T kind="sub">No server runs yet — fire an automation or ask Famili to do something.</T></Card>
             ) : (

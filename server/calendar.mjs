@@ -27,10 +27,18 @@ export function mapGoogleEvents(items) {
     }));
 }
 
-// Resolve the connected Google account this subscription reads from (the actor's own).
+// Resolve the connected Google account this subscription reads from. The
+// subscription is pinned to the account that created it (sub.accountId) — any
+// household adult can hit Sync on it without being logged into that Google
+// account, since the tokens live server-side. Falls back to the actor's own
+// account only for legacy subs that never stored an accountId.
 function resolveGoogleAccount(sub, session) {
-  const mine = listAccountsFor(session.householdId, session.actorId).filter((a) => a.provider === "google");
-  return (sub?.accountId ? mine.find((a) => a.id === sub.accountId) : mine[0]) ?? null;
+  if (sub?.accountId) {
+    const pinned = getAccountRaw(sub.accountId);
+    if (pinned && pinned.provider === "google" && pinned.householdId === session.householdId) return pinned;
+    return null; // pinned account was revoked — surface no_account rather than silently reading someone else's
+  }
+  return listAccountsFor(session.householdId, session.actorId).find((a) => a.provider === "google") ?? null;
 }
 
 /**
@@ -76,7 +84,25 @@ export async function syncSubscription({ sub, icsText, session }) {
     listEvents((e) => e.householdId === hh && e.layer === "linked" && e.provenance?.subscriptionId === subId && e.provenance?.uid)
       .map((e) => [e.provenance.uid, e]),
   );
-  let imported = 0, updated = 0;
+  // Shared-event dedupe: the same real-world event often arrives through TWO
+  // household subscriptions (spouses on a shared Google calendar, or a mutual
+  // invite). Instead of two cards, the first import owns the event and later
+  // subscriptions attach via provenance.alsoSubscriptionIds — the UI renders one
+  // card wearing every source calendar's color. Matched by source UID first
+  // (Google keeps event ids stable across attendee copies), then by an exact
+  // title+start fingerprint for calendars that re-id.
+  const fpOf = (title, startAt) => `${String(title).trim().toLowerCase()}|${startAt}`;
+  const othersByUid = new Map(); const othersByFp = new Map();
+  for (const e of listEvents((e) => e.householdId === hh && e.layer === "linked" && e.provenance?.subscriptionId && e.provenance.subscriptionId !== subId)) {
+    if (e.provenance.uid) othersByUid.set(e.provenance.uid, e);
+    if (e.startAt) othersByFp.set(fpOf(e.title, e.startAt), e);
+  }
+  const attachTo = (other) => {
+    const also = [...new Set([...(other.provenance?.alsoSubscriptionIds ?? []), subId])];
+    patchEvent(other.id, { provenance: { ...(other.provenance ?? {}), alsoSubscriptionIds: also } });
+  };
+  let imported = 0, updated = 0, merged = 0;
+  const seenAlso = new Set(); // uids this sub attached to (owned by another sub)
   for (const ev of parsed) {
     if (!ev.startAt) continue;
     const uid = ev.uid || crypto.createHash("sha1").update(`${ev.title}|${ev.startAt}`).digest("hex");
@@ -90,24 +116,61 @@ export async function syncSubscription({ sub, icsText, session }) {
       const needsProv = gprov && !prior.provenance?.googleEventId;
       patchEvent(prior.id, needsProv ? { ...fields, provenance: { ...(prior.provenance ?? {}), ...gprov } } : fields);
       existing.delete(uid); updated++;
+      continue;
     }
-    else {
-      putEvent({
-        id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: hh,
-        ...fields, endAt: ev.endAt ?? null, spaceId: "sp-family", participantIds: [], driverId: null,
-        ownerId: null, backupOwnerId: null, whatToBring: [], checklist: [], travel: null, reminders: [],
-        attachments: [], comments: [], mealImpact: null, visibility: "household", category: "Calendar",
-        layer: "linked", status: "confirmed", source: sub?.name ?? "Subscribed calendar",
-        provenance: { via: gprov ? "google" : "ics", subscriptionId: subId, uid, ...(gprov ?? {}) },
-        createdBy: session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
-      });
-      imported++;
+    const other = othersByUid.get(uid) ?? othersByFp.get(fpOf(ev.title, ev.startAt));
+    if (other) { attachTo(other); seenAlso.add(other.id); merged++; continue; }
+    putEvent({
+      id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: hh,
+      ...fields, endAt: ev.endAt ?? null, spaceId: "sp-family", participantIds: [], driverId: null,
+      ownerId: null, backupOwnerId: null, whatToBring: [], checklist: [], travel: null, reminders: [],
+      attachments: [], comments: [], mealImpact: null, visibility: "household", category: "Calendar",
+      layer: "linked", status: "confirmed", source: sub?.name ?? "Subscribed calendar",
+      provenance: { via: gprov ? "google" : "ics", subscriptionId: subId, uid, ...(gprov ?? {}) },
+      createdBy: session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
+    });
+    imported++;
+  }
+  // This sub no longer sees events it previously attached to (invite withdrawn) —
+  // detach our color from those shared cards.
+  for (const e of listEvents((e) => e.householdId === hh && e.layer === "linked" && (e.provenance?.alsoSubscriptionIds ?? []).includes(subId))) {
+    if (!seenAlso.has(e.id)) {
+      patchEvent(e.id, { provenance: { ...(e.provenance ?? {}), alsoSubscriptionIds: (e.provenance.alsoSubscriptionIds ?? []).filter((x) => x !== subId) } });
     }
   }
-  // Anything that disappeared from the feed is removed (feed = source of truth).
+  // Anything that disappeared from the feed is removed (feed = source of truth) —
+  // unless another subscription still shows it, in which case ownership transfers.
   let removed = 0;
-  for (const stale of existing.values()) { deleteEventRec(stale.id); removed++; }
-  return { ok: true, imported, updated, removed, total: parsed.length };
+  for (const stale of existing.values()) {
+    const also = (stale.provenance?.alsoSubscriptionIds ?? []).filter((x) => x !== subId);
+    if (also.length > 0) {
+      patchEvent(stale.id, { provenance: { ...(stale.provenance ?? {}), subscriptionId: also[0], alsoSubscriptionIds: also.slice(1) } });
+    } else { deleteEventRec(stale.id); removed++; }
+  }
+  // One-time cleanup for duplicates that landed before dedupe existed: same
+  // household, same uid or fingerprint, different subs → oldest card wins, the
+  // rest fold into alsoSubscriptionIds.
+  const groups = new Map();
+  for (const e of listEvents((e) => e.householdId === hh && e.layer === "linked" && e.startAt)) {
+    const k = fpOf(e.title, e.startAt);
+    (groups.get(k) ?? groups.set(k, []).get(k)).push(e);
+  }
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    g.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    const keeper = g[0];
+    const subsSet = new Set([...(keeper.provenance?.alsoSubscriptionIds ?? [])]);
+    let changed = false;
+    for (const dupe of g.slice(1)) {
+      // Only fold cross-subscription copies; same-sub twins are the feed's business.
+      if (!dupe.provenance?.subscriptionId || dupe.provenance.subscriptionId === keeper.provenance?.subscriptionId) continue;
+      subsSet.add(dupe.provenance.subscriptionId);
+      for (const x of dupe.provenance?.alsoSubscriptionIds ?? []) if (x !== keeper.provenance?.subscriptionId) subsSet.add(x);
+      deleteEventRec(dupe.id); removed++; changed = true;
+    }
+    if (changed) patchEvent(keeper.id, { provenance: { ...(keeper.provenance ?? {}), alsoSubscriptionIds: [...subsSet] } });
+  }
+  return { ok: true, imported, updated, removed, merged, total: parsed.length };
 }
 
 /* ---- Two-way sync, merge-back half (Phase 9): Google edits → pushed FamiliOS events ----
@@ -345,7 +408,16 @@ export function removeSubscriptionEvents(subId, session) {
   const hh = session.householdId;
   let removed = 0;
   for (const e of listEvents((x) => x.householdId === hh && x.layer === "linked" && x.provenance?.subscriptionId === subId)) {
-    deleteEventRec(e.id); removed++;
+    // Shared card: another subscription still shows this event — transfer
+    // ownership to it instead of deleting the household's view of the event.
+    const also = (e.provenance?.alsoSubscriptionIds ?? []).filter((x) => x !== subId);
+    if (also.length > 0) {
+      patchEvent(e.id, { provenance: { ...(e.provenance ?? {}), subscriptionId: also[0], alsoSubscriptionIds: also.slice(1) } });
+    } else { deleteEventRec(e.id); removed++; }
+  }
+  // Detach this subscription's color from cards it was riding along on.
+  for (const e of listEvents((x) => x.householdId === hh && x.layer === "linked" && (x.provenance?.alsoSubscriptionIds ?? []).includes(subId))) {
+    patchEvent(e.id, { provenance: { ...(e.provenance ?? {}), alsoSubscriptionIds: e.provenance.alsoSubscriptionIds.filter((x) => x !== subId) } });
   }
   return removed;
 }
