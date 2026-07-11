@@ -69,6 +69,18 @@ export interface CatalogToolRec {
 export interface AuditEvent { id: string; at: string; type: string; ok: boolean; actorName?: string; toolId?: string; error?: string }
 export interface ToolResult { ok: boolean; result?: unknown; error?: string; message?: string }
 export interface OAuthStartResult { ok?: boolean; url?: string; error?: string; message?: string }
+
+// OAuth connector providers (Google, Microsoft, Amazon Alexa, …) — the public,
+// secret-free view: scope catalog (what the consent screen grants, e.g. Google
+// Home devices on the Google provider) plus the actor's connected accounts.
+export interface ProviderScope { key: string; label: string; risk: string }
+export interface ProviderAccountRec { id: string; displayName?: string | null; status?: string }
+export interface ProviderRec {
+  id: string; name: string; category?: string; readiness: string;
+  clientIdEnv?: string; clientSecretEnv?: string;
+  scopes?: ProviderScope[];
+  accounts: ProviderAccountRec[];
+}
 // Server-owned family data (mirrors the web client). The backend returns these already
 // role/visibility-filtered for the bearer session's actor, so a child's device never
 // receives adults-only items — no client-side hiding required.
@@ -247,8 +259,8 @@ export const api = {
     const r = await req<{ connectors: Array<{ id: string; name: string; readiness: string; live: boolean; category: string }> }>("/connectors");
     return r.data?.connectors ?? [];
   },
-  async providers(): Promise<Array<{ id: string; name: string; readiness: string; accounts: unknown[] }>> {
-    const r = await req<{ providers: Array<{ id: string; name: string; readiness: string; accounts: unknown[] }> }>("/providers");
+  async providers(): Promise<ProviderRec[]> {
+    const r = await req<{ providers: ProviderRec[] }>("/providers");
     return r.data?.providers ?? [];
   },
   // conversationId (optional) makes the turn server-durable: both messages persist on

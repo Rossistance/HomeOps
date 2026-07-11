@@ -4,9 +4,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Alert, TextInput, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
-import { api, type CalendarSubscription } from "@/lib/api";
+import { api, type CalendarSubscription, type ProviderRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { useTheme, type HearthColors } from "@/theme";
+import { useTheme, riskColor, type HearthColors } from "@/theme";
 import {
   Badge, BrandIcon, Button, Card, EmptyState, HScreen, Notice, Rise, Row,
   SectionHeader, SkeletonCards, Sym, SymTile, T,
@@ -41,15 +41,12 @@ function providerIcon(id: string): string {
   return "globe";
 }
 
-interface ProviderAccount { id: string; displayName?: string | null }
-interface ProviderRow { id: string; name: string; readiness: string; accounts: ProviderAccount[] }
-
 export default function ConnectionsScreen() {
   const { session } = useSession();
   const { colors, spacing, radii, fonts } = useTheme();
   const canManage = ["Owner", "Adult Admin", "Adult Member"].includes(session?.role ?? "");
   const [connectors, setConnectors] = useState<Array<{ id: string; name: string; readiness: string; live: boolean }>>([]);
-  const [providers, setProviders] = useState<ProviderRow[]>([]);
+  const [providers, setProviders] = useState<ProviderRec[]>([]);
   const [subs, setSubs] = useState<CalendarSubscription[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -63,7 +60,7 @@ export default function ConnectionsScreen() {
   const load = useCallback(async () => {
     const [c, p, s] = await Promise.all([api.connectors(), api.providers(), api.calendarSubscriptions()]);
     setConnectors(c);
-    setProviders(p as ProviderRow[]);
+    setProviders(p);
     setSubs(s);
     setLoaded(true);
   }, []);
@@ -217,6 +214,21 @@ export default function ConnectionsScreen() {
                       ))}
                     </View>
                   ) : null}
+                  {(p.scopes?.length ?? 0) > 0 ? (
+                    <View style={{ gap: 6 }}>
+                      <T kind="eyebrow">Permissions {connected ? "granted" : "you'll grant"}</T>
+                      {p.scopes!.map((s) => {
+                        const rc = riskColor(colors, s.risk);
+                        return (
+                          <View key={s.key} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                            <Sym name="checkmark.shield" size={13} color={colors.sage} />
+                            <T kind="sub" style={{ flex: 1 }} numberOfLines={1}>{s.label}</T>
+                            <Badge label={s.risk} fg={rc.fg} bg={rc.bg} />
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ) : null}
                   {needsAuth ? (
                     <Button
                       title={connecting === p.id ? "Opening…" : `Connect ${p.name}`}
@@ -226,6 +238,11 @@ export default function ConnectionsScreen() {
                       loading={connecting === p.id}
                       onPress={() => connect(p.id, p.name)}
                     />
+                  ) : null}
+                  {!connected && !needsAuth && p.clientIdEnv ? (
+                    <T kind="caption" color={colors.textFaint}>
+                      Deployment setup needed: set {p.clientIdEnv} and {p.clientSecretEnv} on the server, then connect here.
+                    </T>
                   ) : null}
                 </Card>
               </Rise>

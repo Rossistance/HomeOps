@@ -1,6 +1,7 @@
 // Today — the FamiliOS front page. Greeting + approval count, the household
-// member strip, the Ask Famili hero, quick actions, then the day at a glance:
-// approvals needing you, today's events, coming up, bills due. Server-truth
+// member strip, the Ask Famili hero, the Calendar key card (today's plans,
+// color-coded per member), quick actions, then the day at a glance:
+// approvals needing you, coming up, bills due. Server-truth
 // via api.*; approvals open the signature Approval sheet.
 import { useCallback, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -8,6 +9,7 @@ import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type ApprovalRec, type EventRec, type EvolutionRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
+import { memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
 import { useTheme, riskColor } from "@/theme";
 import {
@@ -92,7 +94,6 @@ export default function TodayScreen() {
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
     .slice(0, 3);
   const bills = tasks.filter((t) => t.type === "bill" && t.status !== "done").slice(0, 4);
-  const hasGroceries = tasks.some((t) => t.type === "list" && t.listName === "Groceries");
 
   // "What I learned" — recent things Famili picked up: new memories, improvement
   // proposals waiting on review, and freshly completed runs. Newest, capped at 4.
@@ -224,6 +225,65 @@ export default function TodayScreen() {
             </PressableScale>
           </Rise>
 
+          {/* Calendar key card — today's plans at a glance, color-coded per member,
+              directly under the Ask hero. Tap anywhere to open the full calendar. */}
+          <Rise index={3}>
+            <PressableCard
+              onPress={() => router.push("/calendar")}
+              accessibilityRole="button"
+              accessibilityLabel="Open calendar"
+              style={{ gap: spacing.md }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+                <SymTile name="calendar" color={colors.ember} bg={colors.emberBg} size={36} iconSize={17} />
+                <View style={{ flex: 1, gap: 2 }}>
+                  <T kind="rowTitle">Calendar</T>
+                  <T kind="detail">
+                    {todayEvents.length === 0
+                      ? "Nothing on the calendar today"
+                      : `${todayEvents.length} plan${todayEvents.length === 1 ? "" : "s"} today`}
+                  </T>
+                </View>
+                <Sym name="chevron.right" size={13} color={colors.textFaint} />
+              </View>
+              {todayEvents.length === 0 ? (
+                upcoming.length > 0 ? (
+                  <T kind="sub">
+                    Next: {upcoming[0].title} · {new Date(upcoming[0].startAt!).toLocaleDateString(undefined, { weekday: "short" })}{" "}
+                    {new Date(upcoming[0].startAt!).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                  </T>
+                ) : null
+              ) : (
+                <View style={{ gap: 8 }}>
+                  {todayEvents.slice(0, 3).map((e) => {
+                    const stripe = memberColor(colors, members.find((m) => m.actorId === e.participantIds?.[0])) ?? colors.textFaint;
+                    return (
+                      <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+                        <View style={{ width: 3, alignSelf: "stretch", borderRadius: 2, backgroundColor: stripe }} />
+                        <View style={{ flex: 1, gap: 1 }}>
+                          <T kind="subMedium" color={colors.text} numberOfLines={1}>{e.title}</T>
+                          {!!e.location && <T kind="detail" numberOfLines={1}>{e.location}</T>}
+                        </View>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                          {(e.participantIds ?? []).slice(0, 4).map((pid) => {
+                            const c = memberColor(colors, members.find((m) => m.actorId === pid));
+                            return c ? <View key={pid} style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c }} /> : null;
+                          })}
+                          <T kind="detail" color={colors.textMuted}>
+                            {e.startAt ? new Date(e.startAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : "All day"}
+                          </T>
+                        </View>
+                      </View>
+                    );
+                  })}
+                  {todayEvents.length > 3 && (
+                    <T kind="detail" color={colors.ember}>+{todayEvents.length - 3} more today</T>
+                  )}
+                </View>
+              )}
+            </PressableCard>
+          </Rise>
+
           {/* quick actions — 2×3 grid; Meals + Tasks lead */}
           <Rise index={3}>
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
@@ -278,42 +338,6 @@ export default function TodayScreen() {
                     <T kind="subMedium" color={colors.ember}>See all {pending.length}</T>
                   </PressableScale>
                 )}
-              </Card>
-            )}
-          </Rise>
-
-          {/* today */}
-          <Rise index={5}>
-            <SectionHeader title="Today" trailing={<SeeAll label="Calendar" onPress={() => router.push("/calendar")} />} />
-            {todayEvents.length === 0 ? (
-              <Card><T kind="sub">Nothing on the calendar today.</T></Card>
-            ) : (
-              <Card padded={false}>
-                {todayEvents.map((e, i) => {
-                  const grocery = hasGroceries && /grocer/i.test(e.title);
-                  return (
-                    <PressableScale
-                      key={e.id}
-                      onPress={grocery ? () => router.push("/groceries") : undefined}
-                      disabled={!grocery}
-                      haptic={grocery ? "select" : null}
-                      style={{
-                        flexDirection: "row", alignItems: "center", gap: spacing.md,
-                        paddingHorizontal: spacing.lg, paddingVertical: 13,
-                        borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator,
-                      }}
-                    >
-                      <View style={{ flex: 1, gap: 2 }}>
-                        <T kind="rowTitle" numberOfLines={2}>{e.title}</T>
-                        {!!e.location && <T kind="detail" numberOfLines={1}>{e.location}</T>}
-                      </View>
-                      <T kind="subMedium" color={colors.textMuted}>
-                        {e.startAt ? new Date(e.startAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : "All day"}
-                      </T>
-                      {grocery && <Sym name="chevron.right" size={13} color={colors.textFaint} />}
-                    </PressableScale>
-                  );
-                })}
               </Card>
             )}
           </Rise>

@@ -143,6 +143,23 @@ export default function LibraryScreen() {
     ]);
   };
 
+  const removeMemory = async (m: MemoryRec) => {
+    setMemory((list) => list.filter((x) => x.id !== m.id)); // optimistic
+    const r = await api.deleteMemory(m.id);
+    if (r.error) {
+      await load();
+      setNotice({ text: r.error === "insufficient_role" ? "You can't delete this memory." : `Couldn't delete: ${r.error}`, ok: false });
+    } else {
+      setNotice({ text: "Memory removed.", ok: true });
+    }
+  };
+  const confirmRemoveMemory = (m: MemoryRec) => {
+    Alert.alert("Forget this memory?", "Famili will no longer use it when planning.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Forget", style: "destructive", onPress: () => void removeMemory(m) },
+    ]);
+  };
+
   const badgeFor = (f: FileRec) => {
     const sensitive = f.visibility === "private" || f.tags.includes("sensitive");
     if (sensitive) return { label: "Sensitive", fg: colors.lavender, bg: colors.lavenderBg };
@@ -352,7 +369,7 @@ export default function LibraryScreen() {
 
           <SectionHeader title="Memory" />
           <Rise index={1}>
-            <T kind="sub">What Famili has learned from real runs — read-only here.</T>
+            <T kind="sub">What Famili has learned from real runs. Remove anything it got wrong.</T>
           </Rise>
           {memory.length === 0 ? (
             <EmptyState icon="brain" title="No memory yet" hint="Entries appear as your agents complete runs." />
@@ -362,7 +379,12 @@ export default function LibraryScreen() {
                 <Card style={{ gap: spacing.sm }}>
                   <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.sm }}>
                     <Badge label={m.type || m.scope} fg={colors.lavender} bg={colors.lavenderBg} />
-                    <T kind="caption" color={colors.textFaint}>{new Date(m.createdAt).toLocaleDateString()}</T>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                      <T kind="caption" color={colors.textFaint}>{new Date(m.createdAt).toLocaleDateString()}</T>
+                      <PressableScale onPress={() => confirmRemoveMemory(m)} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Delete memory">
+                        <Sym name="trash" size={15} color={colors.textFaint} />
+                      </PressableScale>
+                    </View>
                   </View>
                   <T kind="body" selectable>{m.text}</T>
                 </Card>

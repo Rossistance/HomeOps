@@ -8,6 +8,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Alert, ScrollView, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type CalendarSubscription, type EventRec, type MemberRec } from "@/lib/api";
+import { memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
@@ -47,23 +48,6 @@ function fmtStamp(iso: string | null | undefined): string {
 /** A pull flagged this canonical event: both FamiliOS and Google changed it since
  * the last push/merge. The user picks which version to keep. */
 const conflictOf = (e: EventRec) => e.provenance?.conflict ?? null;
-
-/** Map a family member's color (accent name or hex) to a concrete theme color, so each
- * person's calendar items are color-coded consistently (matches the web app + avatars). */
-function memberAccent(colors: ReturnType<typeof useTheme>["colors"], name?: string | null): string | null {
-  if (!name) return null;
-  if (name.startsWith("#")) return name;
-  switch (name) {
-    case "sage": return colors.sage;
-    case "coral": return colors.coral;
-    case "amber": return colors.amber;
-    case "sky": return colors.sky;
-    case "lavender": return colors.lavender;
-    case "ember": return colors.ember;
-    case "ink": return colors.textSecondary;
-    default: return null;
-  }
-}
 
 function dayTitle(k: string, todayKey: string): string {
   const label = new Date(`${k}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
@@ -134,16 +118,10 @@ export default function CalendarScreen() {
     (id: string | null) => (id ? members.find((m) => m.actorId === id)?.displayName ?? null : null),
     [members],
   );
-  // Per-member calendar color: the server-set color if any, else a deterministic accent
-  // hashed from the name — the SAME fallback the web app uses, so a member is the same color
-  // on iOS and web even before anyone picks one.
-  const colorOf = useCallback((id: string | null) => {
-    const m = id ? members.find((x) => x.actorId === id) : null;
-    if (!m) return null;
-    if (m.color) return memberAccent(colors, m.color);
-    const AV = ["ember", "sage", "sky", "lavender", "amber", "ink"];
-    return memberAccent(colors, AV[[...m.displayName].reduce((a, c) => a + c.charCodeAt(0), 0) % AV.length]);
-  }, [members, colors]);
+  const colorOf = useCallback(
+    (id: string | null) => memberColor(colors, id ? members.find((x) => x.actorId === id) : null),
+    [members, colors],
+  );
 
   // Upcoming = anything undated or starting within the last 12h onward (ported).
   const upcoming = useMemo(() => [...events]
