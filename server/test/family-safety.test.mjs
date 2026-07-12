@@ -15,8 +15,11 @@ process.env.HOMEOPS_SECRET_KEY = "test-secret-key-test-secret-key-32";
 const { eventFingerprint } = await import("../calendar.mjs");
 const { approvalAudience, approvalPushTokens } = await import("../notify.mjs");
 const { putMember, addPushToken } = await import("../store.mjs");
+// The confidence judge is a pure function — exercise its fail-closed default directly
+// (no HTTP), with no AI provider configured in this isolated unit data dir.
+const { judgeEvolutionConfidence } = await import("../planner.mjs");
 
-import { startServer, stopServer, makeSession, writeStoreDoc } from "./harness.mjs";
+import { startServer, stopServer, makeSession, readStoreDoc, writeStoreDoc } from "./harness.mjs";
 
 let ctx, alex, morgan, child;
 before(async () => {
@@ -155,4 +158,83 @@ test("POST /api/calendar/sync-all returns the aggregate shape and respects the r
   for (const k of ["synced", "imported", "updated", "removed"]) assert.equal(typeof r.data[k], "number", k);
   assert.deepEqual(Object.keys(r.data.pulled).sort(), ["checked", "conflicts", "merged", "unlinked"]);
   assert.ok(Array.isArray(r.data.errors));
+});
+
+/* ---- Help requests: direction (ask | offer) ---- */
+test("help request kind:'offer' — a child may offer help; kind persists and copy differs", async () => {
+  // A Child View session can create an OFFER (offering help never needs a role floor).
+  const created = await child.req("/api/help-requests", {
+    method: "POST",
+    body: JSON.stringify({ toActorId: "m-alex", kind: "offer", message: "I can set the table tonight" }),
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+  const hr = created.data.helpRequest;
+  assert.equal(hr.kind, "offer", "kind is stored on the record");
+  assert.equal(hr.status, "pending");
+  assert.equal(hr.fromActorId, "m-noah");
+  assert.equal(hr.toActorId, "m-alex");
+
+  // Offer copy: the recipient sees "Help offered"/"offered to help", not "Can you help?".
+  const notifs = (await alex.req("/api/notifications")).data.notifications;
+  assert.ok(notifs.some((n) => n.title === "Help offered" && n.body.includes("offered to help")), "offer uses offer-flavored copy");
+
+  // GET echoes the direction; legacy/ask rows read back as "ask".
+  const mine = (await child.req("/api/help-requests")).data.helpRequests;
+  assert.equal(mine.find((h) => h.id === hr.id)?.kind, "offer");
+  assert.ok(mine.every((h) => h.kind === "ask" || h.kind === "offer"), "every row carries a direction");
+});
+
+/* ---- Settings: autoApproveImprovements (AI-judged auto-approval, default ON) ---- */
+test("autoApproveImprovements defaults true in GET and persists when toggled off", async () => {
+  assert.equal((await alex.req("/api/settings")).data.settings.autoApproveImprovements, true, "defaults ON");
+
+  const off = await morgan.req("/api/settings", { method: "POST", body: JSON.stringify({ autoApproveImprovements: false }) });
+  assert.equal(off.status, 200);
+  assert.equal(off.data.settings.autoApproveImprovements, false);
+  assert.equal((await alex.req("/api/settings")).data.settings.autoApproveImprovements, false, "persists across reads");
+
+  // Restore the ON default so later tests aren't affected.
+  await morgan.req("/api/settings", { method: "POST", body: JSON.stringify({ autoApproveImprovements: true }) });
+});
+
+/* ---- Confidence judge: fail-closed with no AI provider (never auto-approve blindly) ---- */
+test("judgeEvolutionConfidence returns confident:false when no AI provider is configured", async () => {
+  const r = await judgeEvolutionConfidence({
+    trace: { status: "failed", steps: [{ title: "Send email", status: "failed", detail: "no account" }] },
+    proposal: { after: "Connect Gmail before attempting to send.", risk: "Low" },
+    session: { householdId: "local" },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.confident, false, "with no provider the judge must never approve");
+});
+
+/* ---- Avatar visibility: a real profile photo becomes household-readable ---- */
+test("PATCH member photoFileId flips a private avatar file to household visibility", async () => {
+  // Alex uploads an avatar as PRIVATE (the client's current behavior — the root-cause bug).
+  const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+  const up = await alex.req("/api/files", { method: "POST", body: JSON.stringify({ name: "avatar.png", mime: "image/png", contentBase64: png, visibility: "private" }) });
+  assert.equal(up.status, 200, JSON.stringify(up.data));
+  const fileId = up.data.file.id;
+
+  // While private, ANOTHER member's card can't load it (the 404 that broke the Today strip).
+  const before = await morgan.req(`/api/files/${fileId}/content`);
+  assert.equal(before.status, 404, "a private avatar is invisible to other members");
+
+  // Alex sets it as their profile photo → the server flips that one file to household.
+  const patched = await alex.req("/api/members/m-alex", { method: "PATCH", body: JSON.stringify({ photoFileId: fileId }) });
+  assert.equal(patched.status, 200, JSON.stringify(patched.data));
+  assert.equal(patched.data.member.photoFileId, fileId);
+
+  // The file record is now household-visible…
+  const rec = readStoreDoc(ctx, "household_files.json", {})[fileId];
+  assert.equal(rec.visibility, "household", "photo file flipped to household visibility");
+
+  // …so every member can now render the avatar.
+  const after = await morgan.req(`/api/files/${fileId}/content`);
+  assert.equal(after.status, 200, "the avatar is now readable household-wide");
+
+  // Emoji avatars resolve to no file — stored verbatim, no file touched, no error.
+  const emoji = await alex.req("/api/members/m-alex", { method: "PATCH", body: JSON.stringify({ photoFileId: "emoji:🦊" }) });
+  assert.equal(emoji.status, 200);
+  assert.equal(emoji.data.member.photoFileId, "emoji:🦊");
 });

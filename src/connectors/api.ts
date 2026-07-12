@@ -369,6 +369,10 @@ export interface ServerEvolution {
   before?: string;
   after?: string;
   risk?: "Low" | "Medium" | "High";
+  /** Auto-approval (server-side, when settings.autoApproveImprovements is on and the
+   *  proposal is low-risk): the change was applied without a human. `autoReason` explains why. */
+  autoApproved?: boolean;
+  autoReason?: string;
   model?: string;
   createdAt: number;
   updatedAt: string;
@@ -408,6 +412,9 @@ export interface CalendarSyncAllResult {
 export interface HelpRequest {
   id: string; fromActorId: string; fromName: string; toActorId: string; toName: string;
   message: string; eventId: string | null; taskId: string | null;
+  /** "ask" = from-actor asks the recipient to help with the from-actor's item;
+   *  "offer" = from-actor offers to help with the recipient's item. Server default "ask". */
+  kind?: "ask" | "offer";
   status: "pending" | "accepted" | "declined" | "cancelled";
   responseNote: string | null; createdAt: string; respondedAt: string | null;
 }
@@ -571,11 +578,11 @@ export const backend = {
   async audit(limit = 50): Promise<AuditEvent[]> {
     try { return (await req<{ events: AuditEvent[] }>(`/audit?limit=${limit}`)).events ?? []; } catch { return []; }
   },
-  async getSettings(): Promise<{ externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean }> {
-    try { return (await req<{ settings: { externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean } }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
+  async getSettings(): Promise<{ externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean }> {
+    try { return (await req<{ settings: { externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean } }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
   },
-  async setSettings(patch: Record<string, unknown>): Promise<{ externalActionsEnabled: boolean; calendarAutoSync?: boolean }> {
-    try { return (await req<{ settings: { externalActionsEnabled: boolean; calendarAutoSync?: boolean } }>("/settings", { method: "POST", body: JSON.stringify(patch), mutation: true })).settings; } catch { return { externalActionsEnabled: true }; }
+  async setSettings(patch: Record<string, unknown>): Promise<{ externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean }> {
+    try { return (await req<{ settings: { externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean } }>("/settings", { method: "POST", body: JSON.stringify(patch), mutation: true })).settings; } catch { return { externalActionsEnabled: true }; }
   },
 
   /* ---- AI providers ---- */
@@ -863,7 +870,7 @@ export const backend = {
   async helpRequests(): Promise<HelpRequest[]> {
     try { return (await req<{ helpRequests: HelpRequest[] }>("/help-requests")).helpRequests ?? []; } catch { return []; }
   },
-  async createHelpRequest(input: { toActorId: string; message: string; eventId?: string; taskId?: string }): Promise<{ helpRequest?: HelpRequest; error?: string; message?: string }> {
+  async createHelpRequest(input: { toActorId: string; message: string; eventId?: string; taskId?: string; kind?: "ask" | "offer" }): Promise<{ helpRequest?: HelpRequest; error?: string; message?: string }> {
     try { return await req("/help-requests", { method: "POST", body: JSON.stringify(input), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
   async respondHelpRequest(id: string, response: "accept" | "decline", note?: string): Promise<{ helpRequest?: HelpRequest; error?: string; message?: string }> {

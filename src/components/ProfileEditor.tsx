@@ -12,6 +12,34 @@ const MEMBER_COLORS = ["ink", "sage", "coral", "amber", "sky", "lavender"] as co
 // Curated emoji avatars, saved as `photoFileId: "emoji:🦊"`.
 const EMOJI_AVATARS = ["🦊", "🐻", "🦉", "🐙", "🌻", "🍀", "⭐️", "🌈", "🐝", "🦋", "🍕", "⚽️"];
 
+/** Center-crop an uploaded image to a square and downscale it to `size`×`size`, returning
+ *  the base64 body of a JPEG (data-URI prefix stripped) ready for the file-upload API.
+ *  Keeps avatar thumbnails small so they load fast wherever a member renders. */
+function downscaleToJpegBase64(file: File, size = 256): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { resolve(undefined); return; }
+        const side = Math.min(img.naturalWidth, img.naturalHeight) || size;
+        const sx = (img.naturalWidth - side) / 2;
+        const sy = (img.naturalHeight - side) / 2;
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+        const uri = canvas.toDataURL("image/jpeg", 0.8);
+        resolve(uri.includes(",") ? uri.split(",")[1] : undefined);
+      } catch { resolve(undefined); }
+      finally { URL.revokeObjectURL(url); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(undefined); };
+    img.src = url;
+  });
+}
+
 /** "My Profile" editor — edit MY display name, accent color, and avatar (curated emoji
  *  or an uploaded photo). Saves through the server member registry (self-edit of
  *  name/color/photo is allowed for every role). */
@@ -28,14 +56,11 @@ export function ProfileEditor({ member, onClose }: { member: Member; onClose: ()
   const uploadPhoto = async (file: File | null) => {
     if (!file) return;
     setUploading(true);
-    const base64 = await new Promise<string | undefined>((res) => {
-      const reader = new FileReader();
-      reader.onload = () => { const u = reader.result as string; res(u.includes(",") ? u.split(",")[1] : undefined); };
-      reader.onerror = () => res(undefined);
-      reader.readAsDataURL(file);
-    });
+    // Downscale to a small square JPEG before upload so avatar thumbnails stay tiny and
+    // load fast everywhere they render (center-cropped to match the round object-cover avatar).
+    const base64 = await downscaleToJpegBase64(file, 256);
     if (!base64) { setUploading(false); toast({ kind: "error", title: "Couldn't read that image" }); return; }
-    const up = await backend.uploadFile({ name: `${name.trim() || member.displayName} — avatar`, mime: file.type || "image/jpeg", contentBase64: base64, tags: ["Avatar"], visibility: "personal", source: "avatar" });
+    const up = await backend.uploadFile({ name: `${name.trim() || member.displayName} — avatar`, mime: "image/jpeg", contentBase64: base64, tags: ["Avatar"], visibility: "personal", source: "avatar" });
     setUploading(false);
     if (up.file) setPhotoFileId(up.file.id);
     else toast({ kind: "error", title: "Photo upload failed", message: up.message ?? up.error });

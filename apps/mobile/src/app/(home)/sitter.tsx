@@ -10,13 +10,13 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
-import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, PressableScale } from "@/components/ui";
+import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
 import { HelpRequestsSection } from "./grandparent";
 import { MemberAvatar } from "./profile";
 
 export function SitterHome({ memberId, preview = false }: { memberId: string; preview?: boolean }) {
   const { colors, spacing } = useTheme();
-  const { session } = useSession();
+  const { session, signOut } = useSession();
   const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -72,7 +72,16 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
             <MemberAvatar member={member} size={40} />
           </PressableScale>
         )}
-        <T kind="eyebrow">{first}'s FamiliOS</T>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+          <T kind="eyebrow">{first}'s FamiliOS</T>
+          {/* Real login (not parent preview) needs a way out — no Settings tab on
+              scoped homes, so switch profile / sign out lives in the header. */}
+          {!preview && (
+            <PressableScale onPress={() => void signOut()} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Switch profile">
+              <SymTile name="rectangle.portrait.and.arrow.right" color={colors.textSecondary} bg={colors.surfaceSunken} size={34} iconSize={16} />
+            </PressableScale>
+          )}
+        </View>
       </View>
 
       {loading || !member ? <SkeletonCards count={3} /> : (
@@ -162,8 +171,8 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
           )}
 
           {!preview && (
-            <PressableScale onPress={() => router.push("/help")} haptic="select" style={{ alignItems: "center", marginTop: spacing.sm }} accessibilityRole="button" accessibilityLabel="Ask for help">
-              <T kind="subMedium" color={colors.ember}>Ask a family member for help</T>
+            <PressableScale onPress={() => router.push("/help")} haptic="select" style={{ alignItems: "center", marginTop: spacing.sm }} accessibilityRole="button" accessibilityLabel="Ask or offer help">
+              <T kind="subMedium" color={colors.ember}>Ask or offer help</T>
             </PressableScale>
           )}
 

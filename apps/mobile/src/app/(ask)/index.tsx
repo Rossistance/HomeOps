@@ -497,7 +497,15 @@ export default function AskScreen() {
           ),
         }}
       />
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      {/* keyboardVerticalOffset clears the stack header so the composer sits
+          directly above the keyboard when focused. @react-navigation/elements'
+          useHeaderHeight isn't resolvable here, so use the safe-area top inset
+          plus the standard 44pt iOS header height. */}
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={insets.top + 44}
+      >
         {/* Pinned header: space toggle + recent chats stay fixed while the
             messages scroll beneath them. */}
         <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.sm, gap: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border, backgroundColor: colors.bg }}>

@@ -22,9 +22,10 @@ import { apiForAccount } from "./oauth.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
 import { resolveRegisteredFunction, runFunctionHandler, computeFunctionState } from "./functions.mjs";
 import { getAgent } from "./store.mjs";
-import { isToolStepAllowed } from "./agents.mjs";
+import { isToolStepAllowed, partialUpdateAgent } from "./agents.mjs";
+import { partialUpdateSkill } from "./skills.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
-import { proposeEvolution, INTERNAL_INPUTS } from "./planner.mjs";
+import { proposeEvolution, judgeEvolutionConfidence, INTERNAL_INPUTS } from "./planner.mjs";
 import { providerChat } from "./ai.mjs";
 
 const RUN_STEP_TIMEOUT_MS = 60_000;
@@ -679,19 +680,43 @@ function recordFailureEvolution(run) {
     steps: (run.steps ?? []).map((s) => ({ title: s.title, toolId: s.toolId, status: s.status, detail: s.detail })),
     sourceRef: run.sourceRef,
   };
-  proposeEvolution({ trace }).then((r) => {
-    if (r.ok && r.proposal) {
-      patchEvolution(evoId, {
-        title: r.proposal.title,
-        reason: r.proposal.reason,
-        summary: r.proposal.summary,
-        after: r.proposal.after,
-        risk: r.proposal.risk,
-        source: "ai",
-        model: r.model,
-        updatedAt: new Date().toISOString(),
-      });
-    }
+  proposeEvolution({ trace }).then(async (r) => {
+    if (!(r.ok && r.proposal)) return;
+    patchEvolution(evoId, {
+      title: r.proposal.title,
+      reason: r.proposal.reason,
+      summary: r.proposal.summary,
+      after: r.proposal.after,
+      risk: r.proposal.risk,
+      source: "ai",
+      model: r.model,
+      updatedAt: new Date().toISOString(),
+    });
+    // Auto-approval (conservative). Only a LOW-risk enriched proposal that carries a
+    // concrete `after`, only when the household hasn't opted out, and only when an AI
+    // confidence judge (a VALIDATION pass — it does NOT re-run the failing task) says
+    // the change directly fixes the failure. Medium/High always waits for a human.
+    // Fully wrapped: auto-approval must never throw into the failure/run path.
+    try {
+      const settings = getSettings(run.householdId);
+      if (settings.autoApproveImprovements !== false && r.proposal.risk === "Low" && r.proposal.after) {
+        const judged = await judgeEvolutionConfidence({ trace, proposal: r.proposal, session: { householdId: run.householdId } });
+        if (judged.confident) {
+          let applied = false;
+          if (kind === "agent" && run.sourceRef?.agentId) {
+            const u = partialUpdateAgent(run.sourceRef.agentId, { instructions: r.proposal.after });
+            applied = !!(u && !u.error);
+          } else if (kind === "skill" && run.sourceRef?.skillId) {
+            const u = partialUpdateSkill(run.sourceRef.skillId, { planner_guidance: r.proposal.after });
+            applied = !!(u && !u.error);
+          }
+          if (applied) {
+            patchEvolution(evoId, { status: "accepted", reviewedAt: Date.now(), reviewedBy: "ai", autoApproved: true, autoReason: judged.reason });
+            appendAudit({ type: "evolution.auto_accept", id: evoId, kind, agentId: run.sourceRef?.agentId ?? null, householdId: run.householdId, reason: judged.reason });
+          }
+        }
+      }
+    } catch { /* auto-approval is best-effort; never disrupt the failure path */ }
   }).catch(() => {});
 }
 

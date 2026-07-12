@@ -38,7 +38,7 @@ function Progress({ pct }: { pct: number }) {
 
 export function KidHome({ memberId, preview = false }: { memberId: string; preview?: boolean }) {
   const { colors, spacing } = useTheme();
-  const { session } = useSession();
+  const { session, signOut } = useSession();
   const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -72,7 +72,9 @@ export function KidHome({ memberId, preview = false }: { memberId: string; previ
     const byId = new Map(events.map((e) => [e.id, e]));
     return helpRequests
       .filter((h) => h.status === "accepted" && h.eventId && byId.has(h.eventId))
-      .map((h) => ({ id: h.id, name: h.toName, event: byId.get(h.eventId!)! }));
+      // Name the party actually helping: for an offer that's the sender, for an
+      // ask it's the person who was asked.
+      .map((h) => ({ id: h.id, name: h.kind === "offer" ? h.fromName : h.toName, event: byId.get(h.eventId!)! }));
   }, [helpRequests, events]);
 
   const toggle = async (t: TaskRec) => {
@@ -97,7 +99,16 @@ export function KidHome({ memberId, preview = false }: { memberId: string; previ
             <MemberAvatar member={kid} size={40} />
           </PressableScale>
         )}
-        <T kind="eyebrow">{first}'s FamiliOS</T>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+          <T kind="eyebrow">{first}'s FamiliOS</T>
+          {/* Real login (not parent preview) needs a way out — no Settings tab on
+              scoped homes, so switch profile / sign out lives in the header. */}
+          {!preview && (
+            <PressableScale onPress={() => void signOut()} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Switch profile">
+              <SymTile name="rectangle.portrait.and.arrow.right" color={colors.textSecondary} bg={colors.surfaceSunken} size={34} iconSize={16} />
+            </PressableScale>
+          )}
+        </View>
       </View>
 
       {loading || !kid ? <SkeletonCards count={3} /> : (
@@ -215,6 +226,13 @@ export function KidHome({ memberId, preview = false }: { memberId: string; previ
                 })}
               </Card>
             </Rise>
+          )}
+
+          {/* A child can ask for a hand or offer to help — including other kids. */}
+          {!preview && (
+            <PressableScale onPress={() => router.push("/help")} haptic="select" style={{ alignItems: "center", marginTop: spacing.sm }} accessibilityRole="button" accessibilityLabel="Ask or offer help">
+              <T kind="subMedium" color={colors.ember}>Ask or offer help</T>
+            </PressableScale>
           )}
         </>
       )}

@@ -2,15 +2,15 @@
 // webhooks, connector watchers and manual triggers. Each card shows what fires,
 // when, what it runs, and how the last firing went; the Switch flips `enabled`
 // live and "Test run" fires the real trigger through the durable runtime.
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Switch, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Alert, Switch, View } from "react-native";
 import { router } from "expo-router";
 import { api, type RunRec, type TriggerRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic, statusColor, type HearthColors } from "@/theme";
 // "ui/index" (not "ui"): the legacy src/components/ui.tsx still shadows the ui/
 // directory until the old screens are all ported — this resolves the new system.
-import { Badge, Button, Card, EmptyState, ErrorState, HScreen, Notice, PressableCard, Rise, Row, SectionHeader, SkeletonCards, Sym, T } from "@/components/ui";
+import { Badge, Button, Card, EmptyState, ErrorState, HScreen, Notice, PressableCard, PressableScale, Rise, Row, SectionHeader, SkeletonCards, Sym, T } from "@/components/ui";
 
 // The server's publicTrigger() shape (server/triggers.mjs): agent linkage lives in
 // target.agentId (not top-level agentId), the last outcome is the string
@@ -109,6 +109,124 @@ function friendly(error?: string, message?: string): string {
   }
 }
 
+/* ----------------------- live "Test run" progress ------------------------ */
+// Poll the durable run the fired trigger started, so the user watches it move
+// step-by-step instead of a one-line "started" notice. Mapping mirrors the
+// vocabulary in lib/run-context.tsx but keeps failed/waiting distinct for glyphs.
+const LIVE_POLL_MS = 1800;
+const LIVE_POLL_MAX_MS = 3 * 60 * 1000;
+type StepVis = "pending" | "running" | "done" | "failed" | "waiting";
+type RunVis = "running" | "waiting" | "completed" | "failed";
+
+function stepVis(st: RunRec["steps"][number]): StepVis {
+  const s = st.status;
+  if (s === "done" || s === "completed" || s === "succeeded") return "done";
+  if (s === "failed" || s === "error") return "failed";
+  if (s === "waiting_approval" || s === "waiting_for_approval" || s === "blocked" || s === "paused" || st.approvalId) return "waiting";
+  if (s === "running" || s === "in_progress") return "running";
+  return "pending";
+}
+function runVis(s: string): RunVis {
+  switch (s) {
+    case "completed": case "succeeded": return "completed";
+    case "failed": case "error": case "cancelled": return "failed";
+    case "waiting_approval": case "waiting_for_approval": case "paused": return "waiting";
+    default: return "running";
+  }
+}
+function runTone(c: HearthColors, vis: RunVis): { fg: string; bg: string } {
+  switch (vis) {
+    case "completed": return { fg: c.sage, bg: c.sageBg };
+    case "failed": return { fg: c.coral, bg: c.coralBg };
+    case "waiting": return { fg: c.amber, bg: c.amberBg };
+    default: return { fg: c.ember, bg: c.emberBg };
+  }
+}
+
+// The pinned progress card: run title + status badge, a "Step N of M" summary,
+// the step list with a status glyph each, and a terminal outcome + Done control.
+function LiveRunCard({ triggerName, run, onDismiss }: { triggerName: string; run: RunRec; onDismiss: () => void }) {
+  const { colors, spacing } = useTheme();
+  const steps = run.steps ?? [];
+  const total = steps.length;
+  const vis = runVis(run.status);
+  const tone = runTone(colors, vis);
+  const done = steps.filter((s) => stepVis(s) === "done").length;
+  const activeIdx = steps.findIndex((s) => { const v = stepVis(s); return v === "running" || v === "waiting"; });
+  const stepN = total === 0 ? 0 : activeIdx >= 0 ? activeIdx + 1 : vis === "completed" ? total : Math.min(done + 1, total);
+  const terminal = vis === "completed" || vis === "failed";
+  const failedStep = steps.find((s) => stepVis(s) === "failed");
+  const label = run.status === "cancelled" ? "Cancelled"
+    : vis === "completed" ? "Completed"
+    : vis === "failed" ? "Failed"
+    : vis === "waiting" ? "Waiting" : "Running";
+  const outcome = vis === "completed"
+    ? `${triggerName} finished${total ? ` — ${done} of ${total} step${total === 1 ? "" : "s"} done` : ""}.`
+    : run.status === "cancelled" ? "This run was cancelled."
+    : failedStep ? (failedStep.detail || `${failedStep.title} failed.`)
+    : "This run didn't finish.";
+
+  return (
+    <Card style={{ gap: spacing.sm }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <T kind="h3" color={colors.text} numberOfLines={1}>{run.title || triggerName}</T>
+          <T kind="caption" color={colors.textFaint}>{total === 0 ? "Starting…" : `Step ${stepN} of ${total}`}</T>
+        </View>
+        <Badge label={label} fg={tone.fg} bg={tone.bg} />
+        <PressableScale onPress={onDismiss} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Dismiss run progress">
+          <Sym name="xmark" size={14} color={colors.textFaint} />
+        </PressableScale>
+      </View>
+
+      {total === 0 ? (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 4 }}>
+          <ActivityIndicator size="small" color={colors.ember} />
+          <T kind="sub">Kicking off the run…</T>
+        </View>
+      ) : (
+        <View style={{ gap: spacing.sm }}>
+          {steps.map((s, i) => {
+            const v = stepVis(s);
+            return (
+              <View key={s.index ?? i} style={{ flexDirection: "row", alignItems: "flex-start", gap: spacing.sm }}>
+                <View style={{ width: 20, alignItems: "center", marginTop: 1 }}>
+                  {v === "running" ? <ActivityIndicator size="small" color={colors.ember} />
+                    : v === "done" ? <Sym name="checkmark.circle.fill" size={16} color={colors.sage} />
+                    : v === "failed" ? <Sym name="xmark.circle.fill" size={16} color={colors.coral} />
+                    : v === "waiting" ? <Sym name="hourglass" size={16} color={colors.amber} />
+                    : <Sym name="circle" size={13} color={colors.textFaint} />}
+                </View>
+                <View style={{ flex: 1, gap: 1 }}>
+                  <T kind="subMedium" color={v === "pending" ? colors.textMuted : colors.text}>{s.title}</T>
+                  {v === "waiting" ? (
+                    <T kind="sub" color={colors.amber}>Waiting for approval in your Inbox</T>
+                  ) : v === "failed" && s.detail ? (
+                    <T kind="sub" numberOfLines={2}>{s.detail}</T>
+                  ) : null}
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      )}
+
+      {vis === "waiting" ? (
+        <View style={{ marginTop: 2 }}>
+          <Button title="Open Inbox" icon="tray" variant="ember" small onPress={() => router.push("/inbox")} />
+        </View>
+      ) : terminal ? (
+        <View style={{ gap: spacing.sm, marginTop: 2 }}>
+          <Notice text={outcome} ok={vis === "completed"} />
+          <View style={{ flexDirection: "row" }}>
+            <Button title="Done" variant="neutral" small onPress={onDismiss} />
+          </View>
+        </View>
+      ) : null}
+    </Card>
+  );
+}
+
 export default function AutomationsScreen() {
   const { session } = useSession();
   const { colors, spacing } = useTheme();
@@ -122,6 +240,10 @@ export default function AutomationsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
   const [firingId, setFiringId] = useState<string | null>(null);
+  // Live "Test run" progress: the run the fired trigger started, polled to completion.
+  const [live, setLive] = useState<{ triggerName: string; run: RunRec } | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const inFlightRef = useRef(false); // guard: never overlap two getRun fetches
 
   const load = useCallback(async () => {
     const [trs, rns, ags] = await Promise.all([api.triggers(), api.runs(), api.agents()]);
@@ -137,6 +259,39 @@ export default function AutomationsScreen() {
   }, []);
   useEffect(() => { if (session) void load(); }, [session, load]);
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
+
+  /* --------------------- live run polling (Test run) --------------------- */
+  const stopPoll = useCallback(() => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }, []);
+  useEffect(() => stopPoll, [stopPoll]); // clear the interval on unmount
+  const dismissLive = useCallback(() => { stopPoll(); setLive(null); }, [stopPoll]);
+
+  // Start tracking a freshly-fired run: optimistic shell, then poll every ~1.8s
+  // until it's terminal or the 3-min safety deadline; refresh the lists at the end.
+  const trackRun = useCallback((triggerName: string, runId: string) => {
+    stopPoll();
+    inFlightRef.current = false;
+    setLive({ triggerName, run: { id: runId, title: triggerName, status: "running", steps: [] } });
+    const deadline = Date.now() + LIVE_POLL_MAX_MS;
+    const tick = async () => {
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      try {
+        const res = await api.getRun(runId);
+        if (res.run) {
+          setLive({ triggerName, run: res.run });
+          const v = runVis(res.run.status);
+          if (v === "completed" || v === "failed") { stopPoll(); void load(); }
+        }
+      } finally {
+        inFlightRef.current = false;
+      }
+      if (Date.now() > deadline) stopPoll();
+    };
+    void tick(); // poll immediately so the shell fills in without a 1.8s wait
+    pollRef.current = setInterval(() => { void tick(); }, LIVE_POLL_MS);
+  }, [stopPoll, load]);
 
   // Trigger-fired runs are attributed source:"trigger" by the server; if none are
   // identifiable yet, fall back to the latest runs so the section stays honest.
@@ -168,12 +323,18 @@ export default function AutomationsScreen() {
     setFiringId(t.id); setNotice(null);
     const r = await api.fireTrigger(t.id);
     setFiringId(null);
-    if (r.ok) {
-      tapHaptic("success");
-      setNotice({ ok: true, text: `${t.name}: fired${r.runId ? ` — run ${r.runId.slice(0, 12)}… started` : ""}.` });
-      await load();
-    } else {
+    if (!r.ok) {
       setNotice({ ok: false, text: friendly(r.error, r.message) });
+      return;
+    }
+    tapHaptic("success");
+    if (r.runId) {
+      // Watch the real run move step-by-step in the pinned progress card.
+      trackRun(t.name, r.runId);
+    } else {
+      // No run id to follow (e.g. a webhook with nothing to execute) — keep the notice.
+      setNotice({ ok: true, text: `${t.name}: fired.` });
+      await load();
     }
   };
 
@@ -211,6 +372,12 @@ export default function AutomationsScreen() {
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh}>
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
+
+      {live ? (
+        <Rise index={0}>
+          <LiveRunCard triggerName={live.triggerName} run={live.run} onDismiss={dismissLive} />
+        </Rise>
+      ) : null}
 
       {triggers.length === 0 ? (
         <EmptyState

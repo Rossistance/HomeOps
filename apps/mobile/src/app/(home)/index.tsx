@@ -142,6 +142,12 @@ function AdminToday() {
     () => helpRequests.filter((h) => h.status === "pending" && h.fromActorId === session?.actorId),
     [helpRequests, session?.actorId],
   );
+  // The linked plan/task title, for wording help requests ("…help with {item}").
+  const itemName = useCallback((h: HelpRequestRec): string | null => {
+    if (h.eventId) return events.find((e) => e.id === h.eventId)?.title ?? null;
+    if (h.taskId) return tasks.find((t) => t.id === h.taskId)?.title ?? null;
+    return null;
+  }, [events, tasks]);
 
   const respondHelp = useCallback(async (h: HelpRequestRec, response: "accept" | "decline", note?: string) => {
     setHelpBusyId(h.id);
@@ -355,21 +361,26 @@ function AdminToday() {
             </PressableCard>
           </Rise>
 
-          {/* Ask for help — send a grandparent, sitter or family member a hand-off. */}
+          {/* Ask OR offer help — hand a task off to, or pitch in for, a
+              grandparent, sitter or family member. */}
           <Rise index={4}>
-            <PressableCard
-              onPress={() => router.push("/help")}
-              accessibilityRole="button"
-              accessibilityLabel="Ask for help"
-              style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}
-            >
-              <SymTile name="hand.raised.fill" color={colors.lavender} bg={colors.lavenderBg} size={36} iconSize={17} />
-              <View style={{ flex: 1, gap: 2 }}>
-                <T kind="rowTitle">Ask for help</T>
-                <T kind="detail">Ask a grandparent, sitter or family member for a hand</T>
+            <Card style={{ gap: spacing.md }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+                <SymTile name="hand.raised.fill" color={colors.lavender} bg={colors.lavenderBg} size={36} iconSize={17} />
+                <View style={{ flex: 1, gap: 2 }}>
+                  <T kind="rowTitle">Ask or offer help</T>
+                  <T kind="detail">Hand something off to — or pitch in for — a grandparent, sitter or family member</T>
+                </View>
               </View>
-              <Sym name="chevron.right" size={13} color={colors.textFaint} />
-            </PressableCard>
+              <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                <View style={{ flex: 1 }}>
+                  <Button small variant="ember" icon="hand.raised.fill" title="Ask for help" onPress={() => router.push({ pathname: "/help", params: { mode: "ask" } })} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button small variant="neutral" icon="hand.thumbsup" title="Offer help" onPress={() => router.push({ pathname: "/help", params: { mode: "offer" } })} />
+                </View>
+              </View>
+            </Card>
           </Rise>
 
           {/* quick actions — 2×3 grid; Meals + Tasks lead */}
@@ -431,31 +442,38 @@ function AdminToday() {
                   </Card>
                 )}
 
-                {/* help requests addressed to ME — accept/decline inline */}
-                {helpToMe.map((h) => (
-                  <Card key={h.id} style={{ gap: spacing.sm }}>
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                      <Sym name="hand.raised.fill" size={14} color={colors.lavender} />
-                      <T kind="rowTitle" style={{ flex: 1 }} numberOfLines={1}>{h.fromName} asked for help</T>
-                    </View>
-                    <T kind="sub" numberOfLines={3}>{h.message}</T>
-                    <View style={{ flexDirection: "row", gap: spacing.sm }}>
-                      <View style={{ flex: 1 }}>
-                        <Button small variant="success" icon="checkmark" title="Accept" loading={helpBusyId === h.id} disabled={!!helpBusyId} onPress={() => void respondHelp(h, "accept")} />
+                {/* help requests addressed to ME — worded by direction; accept/decline inline */}
+                {helpToMe.map((h) => {
+                  const item = itemName(h);
+                  const isOffer = h.kind === "offer";
+                  const headline = isOffer
+                    ? (item ? `${h.fromName} offered to help with ${item}` : `${h.fromName} offered to help`)
+                    : (item ? `${h.fromName} asked you to help with ${item}` : `${h.fromName} asked for your help`);
+                  return (
+                    <Card key={h.id} style={{ gap: spacing.sm }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                        <Sym name={isOffer ? "hand.thumbsup.fill" : "hand.raised.fill"} size={14} color={colors.lavender} />
+                        <T kind="rowTitle" style={{ flex: 1 }} numberOfLines={2}>{headline}</T>
                       </View>
-                      <View style={{ flex: 1 }}>
-                        <Button small variant="neutral" title="Decline" disabled={!!helpBusyId} onPress={() => declineHelp(h)} />
+                      <T kind="sub" numberOfLines={3}>{h.message}</T>
+                      <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                        <View style={{ flex: 1 }}>
+                          <Button small variant="success" icon="checkmark" title="Accept" loading={helpBusyId === h.id} disabled={!!helpBusyId} onPress={() => void respondHelp(h, "accept")} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Button small variant="neutral" title="Decline" disabled={!!helpBusyId} onPress={() => declineHelp(h)} />
+                        </View>
                       </View>
-                    </View>
-                  </Card>
-                ))}
+                    </Card>
+                  );
+                })}
 
                 {/* my outgoing pending asks — waiting + cancel */}
                 {helpFromMe.map((h) => (
                   <Card key={h.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                     <SymTile name="hourglass" color={colors.amber} bg={colors.amberBg} size={36} iconSize={16} />
                     <View style={{ flex: 1, gap: 2 }}>
-                      <T kind="rowTitle" numberOfLines={1}>Waiting on {h.toName}…</T>
+                      <T kind="rowTitle" numberOfLines={1}>{h.kind === "offer" ? `Offered to help ${h.toName}` : `Waiting on ${h.toName}…`}</T>
                       <T kind="detail" numberOfLines={2}>{h.message}</T>
                     </View>
                     <Button small variant="ghost" title="Cancel" loading={helpBusyId === h.id} onPress={() => void cancelHelp(h)} />

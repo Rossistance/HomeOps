@@ -31,7 +31,7 @@ import {
   listNotifications, markNotificationRead,
   listContactMethods, getContactMethod, putContactMethod, patchContactMethod, deleteContactMethodRec,
   getContactVerification, putContactVerification, patchContactVerification, deleteContactVerification,
-  listFiles, getFileRec, putFileRec, writeFileBlob, readFileBlob, deleteFileRec,
+  listFiles, getFileRec, putFileRec, patchFileRec, writeFileBlob, readFileBlob, deleteFileRec,
   listPlaybooks, getPlaybook, putPlaybook, deletePlaybookRec,
   listHelpRequests, getHelpRequest, putHelpRequest, patchHelpRequest,
   addNotification, getAccountRaw,
@@ -936,7 +936,17 @@ const handleRequest = async (req, res) => {
         patch.role = body.role;
       }
       // Profile photo / curated avatar id (self-service). An explicit null/"" clears it.
-      if (body.photoFileId !== undefined) patch.photoFileId = body.photoFileId ? String(body.photoFileId).slice(0, 120) : null;
+      if (body.photoFileId !== undefined) {
+        patch.photoFileId = body.photoFileId ? String(body.photoFileId).slice(0, 120) : null;
+        // A REAL uploaded photo is uploaded private, so another member's Today-strip card
+        // 404s on it (canSeeEntity denies a private file they don't own). Flip that one
+        // file to household visibility so the whole family can render the avatar. Curated
+        // ("avatar:03") and emoji ("emoji:🦊") ids resolve to no file — left untouched.
+        if (patch.photoFileId && !patch.photoFileId.startsWith("emoji:")) {
+          const f = getFileRec(patch.photoFileId);
+          if (f && f.householdId === g.session.householdId && f.visibility !== "household") patchFileRec(f.id, { visibility: "household" });
+        }
+      }
       // Child AI access — an adult toggles whether a child may chat with the assistant.
       if (body.aiEnabled !== undefined) patch.aiEnabled = !!body.aiEnabled;
       const updated = putMember({ actorId: m.actorId, ...patch });
@@ -1371,7 +1381,10 @@ const handleRequest = async (req, res) => {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const mine = listHelpRequests((h) => h.householdId === g.session.householdId)
         .filter((h) => h.fromActorId === g.session.actorId || h.toActorId === g.session.actorId || isAdultRole(g.session.role))
-        .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
+        .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")))
+        // Direction: legacy rows have no `kind` — they were all "ask" (a requester asking
+        // a helper). "offer" is a member offering to help with the RECIPIENT's item.
+        .map((h) => ({ ...h, kind: h.kind === "offer" ? "offer" : "ask" }));
       return json(res, 200, { helpRequests: mine }, req);
     }
     if (path === "/api/help-requests" && method === "POST") {
@@ -1381,17 +1394,23 @@ const handleRequest = async (req, res) => {
       if (!to || to.archived) return json(res, 400, { error: "bad_recipient", message: "Pick a current household member to ask." }, req);
       const message = String(body.message ?? "").trim().slice(0, 500);
       if (!message) return json(res, 400, { error: "message_required", message: "Say what you need help with." }, req);
+      // Direction: "ask" (default) = requester asking `to` to help with the requester's
+      // item; "offer" = requester offering to help with `to`'s item. Recipient is `to` either way.
+      const kind = body.kind === "offer" ? "offer" : "ask";
       const fromName = getMember(g.session.actorId)?.displayName ?? g.session.actorId;
       const hr = putHelpRequest({
         id: "hr_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         fromActorId: g.session.actorId, fromName, toActorId: to.actorId, toName: to.displayName,
+        kind,
         message, eventId: body.eventId ?? null, taskId: body.taskId ?? null,
         status: "pending", responseNote: null,
         createdAt: new Date().toISOString(), respondedAt: null,
       });
-      addNotification({ householdId: g.session.householdId, actorId: to.actorId, channel: "in_app", title: "Can you help?", body: `${fromName}: ${message}` });
-      void pushToMember({ householdId: g.session.householdId, actorId: to.actorId, title: "Can you help?", body: `${fromName}: ${message}`, data: { type: "help_request", id: hr.id } });
-      audit({ type: "help.request", helpRequestId: hr.id, toActorId: to.actorId, ok: true }, req, g.session);
+      const nTitle = kind === "offer" ? "Help offered" : "Can you help?";
+      const nBody = kind === "offer" ? `${fromName} offered to help: ${message}` : `${fromName}: ${message}`;
+      addNotification({ householdId: g.session.householdId, actorId: to.actorId, channel: "in_app", title: nTitle, body: nBody });
+      void pushToMember({ householdId: g.session.householdId, actorId: to.actorId, title: nTitle, body: nBody, data: { type: "help_request", id: hr.id } });
+      audit({ type: "help.request", helpRequestId: hr.id, toActorId: to.actorId, kind, ok: true }, req, g.session);
       return json(res, 200, { helpRequest: hr }, req);
     }
     const helpRespond = path.match(/^\/api\/help-requests\/([^/]+)\/respond$/);
@@ -1406,10 +1425,13 @@ const handleRequest = async (req, res) => {
       const status = body.response === "accept" ? "accepted" : "declined";
       const responseNote = String(body.note ?? "").trim().slice(0, 500) || null;
       const updated = patchHelpRequest(hr.id, { status, responseNote, respondedAt: new Date().toISOString() });
-      const title = `Help request ${status}`;
+      // Copy tracks direction: the notified party is always the creator (hr.fromActorId).
+      // ask → "X accepted your request"; offer → "X accepted your help offer".
+      const noun = hr.kind === "offer" ? "help offer" : "request";
+      const title = hr.kind === "offer" ? `Help offer ${status}` : `Request ${status}`;
       const note = responseNote ? ` — ${responseNote}` : "";
-      addNotification({ householdId: g.session.householdId, actorId: hr.fromActorId, channel: "in_app", title, body: `${hr.toName}: “${hr.message.slice(0, 80)}”${note}` });
-      void pushToMember({ householdId: g.session.householdId, actorId: hr.fromActorId, title, body: `${hr.toName}${note}`, data: { type: "help_request", id: hr.id } });
+      addNotification({ householdId: g.session.householdId, actorId: hr.fromActorId, channel: "in_app", title, body: `${hr.toName} ${status} your ${noun}${note}` });
+      void pushToMember({ householdId: g.session.householdId, actorId: hr.fromActorId, title, body: `${hr.toName} ${status} your ${noun}${note}`, data: { type: "help_request", id: hr.id } });
       audit({ type: "help.respond", helpRequestId: hr.id, status, ok: true }, req, g.session);
       return json(res, 200, { helpRequest: updated }, req);
     }
@@ -2669,7 +2691,7 @@ const handleRequest = async (req, res) => {
     if (path === "/api/settings" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const s = getSettings(g.session.householdId);
-      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false } }, req);
     }
     if (path === "/api/settings" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -2680,10 +2702,13 @@ const handleRequest = async (req, res) => {
       // Calendar auto-sync: Adult Admin opt-in that pre-authorizes Google Calendar
       // pushes (no per-event approvals) and turns on the server-triggered two-way sweep.
       if (typeof body.calendarAutoSync === "boolean") patch.calendarAutoSync = body.calendarAutoSync;
+      // AI-judged auto-approval of LOW-risk improvement proposals (default ON). When off,
+      // every proposal — even low-risk — waits for a human in the evolution review queue.
+      if (typeof body.autoApproveImprovements === "boolean") patch.autoApproveImprovements = body.autoApproveImprovements;
       if (typeof body.ownerPin === "string" && body.ownerPin) patch.ownerPinHash = crypto.createHash("sha256").update(body.ownerPin).digest("hex");
       const next = setSettings(patch, g.session.householdId);
       audit({ type: "settings.update", ok: true, changed: Object.keys(patch), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
-      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true, autoApproveImprovements: next.autoApproveImprovements !== false } }, req);
     }
 
     /* ---- AI providers ---- */
@@ -2926,7 +2951,19 @@ const handleRequest = async (req, res) => {
     // real run traces. Accepting an agent proposal versions the agent server-side.
     if (path === "/api/evolution" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const all = listEvolutions((e) => !e.householdId || e.householdId === g.session.householdId);
+      // Project a stable review shape so clients can show/act on proposals: always carry
+      // `after` (the concrete change), the resolved `agentName`, and the auto-approval
+      // verdict (`autoApproved`/`autoReason`) even for legacy rows that predate them.
+      const all = listEvolutions((e) => !e.householdId || e.householdId === g.session.householdId).map((e) => ({
+        ...e,
+        source: e.source ?? "trace",
+        after: e.after ?? null,
+        risk: e.risk ?? null,
+        agentId: e.agentId ?? null,
+        agentName: e.agentId ? (getAgent(e.agentId)?.name ?? null) : null,
+        autoApproved: e.autoApproved === true,
+        autoReason: e.autoReason ?? null,
+      }));
       return json(res, 200, { evolutions: all }, req);
     }
     const evoReviewMatch = path.match(/^\/api\/evolution\/([^/]+)\/review$/);

@@ -1,11 +1,16 @@
-// Ask for help — pick a family member (grandparent, sitter, anyone), optionally
-// link a calendar event or task, write a short message (prefilled from the
-// event), and send. When the picked member has a connected calendar we peek at
-// their own events for a free/busy hint before you ask. Sending creates a real
-// server help request that shows up on their home with Accept/Decline.
+// Ask or offer help — one screen, two directions:
+//  · Ask  (default): pick a family member, optionally link one of MY upcoming
+//    events or open tasks, write a short message, and send. When the picked
+//    member has a connected calendar we peek at their events for a free/busy
+//    hint before you ask.
+//  · Offer: pick a family member to help, then link one of THEIR upcoming events
+//    or open tasks, and send an offer.
+// The person picker never excludes children (a child can be asked/offered, and a
+// child user can target other children). Sending creates a real server help
+// request that shows up on the recipient's home with Accept/Decline.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ScrollView, TextInput, View } from "react-native";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { api, type CalendarSubscription, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
@@ -26,6 +31,10 @@ const fmtWhen = (iso: string | null) => {
 export default function HelpScreen() {
   const { colors, spacing } = useTheme();
   const { session } = useSession();
+  const params = useLocalSearchParams<{ mode?: string }>();
+  // Direction: "ask" (hand one of MY things off) or "offer" (pitch in on one of
+  // THEIRS). Seeded from the route param, then owned by the segmented toggle.
+  const [mode, setMode] = useState<"ask" | "offer">(params.mode === "offer" ? "offer" : "ask");
   const [loading, setLoading] = useState(true);
   const [members, setMembers] = useState<MemberRec[]>([]);
   const [events, setEvents] = useState<EventRec[]>([]);
@@ -52,11 +61,19 @@ export default function HelpScreen() {
     return () => { cancelled = true; };
   }, []);
 
+  // Everyone but me — children included on purpose (they can be asked or offered).
   const others = useMemo(() => members.filter((m) => m.actorId !== session?.actorId), [members, session?.actorId]);
   const toMember = useMemo(() => others.find((m) => m.actorId === toActorId) ?? null, [others, toActorId]);
 
-  // Linkable events: dated, within the next 14 days.
+  // Whose items fill the "link a plan/task" list:
+  //  · Ask   → MINE (I'm handing one of my things off).
+  //  · Offer → the SELECTED person's (I'm pitching in on one of theirs).
+  const itemsOwnerId = mode === "ask" ? (session?.actorId ?? null) : toActorId;
+
+  // Linkable events: dated, within the next 14 days, where itemsOwnerId is the
+  // owner or a participant.
   const upcoming = useMemo(() => {
+    if (!itemsOwnerId) return [];
     const now = Date.now();
     return events
       .filter((e) => e.startAt && !isNaN(+new Date(e.startAt)))
@@ -64,35 +81,62 @@ export default function HelpScreen() {
         const t = new Date(e.startAt!).getTime();
         return t >= now - 2 * HOUR && t <= now + 14 * 86400000;
       })
+      .filter((e) => e.ownerId === itemsOwnerId || e.participantIds?.includes(itemsOwnerId))
       .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
-  }, [events]);
+  }, [events, itemsOwnerId]);
   const visibleEvents = showAllEvents ? upcoming : upcoming.slice(0, 6);
-  const openTasks = useMemo(() => tasks.filter((t) => t.status !== "done").slice(0, 5), [tasks]);
+  const openTasks = useMemo(
+    () => (itemsOwnerId ? tasks.filter((t) => t.status !== "done" && t.assignedMemberId === itemsOwnerId).slice(0, 5) : []),
+    [tasks, itemsOwnerId],
+  );
   const selectedEvent = useMemo(() => (eventId ? upcoming.find((e) => e.id === eventId) ?? null : null), [eventId, upcoming]);
   const selectedTask = useMemo(() => (taskId ? openTasks.find((t) => t.id === taskId) ?? null : null), [taskId, openTasks]);
+
+  // Prefill differs by direction: "Can you…?" when asking, "I can help…" when offering.
+  const prefillForEvent = (e: EventRec) =>
+    mode === "offer"
+      ? `I can help with ${e.title}${e.startAt ? ` (${fmtWhen(e.startAt)})` : ""}.`
+      : `Can you help with ${e.title}${e.startAt ? ` (${fmtWhen(e.startAt)})` : ""}?`;
+  const prefillForTask = (t: TaskRec) =>
+    mode === "offer" ? `I can help with "${t.title}".` : `Can you take care of "${t.title}"?`;
 
   const pickEvent = (e: EventRec) => {
     const next = eventId === e.id ? null : e.id;
     setEventId(next);
     if (next) setTaskId(null);
-    if (!messageTouched.current) {
-      setMessage(next ? `Can you help with ${e.title}${e.startAt ? ` (${fmtWhen(e.startAt)})` : ""}?` : "");
-    }
+    if (!messageTouched.current) setMessage(next ? prefillForEvent(e) : "");
   };
   const pickTask = (t: TaskRec) => {
     const next = taskId === t.id ? null : t.id;
     setTaskId(next);
     if (next) setEventId(null);
-    if (!messageTouched.current) {
-      setMessage(next ? `Can you take care of "${t.title}"?` : "");
+    if (!messageTouched.current) setMessage(next ? prefillForTask(t) : "");
+  };
+
+  // Switching direction resets the linked item + prefill (the item lists differ).
+  const switchMode = (next: "ask" | "offer") => {
+    if (next === mode) return;
+    setMode(next);
+    setEventId(null); setTaskId(null); setShowAllEvents(false);
+    messageTouched.current = false;
+    setMessage("");
+  };
+
+  // In offer mode the shown items belong to the chosen person, so changing who
+  // clears the linked item + prefill.
+  const selectPerson = (actorId: string) => {
+    const next = toActorId === actorId ? null : actorId;
+    setToActorId(next);
+    if (mode === "offer") {
+      setEventId(null); setTaskId(null); setShowAllEvents(false);
+      if (!messageTouched.current) setMessage("");
     }
   };
 
-  // Free/busy hint: only meaningful when the member has a connected calendar
-  // (a subscription they own). Then any of THEIR events overlapping the picked
-  // event's window is a conflict.
+  // Free/busy hint: ask mode only. In offer mode the events ARE the target's own,
+  // so an overlap check against themselves is meaningless. Needs a connected calendar.
   const freeBusy = useMemo(() => {
-    if (!toMember || !selectedEvent?.startAt) return null;
+    if (mode !== "ask" || !toMember || !selectedEvent?.startAt) return null;
     const hasCalendar = subs.some((s) => s.ownerActorId === toMember.actorId);
     if (!hasCalendar) return null;
     const start = new Date(selectedEvent.startAt).getTime();
@@ -110,7 +154,7 @@ export default function HelpScreen() {
     return conflict
       ? { free: false as const, text: `⚠ ${toMember.displayName.split(" ")[0]} has ${conflict.title} then` }
       : { free: true as const, text: `✓ ${toMember.displayName.split(" ")[0]} looks free then` };
-  }, [toMember, selectedEvent, subs, events]);
+  }, [mode, toMember, selectedEvent, subs, events]);
 
   const send = useCallback(async () => {
     if (!toActorId || busy) return;
@@ -122,6 +166,7 @@ export default function HelpScreen() {
       message: msg,
       eventId: eventId ?? undefined,
       taskId: taskId ?? undefined,
+      kind: mode,
     });
     setBusy(false);
     if (!r.helpRequest) {
@@ -130,19 +175,48 @@ export default function HelpScreen() {
     }
     tapHaptic("success");
     router.back();
-  }, [toActorId, busy, message, eventId, taskId]);
+  }, [toActorId, busy, message, eventId, taskId, mode]);
 
   if (loading) {
     return <HScreen><SkeletonCards count={3} /></HScreen>;
   }
 
+  const offer = mode === "offer";
+  const firstName = toMember?.displayName.split(" ")[0] ?? "";
+
   return (
     <HScreen>
       {note ? <Notice text={note} ok={false} /> : null}
 
-      {/* 1 — who */}
+      {/* direction toggle — Ask ↔ Offer */}
       <Rise index={0}>
-        <SectionHeader title="Who can help?" />
+        <View style={{ flexDirection: "row", backgroundColor: colors.surfaceSunken, borderRadius: 14, borderCurve: "continuous", padding: 3, gap: 3 }}>
+          {([["ask", "Ask for help"], ["offer", "Offer help"]] as const).map(([key, label]) => {
+            const active = mode === key;
+            return (
+              <PressableScale
+                key={key}
+                haptic="select"
+                onPress={() => switchMode(key)}
+                accessibilityRole="button"
+                accessibilityState={{ selected: active }}
+                accessibilityLabel={label}
+                style={{
+                  flex: 1, alignItems: "center", paddingVertical: 10, borderRadius: 11, borderCurve: "continuous",
+                  backgroundColor: active ? colors.surface : "transparent",
+                  borderWidth: 1, borderColor: active ? colors.border : "transparent",
+                }}
+              >
+                <T kind="subMedium" color={active ? colors.text : colors.textMuted}>{label}</T>
+              </PressableScale>
+            );
+          })}
+        </View>
+      </Rise>
+
+      {/* 1 — who */}
+      <Rise index={1}>
+        <SectionHeader title={offer ? "Who do you want to help?" : "Who can help?"} />
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -156,10 +230,10 @@ export default function HelpScreen() {
               <PressableScale
                 key={m.actorId}
                 haptic="select"
-                onPress={() => setToActorId(selected ? null : m.actorId)}
+                onPress={() => selectPerson(m.actorId)}
                 accessibilityRole="button"
                 accessibilityState={{ selected }}
-                accessibilityLabel={`Ask ${m.displayName}`}
+                accessibilityLabel={`${offer ? "Help" : "Ask"} ${m.displayName}`}
                 style={{
                   alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 10,
                   borderRadius: 16, borderCurve: "continuous", minWidth: 76,
@@ -177,84 +251,90 @@ export default function HelpScreen() {
         </ScrollView>
       </Rise>
 
-      {/* 2 — link a plan or task (optional) */}
-      <Rise index={1}>
-        <SectionHeader title="About a plan? (optional)" />
-        {upcoming.length === 0 ? (
-          <Card><T kind="sub">Nothing on the calendar in the next two weeks.</T></Card>
+      {/* 2 — link a plan or task */}
+      <Rise index={2}>
+        {offer && !toActorId ? (
+          <Card><T kind="sub">Pick someone above to see what you can help with.</T></Card>
         ) : (
-          <Card padded={false}>
-            {visibleEvents.map((e, i) => {
-              const selected = eventId === e.id;
-              return (
-                <PressableScale
-                  key={e.id}
-                  haptic="select"
-                  onPress={() => pickEvent(e)}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected }}
-                  accessibilityLabel={`Link ${e.title}`}
-                  style={{
-                    flexDirection: "row", alignItems: "center", gap: spacing.md,
-                    paddingHorizontal: spacing.lg, paddingVertical: 11,
-                    borderTopWidth: i > 0 ? 1 : 0, borderTopColor: colors.separator,
-                    backgroundColor: selected ? colors.emberBg : "transparent",
-                  }}
-                >
-                  <Sym name={selected ? "checkmark.circle.fill" : "calendar"} size={16} color={selected ? colors.ember : colors.textFaint} />
-                  <View style={{ flex: 1, gap: 1 }}>
-                    <T kind="subMedium" color={colors.text} numberOfLines={1}>{e.title}</T>
-                    <T kind="detail" numberOfLines={1}>{fmtWhen(e.startAt)}{e.location ? ` · ${e.location}` : ""}</T>
-                  </View>
-                </PressableScale>
-              );
-            })}
-            {upcoming.length > 6 && (
-              <PressableScale onPress={() => setShowAllEvents((v) => !v)} haptic="select" style={{ padding: spacing.md, alignItems: "center" }}>
-                <T kind="subMedium" color={colors.ember}>{showAllEvents ? "Show fewer" : `Show all ${upcoming.length}`}</T>
-              </PressableScale>
-            )}
-          </Card>
-        )}
-        {openTasks.length > 0 && (
           <>
-            <SectionHeader title="Or a task?" />
-            <Card padded={false}>
-              {openTasks.map((t, i) => {
-                const selected = taskId === t.id;
-                return (
-                  <PressableScale
-                    key={t.id}
-                    haptic="select"
-                    onPress={() => pickTask(t)}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected }}
-                    accessibilityLabel={`Link task ${t.title}`}
-                    style={{
-                      flexDirection: "row", alignItems: "center", gap: spacing.md,
-                      paddingHorizontal: spacing.lg, paddingVertical: 11,
-                      borderTopWidth: i > 0 ? 1 : 0, borderTopColor: colors.separator,
-                      backgroundColor: selected ? colors.emberBg : "transparent",
-                    }}
-                  >
-                    <Sym name={selected ? "checkmark.circle.fill" : "checklist"} size={16} color={selected ? colors.ember : colors.textFaint} />
-                    <T kind="subMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={1}>{t.title}</T>
+            <SectionHeader title={offer ? (firstName ? `What can you help ${firstName} with?` : "What can you help with?") : "About a plan? (optional)"} />
+            {upcoming.length === 0 ? (
+              <Card><T kind="sub">{offer ? `Nothing on ${firstName || "their"} calendar in the next two weeks.` : "Nothing on the calendar in the next two weeks."}</T></Card>
+            ) : (
+              <Card padded={false}>
+                {visibleEvents.map((e, i) => {
+                  const selected = eventId === e.id;
+                  return (
+                    <PressableScale
+                      key={e.id}
+                      haptic="select"
+                      onPress={() => pickEvent(e)}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      accessibilityLabel={`Link ${e.title}`}
+                      style={{
+                        flexDirection: "row", alignItems: "center", gap: spacing.md,
+                        paddingHorizontal: spacing.lg, paddingVertical: 11,
+                        borderTopWidth: i > 0 ? 1 : 0, borderTopColor: colors.separator,
+                        backgroundColor: selected ? colors.emberBg : "transparent",
+                      }}
+                    >
+                      <Sym name={selected ? "checkmark.circle.fill" : "calendar"} size={16} color={selected ? colors.ember : colors.textFaint} />
+                      <View style={{ flex: 1, gap: 1 }}>
+                        <T kind="subMedium" color={colors.text} numberOfLines={1}>{e.title}</T>
+                        <T kind="detail" numberOfLines={1}>{fmtWhen(e.startAt)}{e.location ? ` · ${e.location}` : ""}</T>
+                      </View>
+                    </PressableScale>
+                  );
+                })}
+                {upcoming.length > 6 && (
+                  <PressableScale onPress={() => setShowAllEvents((v) => !v)} haptic="select" style={{ padding: spacing.md, alignItems: "center" }}>
+                    <T kind="subMedium" color={colors.ember}>{showAllEvents ? "Show fewer" : `Show all ${upcoming.length}`}</T>
                   </PressableScale>
-                );
-              })}
-            </Card>
+                )}
+              </Card>
+            )}
+            {openTasks.length > 0 && (
+              <>
+                <SectionHeader title="Or a task?" />
+                <Card padded={false}>
+                  {openTasks.map((t, i) => {
+                    const selected = taskId === t.id;
+                    return (
+                      <PressableScale
+                        key={t.id}
+                        haptic="select"
+                        onPress={() => pickTask(t)}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected }}
+                        accessibilityLabel={`Link task ${t.title}`}
+                        style={{
+                          flexDirection: "row", alignItems: "center", gap: spacing.md,
+                          paddingHorizontal: spacing.lg, paddingVertical: 11,
+                          borderTopWidth: i > 0 ? 1 : 0, borderTopColor: colors.separator,
+                          backgroundColor: selected ? colors.emberBg : "transparent",
+                        }}
+                      >
+                        <Sym name={selected ? "checkmark.circle.fill" : "checklist"} size={16} color={selected ? colors.ember : colors.textFaint} />
+                        <T kind="subMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={1}>{t.title}</T>
+                      </PressableScale>
+                    );
+                  })}
+                </Card>
+              </>
+            )}
           </>
         )}
       </Rise>
 
       {/* 3 — message */}
-      <Rise index={2}>
+      <Rise index={3}>
         <SectionHeader title="Your message" />
         <Well style={{ padding: 0 }}>
           <TextInput
             value={message}
             onChangeText={(t) => { messageTouched.current = t.length > 0; setMessage(t); }}
-            placeholder={toMember ? `Ask ${toMember.displayName.split(" ")[0]} for a hand…` : "What do you need help with?"}
+            placeholder={toMember ? (offer ? `Offer ${firstName} a hand…` : `Ask ${firstName} for a hand…`) : (offer ? "What can you help with?" : "What do you need help with?")}
             placeholderTextColor={colors.textFaint}
             multiline
             style={{ paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: colors.text, minHeight: 76 }}
@@ -262,7 +342,7 @@ export default function HelpScreen() {
           />
         </Well>
 
-        {/* free/busy hint — only when we actually know their calendar */}
+        {/* free/busy hint — only when we actually know their calendar (ask mode) */}
         {freeBusy ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: spacing.sm }}>
             <T kind="subMedium" color={freeBusy.free ? colors.sage : colors.coral}>{freeBusy.text}</T>
@@ -273,9 +353,9 @@ export default function HelpScreen() {
         ) : null}
       </Rise>
 
-      <Rise index={3}>
+      <Rise index={4}>
         <Button
-          title={busy ? "Sending…" : toMember ? `Ask ${toMember.displayName.split(" ")[0]}` : "Pick someone to ask"}
+          title={busy ? "Sending…" : toMember ? (offer ? `Offer to help ${firstName}` : `Ask ${firstName}`) : (offer ? "Pick someone to help" : "Pick someone to ask")}
           variant="ember"
           full
           loading={busy}

@@ -192,9 +192,26 @@ export interface HelpRequestRec {
   toActorId: string; toName: string;
   message: string;
   eventId: string | null; taskId: string | null;
+  /** "ask" = I'm asking you to help with MY item; "offer" = I'm offering to help with YOUR item. */
+  kind?: "ask" | "offer";
   status: "pending" | "accepted" | "declined" | "cancelled";
   responseNote: string | null;
   createdAt: string; respondedAt: string | null;
+}
+/** Server evolution/improvement proposals (mined from real run traces). Adult Admins
+ * accept/reject; low-risk ones the AI is confident about are auto-applied server-side. */
+export interface EvolutionReviewRec {
+  id: string; kind: "skill" | "agent" | "tool" | "function";
+  status: "pending" | "accepted" | "rejected"; source: string;
+  title: string; reason: string; summary: string; after?: string;
+  risk?: "Low" | "Medium" | "High"; agentId?: string | null; agentName?: string | null;
+  autoApproved?: boolean; autoReason?: string | null; createdAt: number;
+}
+/** Household settings the mobile client can read/toggle. */
+export interface AppSettingsRec {
+  externalActionsEnabled: boolean; ownerPinSet: boolean;
+  aiActiveProvider: string | null; calendarAutoSync: boolean;
+  autoApproveImprovements: boolean;
 }
 /** Result of POST /api/calendar/sync-all — one button syncs every subscription
  * and pulls Google-side edits in the same pass. */
@@ -801,7 +818,7 @@ export const api = {
     const r = await req<{ helpRequests: HelpRequestRec[] }>("/help-requests");
     return r.data?.helpRequests ?? [];
   },
-  async createHelpRequest(body: { toActorId: string; message: string; eventId?: string; taskId?: string }): Promise<{ helpRequest?: HelpRequestRec; error?: string; message?: string }> {
+  async createHelpRequest(body: { toActorId: string; message: string; eventId?: string; taskId?: string; kind?: "ask" | "offer" }): Promise<{ helpRequest?: HelpRequestRec; error?: string; message?: string }> {
     const r = await req<{ helpRequest?: HelpRequestRec; error?: string; message?: string }>("/help-requests", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
@@ -813,6 +830,29 @@ export const api = {
   },
   async cancelHelpRequest(id: string): Promise<{ helpRequest?: HelpRequestRec; ok?: boolean; error?: string }> {
     const r = await req<{ helpRequest?: HelpRequestRec; ok?: boolean; error?: string }>(`/help-requests/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+
+  /* ---- Evolution / improvement proposals (mirror of the web "what I learned") ---- */
+  async evolutionReviews(): Promise<EvolutionReviewRec[]> {
+    const r = await req<{ evolutions: EvolutionReviewRec[] }>("/evolution");
+    return r.data?.evolutions ?? [];
+  },
+  // Accept applies the improvement (versions the agent/skill); reject dismisses it. Adult Admin+.
+  async reviewEvolution(id: string, accept: boolean): Promise<{ ok?: boolean; applied?: boolean; applyError?: string | null; evolution?: EvolutionReviewRec; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; applied?: boolean; applyError?: string | null; evolution?: EvolutionReviewRec; error?: string; message?: string }>(`/evolution/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({ accept }) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+
+  /* ---- Household settings (read + toggle) ---- */
+  async settings(): Promise<AppSettingsRec | null> {
+    const r = await req<{ settings: AppSettingsRec }>("/settings");
+    return r.data?.settings ?? null;
+  },
+  async updateSettings(patch: Partial<Pick<AppSettingsRec, "externalActionsEnabled" | "calendarAutoSync" | "autoApproveImprovements">>): Promise<{ settings?: AppSettingsRec; error?: string }> {
+    const r = await req<{ settings?: AppSettingsRec; error?: string }>("/settings", { method: "POST", body: JSON.stringify(patch) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },

@@ -1,17 +1,24 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useStore } from "@/store/useStore";
 import { Card } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { fmtDateFull, fmtTime } from "@/lib/dates";
+import { HelpComposer } from "@/components/HelpComposer";
+import { isChild } from "@/lib/roles";
 import { useMyHelpRequests } from "./GrandparentView";
 
 /** The child dashboard: a big friendly greeting, today's chores (mine, toggleable),
- *  a read-only look at today's schedule, and who's helping with today's events. */
+ *  a read-only look at today's schedule, a kid-friendly ask/offer help affordance
+ *  (to and from other children), and who's helping with today's events. */
 export function KidView() {
   const data = useStore((s) => s.data);
   const me = useStore((s) => s.currentMember());
   const setTaskStatus = useStore((s) => s.setTaskStatus);
-  const { requests } = useMyHelpRequests();
+  const { requests, reload } = useMyHelpRequests();
+  const [helpOpen, setHelpOpen] = useState(false);
+
+  // Kids ask/offer help to/from other kids — the person picker is scoped to siblings.
+  const otherKids = useMemo(() => data.members.filter((m) => m.id !== me?.id && isChild(m)), [data.members, me?.id]);
 
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
@@ -103,6 +110,19 @@ export function KidView() {
           </ol>
         )}
       </Card>
+
+      {/* Ask or offer help — kid to kid */}
+      {me && otherKids.length > 0 && (
+        <Card className="card-pad">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.12em] text-ink-500"><Icon name="HeartHandshake" size={15} /> Ask or offer help</h3>
+            <button onClick={() => setHelpOpen((v) => !v)} className="text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">{helpOpen ? "Close" : "Open"}</button>
+          </div>
+          {helpOpen
+            ? <HelpComposer me={me} people={otherKids} events={data.events} tasks={data.tasks} kidFriendly onSent={reload} />
+            : <p className="text-base text-ink-500">Need a hand — or want to help a brother or sister? Tap Open.</p>}
+        </Card>
+      )}
 
       {/* Who's helping you today */}
       <Card className="card-pad">

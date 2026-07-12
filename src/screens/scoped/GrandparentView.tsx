@@ -64,17 +64,21 @@ export function ScheduleList({ events }: { events: CalendarEvent[] }) {
  *  (plus an optional note) through the server help-request endpoints. */
 export function HelpInbox({ meId, requests, onChanged }: { meId: string; requests: HelpRequest[]; onChanged: () => void | Promise<void> }) {
   const toast = useStore((s) => s.toast);
-  const eventById = useStore((s) => s.data.events);
+  const events = useStore((s) => s.data.events);
+  const tasks = useStore((s) => s.data.tasks);
   const pending = requests.filter((r) => r.status === "pending" && r.toActorId === meId);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  // The task a request is about (events get a richer detail line below, resolved inline).
+  const taskLabelFor = (r: HelpRequest) => (r.taskId ? tasks.find((t) => (t.serverId ?? t.id) === r.taskId)?.title ?? null : null);
 
   const respond = async (r: HelpRequest, response: "accept" | "decline") => {
     setBusyId(r.id);
     const res = await backend.respondHelpRequest(r.id, response, notes[r.id]?.trim() || undefined);
     setBusyId(null);
     if (res.error) { toast({ kind: "error", title: "Couldn't send your answer", message: res.message ?? res.error }); return; }
-    toast({ kind: "success", title: response === "accept" ? "You're helping — thank you!" : "Answer sent" });
+    toast({ kind: "success", title: response === "accept" ? (r.kind === "offer" ? "Thanks — help is on the way!" : "You're helping — thank you!") : "Answer sent" });
     await onChanged();
   };
 
@@ -86,14 +90,22 @@ export function HelpInbox({ meId, requests, onChanged }: { meId: string; request
       ) : (
         <ul className="space-y-3">
           {pending.map((r) => {
-            const ev = r.eventId ? eventById.find((e) => (e.serverId ?? e.id) === r.eventId) : null;
+            const ev = r.eventId ? events.find((e) => (e.serverId ?? e.id) === r.eventId) : null;
+            const taskLabel = taskLabelFor(r);
+            const isOffer = r.kind === "offer";
             return (
               <li key={r.id} className="rounded-2xl border border-amber-200/70 bg-amber-50/60 p-4">
-                <p className="text-base text-ink-800"><span className="font-semibold">{r.fromName}</span> asks: “{r.message}”</p>
+                <p className="text-base text-ink-800">
+                  <span className="font-semibold">{r.fromName}</span>{" "}
+                  {isOffer
+                    ? <>offered to help{taskLabel ? <> with <span className="font-semibold">{taskLabel}</span></> : ev ? <> with <span className="font-semibold">{ev.title}</span></> : null}</>
+                    : <>asks: “{r.message}”</>}
+                </p>
+                {isOffer && r.message && <p className="mt-1 text-sm text-ink-600">“{r.message}”</p>}
                 {ev && <p className="mt-1 text-sm text-ink-500"><Icon name="Calendar" size={13} className="mr-1 inline" /> {ev.title} · {dayName(ev.startAt)} {fmtTime(ev.startAt)}{ev.location ? ` · ${ev.location}` : ""}</p>}
                 <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <Button variant="success" disabled={busyId === r.id} onClick={() => void respond(r, "accept")}><Icon name="Check" size={15} /> Yes, I can</Button>
-                  <Button variant="secondary" disabled={busyId === r.id} onClick={() => void respond(r, "decline")}><Icon name="X" size={15} /> Sorry, not this time</Button>
+                  <Button variant="success" disabled={busyId === r.id} onClick={() => void respond(r, "accept")}><Icon name="Check" size={15} /> {isOffer ? "Yes, please" : "Yes, I can"}</Button>
+                  <Button variant="secondary" disabled={busyId === r.id} onClick={() => void respond(r, "decline")}><Icon name="X" size={15} /> {isOffer ? "No thanks" : "Sorry, not this time"}</Button>
                   <TextInput value={notes[r.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [r.id]: e.target.value }))} placeholder="Add a note (optional)" className="min-w-[12rem] flex-1" />
                 </div>
               </li>

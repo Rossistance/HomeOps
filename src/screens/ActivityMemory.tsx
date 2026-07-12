@@ -257,6 +257,9 @@ function ProposalCard({ e, onReview, onView }: { e: EvolutionProposal | ServerEv
   const [busy, setBusy] = useState(false);
   const statusColor: "sage" | "gray" | "amber" = e.status === "accepted" ? "sage" : e.status === "rejected" ? "gray" : "amber";
   const meta = KIND_META[e.kind] ?? KIND_META.tool;
+  // Server-side low-risk auto-approval: applied without a human when the household opts in.
+  const autoApproved = (e as any).autoApproved === true;
+  const autoReason = (e as any).autoReason as string | undefined;
   const entityName = (e as any).agentName ?? (e as any).skillName ?? (e as any).functionId ?? (e as any).toolId ?? null;
   const hasView = (e as any).agentId || (e as any).skillId || e.kind === "function";
   const doReview = async (accept: boolean) => { setBusy(true); await onReview(e.id, accept); setBusy(false); };
@@ -275,7 +278,10 @@ function ProposalCard({ e, onReview, onView }: { e: EvolutionProposal | ServerEv
             </p>
           </div>
         </div>
-        <Badge color={statusColor}>{e.status}</Badge>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          {autoApproved && <Badge color="lavender"><Icon name="Sparkles" size={11} /> Auto-applied by AI</Badge>}
+          <Badge color={statusColor}>{e.status}</Badge>
+        </div>
       </div>
       <p className="rounded-xl bg-surface-sunken/60 px-3 py-2 text-xs text-ink-600"><Icon name="Search" size={11} className="mr-1 inline" /> {e.reason}</p>
       <p className="mt-2 text-sm text-ink-700">{e.summary}</p>
@@ -296,6 +302,8 @@ function ProposalCard({ e, onReview, onView }: { e: EvolutionProposal | ServerEv
             </Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => doReview(false)}>Dismiss</Button>
           </>
+        ) : autoApproved ? (
+          <span className="flex items-center gap-1 text-xs text-lavender-600"><Icon name="Sparkles" size={12} /> {autoReason || "Auto-applied by AI"}</span>
         ) : <span className="text-xs text-ink-400">Reviewed</span>}
         {e.kind === "function" && (
           <Button size="sm" variant="secondary" className="ml-auto" onClick={onView}><Icon name="FunctionSquare" size={13} /> Open in Functions</Button>

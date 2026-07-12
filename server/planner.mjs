@@ -525,6 +525,27 @@ export async function proposeEvolution({ trace, session, providerId } = {}) {
   return { ok: true, proposal: { title: String(parsed.title ?? "Improvement"), reason: String(parsed.reason ?? ""), summary: String(parsed.summary ?? ""), after: parsed.after != null ? String(parsed.after) : undefined, risk }, model: out.model };
 }
 
+/* ---- Auto-approval confidence judge (a VALIDATION pass, NOT a live re-run) ------ *
+ * Given the failure trace + a proposed `after` (new instructions/guidance), ask the
+ * AI whether applying the change is LIKELY to make the next run succeed. Strict by
+ * design: confident only when the change directly addresses the failure and is low-
+ * risk. Any missing provider / exhausted budget / unparseable answer → confident:false,
+ * so the engine NEVER auto-applies without a positive judgment (fail-closed).          */
+const JUDGE_SYS = `You are FamiliOS' change-safety judge. You are given a failed run's trace and a proposed change to an agent's instructions (or a skill's guidance). Decide whether applying this change is LIKELY to make the NEXT run succeed. Be STRICT: answer confident:true ONLY when the change DIRECTLY addresses the specific failure shown in the trace AND is low-risk (introduces no new external actions, no new permissions, nothing a family would consider unsafe). If the change is vague, off-target, risky, or you are unsure, answer false. Respond with ONLY a JSON object — no prose, no fences: {"confident": boolean, "reason": string}`;
+
+export async function judgeEvolutionConfidence({ trace, proposal, session, providerId } = {}) {
+  const id = activeProviderId(providerId, session?.householdId);
+  if (!id) return { ok: false, confident: false, reason: "no_provider" };
+  if (!proposal || proposal.after == null || !String(proposal.after).trim()) return { ok: false, confident: false, reason: "no_after" };
+  const gated = budgetGate(session); if (gated) return { ok: false, confident: false, reason: "ai_budget_exhausted" };
+  const user = `Failure trace (JSON): ${JSON.stringify(trace ?? {}).slice(0, 3000)}\n\nProposed change to apply (the new instructions/guidance):\n${String(proposal.after).slice(0, 2000)}`;
+  const out = await providerChat(id, { messages: [{ role: "system", content: JUDGE_SYS }, { role: "user", content: user }] });
+  if (!out.ok) return { ok: false, confident: false, reason: out.error ?? "provider_error" };
+  const parsed = extractJSON(out.text);
+  if (!parsed || typeof parsed.confident !== "boolean") return { ok: false, confident: false, reason: "parse_failed" };
+  return { ok: true, confident: parsed.confident === true, reason: String(parsed.reason ?? ""), model: out.model };
+}
+
 const MINIAPP_SYS = `You generate the seed DATA for a FamiliOS "mini app" (a small interactive household tracker) from a plain-English request. Respond with ONLY a JSON object — no prose, no markdown fences:
 { "type": <one of the allowed types>, "name": string, "description": string, "data": object }
 

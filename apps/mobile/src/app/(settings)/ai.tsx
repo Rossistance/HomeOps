@@ -253,6 +253,7 @@ export default function SettingsScreen() {
       )}
 
       {isAdmin ? <RiskOverridesSection /> : null}
+      {isAdmin ? <AutoApproveImprovements /> : null}
 
       <SectionHeader title="On the web" />
       <Rise index={2}>
@@ -399,6 +400,67 @@ function RiskOverridesSection() {
           {open && loaded && !failed && gated.length === 0 ? (
             <View style={{ paddingHorizontal: spacing.lg, paddingBottom: spacing.lg }}>
               <T kind="sub">No approval-gated tools in the catalog.</T>
+            </View>
+          ) : null}
+        </Card>
+      </Rise>
+    </>
+  );
+}
+
+/* ---- Auto-approve improvements (bug 6) ----
+ * The household setting that lets FamiliOS apply low-risk improvements it's
+ * confident about without a human accept. Adult Admin only; the toggle reverts
+ * and explains on a 403. Every applied change is still logged in Activity. */
+function AutoApproveImprovements() {
+  const { colors, spacing } = useTheme();
+  const [on, setOn] = useState<boolean | null>(null); // null = not loaded yet
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const s = await api.settings();
+    if (s) setOn(!!s.autoApproveImprovements);
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  const toggle = async (v: boolean) => {
+    setBusy(true); setNote(null);
+    setOn(v); // optimistic
+    const r = await api.updateSettings({ autoApproveImprovements: v });
+    setBusy(false);
+    if (r.error) {
+      setOn(!v); // revert
+      tapHaptic("error");
+      setNote(r.error === "insufficient_role" ? "Only an Owner or Adult Admin can change this." : "Couldn't save — try again.");
+      return;
+    }
+    if (r.settings) setOn(!!r.settings.autoApproveImprovements);
+    tapHaptic(v ? "warning" : "select");
+  };
+
+  return (
+    <>
+      <SectionHeader title="Improvements" />
+      <Rise index={2}>
+        <Card padded={false}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, padding: spacing.lg }}>
+            <SymTile name="wand.and.stars" color={colors.ember} bg={colors.emberBg} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <T kind="bodyMedium" color={colors.text}>Auto-approve low-risk improvements</T>
+              <T kind="sub">When on, FamiliOS applies low-risk fixes it&apos;s confident will help — always logged in Activity, and reversible.</T>
+            </View>
+            <Switch
+              value={!!on}
+              disabled={busy || on === null}
+              onValueChange={(v) => void toggle(v)}
+              trackColor={{ true: colors.ember, false: colors.surfaceSunken }}
+              accessibilityLabel="Auto-approve low-risk improvements"
+            />
+          </View>
+          {note ? (
+            <View style={{ paddingHorizontal: spacing.lg, paddingBottom: spacing.lg }}>
+              <Notice text={note} ok={false} />
             </View>
           ) : null}
         </Card>

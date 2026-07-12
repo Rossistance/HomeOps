@@ -11,7 +11,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
-import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, PressableScale, Button } from "@/components/ui";
+import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale, Button } from "@/components/ui";
 import { MemberAvatar } from "./profile";
 
 const fmtEventTime = (e: EventRec) => {
@@ -62,9 +62,14 @@ export function HelpRequestsSection({ memberId, requests, events, onChanged }: {
         {pending.map((r) => {
           const ev = eventOf(r.eventId);
           const declining = decliningId === r.id;
+          const item = ev?.title ?? null;
+          const isOffer = r.kind === "offer";
+          const headline = isOffer
+            ? (item ? `${r.fromName} offered to help with ${item}` : `${r.fromName} offered to help`)
+            : (item ? `${r.fromName} asked you to help with ${item}` : `${r.fromName} asked for your help`);
           return (
             <Card key={r.id} style={{ gap: spacing.sm }}>
-              <T kind="rowTitle" style={{ fontSize: 17 }}>{r.fromName} asks:</T>
+              <T kind="rowTitle" style={{ fontSize: 17 }}>{headline}</T>
               <T kind="body" style={{ fontSize: 16, lineHeight: 23 }}>{r.message}</T>
               {ev ? (
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
@@ -96,10 +101,10 @@ export function HelpRequestsSection({ memberId, requests, events, onChanged }: {
               ) : (
                 <View style={{ flexDirection: "row", gap: spacing.sm }}>
                   <View style={{ flex: 1 }}>
-                    <Button variant="success" icon="checkmark" title="I can help" loading={busyId === r.id} disabled={!!busyId} onPress={() => void respond(r, "accept")} />
+                    <Button variant="success" icon="checkmark" title={isOffer ? "Yes, thank you" : "I can help"} loading={busyId === r.id} disabled={!!busyId} onPress={() => void respond(r, "accept")} />
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Button variant="neutral" title="Can't this time" disabled={!!busyId} onPress={() => setDecliningId(r.id)} />
+                    <Button variant="neutral" title={isOffer ? "Maybe not now" : "Can't this time"} disabled={!!busyId} onPress={() => setDecliningId(r.id)} />
                   </View>
                 </View>
               )}
@@ -112,7 +117,7 @@ export function HelpRequestsSection({ memberId, requests, events, onChanged }: {
             <Card key={r.id} style={{ backgroundColor: colors.sageBg, borderColor: "transparent", gap: 4 }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                 <Sym name="checkmark.circle.fill" size={15} color={colors.sage} />
-                <T kind="subMedium" color={colors.text} style={{ flex: 1 }}>You're helping {r.fromName}</T>
+                <T kind="subMedium" color={colors.text} style={{ flex: 1 }}>{r.kind === "offer" ? `${r.fromName} is helping you` : `You're helping ${r.fromName}`}</T>
               </View>
               <T kind="sub" style={{ fontSize: 14 }} numberOfLines={2}>
                 {r.message}{ev ? ` · ${ev.title}` : ""}
@@ -127,7 +132,7 @@ export function HelpRequestsSection({ memberId, requests, events, onChanged }: {
 
 export function GrandparentHome({ memberId, preview = false }: { memberId: string; preview?: boolean }) {
   const { colors, spacing } = useTheme();
-  const { session } = useSession();
+  const { session, signOut } = useSession();
   const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -182,7 +187,16 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
             <MemberAvatar member={member} size={40} />
           </PressableScale>
         )}
-        <T kind="eyebrow">{first}'s FamiliOS</T>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+          <T kind="eyebrow">{first}'s FamiliOS</T>
+          {/* Real login (not parent preview) needs a way out — no Settings tab on
+              scoped homes, so switch profile / sign out lives in the header. */}
+          {!preview && (
+            <PressableScale onPress={() => void signOut()} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Switch profile">
+              <SymTile name="rectangle.portrait.and.arrow.right" color={colors.textSecondary} bg={colors.surfaceSunken} size={34} iconSize={16} />
+            </PressableScale>
+          )}
+        </View>
       </View>
 
       {loading || !member ? <SkeletonCards count={3} /> : (
@@ -271,8 +285,8 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
           )}
 
           {!preview && (
-            <PressableScale onPress={() => router.push("/help")} haptic="select" style={{ alignItems: "center", marginTop: spacing.sm }} accessibilityRole="button" accessibilityLabel="Ask for help">
-              <T kind="subMedium" color={colors.ember}>Ask a family member for help</T>
+            <PressableScale onPress={() => router.push("/help")} haptic="select" style={{ alignItems: "center", marginTop: spacing.sm }} accessibilityRole="button" accessibilityLabel="Ask or offer help">
+              <T kind="subMedium" color={colors.ember}>Ask or offer help</T>
             </PressableScale>
           )}
 

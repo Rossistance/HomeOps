@@ -4,14 +4,14 @@
 import { useCallback, useState } from "react";
 import { Alert, View } from "react-native";
 import { useFocusEffect } from "expo-router";
-import { api, type AuditEvent, type MemoryRec, type RunRec } from "@/lib/api";
+import { api, type AuditEvent, type EvolutionReviewRec, type MemoryRec, type RunRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
 import { useRun } from "@/lib/run-context";
-import { useTheme, statusColor, tapHaptic } from "@/theme";
+import { useTheme, statusColor, riskColor, tapHaptic } from "@/theme";
 import { humanDetail } from "@/lib/format";
 import {
-  T, Card, Badge, Row, SectionHeader, SkeletonCards, ErrorState, Notice,
+  T, Card, Badge, Button, Row, SectionHeader, SkeletonCards, ErrorState, Notice,
   Rise, HScreen, Sym, PressableScale,
 } from "@/components/ui";
 
@@ -66,19 +66,23 @@ export default function ActivityScreen() {
   const { colors, spacing } = useTheme();
   const { session } = useSession();
   const { activeRun, clearRun } = useRun();
+  const canManage = session?.role === "Owner" || session?.role === "Adult Admin";
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [runs, setRuns] = useState<RunRec[]>([]);
   const [memory, setMemory] = useState<MemoryRec[]>([]);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [evolutions, setEvolutions] = useState<EvolutionReviewRec[]>([]);
+  const [evoBusy, setEvoBusy] = useState<string | null>(null);
+  const [evoMsg, setEvoMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("All");
 
   const load = useCallback(async () => {
-    const [h, rs, mem, ev] = await Promise.all([api.health(), api.runs(), api.memory(), api.audit(20)]);
+    const [h, rs, mem, ev, evos] = await Promise.all([api.health(), api.runs(), api.memory(), api.audit(20), api.evolutionReviews()]);
     setOffline(!h);
-    if (h) { setRuns(rs); setMemory(mem); setAudit(ev); }
+    if (h) { setRuns(rs); setMemory(mem); setAudit(ev); setEvolutions(evos); }
     setLoading(false);
   }, []);
 
@@ -111,6 +115,29 @@ export default function ActivityScreen() {
       ],
     );
   };
+
+  // Accept applies the improvement (server versions the agent/skill); dismiss rejects it.
+  // Adult Admin+ only — the server returns 403 for anyone else, surfaced inline.
+  const reviewEvo = async (ev: EvolutionReviewRec, accept: boolean) => {
+    setEvoBusy(ev.id); setEvoMsg(null);
+    const r = await api.reviewEvolution(ev.id, accept);
+    setEvoBusy(null);
+    if (r.error) {
+      tapHaptic("error");
+      setEvoMsg({ ok: false, text: r.error === "insufficient_role" ? "Only an Owner or Adult Admin can review improvements." : r.message ?? "Couldn't save that — try again." });
+      return;
+    }
+    if (accept && r.applyError) {
+      tapHaptic("warning");
+      setEvoMsg({ ok: false, text: `Accepted, but couldn't apply automatically: ${r.applyError}` });
+    } else {
+      tapHaptic(accept ? "success" : "select");
+      setEvoMsg({ ok: true, text: accept ? (r.applied ? "Accepted and applied." : "Accepted.") : "Dismissed." });
+    }
+    await load();
+  };
+  // Dismissed proposals drop off the list; keep pending + accepted (incl. auto-applied).
+  const improvements = evolutions.filter((e) => e.status !== "rejected");
 
   const stepDot = (s: string) =>
     s === "done" ? colors.sage : s === "running" ? colors.ember : s === "blocked" ? colors.amber : colors.textFaint;
@@ -213,7 +240,58 @@ export default function ActivityScreen() {
             )}
           </Rise>
 
-          <Rise index={2}>
+          {improvements.length > 0 ? (
+            <Rise index={2}>
+              <SectionHeader title="Improvements" />
+              {evoMsg ? <View style={{ marginBottom: spacing.sm }}><Notice text={evoMsg.text} ok={evoMsg.ok} /></View> : null}
+              <View style={{ gap: spacing.sm }}>
+                {improvements.map((ev) => {
+                  const rc = ev.risk ? riskColor(colors, ev.risk) : null;
+                  const auto = ev.status === "accepted" && ev.autoApproved;
+                  return (
+                    <Card key={ev.id} style={{ gap: 6 }}>
+                      <View style={{ flexDirection: "row", alignItems: "flex-start", gap: spacing.sm }}>
+                        <T kind="h3" color={colors.text} style={{ flex: 1 }}>{ev.title}</T>
+                        {rc ? <Badge label={ev.risk!} fg={rc.fg} bg={rc.bg} /> : null}
+                      </View>
+                      {ev.reason ? <T kind="sub">{ev.reason}</T> : null}
+                      {ev.summary && ev.summary !== ev.reason ? <T kind="sub" color={colors.textMuted}>{ev.summary}</T> : null}
+                      {ev.agentName ? (
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                          <Sym name="sparkles" size={12} color={colors.textFaint} />
+                          <T kind="caption" color={colors.textMuted}>{ev.agentName}</T>
+                        </View>
+                      ) : null}
+
+                      {auto ? (
+                        <View style={{ gap: 4, marginTop: 2 }}>
+                          <View style={{ flexDirection: "row" }}>
+                            <Badge label="Auto-applied by AI" icon="sparkles" fg={colors.sky} bg={colors.skyBg} />
+                          </View>
+                          {ev.autoReason ? <T kind="caption" color={colors.textMuted}>{ev.autoReason}</T> : null}
+                        </View>
+                      ) : ev.status === "accepted" ? (
+                        <View style={{ flexDirection: "row", marginTop: 2 }}>
+                          <Badge label="Accepted" icon="checkmark" fg={colors.sage} bg={colors.sageBg} />
+                        </View>
+                      ) : canManage ? (
+                        <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: 4 }}>
+                          <Button title="Accept" variant="success" small loading={evoBusy === ev.id} disabled={evoBusy !== null && evoBusy !== ev.id} onPress={() => void reviewEvo(ev, true)} />
+                          <Button title="Dismiss" variant="ghost" small disabled={evoBusy !== null} onPress={() => void reviewEvo(ev, false)} />
+                        </View>
+                      ) : (
+                        <View style={{ flexDirection: "row", marginTop: 2 }}>
+                          <Badge label="Pending review" fg={colors.amber} bg={colors.amberBg} />
+                        </View>
+                      )}
+                    </Card>
+                  );
+                })}
+              </View>
+            </Rise>
+          ) : null}
+
+          <Rise index={3}>
             <SectionHeader title="Memory" />
             {memory.length === 0 ? (
               <Card><T kind="sub">No memories yet — helpers write these as they learn your household&apos;s routines.</T></Card>
@@ -245,7 +323,7 @@ export default function ActivityScreen() {
             )}
           </Rise>
 
-          <Rise index={3}>
+          <Rise index={4}>
             <SectionHeader title="Timeline" />
             <Segmented value={filter} onChange={setFilter} />
             {(() => {

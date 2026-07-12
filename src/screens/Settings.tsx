@@ -37,12 +37,21 @@ export function Settings() {
   const setOwnerPin = async () => { if (!pin) return; await backend.setSettings({ ownerPin: pin }); setPin(""); toast({ kind: "success", title: "Owner PIN set", message: "Elevated profiles now require this PIN to sign in." }); };
   // Calendar auto-sync (server-owned, Adult Admin): pre-authorized Google pushes + two-way sweep.
   const [calendarAutoSync, setCalendarAutoSync] = useState(false);
-  useEffect(() => { void backend.getSettings().then((s) => setCalendarAutoSync(s.calendarAutoSync === true)); }, []);
+  // Auto-approve low-risk improvements (server-owned, Adult Admin): the server applies
+  // low-risk evolution proposals without a human and labels each one. Default on.
+  const [autoApproveImprovements, setAutoApproveImprovements] = useState(true);
+  useEffect(() => { void backend.getSettings().then((s) => { setCalendarAutoSync(s.calendarAutoSync === true); setAutoApproveImprovements(s.autoApproveImprovements !== false); }); }, []);
   const toggleCalendarAutoSync = async (v: boolean) => {
     setCalendarAutoSync(v);
     const s = await backend.setSettings({ calendarAutoSync: v });
     setCalendarAutoSync(s.calendarAutoSync === true);
     toast({ kind: v ? "success" : "info", title: v ? "Calendar auto-sync on" : "Calendar auto-sync off", message: v ? "Google pushes are pre-authorized and both calendars mirror automatically." : "Google pushes ask for approval again." });
+  };
+  const toggleAutoApproveImprovements = async (v: boolean) => {
+    setAutoApproveImprovements(v);
+    const s = await backend.setSettings({ autoApproveImprovements: v });
+    setAutoApproveImprovements(s.autoApproveImprovements !== false);
+    toast({ kind: v ? "success" : "info", title: v ? "Auto-approving low-risk improvements" : "Auto-approve off", message: v ? "FamiliOS applies low-risk improvements automatically and labels each one." : "Every improvement now waits for your review." });
   };
 
   const onImport = async (file?: File | null) => {
@@ -95,6 +104,9 @@ export function Settings() {
           </Row>
           <Row label="Calendar auto-sync" desc="Pre-authorize Google Calendar: pushes skip per-event approvals, local edits mirror to Google instantly, and the server sweeps both directions automatically. Conflicts still ask a human.">
             <Toggle checked={calendarAutoSync} onChange={(v) => void toggleCalendarAutoSync(v)} ariaLabel="Calendar auto-sync" />
+          </Row>
+          <Row label="Auto-approve low-risk improvements" desc="Let FamiliOS apply the low-risk improvements it learns from run traces automatically. Each auto-applied change is labelled and logged; higher-risk ideas still wait for your review.">
+            <Toggle checked={autoApproveImprovements} onChange={(v) => void toggleAutoApproveImprovements(v)} ariaLabel="Auto-approve low-risk improvements" />
           </Row>
         </Card>
 
