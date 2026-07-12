@@ -154,7 +154,11 @@ function inputNeedsFill(step, schema, stepIndex) {
   const inp = step.input ?? {};
   const hasTemplate = Object.values(inp).some((v) => typeof v === "string" && v.includes("{{"));
   const missingRequired = schema.some((f) => f.required && !String(inp[f.key] ?? "").trim());
-  return hasTemplate || missingRequired;
+  // Send-style content fields (an email/message body) are frequently schema-optional,
+  // yet a briefing must never go out with just a subject. Treat an empty body/message/
+  // content field as needing a fill so it gets threaded from the prior composed step.
+  const missingContent = schema.some((f) => /^(body|message|content)$/i.test(f.key) && !String(inp[f.key] ?? "").trim());
+  return hasTemplate || missingRequired || missingContent;
 }
 // Deterministic input threading — no AI required. URLs come from the most recent
 // succeeded step whose result carries one (search results, read pages); queries
@@ -165,7 +169,18 @@ function deterministicFill(run, stepIndex, step, schema) {
   let changed = false;
   for (const f of schema) {
     if (String(filled[f.key] ?? "").trim()) continue;
-    if (/(^|_)(url|link|page|href)/i.test(f.key)) {
+    if (/^(body|message|content)$/i.test(f.key)) {
+      // Thread the composed prose from the most recent step that produced text (a
+      // reasoning step, a created artifact, a summary) so a send step never goes out
+      // empty. This is what was missing when briefing emails shipped as subject-only.
+      for (let j = stepIndex - 1; j >= 0; j--) {
+        const s = run.steps[j];
+        if (s?.status !== "succeeded" || !s.result) continue;
+        const r = s.result;
+        const text = typeof r === "string" ? r : (r.text ?? r.body ?? r.answer ?? r.summary ?? r.content ?? null);
+        if (text && String(text).trim().length > 20) { filled[f.key] = String(text); changed = true; break; }
+      }
+    } else if (/(^|_)(url|link|page|href)/i.test(f.key)) {
       for (let j = stepIndex - 1; j >= 0; j--) {
         const s = run.steps[j];
         if (s?.status !== "succeeded" || !s.result) continue;
@@ -260,7 +275,9 @@ async function execResolved(resolved, input, ctx, approvalId) {
       const result = await resolved.tool.run(apiForAccount(account), input);
       return { ok: true, result };
     } catch (e) {
-      return { ok: false, error: "provider_error", message: String(e?.message ?? e) };
+      // Provider tools flag validation failures via e.code so the run records the
+      // honest cause (invalid_input) instead of a generic provider error.
+      return { ok: false, error: e?.code === "invalid_input" ? "invalid_input" : "provider_error", message: String(e?.message ?? e) };
     }
   }
   // connector tool — executeTool re-checks readiness + kill switch; we pass the
@@ -288,7 +305,7 @@ export function releaseAllLeases() {
   return released;
 }
 
-export async function startRun({ source = "manual", sourceRef = {}, plan, params = {}, session, title } = {}) {
+export async function startRun({ source = "manual", sourceRef = {}, plan, params = {}, session, title, visibility } = {}) {
   // Callers treat the return as a run record, so refuse loudly while draining
   // (the window is seconds long; clients surface the message and retry).
   if (_draining) throw new Error("server_restarting: an update is deploying — try again in about a minute.");
@@ -322,6 +339,8 @@ export async function startRun({ source = "manual", sourceRef = {}, plan, params
     id: runId,
     householdId: session?.householdId ?? "local",
     actorId: session?.actorId ?? "system",
+    // Scope for approval fan-out: a personal run's approvals notify only its requester.
+    visibility: visibility === "personal" ? "personal" : "household",
     source,
     sourceRef,
     title: title ?? plan?.title ?? "Run",
@@ -481,7 +500,7 @@ async function _drive(runId) {
     // Approval gate — create the approval, park, and return until a human decides.
     if (resolved.requiresApproval) {
       if (!stepNow.approvalId) {
-        const a = createApproval({ actorId: run.actorId, householdId: run.householdId, connectorId: resolved.connectorId, toolId: stepNow.toolId, input: stepNow.input, risk: resolved.risk, category: resolved.action, preview: stepNow.title });
+        const a = createApproval({ actorId: run.actorId, householdId: run.householdId, connectorId: resolved.connectorId, toolId: stepNow.toolId, input: stepNow.input, risk: resolved.risk, category: resolved.action, preview: stepNow.title, visibility: run.visibility });
         patchRunStep(runId, i, { status: "waiting_for_approval", approvalId: a.id });
         patchRun(runId, { status: "waiting_for_approval" });
         appendAudit({ type: "run.await_approval", runId, toolId: stepNow.toolId, approvalId: a.id, householdId: run.householdId });

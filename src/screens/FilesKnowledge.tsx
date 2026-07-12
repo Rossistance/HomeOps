@@ -36,6 +36,9 @@ function Files() {
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [idOpen, setIdOpen] = useState(false);
+  // Picked-but-not-yet-uploaded files: the name modal opens first so uploads get a
+  // human name instead of IMG_5555.jpg (same pattern as the ID-card modal).
+  const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { if (params?.file) setSelected(params.file); if (params?.new) inputRef.current?.click(); }, [params?.file, params?.new]);
@@ -48,7 +51,7 @@ function Files() {
   );
   const sel = data.files.find((f) => f.id === selected) ?? null;
 
-  const onPick = async (list: FileList | null) => { if (list && list.length) await uploadFiles(Array.from(list)); };
+  const onPick = (list: FileList | null) => { if (list && list.length) setPendingFiles(Array.from(list)); };
 
   return (
     <div>
@@ -86,7 +89,54 @@ function Files() {
       )}
       {sel && <FileDrawer file={sel} onClose={() => setSelected(null)} />}
       {idOpen && <IdCardModal spaceId={spaceId === "all" ? undefined : spaceId} onClose={() => setIdOpen(false)} />}
+      {pendingFiles && (
+        <UploadNameModal
+          files={pendingFiles}
+          onClose={() => setPendingFiles(null)}
+          onUpload={async (files) => { setPendingFiles(null); await uploadFiles(files, spaceId === "all" ? undefined : spaceId); }}
+        />
+      )}
     </div>
+  );
+}
+
+/** Name-the-upload modal (mirrors the IdCardModal pattern): give the document a human
+ *  name — "Fall soccer schedule" instead of IMG_5555.jpg. The name applies when a
+ *  single file is picked; multi-file drops upload with their original names. */
+function UploadNameModal({ files, onClose, onUpload }: { files: File[]; onClose: () => void; onUpload: (files: File[]) => Promise<void> }) {
+  const single = files.length === 1;
+  const original = files[0]?.name ?? "";
+  const ext = original.includes(".") ? original.split(".").pop() : null;
+  const [name, setName] = useState(single ? original.replace(/\.[^.]+$/, "") : "");
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (busy) return;
+    setBusy(true);
+    let toSend = files;
+    if (single && name.trim() && name.trim() !== original.replace(/\.[^.]+$/, "")) {
+      const finalName = ext && !name.trim().toLowerCase().endsWith(`.${ext.toLowerCase()}`) ? `${name.trim()}.${ext}` : name.trim();
+      toSend = [new File([files[0]], finalName, { type: files[0].type })];
+    }
+    await onUpload(toSend);
+    setBusy(false);
+  };
+  return (
+    <Modal open onClose={onClose} title={single ? "Name this document" : `Upload ${files.length} files`} icon="Upload"
+      footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="ember" disabled={busy || (single && !name.trim())} onClick={() => void save()}><Icon name={busy ? "Loader2" : "Upload"} size={15} className={busy ? "animate-spin" : ""} /> Upload</Button></>}>
+      <div className="space-y-3">
+        {single ? (
+          <Field label="Name" hint={`Original file: ${original}`}>
+            <TextInput autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Fall soccer schedule" onKeyDown={(e) => { if (e.key === "Enter") void save(); }} />
+          </Field>
+        ) : (
+          <div>
+            <p className="section-title mb-1.5">Files</p>
+            <ul className="space-y-1 text-sm text-ink-700">{files.map((f, i) => <li key={i} className="flex items-center gap-2"><Icon name="FileText" size={13} className="text-amber-600" /> {f.name}</li>)}</ul>
+            <p className="mt-2 text-xs text-ink-400">Multiple files keep their original names — you can rename each one afterwards.</p>
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -136,6 +186,8 @@ function FileDrawer({ file: f, onClose }: { file: FileAsset; onClose: () => void
   const updateFile = useStore((s) => s.updateFile);
   const requestApproval = useStore((s) => s.requestApproval);
   const [tag, setTag] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState(f.name);
   const [backUrl, setBackUrl] = useState<string | null>(null);
   const [loadingBack, setLoadingBack] = useState(false);
   const owner = data.members.find((m) => m.id === f.ownerMemberId);
@@ -158,6 +210,22 @@ function FileDrawer({ file: f, onClose }: { file: FileAsset; onClose: () => void
         <Button variant="primary" onClick={() => process(f.id)}><Icon name="Sparkles" size={15} /> Process</Button>
       </>}>
       <div className="space-y-4">
+        {/* Inline rename — a human name beats IMG_5555.jpg in every list */}
+        <div className="flex items-center gap-2">
+          {renaming ? (
+            <>
+              <TextInput autoFocus value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} className="flex-1"
+                onKeyDown={(e) => { if (e.key === "Enter" && nameDraft.trim()) { updateFile(f.id, { name: nameDraft.trim() }); setRenaming(false); } if (e.key === "Escape") setRenaming(false); }} />
+              <Button size="sm" variant="primary" disabled={!nameDraft.trim()} onClick={() => { updateFile(f.id, { name: nameDraft.trim() }); setRenaming(false); }}><Icon name="Check" size={13} /></Button>
+              <Button size="sm" variant="ghost" onClick={() => setRenaming(false)}><Icon name="X" size={13} /></Button>
+            </>
+          ) : (
+            <>
+              <p className="min-w-0 flex-1 truncate text-sm font-semibold text-ink-900">{f.name}</p>
+              <IconButton icon="Pencil" label={`Rename ${f.name}`} onClick={() => { setNameDraft(f.name); setRenaming(true); }} />
+            </>
+          )}
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <Badge color="gray">{f.type}</Badge><Badge color="gray">{fmtSize(f.sizeBytes)}</Badge>
           <Badge color={f.searchIndexed ? "sage" : "amber"}>{f.searchIndexed ? "Indexed" : "Not indexed"}</Badge>
@@ -215,14 +283,50 @@ const KTYPES: KnowledgeType[] = ["Custom Instruction", "Family Fact", "Preferenc
 // Item 15: real generated artifacts (briefings/reports/run summaries) written by runs —
 // server-owned, read-only here. Previously backend.artifacts() existed but NOTHING
 // called it, which is why the knowledge library always looked empty.
+/** Collapsible knowledge group (default collapsed, count in the header) — the same
+ *  accordion idiom as the Assistant's BuildRow (open state + chevron + aria-expanded). */
+function CollapsibleGroup({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button onClick={() => setOpen((v) => !v)} aria-expanded={open} className="mb-2.5 flex w-full items-center gap-2 text-left">
+        <p className="section-title flex-1">{title} <span className="font-normal text-ink-400">({count})</span></p>
+        <Icon name={open ? "ChevronUp" : "ChevronDown"} size={15} className="text-ink-400" />
+      </button>
+      {open && children}
+    </div>
+  );
+}
+
+/** Real memories written by agent runs — grouped and collapsed so the library stays scannable. */
+function MemoryGroup() {
+  const memories = useStore((s) => s.data.memories) ?? [];
+  if (!memories.length) return null;
+  return (
+    <CollapsibleGroup title="Memory" count={memories.length}>
+      <div className="stagger grid grid-cols-1 gap-3 md:grid-cols-2">
+        {memories.map((m) => (
+          <Card key={m.id} className="card-pad">
+            <div className="flex items-start justify-between gap-2">
+              <p className="font-semibold text-ink-900">{m.title}</p>
+              <Badge color="lavender">{m.type}</Badge>
+            </div>
+            <p className="mt-1 text-sm text-ink-600">{m.content}</p>
+            <p className="mt-2 text-xs text-ink-400">{m.source} · {fmtDate(m.updatedAt)}</p>
+          </Card>
+        ))}
+      </div>
+    </CollapsibleGroup>
+  );
+}
+
 function GeneratedArtifacts() {
   const [artifacts, setArtifacts] = useState<ServerArtifact[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   useEffect(() => { void backend.artifacts().then(setArtifacts); }, []);
   if (!artifacts.length) return null;
   return (
-    <div>
-      <p className="section-title mb-2.5">Generated reports & briefings</p>
+    <CollapsibleGroup title="Generated reports & briefings" count={artifacts.length}>
       <div className="stagger grid grid-cols-1 gap-3 md:grid-cols-2">
         {artifacts.map((a) => (
           <Card key={a.id} className="card-pad">
@@ -238,7 +342,7 @@ function GeneratedArtifacts() {
           </Card>
         ))}
       </div>
-    </div>
+    </CollapsibleGroup>
   );
 }
 
@@ -257,6 +361,7 @@ function Knowledge() {
         <Button variant="ember" onClick={() => setCreating(true)}><Icon name="Plus" size={16} /> New item</Button>
       </div>
       <div className="space-y-6">
+        <MemoryGroup />
         <GeneratedArtifacts />
         {KTYPES.map((type) => {
           const items = data.knowledge.filter((k) => k.type === type);

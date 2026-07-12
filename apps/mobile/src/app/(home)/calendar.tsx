@@ -5,7 +5,7 @@
 // edits write back two-way); ICS-fed events are read-only mirrors that expand
 // inline. Each subscribed calendar gets its own accent color on its cards.
 // Bottom: calendar subscriptions with sync status (feeds managed in Connections).
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type CalendarSubscription, type EventRec, type MemberRec } from "@/lib/api";
@@ -75,8 +75,11 @@ export default function CalendarScreen() {
   });
   const [expanded, setExpanded] = useState<string | null>(null);
   const [syncing, setSyncing] = useState<string | null>(null);
-  const [pulling, setPulling] = useState(false);
+  const [syncingAll, setSyncingAll] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
+  // Guards the auto-sync interval against overlapping runs (a slow sync + a 60s tick).
+  const syncBusyRef = useRef(false);
 
   const load = useCallback(async () => {
     // api.* swallow network errors into empty arrays, so probe /health for honesty.
@@ -93,34 +96,52 @@ export default function CalendarScreen() {
 
   const conflictCount = useMemo(() => events.filter((e) => conflictOf(e)).length, [events]);
 
-  // Pull Google-side edits back into pushed canonical events (the merge-back half of
-  // two-way sync). Clean edits merge; both-sides-changed flags a conflict to review.
-  const pullEdits = useCallback(async () => {
-    setPulling(true); setNotice(null);
-    const r = await api.pullGoogleEdits();
-    setPulling(false);
-    if (r.ok) {
-      await load();
-      const bits = [
-        r.merged ? `${r.merged} merged` : null,
-        r.conflicts ? `${r.conflicts} conflict${r.conflicts === 1 ? "" : "s"} to review` : null,
-        r.unlinked ? `${r.unlinked} unlinked` : null,
-      ].filter(Boolean);
-      setNotice({
-        text: `Checked ${r.checked ?? 0} pushed event${(r.checked ?? 0) === 1 ? "" : "s"}. ${bits.length ? bits.join(" · ") : "Everything already matches Google."}`,
-        ok: !r.conflicts,
-      });
-    } else {
-      setNotice({
-        text: r.error === "no_account"
-          ? "Connect your Google account (with calendar access) in Connections first."
-          : r.error === "insufficient_role"
-            ? "Pulling Google edits needs Adult Member or higher."
-            : `Couldn't pull Google edits: ${r.message ?? r.error ?? "unknown error"}`,
-        ok: false,
-      });
+  // ONE sync: every subscription syncs and Google-side edits pull back in a single
+  // pass (POST /calendar/sync-all). Also runs silently every ~60s while the screen
+  // is focused, so the calendar keeps itself fresh without any button-pressing.
+  const syncAll = useCallback(async (opts?: { silent?: boolean }) => {
+    if (syncBusyRef.current) return;
+    syncBusyRef.current = true;
+    if (!opts?.silent) { setSyncingAll(true); setNotice(null); }
+    try {
+      const r = await api.syncAllCalendars();
+      if (r.ok) {
+        setLastSyncedAt(new Date());
+        await load();
+        if (!opts?.silent) {
+          const bits = [
+            r.imported ? `${r.imported} new` : null,
+            r.updated ? `${r.updated} updated` : null,
+            r.removed ? `${r.removed} removed` : null,
+            r.pulled?.merged ? `${r.pulled.merged} merged from Google` : null,
+            r.pulled?.conflicts ? `${r.pulled.conflicts} conflict${r.pulled.conflicts === 1 ? "" : "s"} to review` : null,
+            r.errors?.length ? `${r.errors.length} feed${r.errors.length === 1 ? "" : "s"} failed` : null,
+          ].filter(Boolean);
+          setNotice({
+            text: `Synced ${r.synced ?? 0} calendar${(r.synced ?? 0) === 1 ? "" : "s"}. ${bits.length ? bits.join(" · ") : "Everything already up to date."}`,
+            ok: !r.pulled?.conflicts && !r.errors?.length,
+          });
+        }
+      } else if (!opts?.silent) {
+        setNotice({
+          text: r.error === "insufficient_role"
+            ? "Syncing needs Adult Member or higher."
+            : `Couldn't sync: ${r.message ?? r.error ?? "unknown error"}`,
+          ok: false,
+        });
+      }
+    } finally {
+      syncBusyRef.current = false;
+      setSyncingAll(false);
     }
   }, [load]);
+
+  // Auto-sync: a silent sync-all every ~60s while this screen is focused.
+  useFocusEffect(useCallback(() => {
+    if (!canManage) return;
+    const t = setInterval(() => { void syncAll({ silent: true }); }, 60_000);
+    return () => clearInterval(t);
+  }, [canManage, syncAll]));
 
   const nameOf = useCallback(
     (id: string | null) => (id ? members.find((m) => m.actorId === id)?.displayName ?? null : null),
@@ -136,9 +157,13 @@ export default function CalendarScreen() {
   const SUB_AV = ["sky", "sage", "amber", "lavender", "coral", "ember"];
   const subColorForId = useCallback((subId: string) => {
     const sub = subs.find((s) => s.id === subId);
+    // Prefer the OWNING MEMBER's profile color (a connected Google calendar belongs
+    // to a person) so Ross's synced events match Ross's accent on the Today strip.
+    const ownerColor = sub?.ownerActorId ? colorOf(sub.ownerActorId) : null;
+    if (ownerColor) return ownerColor;
     if (sub?.color) return memberAccent(colors, sub.color);
     return memberAccent(colors, SUB_AV[[...subId].reduce((a, c) => a + c.charCodeAt(0), 0) % SUB_AV.length]);
-  }, [subs, colors]);
+  }, [subs, colors, colorOf]);
   /** Every source calendar this synced event appears on (a shared event carries the
    * owning subscription plus any alsoSubscriptionIds) — one color per calendar. */
   const subColorsOf = useCallback((e: EventRec) => {
@@ -161,10 +186,15 @@ export default function CalendarScreen() {
       .map((n) => /\(([^)]+)\)/.exec(n)?.[1] ?? n);
     return names.length ? names.join(" · ") : null;
   }, [nameOf, subs]);
-  /** The single accent a whole event card keys off: first participant's color for
-   * FamiliOS events, the source calendar's color for synced ones. */
+  /** The single accent a whole event card keys off: first participant's color →
+   * the event owner's member color (linked Google events carry the member who
+   * connected that calendar) → the source calendar's color as the last resort. */
   const accentOf = useCallback(
-    (e: EventRec) => e.participantIds.map((id) => colorOf(id)).find(Boolean) ?? subColorsOf(e)[0] ?? null,
+    (e: EventRec) =>
+      e.participantIds.map((id) => colorOf(id)).find(Boolean)
+      ?? colorOf(e.ownerId ?? null)
+      ?? subColorsOf(e)[0]
+      ?? null,
     [colorOf, subColorsOf],
   );
 
@@ -403,24 +433,32 @@ export default function CalendarScreen() {
       </Rise>
       ) : null}
 
-      {/* Two-way Google sync: pull edits made on the Google side back into pushed events. */}
+      {/* One Sync: every subscription + Google-edit pull in a single pass (and it
+          re-runs silently every minute while this screen is open). */}
       {canManage ? (
-        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
-          <Button
-            small
-            variant="neutral"
-            icon="arrow.down.circle"
-            title={pulling ? "Checking…" : "Pull Google edits"}
-            loading={pulling}
-            onPress={() => void pullEdits()}
-          />
-          {conflictCount > 0 ? (
-            <Badge
-              label={`${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`}
-              fg={colors.coral}
-              bg={colors.coralBg}
-              icon="exclamationmark.triangle.fill"
+        <View style={{ gap: 4 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
+            <Button
+              small
+              variant="neutral"
+              icon="arrow.triangle.2.circlepath"
+              title={syncingAll ? "Syncing…" : "Sync"}
+              loading={syncingAll}
+              onPress={() => void syncAll()}
             />
+            {conflictCount > 0 ? (
+              <Badge
+                label={`${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`}
+                fg={colors.coral}
+                bg={colors.coralBg}
+                icon="exclamationmark.triangle.fill"
+              />
+            ) : null}
+          </View>
+          {lastSyncedAt ? (
+            <T kind="caption" color={colors.textFaint}>
+              Last synced {lastSyncedAt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+            </T>
           ) : null}
         </View>
       ) : null}
@@ -531,18 +569,23 @@ export default function CalendarScreen() {
           </Card>
         ) : (
           <Card padded={false}>
-            {subs.map((s, i) => (
-              <Row
-                key={s.id}
-                icon="antenna.radiowaves.left.and.right"
-                iconColor={colors.sky}
-                iconBg={colors.skyBg}
-                title={s.name}
-                subtitle={syncLabel(s)}
-                last={i === subs.length - 1}
-                trailing={<Button small title="Sync" loading={syncing === s.id} onPress={() => void syncNow(s)} />}
-              />
-            ))}
+            {subs.map((s, i) => {
+              // Whose calendar this is: "Ross · wrhixon@gmail.com" when the server
+              // knows the owning account; otherwise fall back to the source label.
+              const owner = [s.ownerName, s.accountEmail].filter(Boolean).join(" · ") || s.source;
+              return (
+                <Row
+                  key={s.id}
+                  icon="antenna.radiowaves.left.and.right"
+                  iconColor={subColorForId(s.id) ?? colors.sky}
+                  iconBg={colors.skyBg}
+                  title={s.name}
+                  subtitle={`${owner}\n${syncLabel(s)}`}
+                  last={i === subs.length - 1}
+                  trailing={<Button small title="Sync" loading={syncing === s.id} onPress={() => void syncNow(s)} />}
+                />
+              );
+            })}
           </Card>
         )}
       </Rise>
@@ -576,11 +619,22 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
   const checklistDone = e.checklist.filter((c) => c.done).length;
   const conflict = conflictOf(e);
   // Color coding: a bold left stripe + a gradient wash of the accent fading
-  // left→right into the card, in the first participant's color (FamiliOS events)
-  // or the source calendar's color (synced events). Shared events show one dot
-  // per calendar they appear on.
-  const memberColors = e.participantIds.map((id) => colorOf(id)).filter(Boolean) as string[];
-  const stripe = memberColors[0] ?? subColors[0] ?? null;
+  // left→right into the card, in the first participant's color (FamiliOS events),
+  // the owner's member color (linked events), or the source calendar's color.
+  // Shared events (several source calendars, or several members) blend 2+ colors
+  // in both the stripe and the wash. One dot per calendar/member either way.
+  const memberColors = [...new Set(e.participantIds.map((id) => colorOf(id)).filter(Boolean))] as string[];
+  const ownerColor = colorOf(e.ownerId ?? null);
+  const distinctSubColors = [...new Set(subColors)];
+  const stripe = memberColors[0] ?? ownerColor ?? subColors[0] ?? null;
+  // ≥2 sources (owning subscription + alsoSubscriptionIds) or ≥2 member colors → blend.
+  const multiSource = ((e.provenance?.alsoSubscriptionIds as string[] | undefined)?.length ?? 0) > 0;
+  const blendColors: string[] = memberColors.length >= 2
+    ? memberColors.slice(0, 3)
+    : multiSource && distinctSubColors.length >= 2
+      ? distinctSubColors.slice(0, 3)
+      : [];
+  const blended = blendColors.length >= 2;
   const dots = e.participantIds.map((id) => colorOf(id) ?? colors.textFaint);
   const [resolving, setResolving] = useState<"google" | "local" | null>(null);
 
@@ -609,20 +663,35 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
         accessibilityLabel={editable
           ? `${e.title}, ${start ?? "no time"}. Edit event`
           : `${e.title}, ${start ?? "no time"}. ${expanded ? "Collapse" : "Expand"} details`}
-        style={stripe ? { borderLeftWidth: 5, borderLeftColor: stripe, overflow: "hidden" } : undefined}
+        style={stripe
+          ? blended
+            ? { overflow: "hidden" }
+            : { borderLeftWidth: 5, borderLeftColor: stripe, overflow: "hidden" }
+          : undefined}
       >
+        {/* wash: one accent fading into the card; shared events blend their colors */}
         {stripe ? (
           <LinearGradient
-            colors={[fade(stripe, 0.22), fade(stripe, 0)]}
+            colors={blended
+              ? ([...blendColors.map((c) => fade(c, 0.18)), fade(blendColors[blendColors.length - 1], 0)] as unknown as [string, string, ...string[]])
+              : [fade(stripe, 0.22), fade(stripe, 0)]}
             start={{ x: 0, y: 0.5 }} end={{ x: 0.8, y: 0.5 }}
             style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0 }}
+            pointerEvents="none"
+          />
+        ) : null}
+        {/* shared events: the left stripe is a vertical two-color gradient */}
+        {blended ? (
+          <LinearGradient
+            colors={blendColors as [string, string, ...string[]]}
+            start={{ x: 0.5, y: 0 }} end={{ x: 0.5, y: 1 }}
+            style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: 5 }}
             pointerEvents="none"
           />
         ) : null}
         <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
           <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={2}>{e.title}</T>
           {conflict ? <Badge label="Sync conflict" fg={colors.coral} bg={colors.coralBg} icon="exclamationmark.triangle.fill" /> : null}
-          {e.layer === "linked" ? <Badge label="Synced" fg={subColors[0] ?? colors.sky} bg={colors.skyBg} icon="arrow.triangle.2.circlepath" /> : null}
           {e.layer === "public" ? <Badge label="Public" fg={colors.textMuted} bg={colors.surfaceSunken} icon="globe" /> : null}
           {editable ? <Sym name="chevron.right" size={12} color={colors.textFaint} /> : null}
         </View>

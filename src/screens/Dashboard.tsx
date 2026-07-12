@@ -1,11 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "@/store/useStore";
-import { Card, Button, Badge, StatusDot, Avatar, EmptyState, Modal, Field, TextInput, ReadinessBadge, ACCENT_BG, MemberDots } from "@/components/ui";
+import { Card, Button, Badge, StatusDot, EmptyState, Modal, Field, TextInput, ReadinessBadge, ACCENT_BG, ACCENT_SOLID, MemberDots } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { generateBriefing, suggestNextActions } from "@/lib/ai";
 import { fmtDateFull, fmtTime, dayName, relativeTime, isOverdue } from "@/lib/dates";
-import { backend, type ServerEvolution } from "@/connectors/api";
+import { backend, type ServerEvolution, type HelpRequest, type CalendarSubscription } from "@/connectors/api";
 import type { Member, CalendarEvent } from "@/types";
+import { capabilitiesFor } from "@/lib/roles";
+import { MemberAvatar } from "@/components/MemberAvatar";
+import { ProfileEditor } from "@/components/ProfileEditor";
+import { KidView } from "@/screens/scoped/KidView";
+import { GrandparentView } from "@/screens/scoped/GrandparentView";
+import { SitterView } from "@/screens/scoped/SitterView";
+import { TextArea, Select } from "@/components/ui";
 
 // "What I learned" feed accents — includes the signature ember for improvement ideas,
 // which isn't in the shared ACCENT_BG map (that one has no ember entry).
@@ -32,8 +39,12 @@ export function Dashboard() {
   const inSpace = <T extends { spaceId?: string }>(arr: T[]): T[] => (spaceFilter === "all" ? arr : arr.filter((x) => x.spaceId === spaceFilter));
 
   const [reminderOpen, setReminderOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [rTitle, setRTitle] = useState("");
   const [ask, setAsk] = useState("");
+  // Role-scoped dashboards: children, grandparents, and sitters get a purpose-built view
+  // instead of the adult Hearth. Capabilities also gate the admin quick actions below.
+  const caps = capabilitiesFor(me ? { role: me.role, relationship: me.relationship, aiEnabled: me.aiEnabled } : null);
   // Evolution proposals are generated server-side (on run failures) and are NOT hydrated into
   // the local store — so, like the Improvements tab, pull them here and merge with any local
   // ones, or the "What I learned" card would miss the main source of improvements.
@@ -96,14 +107,20 @@ export function Dashboard() {
     setAsk("");
   };
 
-  const quick: { label: string; icon: string; accent: keyof typeof ACCENT_BG; run: () => void }[] = [
-    { label: "New agent", icon: "Bot", accent: "ink", run: () => navigate("agents", { new: "1" }) },
-    { label: "New automation", icon: "Workflow", accent: "sage", run: () => navigate("automations", { tab: "builder" }) },
-    { label: "Connect", icon: "Plug", accent: "lavender", run: () => navigate("connections") },
-    { label: "Upload", icon: "Upload", accent: "amber", run: () => navigate("files", { new: "1" }) },
-    { label: "Reminder", icon: "BellPlus", accent: "coral", run: () => setReminderOpen(true) },
-    { label: "Template", icon: "Sparkles", accent: "sky", run: () => navigate("automations", { tab: "templates" }) },
-  ];
+  const quick: { label: string; icon: string; accent: keyof typeof ACCENT_BG; run: () => void; show: boolean }[] = [
+    { label: "New agent", icon: "Bot", accent: "ink", run: () => navigate("agents", { new: "1" }), show: caps.canCreateAgents },
+    { label: "New automation", icon: "Workflow", accent: "sage", run: () => navigate("automations", { tab: "builder" }), show: caps.canCreateAgents },
+    { label: "Connect", icon: "Plug", accent: "lavender", run: () => navigate("connections"), show: caps.canConnect },
+    { label: "Upload", icon: "Upload", accent: "amber", run: () => navigate("files", { new: "1" }), show: caps.canUpload },
+    { label: "Reminder", icon: "BellPlus", accent: "coral", run: () => setReminderOpen(true), show: true },
+    { label: "Template", icon: "Sparkles", accent: "sky", run: () => navigate("automations", { tab: "templates" }), show: caps.canCreateAgents },
+  ].filter((q) => q.show);
+
+  // Purpose-built views for children, grandparents, and sitters/helpers (all hooks
+  // above have run, so this early return is safe).
+  if (caps.viewMode === "child") return <KidView />;
+  if (caps.viewMode === "grandparent") return <GrandparentView />;
+  if (caps.viewMode === "sitter") return <SitterView />;
 
   return (
     <div className="space-y-5">
@@ -113,7 +130,15 @@ export function Dashboard() {
         <div className="relative z-10 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="max-w-xl">
             <p className="text-xs font-medium uppercase tracking-[0.18em] text-white/45">{fmtDateFull(new Date())}</p>
-            <h1 className="font-display mt-1.5 text-4xl font-semibold leading-[1.05] tracking-tight sm:text-[2.7rem]">Good {partOfDay}, {firstName}</h1>
+            <div className="mt-1.5 flex items-center gap-3">
+              <h1 className="font-display text-4xl font-semibold leading-[1.05] tracking-tight sm:text-[2.7rem]">Good {partOfDay}, {firstName}</h1>
+              {me && (
+                <button onClick={() => setProfileOpen(true)} aria-label="Edit my profile" title="My Profile"
+                  className="shrink-0 rounded-full transition-transform hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ember-300">
+                  <MemberAvatar initials={me.initials} color={me.avatarColor} photoFileId={me.photoFileId} size={40} />
+                </button>
+              )}
+            </div>
             <p className="mt-2.5 text-sm leading-relaxed text-white/70">
               Here's your household at a glance.{" "}
               {pendingApprovals.length > 0
@@ -125,11 +150,13 @@ export function Dashboard() {
                 <Icon name="Filter" size={12} /> Filtered to {activeSpace.name} · clear <Icon name="X" size={12} />
               </button>
             )}
-            <div className="mt-5 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/10 p-1.5 shadow-[inset_0_2px_6px_rgba(0,0,0,0.25)] backdrop-blur">
-              <Icon name="Sparkles" size={18} className="ml-2 text-ember-200" />
-              <input value={ask} onChange={(e) => setAsk(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAsk()} placeholder="Ask FamiliOS to do something…" aria-label="Ask FamiliOS to do something" className="flex-1 bg-transparent py-2 text-sm text-white placeholder:text-white/50 focus:outline-none" />
-              <button onClick={runAsk} className="rounded-xl bg-ember-400 px-3.5 py-2 text-sm font-semibold text-ink-900 shadow-ember transition-transform active:scale-95 hover:bg-ember-300">Go</button>
-            </div>
+            {caps.canUseAI && (
+              <div className="mt-5 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/10 p-1.5 shadow-[inset_0_2px_6px_rgba(0,0,0,0.25)] backdrop-blur">
+                <Icon name="Sparkles" size={18} className="ml-2 text-ember-200" />
+                <input value={ask} onChange={(e) => setAsk(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAsk()} placeholder="Ask FamiliOS to do something…" aria-label="Ask FamiliOS to do something" className="flex-1 bg-transparent py-2 text-sm text-white placeholder:text-white/50 focus:outline-none" />
+                <button onClick={runAsk} className="rounded-xl bg-ember-400 px-3.5 py-2 text-sm font-semibold text-ink-900 shadow-ember transition-transform active:scale-95 hover:bg-ember-300">Go</button>
+              </div>
+            )}
           </div>
           {/* Family rhythm strip */}
           <div className="shrink-0">
@@ -140,7 +167,7 @@ export function Dashboard() {
                 return (
                   <button key={m.id} onClick={() => navigate("spaces", { tab: "members", member: m.id })} className="group flex flex-col items-center gap-1.5">
                     <span className="relative transition-transform group-hover:-translate-y-0.5">
-                      <Avatar initials={m.initials} color={m.avatarColor} size={44} />
+                      <MemberAvatar initials={m.initials} color={m.avatarColor} photoFileId={m.photoFileId} size={44} />
                       {count > 0 && <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-ember-400 px-1 text-[10px] font-bold text-ink-900 shadow-ember">{count}</span>}
                     </span>
                     <span className="text-[10px] text-white/70">{m.displayName.split(" ")[0]}</span>
@@ -206,6 +233,9 @@ export function Dashboard() {
           )}
         </Card>
       </div>
+
+      {/* ───────────── Ask for help from a family member (human-to-human) ───────────── */}
+      {me && <HelpCard me={me} members={data.members} events={data.events} />}
 
       {/* ───────────────────────── Quick actions ───────────────────────── */}
       <div className="stagger grid grid-cols-3 gap-2.5 sm:grid-cols-6">
@@ -331,7 +361,164 @@ export function Dashboard() {
         <Field label="What's the reminder?"><TextInput autoFocus value={rTitle} onChange={(e) => setRTitle(e.target.value)} placeholder="e.g. Sign the field-trip slip" /></Field>
         <p className="mt-3 text-xs text-ink-400">Saved locally to your household.</p>
       </Modal>
+
+      {profileOpen && me && <ProfileEditor member={me} onClose={() => setProfileOpen(false)} />}
     </div>
+  );
+}
+
+/* ─────────────── Ask for help from a family member (human-to-human) ─────────────── *
+ * Pick a member, optionally link an upcoming event (the message prefills), see a
+ * free/busy hint when that member has a connected calendar, and send. Pending
+ * requests addressed to ME are answerable inline; my outgoing ones are cancellable. */
+function HelpCard({ me, members, events }: { me: Member; members: Member[]; events: CalendarEvent[] }) {
+  const toast = useStore((s) => s.toast);
+  const [requests, setRequests] = useState<HelpRequest[]>([]);
+  const [subs, setSubs] = useState<CalendarSubscription[]>([]);
+  const [toId, setToId] = useState("");
+  const [eventId, setEventId] = useState("");
+  const [message, setMessage] = useState("");
+  const [messageEdited, setMessageEdited] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const reload = async () => setRequests(await backend.helpRequests());
+  useEffect(() => { void reload(); void backend.calendarSubscriptions().then(setSubs); }, []);
+
+  const others = members.filter((m) => m.id !== me.id);
+  const upcoming = useMemo(() => [...events]
+    .filter((e) => { const t = +new Date(e.startAt); return !isNaN(t) && t >= Date.now() - 36e5 && t <= Date.now() + 14 * 864e5; })
+    .sort((a, b) => +new Date(a.startAt) - +new Date(b.startAt)).slice(0, 30), [events]);
+  const chosenEvent = upcoming.find((e) => (e.serverId ?? e.id) === eventId) ?? null;
+
+  const pickEvent = (id: string) => {
+    setEventId(id);
+    const ev = upcoming.find((e) => (e.serverId ?? e.id) === id);
+    if (ev && (!messageEdited || !message.trim())) { setMessage(`Can you pick up the girls from ${ev.title}?`); setMessageEdited(false); }
+    if (!id && !messageEdited) setMessage("");
+  };
+
+  // Free/busy hint: only when the chosen member has a connected calendar (a subscription
+  // they own) — then check their own events for overlap with the linked event's window.
+  const hint = useMemo(() => {
+    if (!toId || !chosenEvent) return null;
+    if (!subs.some((s) => s.ownerActorId === toId)) return null;
+    const start = +new Date(chosenEvent.startAt);
+    if (isNaN(start)) return null;
+    const end = chosenEvent.endAt ? +new Date(chosenEvent.endAt) : start + 36e5;
+    const clash = events.find((e) => {
+      if ((e.serverId ?? e.id) === (chosenEvent.serverId ?? chosenEvent.id)) return false;
+      if (!(e.ownerId === toId || e.memberIds.includes(toId))) return false;
+      const s0 = +new Date(e.startAt);
+      if (isNaN(s0)) return false;
+      const e0 = e.endAt ? +new Date(e.endAt) : s0 + 36e5;
+      return s0 < end && e0 > start;
+    });
+    return clash ? { busy: true as const, title: clash.title } : { busy: false as const, title: "" };
+  }, [toId, chosenEvent, subs, events]);
+
+  const send = async () => {
+    if (!toId || !message.trim() || busy) return;
+    setBusy(true);
+    const r = await backend.createHelpRequest({ toActorId: toId, message: message.trim(), eventId: eventId || undefined });
+    setBusy(false);
+    if (r.error) { toast({ kind: "error", title: "Couldn't send the request", message: r.message ?? r.error }); return; }
+    toast({ kind: "success", title: "Help request sent", message: `${members.find((m) => m.id === toId)?.displayName ?? "They"} will see it on their dashboard.` });
+    setToId(""); setEventId(""); setMessage(""); setMessageEdited(false);
+    await reload();
+  };
+
+  const respond = async (r: HelpRequest, response: "accept" | "decline") => {
+    setBusy(true);
+    const res = await backend.respondHelpRequest(r.id, response);
+    setBusy(false);
+    if (res.error) toast({ kind: "error", title: "Couldn't respond", message: res.message ?? res.error });
+    await reload();
+  };
+  const cancel = async (r: HelpRequest) => {
+    setBusy(true);
+    const res = await backend.cancelHelpRequest(r.id);
+    setBusy(false);
+    if (res.error) toast({ kind: "error", title: "Couldn't cancel", message: res.message ?? res.error });
+    await reload();
+  };
+
+  const incoming = requests.filter((r) => r.status === "pending" && r.toActorId === me.id);
+  const outgoing = requests.filter((r) => r.status === "pending" && r.fromActorId === me.id);
+  const eventLabel = (e: CalendarEvent) => `${dayName(e.startAt).slice(0, 3)} ${fmtTime(e.startAt)} — ${e.title}`;
+
+  return (
+    <Card className="card-pad">
+      <Header icon="HeartHandshake" title="Ask for help from a family member" />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="space-y-3">
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-400">Who</p>
+            <div className="flex flex-wrap gap-1.5">
+              {others.map((m) => {
+                const on = toId === m.id;
+                return (
+                  <button key={m.id} onClick={() => setToId(on ? "" : m.id)} aria-pressed={on}
+                    className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors ${on ? "border-ember-400 bg-ember-50 text-ember-700" : "border-ink-900/[0.08] bg-surface-sunken/60 text-ink-600 hover:text-ink-800"}`}>
+                    <span className={`h-2 w-2 rounded-full ${ACCENT_SOLID[m.avatarColor] ?? ACCENT_SOLID.gray}`} />
+                    {m.displayName.split(" ")[0]}
+                  </button>
+                );
+              })}
+              {others.length === 0 && <p className="text-xs text-ink-400">No other members yet — add family in Household Spaces.</p>}
+            </div>
+          </div>
+          <Field label="For an event (optional)">
+            <Select value={eventId} onChange={(e) => pickEvent(e.target.value)}>
+              <option value="">No specific event</option>
+              {upcoming.map((e) => <option key={e.serverId ?? e.id} value={e.serverId ?? e.id}>{eventLabel(e)}</option>)}
+            </Select>
+          </Field>
+          <Field label="Message">
+            <TextArea rows={2} value={message} placeholder="Can you pick up the girls from practice?" onChange={(e) => { setMessage(e.target.value); setMessageEdited(true); }} />
+          </Field>
+          <div className="flex items-center gap-3">
+            <Button variant="ember" disabled={!toId || !message.trim() || busy} onClick={() => void send()}><Icon name="Send" size={14} /> Send</Button>
+            {hint && (hint.busy
+              ? <span className="text-xs font-medium text-amber-600">⚠ busy with {hint.title}</span>
+              : <span className="text-xs font-medium text-sage-600">✓ free</span>)}
+          </div>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-400">Asked of you</p>
+            {incoming.length === 0 ? <p className="text-xs text-ink-400">Nothing waiting on you.</p> : (
+              <ul className="space-y-2">
+                {incoming.map((r) => (
+                  <li key={r.id} className="rounded-2xl border border-amber-200/70 bg-amber-50/60 px-3 py-2">
+                    <p className="text-sm text-ink-800"><span className="font-semibold">{r.fromName}</span>: {r.message}</p>
+                    <div className="mt-1.5 flex gap-2">
+                      <Button size="sm" variant="success" disabled={busy} onClick={() => void respond(r, "accept")}><Icon name="Check" size={12} /> Accept</Button>
+                      <Button size="sm" variant="ghost" disabled={busy} onClick={() => void respond(r, "decline")}><Icon name="X" size={12} /> Decline</Button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-400">Your open asks</p>
+            {outgoing.length === 0 ? <p className="text-xs text-ink-400">You haven't asked anyone for help.</p> : (
+              <ul className="space-y-2">
+                {outgoing.map((r) => (
+                  <li key={r.id} className="flex items-center gap-2 rounded-2xl border border-ink-900/[0.06] bg-surface-rim px-3 py-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm text-ink-800">To <span className="font-semibold">{r.toName}</span>: {r.message}</p>
+                      <p className="text-[11px] text-ink-400">Waiting for an answer · {relativeTime(r.createdAt)}</p>
+                    </div>
+                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => void cancel(r)}><Icon name="X" size={12} /> Cancel</Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </div>
+    </Card>
   );
 }
 

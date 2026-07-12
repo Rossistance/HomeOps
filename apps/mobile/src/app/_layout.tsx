@@ -11,6 +11,7 @@ import { useFonts } from "expo-font";
 import { Newsreader_600SemiBold } from "@expo-google-fonts/newsreader";
 import { Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } from "@expo-google-fonts/inter";
 import { SessionProvider, useSession } from "@/lib/session";
+import { capabilitiesFor, type Capabilities } from "@/lib/roles";
 import { RunProvider } from "@/lib/run-context";
 import { ThemePrefProvider, OnboardingProvider, useOnboarding } from "@/lib/prefs";
 import { Lock } from "@/components/Lock";
@@ -31,7 +32,9 @@ Notifications.setNotificationHandler({
 });
 
 // Handoff IA: Today · Ask (sparkle) · Agents (bot) · Library (folder) · Settings (gear).
-function TabsNav() {
+// The trigger set is role-scoped: children see Today (plus Ask when an adult enabled
+// AI for them); grandparents/sitters see Today + Ask; adults/owners see all five.
+function TabsNav({ caps }: { caps: Capabilities }) {
   // Today is home base. unstable_settings.initialRouteName doesn't anchor
   // NativeTabs (it kept opening the alphabetically-first group, (agents)),
   // so force the selection once on mount — before first paint.
@@ -41,30 +44,41 @@ function TabsNav() {
     anchored.current = true;
     router.replace("/(home)");
   }, []);
-  return (
-    <NativeTabs>
-      <NativeTabs.Trigger name="(home)">
-        <NativeTabs.Trigger.Icon sf="house.fill" md="home" />
-        <NativeTabs.Trigger.Label>Today</NativeTabs.Trigger.Label>
-      </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="(ask)">
+
+  const fullNav = caps.viewMode === "adult" || caps.viewMode === "owner";
+  // Built as an array so the trigger set can vary by role (conditional JSX
+  // children inside NativeTabs are less predictable than an explicit list).
+  const triggers = [
+    <NativeTabs.Trigger key="(home)" name="(home)">
+      <NativeTabs.Trigger.Icon sf="house.fill" md="home" />
+      <NativeTabs.Trigger.Label>Today</NativeTabs.Trigger.Label>
+    </NativeTabs.Trigger>,
+  ];
+  if (caps.canUseAI) {
+    triggers.push(
+      <NativeTabs.Trigger key="(ask)" name="(ask)">
         <NativeTabs.Trigger.Icon sf="sparkles" md="auto_awesome" />
         <NativeTabs.Trigger.Label>Ask</NativeTabs.Trigger.Label>
-      </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="(agents)">
+      </NativeTabs.Trigger>,
+    );
+  }
+  if (fullNav) {
+    triggers.push(
+      <NativeTabs.Trigger key="(agents)" name="(agents)">
         <NativeTabs.Trigger.Icon sf="cpu" md="smart_toy" />
         <NativeTabs.Trigger.Label>Agents</NativeTabs.Trigger.Label>
-      </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="(library)">
+      </NativeTabs.Trigger>,
+      <NativeTabs.Trigger key="(library)" name="(library)">
         <NativeTabs.Trigger.Icon sf="folder.fill" md="folder" />
         <NativeTabs.Trigger.Label>Library</NativeTabs.Trigger.Label>
-      </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="(settings)">
+      </NativeTabs.Trigger>,
+      <NativeTabs.Trigger key="(settings)" name="(settings)">
         <NativeTabs.Trigger.Icon sf="gearshape.fill" md="settings" />
         <NativeTabs.Trigger.Label>Settings</NativeTabs.Trigger.Label>
-      </NativeTabs.Trigger>
-    </NativeTabs>
-  );
+      </NativeTabs.Trigger>,
+    );
+  }
+  return <NativeTabs>{triggers}</NativeTabs>;
 }
 
 function PushRegistrar() {
@@ -92,14 +106,34 @@ function Gate() {
   const { loading, session } = useSession();
   const { loaded: obLoaded, onboarded } = useOnboarding();
   const { colors } = useTheme();
+  // Role-scoped logins: resolve the signed-in member ONCE so the tab bar (and the
+  // home each role lands on) matches their capabilities — a child or sitter never
+  // gets the full admin navigation. The server still enforces everything.
+  const [caps, setCaps] = useState<Capabilities | null>(null);
+  const actorId = session?.actorId ?? null;
+  useEffect(() => {
+    if (!actorId) { setCaps(null); return; }
+    let cancelled = false;
+    void (async () => {
+      const members = await api.members();
+      if (cancelled) return;
+      const me = members.find((m) => m.isCurrentUser) ?? members.find((m) => m.actorId === actorId) ?? null;
+      setCaps(capabilitiesFor(me));
+    })();
+    return () => { cancelled = true; };
+  }, [actorId]);
+
   if (loading || !obLoaded) {
     return <View style={[st.splash, { backgroundColor: colors.bg }]}><ActivityIndicator color={colors.ember} size="large" /></View>;
   }
   if (!session) return <Lock />;
   if (!onboarded) return <Onboarding />;
+  if (!caps) {
+    return <View style={[st.splash, { backgroundColor: colors.bg }]}><ActivityIndicator color={colors.ember} size="large" /></View>;
+  }
   return (
     <>
-      <TabsNav />
+      <TabsNav caps={caps} />
       <PushRegistrar />
     </>
   );

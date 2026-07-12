@@ -422,7 +422,7 @@ const APPROVER_DEFAULTS = {
 export function defaultApproverRoles(risk) {
   return APPROVER_DEFAULTS[risk] ?? ["Owner", "Adult Admin"];
 }
-export function createApproval({ actorId, householdId, connectorId, toolId, input, risk, category, preview, allowedApproverRoles, allowedApproverIds, source }) {
+export function createApproval({ actorId, householdId, connectorId, toolId, input, risk, category, preview, allowedApproverRoles, allowedApproverIds, source, visibility }) {
   const all = readJSON("approvals.json", {});
   const id = "apr_" + crypto.randomBytes(12).toString("hex");
   const now = Date.now();
@@ -430,6 +430,8 @@ export function createApproval({ actorId, householdId, connectorId, toolId, inpu
   all[id] = {
     id, actorId, requestedBy: actorId, householdId: householdId ?? "local", connectorId, toolId,
     inputHash: hashInput(input), risk: toolRisk, toolRisk, category: category ?? "Message",
+    // "personal" approvals never fan out beyond their requester (see notify.approvalAudience).
+    visibility: visibility === "personal" ? "personal" : "household",
     preview: preview ?? "", status: "pending", source: source ?? "executable",
     allowedApproverRoles: allowedApproverRoles ?? defaultApproverRoles(toolRisk),
     allowedApproverIds: allowedApproverIds ?? [],
@@ -570,17 +572,26 @@ export function seenWebhookNonce(nonce) {
   return false;
 }
 
-/* ---- Expo push tokens (registered by native clients on login) ---- */
-export function getPushTokens() {
-  return readJSON("push-tokens.json", []);
+/* ---- Expo push tokens (registered by native clients on login) ----
+ * Stored as { token, householdId, actorId, updatedAt } so a notification can target the
+ * right person's device(s) — a personal approval must not fan out to the whole family.
+ * Legacy entries were bare strings; getPushTokens() normalizes them to objects (with
+ * null owner) so old registrations keep working until the client re-registers. */
+function normalizePushRec(t) {
+  if (typeof t === "string") return { token: t, householdId: null, actorId: null };
+  return t && typeof t === "object" && t.token ? t : null;
 }
-export function addPushToken(token) {
+export function getPushTokens() {
+  return readJSON("push-tokens.json", []).map(normalizePushRec).filter(Boolean);
+}
+export function addPushToken(token, owner = {}) {
   if (!token || typeof token !== "string") return;
-  const tokens = getPushTokens();
-  if (!tokens.includes(token)) writeJSON("push-tokens.json", [...tokens, token]);
+  const rows = getPushTokens().filter((r) => r.token !== token);
+  rows.push({ token, householdId: owner.householdId ?? null, actorId: owner.actorId ?? null, updatedAt: Date.now() });
+  writeJSON("push-tokens.json", rows);
 }
 export function removePushToken(token) {
-  writeJSON("push-tokens.json", getPushTokens().filter((t) => t !== token));
+  writeJSON("push-tokens.json", getPushTokens().filter((r) => r.token !== token));
 }
 
 /* =======================================================================
@@ -853,6 +864,17 @@ export const getPlaybook = (id) => _playbooks.get(id);
 export const putPlaybook = (p) => _playbooks.put(p);
 export const patchPlaybook = (id, patch) => _playbooks.patch(id, patch);
 export const deletePlaybookRec = (id) => _playbooks.remove(id);
+
+/* ---- Help requests: "can you help?" asks between household members ----
+ * A member (any role — children and helpers included) asks another member for a
+ * hand, optionally anchored to an event or task. The recipient accepts/declines;
+ * the requester (or an adult) may cancel while pending. Notifications are
+ * targeted to the two people involved, never fanned out to the household. */
+const _helpRequests = keyedCollection("help-requests.json");
+export const listHelpRequests = (filter) => _helpRequests.list(filter);
+export const getHelpRequest = (id) => _helpRequests.get(id);
+export const putHelpRequest = (rec) => _helpRequests.put(rec);
+export const patchHelpRequest = (id, patch) => _helpRequests.patch(id, patch);
 
 /* ---- Household files (Phase 5): server-owned file library ----
  * Metadata lives in household_files.json (keyed collection, visibility-scoped like

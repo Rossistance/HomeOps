@@ -3,7 +3,10 @@
 // (skills/agents/automations) straight from conversation. Streams via
 // /api/assistant/stream with a silent fallback to POST /api/assistant.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from "react-native";
+import * as DocumentPicker from "expo-document-picker";
+import * as ImagePicker from "expo-image-picker";
+import { readAsStringAsync } from "expo-file-system/legacy";
 import Animated, {
   FadeInDown, ReduceMotion, cancelAnimation,
   useAnimatedStyle, useSharedValue, withDelay, withRepeat, withSequence, withTiming,
@@ -11,16 +14,17 @@ import Animated, {
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec, type RunRec } from "@/lib/api";
+import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec, type MemberRec, type RunRec } from "@/lib/api";
 import { streamAssistant } from "@/lib/assistant-stream";
 import { getLocationContext } from "@/lib/location";
+import { capabilitiesFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
 import { useRun } from "@/lib/run-context";
 import { useTheme, useCalmMotion, riskColor, tapHaptic } from "@/theme";
 import { humanDetail } from "@/lib/format";
 // NOTE: explicit /index path — the legacy src/components/ui.tsx (old design
 // system, deleted with the old screens) shadows the ui/ directory otherwise.
-import { Badge, Button, Card, MarkdownText, Notice, PressableScale, Sym, SymTile, T } from "@/components/ui";
+import { Badge, Button, Card, EmptyState, MarkdownText, Notice, PressableScale, Sym, SymTile, T } from "@/components/ui";
 
 interface Msg {
   id: string;
@@ -35,10 +39,8 @@ interface Msg {
 
 interface Suggestion { text: string; icon: string }
 
-// Estimated clearance for the floating native tab bar (49pt bar; the window
-// safe-area inset is added separately). When the keyboard is up the bar is
-// covered, so the composer hugs the keyboard instead.
-const TAB_BAR_CLEARANCE = 56;
+// Attachments ride the same 5 MB base64 pipeline as the Upload sheet.
+const MAX_ATTACH_BYTES = 5 * 1024 * 1024;
 
 export default function AskScreen() {
   const { colors, spacing, radii, type, dark } = useTheme();
@@ -62,9 +64,19 @@ export default function AskScreen() {
   const [recent, setRecent] = useState<ConversationRec[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [kbVisible, setKbVisible] = useState(false);
+  // One pending attachment (uploaded immediately; referenced on the next send).
+  const [attached, setAttached] = useState<{ id: string; name: string } | null>(null);
+  const [attaching, setAttaching] = useState(false);
+  // Current member record → child AI gating (server enforces 403 ai_disabled too).
+  const [me, setMe] = useState<MemberRec | null>(null);
 
   const scroller = useRef<ScrollView>(null);
   const instantScroll = useRef(false);
+  // Scroll intents: scroll-to-end exactly once after the user sends; anchor the
+  // TOP of the next assistant reply once, then leave the position alone while
+  // the reveal timer grows the text.
+  const justSentRef = useRef(false);
+  const pendingAnchorId = useRef<string | null>(null);
   const revealRef = useRef<{ timer: ReturnType<typeof setInterval>; msgId: string; full: string } | null>(null);
 
   /* ---------- progressive reveal (client-side; the server streams progress
@@ -124,6 +136,15 @@ export default function AskScreen() {
   }, [canBuild]);
 
   useEffect(() => { if (session) void loadHome(); }, [session, loadHome]);
+
+  useEffect(() => {
+    if (!session) return;
+    let live = true;
+    void api.members()
+      .then((ms) => { if (live) setMe(ms.find((x) => x.isCurrentUser) ?? null); })
+      .catch(() => null);
+    return () => { live = false; };
+  }, [session]);
 
   /* ---------- keyboard: composer hugs the keyboard; clears the tab bar otherwise ---------- */
   useEffect(() => {
@@ -199,7 +220,7 @@ export default function AskScreen() {
 
   // Deep link support: the Inbox screen links with /(ask)?c=<conversation id>;
   // the Approval sheet links with ?prefill=<draft message> (filled, not sent).
-  const params = useLocalSearchParams<{ c?: string; prefill?: string }>();
+  const params = useLocalSearchParams<{ c?: string; prefill?: string; draft?: string }>();
   const handledC = useRef<string | null>(null);
   useEffect(() => {
     const id = typeof params.c === "string" && params.c ? params.c : null;
@@ -214,6 +235,15 @@ export default function AskScreen() {
     handledPrefill.current = p;
     setText(p);
   }, [params.prefill]);
+  // Playbooks (and others) deep-link with ?draft=<message> — filled into the
+  // composer once, never sent automatically.
+  const handledDraft = useRef<string | null>(null);
+  useEffect(() => {
+    const d = typeof params.draft === "string" && params.draft ? params.draft : null;
+    if (!d || handledDraft.current === d) return;
+    handledDraft.current = d;
+    setText(d);
+  }, [params.draft]);
 
   const newChat = useCallback(() => {
     if (busy) return;
@@ -243,10 +273,16 @@ export default function AskScreen() {
     const t0 = (preset ?? text).trim();
     if (!t0 || busy) return;
     flushReveal();
+    // A pending attachment rides along: named in the message text and passed as
+    // context so the planner can read the uploaded file.
+    const att = attached;
+    setAttached(null);
+    const t = att ? `[Attached: ${att.name}]\n${t0}` : t0;
     const uid = String(Date.now());
     setText("");
     setPhase("thinking");
-    setMsgs((m) => [...m, { id: uid, role: "user", text: t0 }]);
+    justSentRef.current = true;
+    setMsgs((m) => [...m, { id: uid, role: "user", text: t }]);
     setBusy(true);
     // First turn creates the durable server thread; later turns reuse it.
     let convId = conversationId;
@@ -261,17 +297,21 @@ export default function AskScreen() {
     // Coarse location rides along (permission-gated, cached, city-level) so
     // "weather", "near us", and local-news requests tailor without a follow-up.
     const location = await getLocationContext();
-    const context = location ? { location } : undefined;
+    const ctx: Record<string, unknown> = {};
+    if (location) ctx.location = location;
+    if (att) { ctx.attachedFileId = att.id; ctx.attachedFileName = att.name; }
+    const context = Object.keys(ctx).length ? ctx : undefined;
     let r: AssistantResult;
     try {
-      r = await streamAssistant(t0, { conversationId: convId ?? undefined, context, onProgress: () => setPhase("writing") });
+      r = await streamAssistant(t, { conversationId: convId ?? undefined, context, onProgress: () => setPhase("writing") });
     } catch {
       // Any stream failure (transport, auth, parse) → non-streaming call, so
       // behavior never regresses. The server persists the turn either way.
-      r = await api.assistant(t0, { conversationId: convId ?? undefined, context });
+      r = await api.assistant(t, { conversationId: convId ?? undefined, context });
     }
     setBusy(false);
     const aid = uid + "a";
+    pendingAnchorId.current = aid;
     if (r.ok) {
       const full =
         r.kind === "plan" && r.plan ? (r.answer || r.plan.summary || "On it.")
@@ -295,7 +335,59 @@ export default function AskScreen() {
           : (r.message || "I couldn't reach the AI provider just now."),
       }]);
     }
-  }, [busy, conversationId, flushReveal, revealInto, text, watchServerRun]);
+  }, [attached, busy, conversationId, flushReveal, revealInto, space, text, watchServerRun]);
+
+  /* ---------- attachments: pick → upload now → chip → context on next send ---------- */
+  const finishAttach = useCallback(async (name: string, base64: string, mime: string) => {
+    setAttaching(true);
+    const r = await api.uploadFile({ name, contentBase64: base64, mime, visibility: "household" });
+    setAttaching(false);
+    if (!r.file) {
+      Alert.alert("Couldn't attach", r.error === "too_large" ? "That file is over the 5 MB cap."
+        : r.error === "insufficient_role" ? "Attaching files needs Limited Member or higher."
+        : r.message ?? r.error ?? "Try again.");
+      return;
+    }
+    tapHaptic("success");
+    setAttached({ id: r.file.id, name: r.file.name });
+  }, []);
+
+  const attachFromDocument = useCallback(async () => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false });
+      if (res.canceled || !res.assets?.[0]) return;
+      const a = res.assets[0];
+      if ((a.size ?? 0) > MAX_ATTACH_BYTES) { Alert.alert("Too large", "That file is over the 5 MB cap."); return; }
+      const b64 = await readAsStringAsync(a.uri, { encoding: "base64" });
+      await finishAttach(a.name ?? "document", b64, a.mimeType ?? "application/octet-stream");
+    } catch (e) {
+      Alert.alert("Couldn't attach", String((e as Error)?.message ?? e));
+    }
+  }, [finishAttach]);
+
+  const attachFromPhotos = useCallback(async () => {
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) { Alert.alert("Photos access was denied"); return; }
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], base64: true, quality: 0.8 });
+      const a = res.canceled ? null : res.assets?.[0];
+      if (!a) return;
+      if (!a.base64) { Alert.alert("Couldn't read that photo"); return; }
+      if (a.base64.length * 0.75 > MAX_ATTACH_BYTES) { Alert.alert("Too large", "That photo is over the 5 MB cap."); return; }
+      await finishAttach(a.fileName ?? `photo-${Date.now()}.jpg`, a.base64, a.mimeType ?? "image/jpeg");
+    } catch (e) {
+      Alert.alert("Couldn't attach", String((e as Error)?.message ?? e));
+    }
+  }, [finishAttach]);
+
+  const pickAttachment = useCallback(() => {
+    tapHaptic("light");
+    Alert.alert("Attach a file", "It uploads to the household library and rides along with your next message.", [
+      { text: "Choose from Photos", onPress: () => void attachFromPhotos() },
+      { text: "Browse Files", onPress: () => void attachFromDocument() },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  }, [attachFromDocument, attachFromPhotos]);
 
   /* ---------- plan + build actions ---------- */
   // Runs stay IN the chat: live progress renders inline below the messages and
@@ -362,12 +454,37 @@ export default function AskScreen() {
   }, [conversationId]);
 
   /* ---------- render ---------- */
-  const composerPadBottom = kbVisible ? spacing.sm : insets.bottom + TAB_BAR_CLEARANCE;
+  // The floating native tab bar already overlays above the safe-area inset, so
+  // the composer only needs the inset + a hair of breathing room — no guessed
+  // tab-bar clearance (expo-router NativeTabs has no useBottomTabBarHeight).
+  // When the keyboard is up the bar is covered and the composer hugs the keyboard.
+  const composerPadBottom = kbVisible ? spacing.sm : insets.bottom + 8;
+
+  // Child members chat only when an adult flipped on aiEnabled (server 403s too).
+  const caps = me ? capabilitiesFor(me) : null;
+  const aiBlocked = !!caps && caps.viewMode === "child" && !caps.canUseAI;
+  if (aiBlocked) {
+    return (
+      <View style={{ flex: 1, backgroundColor: colors.bg, justifyContent: "center", padding: spacing.xl }}>
+        <Stack.Screen options={{ headerRight: undefined }} />
+        <EmptyState
+          icon="sparkles"
+          title="AI chat is off for your profile"
+          hint="Ask a parent to turn on AI chat for your profile — they can flip it on from Settings → Household."
+        />
+      </View>
+    );
+  }
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       <Stack.Screen
         options={{
+          // Opaque compact header: the space toggle + recent chats pin directly
+          // beneath it, so content must not scroll behind a transparent bar.
+          headerTransparent: false,
+          headerStyle: { backgroundColor: colors.bg },
+          headerShadowVisible: false,
           headerRight: () => (
             <Pressable
               onPress={() => { tapHaptic("light"); newChat(); }}
@@ -381,19 +498,9 @@ export default function AskScreen() {
         }}
       />
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-        <ScrollView
-          ref={scroller}
-          style={{ flex: 1 }}
-          contentInsetAdjustmentBehavior="automatic"
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="interactive"
-          contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.lg, gap: spacing.sm, flexGrow: 1 }}
-          onContentSizeChange={() => {
-            if (!msgs.length && !busy) return;
-            scroller.current?.scrollToEnd({ animated: !instantScroll.current });
-            instantScroll.current = false;
-          }}
-        >
+        {/* Pinned header: space toggle + recent chats stay fixed while the
+            messages scroll beneath them. */}
+        <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.sm, gap: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border, backgroundColor: colors.bg }}>
           {/* Space toggle: where THIS chat lives. Personal = private to you;
               Family = shared with the household. Locked once a thread exists
               (the server owns the record's visibility from creation). */}
@@ -450,7 +557,29 @@ export default function AskScreen() {
               ))}
             </ScrollView>
           ) : null}
+        </View>
 
+        <ScrollView
+          ref={scroller}
+          style={{ flex: 1 }}
+          contentInsetAdjustmentBehavior="automatic"
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.lg, gap: spacing.sm, flexGrow: 1 }}
+          onContentSizeChange={() => {
+            // Auto-scroll intents only — the reveal timer mutating the assistant
+            // text must NOT drag the view to the bottom of long answers.
+            if (instantScroll.current) {
+              instantScroll.current = false;
+              scroller.current?.scrollToEnd({ animated: false });
+              return;
+            }
+            if (justSentRef.current) {
+              justSentRef.current = false;
+              scroller.current?.scrollToEnd({ animated: true });
+            }
+          }}
+        >
           {msgs.length === 0 ? (
             <View style={{ alignItems: "center", paddingVertical: spacing.xxl, gap: spacing.sm }}>
               <LinearGradient
@@ -521,7 +650,18 @@ export default function AskScreen() {
               );
             }
             return (
-              <Animated.View key={m.id} entering={FadeInDown.duration(200).reduceMotion(ReduceMotion.System)} style={{ alignItems: "flex-start" }}>
+              <Animated.View
+                key={m.id}
+                entering={FadeInDown.duration(200).reduceMotion(ReduceMotion.System)}
+                style={{ alignItems: "flex-start" }}
+                onLayout={(e) => {
+                  // Fresh assistant reply: scroll ONCE so its TOP is visible,
+                  // then leave the position alone while the text reveals.
+                  if (pendingAnchorId.current !== m.id) return;
+                  pendingAnchorId.current = null;
+                  scroller.current?.scrollTo({ y: Math.max(0, e.nativeEvent.layout.y - spacing.sm), animated: true });
+                }}
+              >
                 <View style={{ maxWidth: "94%", alignSelf: "stretch", gap: spacing.sm }}>
                   <Card padded={false} style={{ padding: spacing.md, borderTopLeftRadius: 6, alignSelf: "flex-start", maxWidth: "100%" }}>
                     {m.error
@@ -601,7 +741,35 @@ export default function AskScreen() {
         </ScrollView>
 
         {/* Composer */}
-        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: spacing.sm, paddingHorizontal: spacing.md, paddingTop: spacing.sm, paddingBottom: composerPadBottom, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bg }}>
+        <View style={{ paddingBottom: composerPadBottom, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bg }}>
+          {attached ? (
+            <View style={{ flexDirection: "row", paddingHorizontal: spacing.md, paddingTop: spacing.sm }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.surfaceSunken, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6, maxWidth: "80%" }}>
+                <Sym name="paperclip" size={12} color={colors.textMuted} />
+                <T kind="subMedium" color={colors.textSecondary} numberOfLines={1} style={{ flexShrink: 1 }}>{attached.name}</T>
+                <PressableScale onPress={() => setAttached(null)} hitSlop={10} haptic="select" accessibilityRole="button" accessibilityLabel={`Remove attachment ${attached.name}`}>
+                  <Sym name="xmark" size={11} color={colors.textFaint} />
+                </PressableScale>
+              </View>
+            </View>
+          ) : null}
+          <View style={{ flexDirection: "row", alignItems: "flex-end", gap: spacing.sm, paddingHorizontal: spacing.md, paddingTop: spacing.sm }}>
+          <PressableScale
+            onPress={pickAttachment}
+            disabled={attaching || busy}
+            haptic={null}
+            accessibilityRole="button"
+            accessibilityLabel="Attach a file"
+            style={{
+              width: 44, height: 44, borderRadius: 22,
+              backgroundColor: colors.surfaceSunken, alignItems: "center", justifyContent: "center",
+              opacity: attaching || busy ? 0.45 : 1,
+            }}
+          >
+            {attaching
+              ? <ActivityIndicator size="small" color={colors.textMuted} />
+              : <Sym name="plus" size={18} color={colors.textSecondary} />}
+          </PressableScale>
           <TextInput
             value={text}
             onChangeText={setText}
@@ -630,6 +798,7 @@ export default function AskScreen() {
           >
             <Sym name="arrow.up" size={19} color={colors.onEmber} />
           </PressableScale>
+          </View>
         </View>
       </KeyboardAvoidingView>
     </View>

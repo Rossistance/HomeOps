@@ -1,131 +1,20 @@
-// Grandparent view — a calm, large-type day view for members like Grandma &
-// Grandpa. It's both what a grandparent-role login sees as their home (Today
-// renders GrandparentHome directly) and the parent-preview screen opened from
-// the Today member strip (preview=1 shows the "Parent view" back pill).
-// Emphasis: today's family day, the week ahead, gentle reminders, and the
-// "Can you help?" requests the family sent them. Bigger text everywhere.
+// Sitter view — what a Guest/Helper (babysitter, nanny, caregiver) sees as their
+// home, and the parent-preview screen from the Today member strip (preview=1
+// shows the back pill). Calm, large-type layout like the grandparent view:
+// today's family schedule + the week ahead (read-only), the tasks the family
+// assigned to them (with a complete button), and "Can you help?" requests.
 import { useCallback, useMemo, useState } from "react";
-import { StyleSheet, TextInput, View } from "react-native";
+import { StyleSheet, View } from "react-native";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
-import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, PressableScale, Button } from "@/components/ui";
+import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, PressableScale } from "@/components/ui";
+import { HelpRequestsSection } from "./grandparent";
 import { MemberAvatar } from "./profile";
 
-const fmtEventTime = (e: EventRec) => {
-  if (!e.startAt) return null;
-  const d = new Date(e.startAt);
-  if (isNaN(+d)) return null;
-  return `${d.toLocaleDateString(undefined, { weekday: "long" })} ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
-};
-
-/** "Can you help?" — pending help requests addressed to this member, with
- * Accept / Decline (decline takes a one-line note), plus recently accepted
- * ones shown as confirmations. Shared by the grandparent and sitter homes. */
-export function HelpRequestsSection({ memberId, requests, events, onChanged }: {
-  memberId: string;
-  requests: HelpRequestRec[];
-  events: EventRec[];
-  onChanged: () => void | Promise<void>;
-}) {
-  const { colors, spacing } = useTheme();
-  const [decliningId, setDecliningId] = useState<string | null>(null);
-  const [note, setNote] = useState("");
-  const [busyId, setBusyId] = useState<string | null>(null);
-
-  const pending = requests.filter((r) => r.status === "pending" && r.toActorId === memberId);
-  const accepted = requests
-    .filter((r) => r.status === "accepted" && r.toActorId === memberId)
-    .sort((a, b) => String(b.respondedAt ?? "").localeCompare(String(a.respondedAt ?? "")))
-    .slice(0, 3);
-  if (pending.length === 0 && accepted.length === 0) return null;
-
-  const eventOf = (id: string | null) => (id ? events.find((e) => e.id === id) ?? null : null);
-
-  const respond = async (r: HelpRequestRec, response: "accept" | "decline", responseNote?: string) => {
-    setBusyId(r.id);
-    const res = await api.respondHelpRequest(r.id, response, responseNote?.trim() || undefined);
-    setBusyId(null);
-    if (res.helpRequest) {
-      tapHaptic(response === "accept" ? "success" : "select");
-      setDecliningId(null); setNote("");
-      await onChanged();
-    }
-  };
-
-  return (
-    <>
-      <SectionHeader title="Can you help?" />
-      <View style={{ gap: spacing.sm }}>
-        {pending.map((r) => {
-          const ev = eventOf(r.eventId);
-          const declining = decliningId === r.id;
-          return (
-            <Card key={r.id} style={{ gap: spacing.sm }}>
-              <T kind="rowTitle" style={{ fontSize: 17 }}>{r.fromName} asks:</T>
-              <T kind="body" style={{ fontSize: 16, lineHeight: 23 }}>{r.message}</T>
-              {ev ? (
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                  <Sym name="calendar" size={13} color={colors.textMuted} />
-                  <T kind="sub" style={{ fontSize: 14 }}>{ev.title}{fmtEventTime(ev) ? ` · ${fmtEventTime(ev)}` : ""}</T>
-                </View>
-              ) : null}
-              {declining ? (
-                <View style={{ gap: spacing.sm }}>
-                  <View style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 12, borderCurve: "continuous", backgroundColor: colors.surfaceSunken }}>
-                    <TextInput
-                      value={note}
-                      onChangeText={setNote}
-                      placeholder="Add a note (optional)"
-                      placeholderTextColor={colors.textFaint}
-                      style={{ paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, color: colors.text }}
-                      accessibilityLabel="Decline note"
-                    />
-                  </View>
-                  <View style={{ flexDirection: "row", gap: spacing.sm }}>
-                    <View style={{ flex: 1 }}>
-                      <Button small variant="neutral" title="Back" onPress={() => { setDecliningId(null); setNote(""); }} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Button small variant="danger" title="Decline" loading={busyId === r.id} onPress={() => void respond(r, "decline", note)} />
-                    </View>
-                  </View>
-                </View>
-              ) : (
-                <View style={{ flexDirection: "row", gap: spacing.sm }}>
-                  <View style={{ flex: 1 }}>
-                    <Button variant="success" icon="checkmark" title="I can help" loading={busyId === r.id} disabled={!!busyId} onPress={() => void respond(r, "accept")} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Button variant="neutral" title="Can't this time" disabled={!!busyId} onPress={() => setDecliningId(r.id)} />
-                  </View>
-                </View>
-              )}
-            </Card>
-          );
-        })}
-        {accepted.map((r) => {
-          const ev = eventOf(r.eventId);
-          return (
-            <Card key={r.id} style={{ backgroundColor: colors.sageBg, borderColor: "transparent", gap: 4 }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                <Sym name="checkmark.circle.fill" size={15} color={colors.sage} />
-                <T kind="subMedium" color={colors.text} style={{ flex: 1 }}>You're helping {r.fromName}</T>
-              </View>
-              <T kind="sub" style={{ fontSize: 14 }} numberOfLines={2}>
-                {r.message}{ev ? ` · ${ev.title}` : ""}
-              </T>
-            </Card>
-          );
-        })}
-      </View>
-    </>
-  );
-}
-
-export function GrandparentHome({ memberId, preview = false }: { memberId: string; preview?: boolean }) {
+export function SitterHome({ memberId, preview = false }: { memberId: string; preview?: boolean }) {
   const { colors, spacing } = useTheme();
   const { session } = useSession();
   const insets = useSafeAreaInsets();
@@ -133,7 +22,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
   const [refreshing, setRefreshing] = useState(false);
   const [member, setMember] = useState<MemberRec | null>(null);
   const [events, setEvents] = useState<EventRec[]>([]);
-  const [reminders, setReminders] = useState<TaskRec[]>([]);
+  const [assigned, setAssigned] = useState<TaskRec[]>([]);
   const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
   const [householdName, setHouseholdName] = useState<string | null>(null);
 
@@ -141,7 +30,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
     const [members, evts, tasks, hh, hrs] = await Promise.all([api.members(), api.events(), api.tasks(), api.household(), api.helpRequests()]);
     setMember(members.find((m) => m.actorId === memberId) ?? null);
     setEvents(evts.filter((e) => e.startAt).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))));
-    setReminders(tasks.filter((t) => t.assignedMemberId === memberId && t.status !== "done"));
+    setAssigned(tasks.filter((t) => t.assignedMemberId === memberId && t.status !== "done"));
     setHelpRequests(hrs);
     setHouseholdName(hh?.name ?? null);
     setLoading(false);
@@ -159,11 +48,12 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
     return d.toDateString() !== todayStr && d.getTime() > now.getTime() && d.getTime() < now.getTime() + 7 * 86400000;
   }).slice(0, 5), [events, todayStr, now]);
 
-  const completeReminder = async (t: TaskRec) => {
+  // Status-only self-update — the server allows completing your own assigned tasks.
+  const completeTask = async (t: TaskRec) => {
     tapHaptic("success");
-    setReminders((list) => list.filter((x) => x.id !== t.id));
+    setAssigned((list) => list.filter((x) => x.id !== t.id));
     const r = await api.updateTask(t.id, { status: "done" });
-    if (r.error) { setReminders((list) => [...list, t]); }
+    if (r.error) { setAssigned((list) => [...list, t]); }
   };
 
   const time = (iso: string | null) =>
@@ -203,14 +93,14 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
             <HelpRequestsSection memberId={memberId} requests={helpRequests} events={events} onChanged={load} />
           </Rise>
 
-          {reminders.length > 0 && (
+          {assigned.length > 0 && (
             <Rise index={2}>
-              <SectionHeader title={`For you, ${first}`} />
+              <SectionHeader title="Assigned to you" />
               <Card padded={false}>
-                {reminders.map((t, i) => (
+                {assigned.map((t, i) => (
                   <PressableScale
                     key={t.id}
-                    onPress={() => void completeReminder(t)}
+                    onPress={() => void completeTask(t)}
                     haptic={null}
                     accessibilityRole="checkbox"
                     accessibilityState={{ checked: false }}
@@ -226,6 +116,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
                       <T kind="rowTitle" style={{ fontSize: 17 }}>{t.title}</T>
                       {!!t.dueAt && <T kind="sub">{new Date(t.dueAt).toLocaleDateString(undefined, { weekday: "long" })} · {time(t.dueAt)}</T>}
                     </View>
+                    <T kind="detail" color={colors.textFaint}>Tap when done</T>
                   </PressableScale>
                 ))}
               </Card>
@@ -277,7 +168,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
           )}
 
           <T kind="detail" center style={{ marginTop: spacing.sm, fontSize: 13 }}>
-            The family adds things here for you —{"\n"}nothing to set up, nothing to manage.
+            The family shares today's plan with you —{"\n"}nothing to set up, nothing to manage.
           </T>
         </>
       )}
@@ -285,10 +176,10 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
   );
 }
 
-export default function GrandparentScreen() {
+export default function SitterScreen() {
   const { session } = useSession();
   const { id, preview } = useLocalSearchParams<{ id?: string; preview?: string }>();
-  // No id param = a real grandparent login landing here; default to the session actor.
+  // No id param = a real sitter login landing here; default to the session actor.
   const memberId = id ?? session?.actorId ?? "";
-  return <GrandparentHome memberId={memberId} preview={preview === "1"} />;
+  return <SitterHome memberId={memberId} preview={preview === "1"} />;
 }

@@ -4,6 +4,8 @@ import { PageHeader, Card, Button, IconButton, Badge, Avatar, Tabs, Drawer, Moda
 import { cn } from "@/lib/cn";
 import { Icon } from "@/components/Icon";
 import { backend, type ServerMember, type ServerContactMethod } from "@/connectors/api";
+import { MemberAvatar } from "@/components/MemberAvatar";
+import { isChild } from "@/lib/roles";
 import type { Role, Space, SpaceType } from "@/types";
 
 /* Members are SERVER-owned (same registry the iOS app writes to) — the local
@@ -114,7 +116,7 @@ function SpaceDrawer({ space, onClose }: { space: Space; onClose: () => void }) 
           <p className="section-title mb-2">Members</p>
           <div className="space-y-1.5">{data.members.map((m) => (
             <div key={m.id} className="data-row">
-              <span className="flex items-center gap-2 text-sm"><Avatar initials={m.initials} color={m.avatarColor} size={26} /> {m.displayName} <span className="text-xs text-ink-400">{m.role}</span></span>
+              <span className="flex items-center gap-2 text-sm"><MemberAvatar initials={m.initials} color={m.avatarColor} photoFileId={m.photoFileId} size={26} /> {m.displayName} <span className="text-xs text-ink-400">{m.role}</span></span>
               <Toggle checked={space.memberIds.includes(m.id)} onChange={() => toggleMember(space.id, m.id)} />
             </div>
           ))}</div>
@@ -183,6 +185,17 @@ function Members() {
     await reload();
   };
 
+  // Display name / relationship / per-child AI toggle — all through the same server
+  // member registry (self-edit of name is allowed; the rest is Owner/Adult Admin gated,
+  // and the server's `last_owner` guard is surfaced via friendly()).
+  const patchMember = async (m: ServerMember, patch: { displayName?: string; relationship?: string | null; aiEnabled?: boolean }) => {
+    setBusyId(m.actorId); setError(null);
+    const r = await backend.updateMemberRemote(m.actorId, patch);
+    setBusyId(null);
+    if (r.error) setError(friendly(r.error, r.message));
+    await reload();
+  };
+
   return (
     <div>
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -194,48 +207,85 @@ function Members() {
         <p className="text-sm text-ink-500">Loading the household…</p>
       ) : (
         <div className="stagger grid grid-cols-1 gap-4 md:grid-cols-2">
-          {members.map((m) => {
-            const mine = methods.filter((c) => c.memberId === m.actorId);
-            return (
-              <Card key={m.actorId} className="card-pad">
-                <div className="flex items-start gap-3">
-                  <Avatar initials={initialsOf(m.displayName)} color={m.color ?? avatarColor(m.displayName)} size={44} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2"><p className="font-display text-lg font-semibold text-ink-900">{m.displayName}</p>{m.isCurrentUser && <Badge color="sky">You</Badge>}</div>
-                    <p className="text-xs text-ink-500">{m.relationship ?? m.role}</p>
-                  </div>
-                  {!m.isCurrentUser && m.role !== "Owner" && (
-                    <IconButton icon="Trash2" label={`Remove ${m.displayName}`} onClick={() => void remove(m)} />
-                  )}
-                </div>
-                <div className="mt-3 space-y-2">
-                  <Field label="Calendar color">
-                    <div className="flex flex-wrap items-center gap-2">
-                      {MEMBER_COLORS.map((c) => {
-                        const active = (m.color ?? avatarColor(m.displayName)) === c;
-                        return (
-                          <button key={c} onClick={() => void changeColor(m, c)} disabled={busyId === m.actorId} aria-label={`Set ${m.displayName}'s color to ${c}`} aria-pressed={active}
-                            className={cn("h-6 w-6 rounded-full ring-2 ring-offset-2 ring-offset-surface-raised transition-transform hover:scale-110", ACCENT_SOLID[c], active ? "ring-ink-700" : "ring-transparent")} />
-                        );
-                      })}
-                    </div>
-                  </Field>
-                  <Field label="Role">
-                    <Select value={m.role} onChange={(e) => void changeRole(m, e.target.value)} disabled={m.role === "Owner" || busyId === m.actorId}>
-                      {ROLES.map((r) => <option key={r}>{r}</option>)}
-                    </Select>
-                  </Field>
-                  <div className="well space-y-1.5 px-3 py-2.5">
-                    <div className="text-xs text-ink-500"><span className="font-semibold text-ink-600">Contact:</span> {mine.length ? mine.map((c) => `${c.label} (${c.type})`).join(", ") : "none yet"}</div>
-                  </div>
-                </div>
-              </Card>
-            );
-          })}
+          {members.map((m) => (
+            <MemberCard key={m.actorId} m={m} methods={methods.filter((c) => c.memberId === m.actorId)} busy={busyId === m.actorId}
+              onChangeRole={changeRole} onChangeColor={changeColor} onPatch={patchMember} onRemove={remove} />
+          ))}
         </div>
       )}
       {creating && <MemberModal onClose={() => setCreating(false)} onCreated={() => void reload()} />}
     </div>
+  );
+}
+
+function MemberCard({ m, methods, busy, onChangeRole, onChangeColor, onPatch, onRemove }: {
+  m: ServerMember;
+  methods: ServerContactMethod[];
+  busy: boolean;
+  onChangeRole: (m: ServerMember, role: string) => Promise<void>;
+  onChangeColor: (m: ServerMember, color: string) => Promise<void>;
+  onPatch: (m: ServerMember, patch: { displayName?: string; relationship?: string | null; aiEnabled?: boolean }) => Promise<void>;
+  onRemove: (m: ServerMember) => Promise<void>;
+}) {
+  const [name, setName] = useState(m.displayName);
+  const [rel, setRel] = useState(m.relationship ?? "");
+  const dirty = name.trim() !== m.displayName || rel.trim() !== (m.relationship ?? "");
+  const childView = m.role === "Child View" || isChild({ role: m.role, relationship: m.relationship });
+  const color = m.color ?? avatarColor(m.displayName);
+
+  return (
+    <Card className="card-pad">
+      <div className="flex items-start gap-3">
+        <MemberAvatar initials={initialsOf(m.displayName)} color={color} photoFileId={m.photoFileId} size={44} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2"><p className="font-display text-lg font-semibold text-ink-900">{m.displayName}</p>{m.isCurrentUser && <Badge color="sky">You</Badge>}</div>
+          <p className="text-xs text-ink-500">{m.relationship ?? m.role}</p>
+        </div>
+        {!m.isCurrentUser && m.role !== "Owner" && (
+          <IconButton icon="Trash2" label={`Remove ${m.displayName}`} onClick={() => void onRemove(m)} />
+        )}
+      </div>
+      <div className="mt-3 space-y-2">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <Field label="Display name"><TextInput value={name} onChange={(e) => setName(e.target.value)} disabled={busy} /></Field>
+          <Field label="Relationship"><TextInput value={rel} onChange={(e) => setRel(e.target.value)} placeholder="Parent, child, grandparent…" disabled={busy} /></Field>
+        </div>
+        {dirty && (
+          <div className="flex gap-2">
+            <Button size="sm" variant="primary" disabled={busy || !name.trim()} onClick={() => void onPatch(m, { displayName: name.trim(), relationship: rel.trim() || null })}><Icon name="Save" size={13} /> Save</Button>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setName(m.displayName); setRel(m.relationship ?? ""); }}>Cancel</Button>
+          </div>
+        )}
+        <Field label="Calendar color">
+          <div className="flex flex-wrap items-center gap-2">
+            {MEMBER_COLORS.map((c) => {
+              const active = color === c;
+              return (
+                <button key={c} onClick={() => void onChangeColor(m, c)} disabled={busy} aria-label={`Set ${m.displayName}'s color to ${c}`} aria-pressed={active}
+                  className={cn("h-6 w-6 rounded-full ring-2 ring-offset-2 ring-offset-surface-raised transition-transform hover:scale-110", ACCENT_SOLID[c], active ? "ring-ink-700" : "ring-transparent")} />
+              );
+            })}
+          </div>
+        </Field>
+        <Field label="Role">
+          <Select value={m.role} onChange={(e) => void onChangeRole(m, e.target.value)} disabled={m.role === "Owner" || busy}>
+            {ROLES.map((r) => <option key={r}>{r}</option>)}
+          </Select>
+        </Field>
+        {childView && (
+          <div className="flex items-center justify-between rounded-xl border border-lavender-200/70 bg-lavender-50/60 px-3 py-2">
+            <div>
+              <p className="text-sm font-semibold text-ink-800">AI chat</p>
+              <p className="text-xs text-ink-500">{m.aiEnabled ? "Can ask FamiliOS questions." : "Assistant is off for this child."}</p>
+            </div>
+            <Toggle checked={!!m.aiEnabled} onChange={(v) => void onPatch(m, { aiEnabled: v })} />
+          </div>
+        )}
+        <div className="well space-y-1.5 px-3 py-2.5">
+          <div className="text-xs text-ink-500"><span className="font-semibold text-ink-600">Contact:</span> {methods.length ? methods.map((c) => `${c.label} (${c.type})`).join(", ") : "none yet"}</div>
+        </div>
+      </div>
+    </Card>
   );
 }
 

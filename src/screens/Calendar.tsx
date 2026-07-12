@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@/store/useStore";
 import { PageHeader, Card, Button, Badge, Drawer, Field, TextInput, TextArea, Select, MemberDots } from "@/components/ui";
 import { Icon } from "@/components/Icon";
-import { backend, type ServerEvent, type BackendApproval } from "@/connectors/api";
+import { ACCENT_HEX } from "@/components/MemberAvatar";
+import { backend, type ServerEvent, type BackendApproval, type CalendarSubscription } from "@/connectors/api";
 
 /** A calendar item's per-member colored dots (the "color-coded per user" cue). */
 type MemberDot = { id: string; color: string; name: string };
@@ -34,6 +35,10 @@ export function Calendar() {
   const canManage = ["Owner", "Adult Admin", "Adult Member", "Limited Member"].includes(role ?? "");
   const nameOf = (id?: string | null) => (id ? members.find((m) => m.id === id)?.displayName ?? id : null);
   const dotsFor = (ev: ServerEvent): MemberDot[] => (ev.participantIds ?? []).map((id) => ({ id, color: members.find((m) => m.id === id)?.avatarColor ?? "gray", name: nameOf(id) ?? "" }));
+  const hexOf = (memberId?: string | null) => {
+    const m = memberId ? members.find((x) => x.id === memberId) : undefined;
+    return m ? ACCENT_HEX[m.avatarColor] ?? null : null;
+  };
 
   const [events, setEvents] = useState<ServerEvent[]>([]);
   const [selected, setSelected] = useState<ServerEvent | null>(null);
@@ -43,24 +48,49 @@ export function Calendar() {
   const [start, setStart] = useState(toLocalInput(new Date().toISOString()));
   const [location, setLocation] = useState("");
 
-  const [pulling, setPulling] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState<Date | null>(null);
+  const syncInFlight = useRef(false);
+  // Subscriptions feed the per-event owner colors (subscriptionId → ownerActorId → accent),
+  // so shared events can render a two-owner gradient.
+  const [subs, setSubs] = useState<CalendarSubscription[]>([]);
 
   const load = async () => setEvents(await backend.events());
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); void backend.calendarSubscriptions().then(setSubs); }, []);
 
   const conflictCount = useMemo(() => events.filter((e) => conflictOf(e)).length, [events]);
-  const pullEdits = async () => {
-    setPulling(true);
-    const r = await backend.pullGoogleEdits();
-    setPulling(false);
+  // One "Sync" button: re-sync every subscribed calendar AND pull Google-side edits.
+  const doSync = useCallback(async (silent = false) => {
+    if (syncInFlight.current) return;
+    syncInFlight.current = true;
+    setSyncing(true);
+    const r = await backend.syncAllCalendars();
+    syncInFlight.current = false;
+    setSyncing(false);
     if (r.ok) {
       await load();
-      const bits = [r.merged ? `${r.merged} merged` : null, r.conflicts ? `${r.conflicts} conflict${r.conflicts === 1 ? "" : "s"} to review` : null, r.unlinked ? `${r.unlinked} unlinked (deleted on Google)` : null].filter(Boolean);
-      toast({ kind: r.conflicts ? "warn" : "success", title: `Checked ${r.checked ?? 0} pushed event${(r.checked ?? 0) === 1 ? "" : "s"}`, message: bits.length ? bits.join(" · ") : "Everything already matches Google." });
-    } else {
-      toast({ kind: "warn", title: "Couldn't pull Google edits", message: r.message ?? (r.error === "no_account" ? "Connect your Google account (with calendar access) in Connections first." : r.error) });
+      void backend.calendarSubscriptions().then(setSubs);
+      setLastSyncAt(new Date());
+      if (!silent) {
+        const p = r.pulled ?? {};
+        const bits = [
+          r.imported ? `${r.imported} new` : null,
+          r.updated ? `${r.updated} updated` : null,
+          r.removed ? `${r.removed} removed` : null,
+          p.merged ? `${p.merged} merged from Google` : null,
+          p.conflicts ? `${p.conflicts} conflict${p.conflicts === 1 ? "" : "s"} to review` : null,
+        ].filter(Boolean);
+        toast({ kind: p.conflicts ? "warn" : "success", title: `Synced ${r.synced ?? 0} calendar${(r.synced ?? 0) === 1 ? "" : "s"}`, message: bits.length ? bits.join(" · ") : "Everything is up to date." });
+      }
+    } else if (!silent) {
+      toast({ kind: "warn", title: "Couldn't sync", message: r.message ?? (r.error === "no_account" ? "Connect your Google account (with calendar access) in Connections first." : r.error) });
     }
-  };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Auto-sync while the Calendar screen is mounted (~every 60s; skipped if one is in flight).
+  useEffect(() => {
+    const t = window.setInterval(() => { void doSync(true); }, 60_000);
+    return () => window.clearInterval(t);
+  }, [doSync]);
 
   const upcoming = useMemo(() => events
     .filter((e) => !e.startAt || new Date(e.startAt).getTime() >= Date.now() - 12 * 3600e3)
@@ -78,6 +108,24 @@ export function Calendar() {
     for (const k of Object.keys(map)) map[k].sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
     return map;
   }, [events]);
+
+  // Per-event member colors: the owner member's accent drives the row bar / month dot.
+  // Shared events (present in ≥2 subscriptions) get a two-owner gradient.
+  const colorsFor = (ev: ServerEvent): string[] => {
+    const prov = (ev.provenance ?? {}) as { subscriptionId?: string; alsoSubscriptionIds?: string[] };
+    const sourceIds = [prov.subscriptionId, ...(prov.alsoSubscriptionIds ?? [])].filter((x): x is string => !!x);
+    if (sourceIds.length >= 2) {
+      const ownerHexes = [...new Set(sourceIds
+        .map((sid) => subs.find((s) => s.id === sid)?.ownerActorId)
+        .map((aid) => hexOf(aid))
+        .filter((c): c is string => !!c))];
+      if (ownerHexes.length >= 2) return ownerHexes.slice(0, 2);
+    }
+    const primary = hexOf(ev.ownerId) ?? hexOf((ev.participantIds ?? [])[0]);
+    if (primary) return [primary];
+    // Fall back to the layer colors (ember = FamiliOS, sky = synced, gray = public).
+    return [ev.layer === "linked" ? "#6fa6d6" : ev.layer === "public" ? "#c2c7d1" : "#ce5d1d"];
+  };
 
   const add = async () => {
     if (!title.trim()) return; setBusy(true);
@@ -102,10 +150,11 @@ export function Calendar() {
           ))}
         </div>
         {canManage && (
-          <Button size="sm" variant="secondary" disabled={pulling} onClick={pullEdits} title="Check your pushed events for edits made on the Google side">
-            <Icon name={pulling ? "Loader2" : "Download"} size={13} className={pulling ? "animate-spin" : ""} /> Pull Google edits
+          <Button size="sm" variant="secondary" disabled={syncing} onClick={() => void doSync()} title="Sync every subscribed calendar and pull Google-side edits">
+            <Icon name={syncing ? "Loader2" : "RefreshCw"} size={13} className={syncing ? "animate-spin" : ""} /> Sync
           </Button>
         )}
+        {lastSyncAt && <span className="text-xs text-ink-400">Last synced {lastSyncAt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>}
         {conflictCount > 0 && <Badge color="coral"><Icon name="AlertTriangle" size={10} /> {conflictCount} conflict{conflictCount === 1 ? "" : "s"} to review</Badge>}
       </div>
 
@@ -121,7 +170,7 @@ export function Calendar() {
       )}
 
       {view === "month" ? (
-        <MonthGrid byDay={byDayAll} nameOf={nameOf} dotsFor={dotsFor} onOpen={setSelected} />
+        <MonthGrid byDay={byDayAll} nameOf={nameOf} dotsFor={dotsFor} colorsFor={colorsFor} onOpen={setSelected} />
       ) : upcoming.length === 0 ? (
         <Card className="card-pad"><p className="text-sm text-ink-400">Nothing on the calendar yet. Add an event, subscribe to a calendar in Connections, or connect Google.</p></Card>
       ) : (
@@ -129,10 +178,10 @@ export function Calendar() {
           {days.map((k) => (
             <Card key={k} className="card-pad">
               <p className="mb-2 font-display text-sm font-semibold text-ink-900">{new Date(k + "T00:00:00").toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}{k === new Date().toISOString().slice(0, 10) && <span className="ml-2 text-xs font-normal text-ember-600">Today</span>}</p>
-              <ul className="space-y-1.5">{byDay[k].map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} dots={dotsFor(e)} onOpen={() => setSelected(e)} />)}</ul>
+              <ul className="space-y-1.5">{byDay[k].map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} dots={dotsFor(e)} colors={colorsFor(e)} onOpen={() => setSelected(e)} />)}</ul>
             </Card>
           ))}
-          {byDay["undated"] && <Card className="card-pad"><p className="mb-2 font-display text-sm font-semibold text-ink-900">No date set</p><ul className="space-y-1.5">{byDay["undated"].map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} dots={dotsFor(e)} onOpen={() => setSelected(e)} />)}</ul></Card>}
+          {byDay["undated"] && <Card className="card-pad"><p className="mb-2 font-display text-sm font-semibold text-ink-900">No date set</p><ul className="space-y-1.5">{byDay["undated"].map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} dots={dotsFor(e)} colors={colorsFor(e)} onOpen={() => setSelected(e)} />)}</ul></Card>}
         </div>
       )}
 
@@ -144,7 +193,7 @@ export function Calendar() {
 }
 
 /* ---- Month grid (Phase 3): a 7-column month with per-day event chips ---- */
-function MonthGrid({ byDay, nameOf, dotsFor, onOpen }: { byDay: Record<string, ServerEvent[]>; nameOf: (id?: string | null) => string | null; dotsFor: (ev: ServerEvent) => MemberDot[]; onOpen: (e: ServerEvent) => void }) {
+function MonthGrid({ byDay, nameOf, dotsFor, colorsFor, onOpen }: { byDay: Record<string, ServerEvent[]>; nameOf: (id?: string | null) => string | null; dotsFor: (ev: ServerEvent) => MemberDot[]; colorsFor: (ev: ServerEvent) => string[]; onOpen: (e: ServerEvent) => void }) {
   const today = new Date();
   const [cursor, setCursor] = useState({ y: today.getFullYear(), m: today.getMonth() });
   const [selDay, setSelDay] = useState<string | null>(null);
@@ -179,40 +228,39 @@ function MonthGrid({ byDay, nameOf, dotsFor, onOpen }: { byDay: Record<string, S
               <span className={`text-xs font-semibold ${k === todayKey ? "text-ember-600" : "text-ink-700"}`}>{Number(k.slice(8, 10))}</span>
               <span className="mt-0.5 flex flex-wrap gap-0.5">
                 {(byDay[k] ?? []).slice(0, 3).map((e) => (
-                  <span key={e.id} title={e.title} className={`h-1.5 w-1.5 rounded-full ${e.layer === "linked" ? "bg-sky-400" : e.layer === "public" ? "bg-ink-300" : "bg-ember-500"}`} />
+                  <span key={e.id} title={e.title} className="h-1.5 w-1.5 rounded-full" style={{ background: barBackground(colorsFor(e)) }} />
                 ))}
                 {(byDay[k]?.length ?? 0) > 3 && <span className="text-[10px] leading-none text-ink-400">+{(byDay[k]?.length ?? 0) - 3}</span>}
               </span>
             </button>
           ))}
         </div>
-        <p className="mt-2 text-[11px] text-ink-400"><span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-ember-500 align-middle" /> FamiliOS <span className="mx-1 inline-block h-1.5 w-1.5 rounded-full bg-sky-400 align-middle" /> Synced</p>
+        <p className="mt-2 text-[11px] text-ink-400">Dots are colored by each event owner's member color; two-tone dots are shared between two calendars.</p>
       </Card>
       {selDay && (
         <Card className="card-pad">
           <p className="mb-2 font-display text-sm font-semibold text-ink-900">{new Date(selDay + "T00:00:00").toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}</p>
           {(byDay[selDay] ?? []).length === 0
             ? <p className="text-sm text-ink-400">Nothing scheduled this day.</p>
-            : <ul className="space-y-1.5">{(byDay[selDay] ?? []).map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} dots={dotsFor(e)} onOpen={() => onOpen(e)} />)}</ul>}
+            : <ul className="space-y-1.5">{(byDay[selDay] ?? []).map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} dots={dotsFor(e)} colors={colorsFor(e)} onOpen={() => onOpen(e)} />)}</ul>}
         </Card>
       )}
     </div>
   );
 }
 
-function layerBadge(ev: ServerEvent) {
-  if (ev.layer === "linked") return <Badge color="sky"><Icon name="RefreshCw" size={10} /> Synced</Badge>;
-  if (ev.layer === "public") return <Badge color="gray">Public</Badge>;
-  return null;
-}
-function EventRow({ ev, driver, dots, onOpen }: { ev: ServerEvent; driver: string | null; dots: MemberDot[]; onOpen: () => void }) {
+/** Solid color for one owner; a two-stop gradient when an event is shared by two. */
+const barBackground = (colors: string[]) =>
+  colors.length > 1 ? `linear-gradient(180deg, ${colors[0]} 0%, ${colors[0]} 48%, ${colors[1]} 52%, ${colors[1]} 100%)` : colors[0];
+
+function EventRow({ ev, driver, dots, colors, onOpen }: { ev: ServerEvent; driver: string | null; dots: MemberDot[]; colors: string[]; onOpen: () => void }) {
   const time = ev.startAt && !isNaN(+new Date(ev.startAt)) ? new Date(ev.startAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : null;
   return (
     <li>
       <button onClick={onOpen} className="flex w-full items-center gap-2.5 rounded-xl border border-ink-900/[0.05] bg-surface-sunken/50 px-3 py-2 text-left transition-colors hover:border-ember-200" aria-label={`Open ${ev.title}`}>
-        <Icon name="Calendar" size={14} className="shrink-0 text-ink-400" />
+        <span aria-hidden="true" className="h-8 w-1.5 shrink-0 rounded-full" style={{ background: barBackground(colors) }} />
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-ink-800">{ev.title} {layerBadge(ev)} {conflictOf(ev) && <Badge color="coral"><Icon name="AlertTriangle" size={10} /> Sync conflict</Badge>}</p>
+          <p className="text-sm font-medium text-ink-800">{ev.title} {conflictOf(ev) && <Badge color="coral"><Icon name="AlertTriangle" size={10} /> Sync conflict</Badge>}</p>
           <p className="truncate text-xs text-ink-500">{time ?? "All day"}{ev.location ? ` · ${ev.location}` : ""}{driver ? ` · Driver: ${driver}` : ""}{ev.source && ev.layer === "linked" ? ` · ${ev.source}` : ""}</p>
         </div>
         <MemberDots members={dots} />
@@ -225,6 +273,11 @@ function EventRow({ ev, driver, dots, onOpen }: { ev: ServerEvent; driver: strin
 function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGone }: { ev: ServerEvent; canManage: boolean; members: { id: string; name: string }[]; nameOf: (id?: string | null) => string | null; onClose: () => void; onChanged: (id: string) => Promise<void>; onGone: () => Promise<void> }) {
   const toast = useStore((s) => s.toast);
   const linked = ev.layer === "linked" || ev.layer === "public";
+  // Server verdict wins: editable === false → fully read-only for THIS member (e.g. a
+  // linked Google event someone else connected). editable === true → editable even if
+  // linked (it's the member who connected that account). Undefined → legacy layer rule.
+  const readOnly = ev.editable === false;
+  const canEdit = !readOnly && canManage && (ev.editable === true || !linked);
   const [title, setTitle] = useState(ev.title);
   const [location, setLocation] = useState(ev.location ?? "");
   const [notes, setNotes] = useState(ev.notes ?? "");
@@ -296,15 +349,16 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
 
   return (
     <Drawer open onClose={onClose} icon="Calendar" title={ev.title}
-      footer={canManage && !linked ? (
+      footer={canEdit ? (
         <div className="flex flex-wrap gap-2">
           <Button variant="primary" disabled={busy} onClick={save}><Icon name="Save" size={14} /> Save</Button>
-          <Button variant="secondary" disabled={busy || !!pushApproval} onClick={() => push()}><Icon name="Upload" size={14} /> {ev.provenance?.googleEventId ? "Update in Google" : "Push to Google"}</Button>
+          {!linked && <Button variant="secondary" disabled={busy || !!pushApproval} onClick={() => push()}><Icon name="Upload" size={14} /> {ev.provenance?.googleEventId ? "Update in Google" : "Push to Google"}</Button>}
           <Button variant="ghost" disabled={busy} onClick={del}><Icon name="Trash2" size={14} /> Delete</Button>
         </div>
       ) : canManage && linked ? <Button variant="ember" disabled={busy} onClick={copy}><Icon name="Copy" size={14} /> Copy to a FamiliOS event</Button> : undefined}>
       <div className="space-y-4">
-        {linked && <p className="rounded-2xl border border-sky-200/70 bg-sky-50 px-3.5 py-2.5 text-sm text-sky-800"><Icon name="RefreshCw" size={13} className="mr-1 inline" /> Synced from {ev.source || "an external calendar"} — read-only here. Copy it to make an editable FamiliOS event.</p>}
+        {readOnly && <p className="rounded-2xl border border-ink-900/[0.06] bg-surface-sunken/60 px-3.5 py-2.5 text-sm text-ink-500"><Icon name="Lock" size={13} className="mr-1 inline" /> Read-only — synced from {nameOf(ev.ownerId) ?? ev.source ?? "another member"}'s calendar.</p>}
+        {linked && !readOnly && !canEdit && <p className="rounded-2xl border border-sky-200/70 bg-sky-50 px-3.5 py-2.5 text-sm text-sky-800"><Icon name="RefreshCw" size={13} className="mr-1 inline" /> Synced from {ev.source || "an external calendar"} — read-only here. Copy it to make an editable FamiliOS event.</p>}
 
         {conflict && (
           <div className="rounded-xl border border-coral-200/80 bg-coral-50/70 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
@@ -343,7 +397,7 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
           </div>
         )}
 
-        {!linked && canManage ? (
+        {canEdit ? (
           <div className="space-y-2.5">
             <Field label="Title"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
             <Field label="When"><TextInput type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></Field>
@@ -359,7 +413,7 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
         )}
 
         {/* Rich family-event model — editable for canonical events (Phase 3) */}
-        {!linked && canManage ? (
+        {canEdit && !linked ? (
           <>
             <div>
               <p className="section-title mb-1.5">Participants</p>

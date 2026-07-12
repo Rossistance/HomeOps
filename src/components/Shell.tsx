@@ -171,7 +171,9 @@ function Topbar() {
   const spaceFilter = useStore((s) => s.spaceFilter);
   const setSpaceFilter = useStore((s) => s.setSpaceFilter);
   const spaces = useStore((s) => s.data.spaces);
-  const approvals = useStore((s) => s.data.approvals.filter((a) => a.status === "Pending").length);
+  // Scoped roles (child/grandparent/sitter) can't open the approvals screen — don't tease it.
+  const canSeeApprovals = useStore((s) => s.canAccess("messages"));
+  const approvals = useStore((s) => (canSeeApprovals ? s.data.approvals.filter((a) => a.status === "Pending").length : 0));
   const navigate = useStore((s) => s.navigate);
   const [drawer, setDrawer] = useState(false);
   useEffect(() => {
@@ -246,9 +248,11 @@ function MobileBottomNav() {
           </button>
         );
       })}
-      <button onClick={() => navigate("assistant")} className="flex flex-1 flex-col items-center gap-0.5 rounded-xl py-1.5 text-[10px] font-medium text-ember-600">
-        <Icon name="Sparkles" size={20} /> Ask
-      </button>
+      {canAccess("assistant") && (
+        <button onClick={() => navigate("assistant")} className="flex flex-1 flex-col items-center gap-0.5 rounded-xl py-1.5 text-[10px] font-medium text-ember-600">
+          <Icon name="Sparkles" size={20} /> Ask
+        </button>
+      )}
     </nav>
   );
 }

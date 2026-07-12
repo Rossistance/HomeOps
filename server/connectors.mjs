@@ -442,7 +442,9 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
       result = { query: input.query ?? "newer_than:7d", count: messages.length, messages };
     } else if (toolId === "gmail.send") {
       if (!input.to || !input.subject) return { ok: false, error: "invalid_input", message: "Provide `to` and `subject` to send an email." };
-      const raw = base64url(`To: ${input.to}\r\nSubject: ${input.subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${input.body ?? ""}`);
+      // Never ship an empty email — a briefing with only a subject is a bug, not a send.
+      if (!String(input.body ?? "").trim()) return { ok: false, error: "invalid_input", message: "Refusing to send an email with an empty body — compose the message body first." };
+      const raw = base64url(`To: ${input.to}\r\nSubject: ${input.subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${input.body}`);
       const r = await googleApi("gmail", "https://gmail.googleapis.com/gmail/v1/users/me/messages/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ raw }) });
       const j = await r.json();
       if (!r.ok) return { ok: false, error: "provider_error", message: j.error?.message ?? "Gmail send failed" };

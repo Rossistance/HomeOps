@@ -1,16 +1,19 @@
 // Settings — profile, appearance (in-app dark mode), household members,
 // connections at a glance, and the doorway to the deeper legacy screens.
-import { useCallback, useState } from "react";
-import { Alert, Switch, View } from "react-native";
+import { useCallback, useEffect, useState } from "react";
+import { Alert, ScrollView, Switch, TextInput, View } from "react-native";
 import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import Constants from "expo-constants";
 import { api, type MemberRec } from "@/lib/api";
+import { memberAccent } from "@/lib/member-colors";
+import { roleAtLeast } from "@/lib/roles";
 import { useSession } from "@/lib/session";
-import { useTheme, useThemePref } from "@/theme";
+import { useTheme, useThemePref, tapHaptic } from "@/theme";
 import { HuddleMark } from "@/components/brand";
 import {
-  T, Card, Row, SectionHeader, SkeletonCards, Rise, HScreen, Button, PressableScale,
+  T, Card, Chip, ChipRow, Row, SectionHeader, SkeletonCards, Rise, HScreen, Button, PressableScale,
+  HSheet, SheetCTA, Notice, Sym, Well,
 } from "@/components/ui";
 import { ConnectionSheet, type ConnectionService } from "@/components/sheets/connection-sheet";
 import { InviteSheet } from "@/components/sheets/invite-sheet";
@@ -26,8 +29,10 @@ export default function SettingsScreen() {
   const [openService, setOpenService] = useState<ConnectionService | null>(null);
   const [householdName, setHouseholdName] = useState<string | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [editingMember, setEditingMember] = useState<MemberRec | null>(null);
   const isOwner = session?.role === "Owner";
   const canInvite = session?.role === "Owner" || session?.role === "Adult Admin";
+  const canManage = roleAtLeast(session?.role, "Adult Admin");
 
   const load = useCallback(async () => {
     const [mem, provs, conns, hh] = await Promise.all([api.members(), api.providers(), api.connectors(), api.household()]);
@@ -149,14 +154,17 @@ export default function SettingsScreen() {
             <Card padded={false}>
               {members.map((m) => {
                 const removable = canInvite && !m.isCurrentUser && m.role !== "Owner";
+                // Owners/Adult Admins edit anyone; everyone can self-serve name + color.
+                const editable = canManage || m.isCurrentUser;
                 return (
                   <Row
                     key={m.actorId}
                     icon="person.fill"
-                    iconColor={colors.ember}
+                    iconColor={memberAccent(colors, m.color) ?? colors.ember}
                     iconBg={colors.emberBg}
                     title={`${m.displayName}${m.isCurrentUser ? " — you" : ""}`}
-                    subtitle={`${m.relationship ?? m.role}${removable ? " · hold to remove" : ""}`}
+                    subtitle={`${m.relationship ?? m.role}${editable ? " · tap to edit" : ""}${removable ? " · hold to remove" : ""}`}
+                    onPress={editable ? () => setEditingMember(m) : undefined}
                     onLongPress={removable ? () => removeMember(m) : undefined}
                     last={false}
                   />
@@ -250,6 +258,179 @@ export default function SettingsScreen() {
         onChanged={() => void load()}
       />
       <InviteSheet visible={inviteOpen} onClose={() => setInviteOpen(false)} householdName={householdName} onInvited={() => void load()} />
+      <MemberSheet
+        member={editingMember}
+        canManage={canManage}
+        visible={!!editingMember}
+        onClose={() => setEditingMember(null)}
+        onSaved={() => { setEditingMember(null); void load(); }}
+      />
     </HScreen>
+  );
+}
+
+/* ------------------------- member editor sheet ------------------------- */
+
+// The 6 server roles, highest authority first (must match server/auth.mjs).
+const ALL_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member", "Child View", "Guest/Helper"] as const;
+// Named accents the server stores in member.color (same set the web uses).
+const ACCENTS = ["ember", "sage", "sky", "lavender", "amber", "coral"] as const;
+
+/** Edit a member. Owners/Adult Admins get the full editor (role, relationship,
+ * child AI toggle); everyone else gets self-service name + color. The server
+ * enforces the real rules — last-owner demotion comes back as 409 last_owner. */
+function MemberSheet({ member, canManage, visible, onClose, onSaved }: {
+  member: MemberRec | null;
+  canManage: boolean;
+  visible: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { colors, spacing } = useTheme();
+  const [name, setName] = useState("");
+  const [relationship, setRelationship] = useState("");
+  const [role, setRole] = useState<string>("Adult Member");
+  const [color, setColor] = useState<string | null>(null);
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!visible || !member) return;
+    setName(member.displayName);
+    setRelationship(member.relationship ?? "");
+    setRole(member.role);
+    setColor(member.color ?? null);
+    setAiEnabled(!!member.aiEnabled);
+    setBusy(false);
+    setNote(null);
+  }, [visible, member]);
+
+  // AI-chat toggle applies to child profiles (role or relationship says child).
+  const showAiToggle = canManage && (role === "Child View" || /child|kid|son|daughter/i.test(relationship));
+
+  async function save() {
+    if (!member || busy) return;
+    setBusy(true); setNote(null);
+    // Only send what changed — self-edits may touch name/color/photo only.
+    const patch: Parameters<typeof api.patchMember>[1] = {};
+    if (name.trim() && name.trim() !== member.displayName) patch.displayName = name.trim();
+    if ((color ?? null) !== (member.color ?? null)) patch.color = color;
+    if (canManage) {
+      const rel = relationship.trim() || null;
+      if (rel !== (member.relationship ?? null)) patch.relationship = rel;
+      if (role !== member.role) patch.role = role;
+      if (showAiToggle && !!member.aiEnabled !== aiEnabled) patch.aiEnabled = aiEnabled;
+    }
+    if (Object.keys(patch).length === 0) { setBusy(false); onClose(); return; }
+    const r = await api.patchMember(member.actorId, patch);
+    setBusy(false);
+    if (r.member) { tapHaptic("success"); onSaved(); return; }
+    setNote(
+      r.error === "last_owner" ? "That would leave the household without an Owner — promote someone else to Owner first."
+      : r.error === "insufficient_role" ? "Only an Owner or Adult Admin can change roles or other members."
+      : r.message ?? `Couldn't save: ${r.error ?? "unknown error"}`,
+    );
+  }
+
+  if (!member) return null;
+  return (
+    <HSheet
+      visible={visible}
+      onClose={onClose}
+      title={member.isCurrentUser ? "Edit your profile" : `Edit ${member.displayName.split(" ")[0]}`}
+      leftLabel="Cancel"
+      heightPct={0.84}
+      footer={<SheetCTA title={busy ? "Saving…" : "Save changes"} onPress={() => void save()} disabled={busy || !name.trim()} />}
+    >
+      <ScrollView contentContainerStyle={{ paddingHorizontal: spacing.xl, paddingBottom: spacing.lg, gap: spacing.lg }} keyboardShouldPersistTaps="handled">
+        {note ? <Notice text={note} ok={false} /> : null}
+
+        <View style={{ gap: 6 }}>
+          <T kind="eyebrow">Name</T>
+          <Well style={{ padding: 0 }}>
+            <TextInput
+              value={name}
+              onChangeText={setName}
+              placeholder="Display name"
+              placeholderTextColor={colors.textFaint}
+              accessibilityLabel="Display name"
+              style={{ paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: colors.text }}
+            />
+          </Well>
+        </View>
+
+        {canManage ? (
+          <View style={{ gap: 6 }}>
+            <T kind="eyebrow">Relationship</T>
+            <Well style={{ padding: 0 }}>
+              <TextInput
+                value={relationship}
+                onChangeText={setRelationship}
+                placeholder="Child, Grandparent, Sitter…"
+                placeholderTextColor={colors.textFaint}
+                accessibilityLabel="Relationship"
+                style={{ paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: colors.text }}
+              />
+            </Well>
+          </View>
+        ) : null}
+
+        {canManage ? (
+          <View style={{ gap: 6 }}>
+            <T kind="eyebrow">Role</T>
+            <ChipRow>
+              {ALL_ROLES.map((rr) => (
+                <Chip key={rr} label={rr} selected={role === rr} onPress={() => setRole(rr)} />
+              ))}
+            </ChipRow>
+            <T kind="detail">The server refuses a change that would leave the household without an Owner.</T>
+          </View>
+        ) : null}
+
+        <View style={{ gap: 8 }}>
+          <T kind="eyebrow">Color</T>
+          <View style={{ flexDirection: "row", gap: spacing.sm }}>
+            {ACCENTS.map((a) => {
+              const c = memberAccent(colors, a) ?? colors.ember;
+              const on = color === a;
+              return (
+                <PressableScale
+                  key={a}
+                  onPress={() => { tapHaptic("select"); setColor(on ? null : a); }}
+                  haptic={null}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${a} accent${on ? ", selected" : ""}`}
+                  style={{
+                    width: 34, height: 34, borderRadius: 17,
+                    backgroundColor: c, alignItems: "center", justifyContent: "center",
+                    borderWidth: on ? 2.5 : 0, borderColor: colors.text,
+                  }}
+                >
+                  {on ? <Sym name="checkmark" size={13} color="#FFFFFF" /> : null}
+                </PressableScale>
+              );
+            })}
+          </View>
+          <T kind="detail">Their color on the calendar and around the app.</T>
+        </View>
+
+        {showAiToggle ? (
+          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+            <View style={{ flex: 1 }}>
+              <T kind="rowTitle">AI chat</T>
+              <T kind="detail">Let this child talk to Famili in Ask</T>
+            </View>
+            <Switch value={aiEnabled} onValueChange={setAiEnabled} trackColor={{ true: colors.ember }} />
+          </View>
+        ) : null}
+
+        {!canManage ? (
+          <Well>
+            <T kind="detail">You can change your own name and color. Roles and relationships are managed by an Owner or Adult Admin.</T>
+          </Well>
+        ) : null}
+      </ScrollView>
+    </HSheet>
   );
 }

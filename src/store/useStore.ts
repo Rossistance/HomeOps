@@ -32,6 +32,7 @@ import type {
   Role,
   EvolutionProposal,
 } from "@/types";
+import { capabilitiesFor } from "@/lib/roles";
 import { buildSeedData, buildEmptyData } from "@/data/seed";
 import { agentTemplates } from "@/data/agentTemplates";
 import { playbookCatalog } from "@/data/playbooksCatalog";
@@ -170,6 +171,23 @@ const SCREEN_MIN_ROLE: Partial<Record<ScreenId, Role>> = {
 export function screenAllowedForRole(screen: ScreenId, role: Role | undefined): boolean {
   const min = SCREEN_MIN_ROLE[screen];
   return !min || roleAtLeast(role, min);
+}
+/** Scoped view modes see a trimmed surface. Role rank alone can't express this (a
+ * sitter ranks below a child but needs MORE screens), so the capability matrix wins:
+ * child → Home + Calendar (+ Ask only when an adult enabled AI); grandparent → Home,
+ * Ask, Calendar; sitter → those plus Connections (they may connect their own calendar).
+ * Adults keep the role-rank rules above. */
+const SCOPED_SCREENS: Record<string, ScreenId[]> = {
+  child: ["dashboard", "calendar"],
+  grandparent: ["dashboard", "assistant", "calendar"],
+  sitter: ["dashboard", "assistant", "calendar", "connections"],
+};
+export function screenAllowedForMember(screen: ScreenId, member: { role?: string | null; relationship?: string | null; aiEnabled?: boolean | null }, role: Role | undefined): boolean {
+  const caps = capabilitiesFor(member);
+  const scoped = SCOPED_SCREENS[caps.viewMode];
+  if (!scoped) return screenAllowedForRole(screen, role);
+  if (screen === "assistant") return caps.canUseAI; // child needs adult-granted AI; gp/sitter always may ask
+  return scoped.includes(screen);
 }
 
 /** Map a connector display name / alias to its backend connector id. */
@@ -347,8 +365,8 @@ export interface Store extends UIState {
   /** Poll a durable SERVER run to terminal/parked and mirror it into local state. */
   syncServerRun: (runId: string) => Promise<void>;
   // Assistant — the conversational NL → plan → approval → execution → history loop.
-  startConversation: (text: string) => Promise<string>;
-  sendToAssistant: (conversationId: string, text: string) => Promise<void>;
+  startConversation: (text: string, opts?: { visibility?: "household" | "personal" }) => Promise<string>;
+  sendToAssistant: (conversationId: string, text: string, extraContext?: Record<string, unknown>) => Promise<void>;
   runConversationPlan: (conversationId: string, messageId: string) => Promise<void>;
   buildFromChat: (conversationId: string, messageId: string) => Promise<void>;
   deleteConversation: (id: string) => void;
@@ -663,7 +681,7 @@ export const useStore = create<Store>((set, get) => {
       return true;
     },
     currentRole: () => get().session?.role as Role ?? get().currentMember().role,
-    canAccess: (screen) => screenAllowedForRole(screen, (get().session?.role as Role) ?? get().currentMember().role),
+    canAccess: (screen) => screenAllowedForMember(screen, get().currentMember(), (get().session?.role as Role) ?? get().currentMember().role),
     reseed: async () => {
       await clearAppData();
       const data = buildSeedData();
@@ -1043,14 +1061,14 @@ export const useStore = create<Store>((set, get) => {
     },
 
     /* -------- assistant: the conversational NL → plan → approval loop ------- */
-    startConversation: async (text) => {
+    startConversation: async (text, opts) => {
       const t = (text ?? "").trim();
       let id = uid("conv");
       const now = nowISO();
       // Server-owned thread when online — history is then durable + actor-scoped. Falls
       // back to a local-only conversation when the backend is unreachable.
       if (get().backendOnline) {
-        const r = await backend.createConversation((t || "New chat").slice(0, 48));
+        const r = await backend.createConversation((t || "New chat").slice(0, 48), opts?.visibility);
         if (r.conversation) id = r.conversation.id;
       }
       commit((d) => { (d.conversations ??= []).unshift({ id, title: (t || "New chat").slice(0, 48), createdAt: now, updatedAt: now, messages: [] }); });
@@ -1058,7 +1076,7 @@ export const useStore = create<Store>((set, get) => {
       if (t) await get().sendToAssistant(id, t);
       return id;
     },
-    sendToAssistant: async (conversationId, text) => {
+    sendToAssistant: async (conversationId, text, extraContext) => {
       const t = (text ?? "").trim(); if (!t) return;
       const aMsgId = uid("m");
       commit((d) => {
@@ -1085,6 +1103,8 @@ export const useStore = create<Store>((set, get) => {
         pendingApprovals: d0.approvals.filter((a) => a.status === "Pending").length,
         liveConnectors: s.connectors.filter((c) => c.live).map((c) => c.name),
         connectedAccounts: s.accounts.filter((a) => a.status === "connected").map((a) => `${a.provider} (${a.displayName})`),
+        // Per-turn extras (e.g. { attachedFileId, attachedFileName } from the "+" attach button).
+        ...(extraContext ?? {}),
       };
       // Use SSE streaming so the UI shows a live "generating" indicator while the AI
       // is working. Transitions from "thinking" → "streaming" on first progress event.
@@ -1106,7 +1126,9 @@ export const useStore = create<Store>((set, get) => {
         if (!r.ok) {
           m.status = "error";
           m.error = r.message ?? r.error;
-          m.text = r.error === "no_provider"
+          m.text = r.error === "ai_disabled"
+            ? "AI chat isn't turned on for your profile yet. Ask a parent to switch it on in Household → Members, and I'll be right here!"
+            : r.error === "no_provider"
             ? "I need an AI provider to think. Connect one in Settings → AI Providers, then ask me again."
             : r.error === "backend_unreachable"
               ? "I can't reach the FamiliOS runtime. Make sure it's running (npm run dev), then try again."
@@ -1366,7 +1388,7 @@ export const useStore = create<Store>((set, get) => {
         id: e.id, serverId: e.id, title: e.title, startAt: e.startAt ?? "", endAt: e.endAt ?? undefined,
         location: e.location || undefined, spaceId: e.spaceId, memberIds: e.participantIds ?? [],
         category: e.category ?? "General", movable: e.layer === "canonical", source: e.source ?? "FamiliOS",
-        layer: e.layer, visibility: e.visibility, ownerId: e.ownerId, driverId: e.driverId,
+        layer: e.layer, visibility: e.visibility, ownerId: e.ownerId, driverId: e.driverId, editable: e.editable,
         whatToBring: e.whatToBring, checklist: e.checklist,
         notes: (e as { notes?: string }).notes || undefined,
         provenance: (e as { provenance?: CalendarEvent["provenance"] }).provenance ?? null,
@@ -1436,6 +1458,8 @@ export const useStore = create<Store>((set, get) => {
               spaceIds: local?.spaceIds ?? sm.spaceIds ?? [],
               isCurrentUser: sm.isCurrentUser,
               email: local?.email,
+              photoFileId: sm.photoFileId ?? null,
+              aiEnabled: sm.aiEnabled,
               createdAt: local?.createdAt ?? nowISO,
               updatedAt: nowISO,
             };

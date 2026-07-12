@@ -1,15 +1,18 @@
-// Kid view — a simplified, big-target chore checklist for one child, opened
-// from their avatar on Today (parent preview). Real chores (tasks assigned to
-// them) and their real events for the day.
+// Kid view — a simplified, big-target chore checklist for one child. It's both
+// what a child-role login sees as their home (Today renders KidHome directly)
+// and the parent-preview screen opened from the Today avatar strip (preview=1
+// shows the "Parent view" back pill). Real chores, the family's real schedule
+// for today, and who's helping (accepted help requests linked to today's plans).
 import { useCallback, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming, ZoomIn } from "react-native-reanimated";
-import { api, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
+import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic, motion } from "@/theme";
 import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
+import { MemberAvatar } from "./profile";
 
 const CHORE_ICONS: [RegExp, string][] = [
   [/pet|dog|cat|feed|fish/i, "pawprint"],
@@ -33,27 +36,28 @@ function Progress({ pct }: { pct: number }) {
   );
 }
 
-export default function KidScreen() {
+export function KidHome({ memberId, preview = false }: { memberId: string; preview?: boolean }) {
   const { colors, spacing } = useTheme();
   const { session } = useSession();
   const insets = useSafeAreaInsets();
-  const { id } = useLocalSearchParams<{ id: string }>();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [kid, setKid] = useState<MemberRec | null>(null);
   const [chores, setChores] = useState<TaskRec[]>([]);
   const [events, setEvents] = useState<EventRec[]>([]);
+  const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
 
   const load = useCallback(async () => {
-    const [members, tasks, evts] = await Promise.all([api.members(), api.tasks(), api.events()]);
-    setKid(members.find((m) => m.actorId === id) ?? null);
-    setChores(tasks.filter((t) => t.assignedMemberId === id && t.type !== "bill"));
+    const [members, tasks, evts, hrs] = await Promise.all([api.members(), api.tasks(), api.events(), api.helpRequests()]);
+    setKid(members.find((m) => m.actorId === memberId) ?? null);
+    setChores(tasks.filter((t) => t.assignedMemberId === memberId && t.type !== "bill"));
+    // The whole family's day (read-only) — the kid sees where everyone is going.
     const today = new Date().toDateString();
-    setEvents(evts.filter((e) =>
-      e.startAt && new Date(e.startAt).toDateString() === today && e.participantIds?.includes(id ?? "")
-    ).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))));
+    setEvents(evts.filter((e) => e.startAt && new Date(e.startAt).toDateString() === today)
+      .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))));
+    setHelpRequests(hrs);
     setLoading(false);
-  }, [id]);
+  }, [memberId]);
   useFocusEffect(useCallback(() => { if (session) void load(); }, [session, load]));
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
@@ -61,6 +65,15 @@ export default function KidScreen() {
   const doneCount = useMemo(() => chores.filter((c) => c.status === "done").length, [chores]);
   const allDone = chores.length > 0 && doneCount === chores.length;
   const weekday = new Date().toLocaleDateString(undefined, { weekday: "long" });
+
+  // "Who's helping you" — accepted help requests linked to one of today's events
+  // (e.g. "Grandma is helping — Soccer practice").
+  const helpers = useMemo(() => {
+    const byId = new Map(events.map((e) => [e.id, e]));
+    return helpRequests
+      .filter((h) => h.status === "accepted" && h.eventId && byId.has(h.eventId))
+      .map((h) => ({ id: h.id, name: h.toName, event: byId.get(h.eventId!)! }));
+  }, [helpRequests, events]);
 
   const toggle = async (t: TaskRec) => {
     tapHaptic(t.status === "done" ? "select" : "success");
@@ -72,12 +85,18 @@ export default function KidScreen() {
 
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh}>
-      {/* custom header: exit pill + kid label */}
+      {/* custom header: exit pill (parent preview) OR my-profile button (real login) */}
       <View style={{ paddingTop: insets.top > 0 ? 0 : spacing.md, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-        <PressableScale onPress={() => router.back()} haptic="select" style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999 }} accessibilityRole="button" accessibilityLabel="Back to parent view">
-          <Sym name="chevron.left" size={12} color={colors.textSecondary} />
-          <T kind="subMedium" color={colors.textSecondary}>Parent view</T>
-        </PressableScale>
+        {preview ? (
+          <PressableScale onPress={() => router.back()} haptic="select" style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999 }} accessibilityRole="button" accessibilityLabel="Back to parent view">
+            <Sym name="chevron.left" size={12} color={colors.textSecondary} />
+            <T kind="subMedium" color={colors.textSecondary}>Parent view</T>
+          </PressableScale>
+        ) : (
+          <PressableScale onPress={() => router.push("/profile")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="My profile">
+            <MemberAvatar member={kid} size={40} />
+          </PressableScale>
+        )}
         <T kind="eyebrow">{first}'s FamiliOS</T>
       </View>
 
@@ -85,9 +104,7 @@ export default function KidScreen() {
         <>
           <Rise index={0}>
             <View style={{ alignItems: "center", gap: 8, marginTop: spacing.sm }}>
-              <View style={[st.bigAvatar, { backgroundColor: colors.emberBg }]}>
-                <T kind="h2" color={colors.ember}>{kid.displayName.split(" ").map((p) => p[0]).slice(0, 2).join("")}</T>
-              </View>
+              <MemberAvatar member={kid} size={56} ringWidth={2} />
               <T kind="h1" style={{ fontSize: 28 }}>Hi, {first}!</T>
               <T kind="body">
                 {weekday} · {allDone ? "all chores done!" : `${chores.length - doneCount} chore${chores.length - doneCount === 1 ? "" : "s"} to go`}
@@ -161,21 +178,41 @@ export default function KidScreen() {
             )}
           </Rise>
 
-          {events.length > 0 && (
+          {/* Who's helping — accepted help requests tied to one of today's plans. */}
+          {helpers.length > 0 && (
             <Rise index={3}>
-              <SectionHeader title="Your day" />
-              <Card padded={false}>
-                {events.map((e, i) => (
-                  <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: 13, borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator }}>
-                    <T kind="subMedium" color={colors.ember} style={{ width: 70 }}>
-                      {new Date(e.startAt!).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+              <Card style={{ backgroundColor: colors.lavenderBg, borderColor: "transparent", gap: 8 }}>
+                {helpers.map((h) => (
+                  <View key={h.id} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <Sym name="heart.fill" size={14} color={colors.lavender} />
+                    <T kind="subMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={2}>
+                      {h.name} is helping — {h.event.title}
                     </T>
-                    <View style={{ flex: 1, gap: 2 }}>
-                      <T kind="rowTitle">{e.title}</T>
-                      {!!e.location && <T kind="detail">{e.location}</T>}
-                    </View>
                   </View>
                 ))}
+              </Card>
+            </Rise>
+          )}
+
+          {/* The family's day — read-only schedule of everyone's plans today. */}
+          {events.length > 0 && (
+            <Rise index={4}>
+              <SectionHeader title="Today" />
+              <Card padded={false}>
+                {events.map((e, i) => {
+                  const mine = e.participantIds?.includes(memberId);
+                  return (
+                    <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: 13, borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator }}>
+                      <T kind="subMedium" color={mine ? colors.ember : colors.textMuted} style={{ width: 70 }}>
+                        {new Date(e.startAt!).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                      </T>
+                      <View style={{ flex: 1, gap: 2 }}>
+                        <T kind="rowTitle">{e.title}{mine ? " — you" : ""}</T>
+                        {!!e.location && <T kind="detail">{e.location}</T>}
+                      </View>
+                    </View>
+                  );
+                })}
               </Card>
             </Rise>
           )}
@@ -185,7 +222,14 @@ export default function KidScreen() {
   );
 }
 
+export default function KidScreen() {
+  const { session } = useSession();
+  const { id, preview } = useLocalSearchParams<{ id?: string; preview?: string }>();
+  // No id param = a real child login landing here; default to the session actor.
+  const memberId = id ?? session?.actorId ?? "";
+  return <KidHome memberId={memberId} preview={preview === "1"} />;
+}
+
 const st = StyleSheet.create({
-  bigAvatar: { width: 56, height: 56, borderRadius: 28, alignItems: "center", justifyContent: "center" },
   doneCheck: { width: 52, height: 52, borderRadius: 26, alignItems: "center", justifyContent: "center" },
 });

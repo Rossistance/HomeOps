@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { View } from "react-native";
 import { api, type EventRec, type FileRec, type Meal, type MemberRec, type TaskRec } from "@/lib/api";
+import { fade, memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
 import { useTheme, type HearthColors } from "@/theme";
 import { Badge, Card, EmptyState, ErrorState, HScreen, Rise, SectionHeader, SkeletonCards, Sym, T } from "@/components/ui";
@@ -81,15 +82,22 @@ export default function HouseholdScreen() {
         members.map((m, i) => {
           const rc = roleTone(colors, m.role);
           const initial = (m.displayName || "?").trim().charAt(0).toUpperCase();
+          // Member accent (their picked color, or the deterministic fallback) and
+          // curated emoji avatar ("emoji:🦊") — file-id photos stay initials here.
+          const accent = memberColor(colors, m) ?? rc.fg;
+          const emoji = m.photoFileId?.startsWith("emoji:") ? m.photoFileId.slice(6) : null;
           return (
             <Rise key={m.actorId} index={i}>
               <Card>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                   <View style={{
-                    width: 44, height: 44, borderRadius: 22, backgroundColor: rc.bg,
+                    width: 44, height: 44, borderRadius: 22, backgroundColor: fade(accent, 0.16),
+                    borderWidth: 1.5, borderColor: accent,
                     alignItems: "center", justifyContent: "center",
                   }}>
-                    <T kind="h3" color={rc.fg}>{initial}</T>
+                    {emoji
+                      ? <T style={{ fontSize: 20, lineHeight: 26 }}>{emoji}</T>
+                      : <T kind="h3" color={accent}>{initial}</T>}
                   </View>
                   <View style={{ flex: 1, gap: 2 }}>
                     <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>

@@ -11,7 +11,7 @@
 import crypto from "node:crypto";
 import {
   listTriggers, getTrigger, putTrigger, patchTrigger, deleteTriggerRec,
-  setConnectorConfig, getSecret, revokeConnector, appendAudit,
+  setConnectorConfig, getSecret, revokeConnector, appendAudit, getAgent, getMember,
 } from "./store.mjs";
 import { runAgent, runSkill } from "./orchestrator.mjs";
 import { runWithTenant } from "./tenant-context.mjs";
@@ -147,8 +147,20 @@ export async function fireTrigger(trigger, opts = {}) {
   return runWithTenant(trigger.householdId ?? "local", () => fireTriggerInner(trigger, opts));
 }
 async function fireTriggerInner(trigger, { triggerType = trigger.type, payload, now = Date.now() } = {}) {
-  const session = { householdId: trigger.householdId ?? "local", actorId: "scheduler", role: "Owner" };
   const tgt = trigger.target ?? {};
+  // Attribute the run to a real owner when the target is a PERSONAL agent, so its
+  // approvals notify that person only — a scheduled personal briefing must not ping the
+  // whole household. Otherwise runs are attributed to the "scheduler" system actor.
+  let actorId = "scheduler";
+  let role = "Owner";
+  if (tgt.kind === "agent" && tgt.agentId) {
+    const agent = getAgent(tgt.agentId);
+    if (agent?.visibility === "personal" && agent.createdBy) {
+      const owner = getMember(agent.createdBy);
+      if (owner && !owner.archived) { actorId = owner.actorId; role = owner.role; }
+    }
+  }
+  const session = { householdId: trigger.householdId ?? "local", actorId, role };
   const params = { ...(tgt.params ?? {}), ...(payload ? { trigger_payload: payload } : {}) };
 
   let out;

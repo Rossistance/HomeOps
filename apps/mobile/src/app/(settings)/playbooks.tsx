@@ -5,12 +5,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { View } from "react-native";
 import Animated, { FadeIn, ReduceMotion } from "react-native-reanimated";
+import { router } from "expo-router";
 import { api, type PlaybookRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme } from "@/theme";
 // "ui/index" (not "ui"): the legacy src/components/ui.tsx still shadows the ui/
 // directory until the old screens are all ported — this resolves the new system.
-import { Badge, Chip, ChipRow, EmptyState, ErrorState, HScreen, PressableCard, Rise, SectionHeader, SkeletonCards, Sym, T } from "@/components/ui";
+import { Badge, Button, Chip, ChipRow, EmptyState, ErrorState, HScreen, PressableCard, Rise, SectionHeader, SkeletonCards, Sym, T } from "@/components/ui";
 
 export default function PlaybooksScreen() {
   const { session } = useSession();
@@ -65,6 +66,12 @@ export default function PlaybooksScreen() {
         />
       ) : (
         <>
+          <Rise index={riseIdx++}>
+            <T kind="sub">
+              Step-by-step recipes for recurring family workflows. Famili follows them when you ask — or turn one into an agent.
+            </T>
+          </Rise>
+
           {categories.length > 1 ? (
             <Rise index={riseIdx++}>
               <ChipRow>
@@ -175,6 +182,14 @@ export default function PlaybooksScreen() {
                                 <T kind="sub" color={colors.textSecondary}>{p.outputFormat}</T>
                               </View>
                             ) : null}
+
+                            <Button
+                              title="Use this playbook"
+                              variant="ember"
+                              icon="sparkles"
+                              full
+                              onPress={() => router.push({ pathname: "/(ask)", params: { draft: `Set up the "${p.name}" playbook as an agent for our family` } })}
+                            />
 
                             {p.system ? (
                               <View style={{ flexDirection: "row" }}>

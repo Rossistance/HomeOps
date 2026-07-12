@@ -6,6 +6,7 @@ export { Card, PressableCard, Well, cardStyle } from "./card";
 export { Button } from "./button";
 export { Badge, Chip, ChipRow } from "./badge";
 export { Row, SectionHeader } from "./list";
+export { CollapsibleSection } from "./collapsible-section";
 export { Skeleton, SkeletonCards } from "./skeleton";
 export { EmptyState, ErrorState, Notice } from "./states";
 export { Rise } from "./stagger";

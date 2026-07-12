@@ -2,7 +2,7 @@
 // Files). Step 2: file it under a space, optionally mark sensitive, upload for
 // real (base64, 5 MB cap — same pipeline as the web app).
 import { useState } from "react";
-import { ScrollView, Switch, View } from "react-native";
+import { ScrollView, Switch, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import { readAsStringAsync } from "expo-file-system/legacy";
@@ -30,12 +30,14 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
   const [file, setFile] = useState<Picked | null>(null);
   // Optional 2nd page (e.g. the back of an ID) — uploaded as ONE logical file.
   const [backPage, setBackPage] = useState<Picked | null>(null);
+  // Editable display name, prefilled from the picked file (extension kept).
+  const [customName, setCustomName] = useState("");
   const [space, setSpace] = useState<string>(SPACES[0]);
   const [sensitive, setSensitive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  function reset() { setFile(null); setBackPage(null); setSpace(SPACES[0]); setSensitive(false); setBusy(false); setNote(null); }
+  function reset() { setFile(null); setBackPage(null); setCustomName(""); setSpace(SPACES[0]); setSensitive(false); setBusy(false); setNote(null); }
   function close() { reset(); onClose(); }
 
   async function fromDocument() {
@@ -47,7 +49,9 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
       if ((a.size ?? 0) > MAX_BYTES) { setNote("That file is over the 5 MB cap."); return; }
       const b64 = await readAsStringAsync(a.uri, { encoding: "base64" });
       setBackPage(null); // documents are single-page
-      setFile({ name: a.name ?? "document", base64: b64, mime: a.mimeType ?? "application/octet-stream", size: a.size ?? Math.round(b64.length * 0.75) });
+      const picked = { name: a.name ?? "document", base64: b64, mime: a.mimeType ?? "application/octet-stream", size: a.size ?? Math.round(b64.length * 0.75) };
+      setFile(picked);
+      setCustomName(picked.name);
     } catch (e) {
       setNote(`Couldn't read that file: ${String((e as Error)?.message ?? e)}`);
     }
@@ -93,6 +97,7 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
       const first = toPicked(assets[0], camera ? "scan" : "photo");
       if (!first) return;
       setFile(first);
+      setCustomName(first.name);
       const second = assets[1] ? toPicked(assets[1], "back") : null;
       setBackPage(second);
     } catch (e) {
@@ -115,8 +120,8 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
 
   // Removing the front promotes the back to front (so there's never a back with no front).
   function removeFront() {
-    if (backPage) { setFile(backPage); setBackPage(null); }
-    else setFile(null);
+    if (backPage) { setFile(backPage); setBackPage(null); setCustomName(backPage.name); }
+    else { setFile(null); setCustomName(""); }
   }
 
   async function submit() {
@@ -125,10 +130,15 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
     const tags: string[] = [];
     if (space !== SPACES[0]) tags.push(spaceTag(space));
     if (sensitive) tags.push("sensitive");
+    // The typed name wins, exactly as typed — except a lost dot-extension is
+    // restored from the original so the file stays openable.
+    let name = customName.trim() || file.name;
+    const origExt = /\.[A-Za-z0-9]+$/.exec(file.name)?.[0];
+    if (origExt && !/\.[A-Za-z0-9]+$/.test(name)) name += origExt;
     // Two pages → one logical multi-page file (contentBase64 stays the first-page blob).
     const pages = backPage ? [{ base64: file.base64 }, { base64: backPage.base64 }] : undefined;
     const r = await api.uploadFile({
-      name: file.name, contentBase64: file.base64, mime: file.mime,
+      name, contentBase64: file.base64, mime: file.mime,
       tags: tags.length ? tags : undefined,
       visibility: sensitive ? "private" : undefined,
       pages,
@@ -174,6 +184,23 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
                   </View>
                 ) : null}
                 {backPage ? <T kind="detail" center>Front &amp; back upload together as one document.</T> : null}
+              </View>
+
+              <View style={{ gap: 8 }}>
+                <T kind="eyebrow">Name</T>
+                <Well style={{ padding: 0 }}>
+                  <TextInput
+                    value={customName}
+                    onChangeText={setCustomName}
+                    placeholder={file.name}
+                    placeholderTextColor={colors.textFaint}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    accessibilityLabel="File name"
+                    style={{ paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: colors.text }}
+                  />
+                </Well>
+                <T kind="detail">Give it a name you'll search for — e.g. 'Insurance card front'</T>
               </View>
 
               <View style={{ gap: 8 }}>

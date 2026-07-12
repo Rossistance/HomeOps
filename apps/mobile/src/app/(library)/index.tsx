@@ -9,7 +9,7 @@ import { api, type ArtifactRec, type FileRec, type KnowledgeRec, type MemoryRec 
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 import {
-  Badge, Button, Card, Chip, ChipRow, EmptyState, HScreen, HSheet, MarkdownText, Notice, PressableScale, Rise,
+  Badge, Button, Card, Chip, ChipRow, CollapsibleSection, EmptyState, HScreen, HSheet, MarkdownText, Notice, PressableScale, Rise,
   SectionHeader, SheetCTA, SkeletonCards, Sym, SymTile, T, Well,
 } from "@/components/ui";
 import { UploadSheet } from "@/components/sheets/upload-sheet";
@@ -319,6 +319,9 @@ export default function LibraryScreen() {
                             <T kind="sub">No inline preview for {f.mime}. Open it on the web app to download.</T>
                           )}
                         </Well>
+                        {/* TODO(rename): add an inline "Rename" action here once lib/api.ts
+                            gains a file PATCH wrapper (e.g. api.patchFile(id, { name })) —
+                            no such wrapper exists yet and api.ts is owned by another task. */}
                         <Button title="Remove file" variant="danger" small loading={busy === `del:${f.id}`} onPress={() => confirmRemove(f)} />
                       </View>
                     )}
@@ -367,7 +370,7 @@ export default function LibraryScreen() {
             ))
           )}
 
-          <SectionHeader title="Memory" />
+          <CollapsibleSection title="Memory" count={memory.length}>
           <Rise index={1}>
             <T kind="sub">What Famili has learned from real runs. Remove anything it got wrong.</T>
           </Rise>
@@ -391,8 +394,9 @@ export default function LibraryScreen() {
               </Rise>
             ))
           )}
+          </CollapsibleSection>
 
-          <SectionHeader title="Artifacts" />
+          <CollapsibleSection title="Artifacts" count={artifacts.length}>
           {artifacts.length === 0 ? (
             <EmptyState icon="doc.text" title="No artifacts yet" hint="Run outputs will collect here." />
           ) : (
@@ -423,6 +427,7 @@ export default function LibraryScreen() {
               );
             })
           )}
+          </CollapsibleSection>
         </>
       )}
 

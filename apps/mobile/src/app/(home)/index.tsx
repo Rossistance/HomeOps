@@ -1,27 +1,31 @@
-// Today — the FamiliOS front page. Greeting + approval count, the household
-// member strip, the Ask Famili hero, the Calendar key card (today's plans,
-// color-coded per member), quick actions, then the day at a glance:
-// approvals needing you, coming up, bills due. Server-truth
-// via api.*; approvals open the signature Approval sheet.
-import { useCallback, useMemo, useState } from "react";
-import { StyleSheet, View } from "react-native";
+// Today — the FamiliOS front page. Role-scoped: a child, grandparent, or sitter
+// login renders their calm scoped home directly (no admin dashboard); adults and
+// owners get the full front page — greeting + approval count, the household
+// member strip, the Ask Famili hero, the Calendar key card, the Ask-for-help
+// card, quick actions, then the day at a glance: approvals needing you (and
+// help requests to/from you), coming up, bills due. Server-truth via api.*.
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Platform, StyleSheet, View } from "react-native";
 import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { api, type ApprovalRec, type EventRec, type EvolutionRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
-import { fade, memberColor } from "@/lib/member-colors";
+import { api, type ApprovalRec, type EventRec, type EvolutionRec, type HelpRequestRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
+import { memberColor } from "@/lib/member-colors";
+import { isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
-import { useTheme, riskColor } from "@/theme";
+import { useTheme, riskColor, tapHaptic } from "@/theme";
 import {
   T, Card, Badge, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
-  Sym, SymTile, PressableScale, PressableCard,
+  Sym, SymTile, PressableScale, PressableCard, Button,
 } from "@/components/ui";
 import { ApprovalSheet } from "@/components/sheets/approval-sheet";
-import { ChoreSheet, isKidMember } from "@/components/sheets/chore-sheet";
+import { ChoreSheet } from "@/components/sheets/chore-sheet";
 import { InviteSheet } from "@/components/sheets/invite-sheet";
 import { useRevSync } from "@/lib/rev-sync";
-
-const isGrandparent = (m: MemberRec) => /grand(parent|ma|pa|mother|father)/i.test(m.relationship ?? "");
+import { KidHome } from "./kid";
+import { GrandparentHome } from "./grandparent";
+import { SitterHome } from "./sitter";
+import { MemberAvatar } from "./profile";
 
 function SeeAll({ label = "See all", onPress }: { label?: string; onPress: () => void }) {
   const { colors } = useTheme();
@@ -40,9 +44,37 @@ function approvalIcon(a: ApprovalRec): string {
   return "checkmark.shield";
 }
 
-const KID_TINTS = ["coral", "sky", "amber", "lavender"] as const;
-
+// Role-scoped entry: resolve who is signed in FIRST, then render the home that
+// matches their view mode. Children/grandparents/sitters never see the admin
+// dashboard — they get their scoped experience as THE home screen.
 export default function TodayScreen() {
+  const { session } = useSession();
+  const [me, setMe] = useState<MemberRec | null>(null);
+  const [resolved, setResolved] = useState(false);
+  const actorId = session?.actorId ?? null;
+
+  useEffect(() => {
+    if (!actorId) return;
+    let cancelled = false;
+    void api.members().then((ms) => {
+      if (cancelled) return;
+      setMe(ms.find((m) => m.isCurrentUser) ?? ms.find((m) => m.actorId === actorId) ?? null);
+      setResolved(true);
+    });
+    return () => { cancelled = true; };
+  }, [actorId]);
+
+  if (!resolved || !actorId) {
+    return <HScreen><SkeletonCards count={4} /></HScreen>;
+  }
+  const viewMode = viewModeFor(me);
+  if (viewMode === "child") return <KidHome memberId={actorId} />;
+  if (viewMode === "grandparent") return <GrandparentHome memberId={actorId} />;
+  if (viewMode === "sitter") return <SitterHome memberId={actorId} />;
+  return <AdminToday />;
+}
+
+function AdminToday() {
   const { colors, spacing } = useTheme();
   const { session } = useSession();
   const insets = useSafeAreaInsets();
@@ -56,20 +88,22 @@ export default function TodayScreen() {
   const [memory, setMemory] = useState<MemoryRec[]>([]);
   const [evolutions, setEvolutions] = useState<EvolutionRec[]>([]);
   const [runs, setRuns] = useState<RunRec[]>([]);
+  const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
   const [openApproval, setOpenApproval] = useState<ApprovalRec | null>(null);
   const [choreOpen, setChoreOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [householdName, setHouseholdName] = useState<string | null>(null);
+  const [helpBusyId, setHelpBusyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [h, aps, evts, tks, mem, hh, memries, evos, rns] = await Promise.all([
+    const [h, aps, evts, tks, mem, hh, memries, evos, rns, hrs] = await Promise.all([
       api.health(), api.approvals(), api.events(), api.tasks(), api.members(), api.household(),
-      api.memory(), api.evolutions(), api.runs(),
+      api.memory(), api.evolutions(), api.runs(), api.helpRequests(),
     ]);
     setOffline(!h);
     if (h) {
       setApprovals(aps); setEvents(evts); setTasks(tks); setMembers(mem); setHouseholdName(hh?.name ?? null);
-      setMemory(memries); setEvolutions(evos); setRuns(rns);
+      setMemory(memries); setEvolutions(evos); setRuns(rns); setHelpRequests(hrs);
     }
     setLoading(false);
   }, []);
@@ -81,6 +115,10 @@ export default function TodayScreen() {
   const now = new Date();
   const part = now.getHours() < 12 ? "morning" : now.getHours() < 18 ? "afternoon" : "evening";
   const first = (session?.actorName ?? "there").split(" ")[0];
+  const meMember = useMemo(
+    () => members.find((m) => m.isCurrentUser) ?? members.find((m) => m.actorId === session?.actorId) ?? null,
+    [members, session?.actorId],
+  );
 
   const pending = useMemo(() => approvals.filter((a) => a.status === "pending"), [approvals]);
   const isToday = (iso: string | null) => {
@@ -94,6 +132,39 @@ export default function TodayScreen() {
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
     .slice(0, 3);
   const bills = tasks.filter((t) => t.type === "bill" && t.status !== "done").slice(0, 4);
+
+  // Help requests to/from me — the "needs your attention" companions.
+  const helpToMe = useMemo(
+    () => helpRequests.filter((h) => h.status === "pending" && h.toActorId === session?.actorId),
+    [helpRequests, session?.actorId],
+  );
+  const helpFromMe = useMemo(
+    () => helpRequests.filter((h) => h.status === "pending" && h.fromActorId === session?.actorId),
+    [helpRequests, session?.actorId],
+  );
+
+  const respondHelp = useCallback(async (h: HelpRequestRec, response: "accept" | "decline", note?: string) => {
+    setHelpBusyId(h.id);
+    const r = await api.respondHelpRequest(h.id, response, note);
+    setHelpBusyId(null);
+    if (r.helpRequest) { tapHaptic(response === "accept" ? "success" : "select"); void load(); }
+  }, [load]);
+  const declineHelp = useCallback((h: HelpRequestRec) => {
+    if (Platform.OS === "ios") {
+      Alert.prompt("Decline", `Add a note for ${h.fromName}? (optional)`, [
+        { text: "Cancel", style: "cancel" },
+        { text: "Decline", style: "destructive", onPress: (note?: string) => void respondHelp(h, "decline", note?.trim() || undefined) },
+      ], "plain-text");
+    } else {
+      void respondHelp(h, "decline");
+    }
+  }, [respondHelp]);
+  const cancelHelp = useCallback(async (h: HelpRequestRec) => {
+    setHelpBusyId(h.id);
+    await api.cancelHelpRequest(h.id);
+    setHelpBusyId(null);
+    void load();
+  }, [load]);
 
   // "What I learned" — recent things Famili picked up: new memories, improvement
   // proposals waiting on review, and freshly completed runs. Newest, capped at 4.
@@ -125,16 +196,21 @@ export default function TodayScreen() {
 
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh}>
-      {/* custom header: date eyebrow + activity button, serif greeting, approval line */}
+      {/* custom header: date eyebrow + profile & activity buttons, serif greeting, approval line */}
       <Rise index={0}>
         <View style={{ paddingTop: insets.top > 0 ? 0 : spacing.md, gap: 6 }}>
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
             <T kind="eyebrow" color={colors.ember}>
               {now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
             </T>
-            <PressableScale onPress={() => router.push("/activity")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Activity">
-              <SymTile name="clock" color={colors.textSecondary} bg={colors.surfaceSunken} size={34} iconSize={16} />
-            </PressableScale>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+              <PressableScale onPress={() => router.push("/profile")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="My profile">
+                <MemberAvatar member={meMember} size={34} />
+              </PressableScale>
+              <PressableScale onPress={() => router.push("/activity")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Activity">
+                <SymTile name="clock" color={colors.textSecondary} bg={colors.surfaceSunken} size={34} iconSize={16} />
+              </PressableScale>
+            </View>
           </View>
           <T kind="h1" style={{ fontSize: 32, lineHeight: 38 }}>Good {part}, {first}</T>
           <T kind="body">
@@ -156,34 +232,23 @@ export default function TodayScreen() {
         </Rise>
       ) : (
         <>
-          {/* member strip */}
+          {/* member strip — everyone in their own color, photo/emoji avatars. Tapping a
+              child/grandparent/sitter opens their scoped home in owner-preview mode. */}
           {members.length > 0 && (
             <Rise index={1}>
               <View style={{ flexDirection: "row", gap: spacing.lg, flexWrap: "wrap" }}>
-                {members.map((m, i) => {
-                  const kid = isKidMember(m);
-                  const gp = !kid && isGrandparent(m);
-                  // Each member wears their calendar color (same memberColor as the
-                  // Calendar screen) so people are color-consistent across the app;
-                  // the old role tints only fill in for members with no derivable color.
-                  const accent = memberColor(colors, m);
-                  const tint = kid ? KID_TINTS[i % KID_TINTS.length] : gp ? "lavender" : "ember";
-                  const fg = accent ?? (tint === "ember" ? colors.ember : colors[tint]);
-                  const bg = accent ? fade(accent, 0.16) : tint === "ember" ? colors.emberBg : colors[`${tint}Bg`];
-                  const initials = m.displayName.split(" ").map((p) => p[0]).slice(0, 2).join("");
-                  const dest = kid ? "/kid" : gp ? "/grandparent" : null;
+                {members.map((m) => {
+                  const dest = isChild(m) ? "/kid" : isGrandparent(m) ? "/grandparent" : isHelper(m) ? "/sitter" : null;
                   return (
                     <PressableScale
                       key={m.actorId}
-                      onPress={dest ? () => router.push({ pathname: dest, params: { id: m.actorId } }) : undefined}
+                      onPress={dest ? () => router.push({ pathname: dest, params: { id: m.actorId, preview: "1" } }) : undefined}
                       disabled={!dest}
                       haptic={dest ? "select" : null}
                       style={{ alignItems: "center", gap: 5, width: 52 }}
                       accessibilityLabel={dest ? `Open ${m.displayName}'s view` : m.displayName}
                     >
-                      <View style={[st.avatar, { backgroundColor: bg }]}>
-                        <T kind="subMedium" color={fg} style={{ fontWeight: "600" }}>{initials}</T>
-                      </View>
+                      <MemberAvatar member={m} size={48} />
                       <T kind="detail" numberOfLines={1}>{m.displayName.split(" ")[0]}</T>
                     </PressableScale>
                   );
@@ -260,7 +325,9 @@ export default function TodayScreen() {
               ) : (
                 <View style={{ gap: 8 }}>
                   {todayEvents.slice(0, 3).map((e) => {
-                    const stripe = memberColor(colors, members.find((m) => m.actorId === e.participantIds?.[0])) ?? colors.textFaint;
+                    const stripe = memberColor(colors, members.find((m) => m.actorId === e.participantIds?.[0]))
+                      ?? memberColor(colors, members.find((m) => m.actorId === e.ownerId))
+                      ?? colors.textFaint;
                     return (
                       <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                         <View style={{ width: 3, alignSelf: "stretch", borderRadius: 2, backgroundColor: stripe }} />
@@ -288,8 +355,25 @@ export default function TodayScreen() {
             </PressableCard>
           </Rise>
 
+          {/* Ask for help — send a grandparent, sitter or family member a hand-off. */}
+          <Rise index={4}>
+            <PressableCard
+              onPress={() => router.push("/help")}
+              accessibilityRole="button"
+              accessibilityLabel="Ask for help"
+              style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}
+            >
+              <SymTile name="hand.raised.fill" color={colors.lavender} bg={colors.lavenderBg} size={36} iconSize={17} />
+              <View style={{ flex: 1, gap: 2 }}>
+                <T kind="rowTitle">Ask for help</T>
+                <T kind="detail">Ask a grandparent, sitter or family member for a hand</T>
+              </View>
+              <Sym name="chevron.right" size={13} color={colors.textFaint} />
+            </PressableCard>
+          </Rise>
+
           {/* quick actions — 2×3 grid; Meals + Tasks lead */}
-          <Rise index={3}>
+          <Rise index={5}>
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
               {quickActions.map((a) => (
                 <PressableCard key={a.title} onPress={a.go} padded={false} style={{ flexBasis: "30%", flexGrow: 1, alignItems: "center", paddingVertical: 12, gap: 7 }} accessibilityRole="button" accessibilityLabel={a.title}>
@@ -301,54 +385,89 @@ export default function TodayScreen() {
           </Rise>
 
           {/* needs your attention */}
-          <Rise index={4}>
+          <Rise index={6}>
             <SectionHeader
               title="Needs your attention"
               trailing={pending.length > 0
                 ? <Badge label={String(pending.length)} fg={colors.onEmber} bg={colors.ember} />
                 : <SeeAll onPress={() => router.push("/inbox")} />}
             />
-            {pending.length === 0 ? (
+            {pending.length === 0 && helpToMe.length === 0 && helpFromMe.length === 0 ? (
               <Card><T kind="sub">All caught up — nothing waiting on you.</T></Card>
             ) : (
-              <Card padded={false}>
-                {pending.slice(0, 5).map((a, i) => {
-                  const risk = riskColor(colors, a.risk);
-                  const title = a.preview.split("\n").find((l) => l.trim()) ?? a.toolId;
-                  return (
-                    <PressableScale
-                      key={a.id}
-                      onPress={() => setOpenApproval(a)}
-                      haptic="select"
-                      accessibilityRole="button"
-                      accessibilityLabel={`Review approval: ${title}`}
-                      style={{
-                        flexDirection: "row", alignItems: "center", gap: spacing.md,
-                        paddingHorizontal: spacing.lg, paddingVertical: 13,
-                        borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator,
-                      }}
-                    >
-                      <SymTile name={approvalIcon(a)} color={risk.fg} bg={risk.bg} size={36} iconSize={17} />
-                      <View style={{ flex: 1, gap: 2 }}>
-                        <T kind="rowTitle" numberOfLines={1}>{title}</T>
-                        <T kind="detail">{a.category || a.toolId} · {a.risk} risk</T>
-                      </View>
-                      <Sym name="chevron.right" size={13} color={colors.textFaint} />
-                    </PressableScale>
-                  );
-                })}
-                {pending.length > 5 && (
-                  <PressableScale onPress={() => router.push("/inbox")} style={{ padding: spacing.md, alignItems: "center" }}>
-                    <T kind="subMedium" color={colors.ember}>See all {pending.length}</T>
-                  </PressableScale>
+              <View style={{ gap: spacing.sm }}>
+                {pending.length > 0 && (
+                  <Card padded={false}>
+                    {pending.slice(0, 5).map((a, i) => {
+                      const risk = riskColor(colors, a.risk);
+                      const title = a.preview.split("\n").find((l) => l.trim()) ?? a.toolId;
+                      return (
+                        <PressableScale
+                          key={a.id}
+                          onPress={() => setOpenApproval(a)}
+                          haptic="select"
+                          accessibilityRole="button"
+                          accessibilityLabel={`Review approval: ${title}`}
+                          style={{
+                            flexDirection: "row", alignItems: "center", gap: spacing.md,
+                            paddingHorizontal: spacing.lg, paddingVertical: 13,
+                            borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator,
+                          }}
+                        >
+                          <SymTile name={approvalIcon(a)} color={risk.fg} bg={risk.bg} size={36} iconSize={17} />
+                          <View style={{ flex: 1, gap: 2 }}>
+                            <T kind="rowTitle" numberOfLines={1}>{title}</T>
+                            <T kind="detail">{a.category || a.toolId} · {a.risk} risk</T>
+                          </View>
+                          <Sym name="chevron.right" size={13} color={colors.textFaint} />
+                        </PressableScale>
+                      );
+                    })}
+                    {pending.length > 5 && (
+                      <PressableScale onPress={() => router.push("/inbox")} style={{ padding: spacing.md, alignItems: "center" }}>
+                        <T kind="subMedium" color={colors.ember}>See all {pending.length}</T>
+                      </PressableScale>
+                    )}
+                  </Card>
                 )}
-              </Card>
+
+                {/* help requests addressed to ME — accept/decline inline */}
+                {helpToMe.map((h) => (
+                  <Card key={h.id} style={{ gap: spacing.sm }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Sym name="hand.raised.fill" size={14} color={colors.lavender} />
+                      <T kind="rowTitle" style={{ flex: 1 }} numberOfLines={1}>{h.fromName} asked for help</T>
+                    </View>
+                    <T kind="sub" numberOfLines={3}>{h.message}</T>
+                    <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                      <View style={{ flex: 1 }}>
+                        <Button small variant="success" icon="checkmark" title="Accept" loading={helpBusyId === h.id} disabled={!!helpBusyId} onPress={() => void respondHelp(h, "accept")} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Button small variant="neutral" title="Decline" disabled={!!helpBusyId} onPress={() => declineHelp(h)} />
+                      </View>
+                    </View>
+                  </Card>
+                ))}
+
+                {/* my outgoing pending asks — waiting + cancel */}
+                {helpFromMe.map((h) => (
+                  <Card key={h.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+                    <SymTile name="hourglass" color={colors.amber} bg={colors.amberBg} size={36} iconSize={16} />
+                    <View style={{ flex: 1, gap: 2 }}>
+                      <T kind="rowTitle" numberOfLines={1}>Waiting on {h.toName}…</T>
+                      <T kind="detail" numberOfLines={2}>{h.message}</T>
+                    </View>
+                    <Button small variant="ghost" title="Cancel" loading={helpBusyId === h.id} onPress={() => void cancelHelp(h)} />
+                  </Card>
+                ))}
+              </View>
             )}
           </Rise>
 
           {/* coming up */}
           {upcoming.length > 0 && (
-            <Rise index={6}>
+            <Rise index={7}>
               <SectionHeader title="Coming up" />
               <Card padded={false}>
                 {upcoming.map((e, i) => (
@@ -382,7 +501,7 @@ export default function TodayScreen() {
 
           {/* bills due soon */}
           {bills.length > 0 && (
-            <Rise index={7}>
+            <Rise index={8}>
               <SectionHeader title="Bills due soon" trailing={<SeeAll onPress={() => router.push("/tasks")} />} />
               <Card padded={false}>
                 {bills.map((b, i) => (
@@ -410,7 +529,7 @@ export default function TodayScreen() {
 
           {/* what I learned — recent memories, proposals, and completed runs */}
           {learnings.length > 0 && (
-            <Rise index={8}>
+            <Rise index={9}>
               <SectionHeader title="What I learned" trailing={<SeeAll label="Activity" onPress={() => router.push("/activity")} />} />
               <Card padded={false}>
                 {learnings.map((l, i) => (

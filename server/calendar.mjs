@@ -27,6 +27,17 @@ export function mapGoogleEvents(items) {
     }));
 }
 
+/** Normalized dedupe fingerprint for an event: lowercased/trimmed title + the DATE
+ * portion for all-day events (Google sends "2026-07-31", ICS feeds often send
+ * "2026-07-31T00:00:00.000Z" for the same day — they must collide), else the full
+ * instant. Exported for unit tests. */
+const MIDNIGHT_RE = /T00:00(:00)?(\.000)?(Z|[+-]00:?00)?$/;
+export function eventFingerprint(title, startAt, allDay) {
+  const s = String(startAt ?? "");
+  const timeKey = allDay || MIDNIGHT_RE.test(s) ? s.slice(0, 10) : s;
+  return `${String(title).trim().toLowerCase()}|${timeKey}`;
+}
+
 // Resolve the connected Google account this subscription reads from. The
 // subscription is pinned to the account that created it (sub.accountId) — any
 // household adult can hit Sync on it without being logged into that Google
@@ -48,11 +59,13 @@ function resolveGoogleAccount(sub, session) {
 export async function syncSubscription({ sub, icsText, session }) {
   let parsed;
   let googleAccountId = null; // set for google-sourced subs so linked events can be edited two-way
+  let ownerActorId = null;    // the member who connected the account — synced events belong to them (colors, free/busy)
   if (sub?.source === "google") {
     // Pull upcoming events from the actor's connected Google Calendar (next ~90 days).
     const account = resolveGoogleAccount(sub, session);
     if (!account) return { ok: false, error: "no_account" };
     googleAccountId = account.id;
+    ownerActorId = account.connectedByActorId ?? null;
     const api = apiForAccount(account);
     const timeMin = new Date().toISOString();
     const timeMax = new Date(Date.now() + 90 * 864e5).toISOString();
@@ -79,51 +92,85 @@ export async function syncSubscription({ sub, icsText, session }) {
   }
   const hh = session.householdId;
   const subId = sub?.id ?? null;
-  // Existing linked events for this subscription, keyed by their source UID.
+  const fpOf = eventFingerprint;
+  // A feed sometimes carries literal twins — the same title on the same (all-day) date
+  // under different UIDs (recurring promos that re-id each publish were the
+  // "3× Skip fabletics" bug). Collapse them by normalized fingerprint BEFORE upserting
+  // so one card lands, not three.
+  {
+    const seenFp = new Set();
+    parsed = parsed.filter((ev) => {
+      if (!ev.startAt) return true;
+      const k = fpOf(ev.title, ev.startAt, ev.allDay);
+      if (seenFp.has(k)) return false;
+      seenFp.add(k);
+      return true;
+    });
+  }
+  // Existing linked events for this subscription, keyed by their source UID — and by
+  // normalized fingerprint, so a feed that re-ids an unchanged event updates the stored
+  // card instead of importing a twin beside it.
   const existing = new Map(
     listEvents((e) => e.householdId === hh && e.layer === "linked" && e.provenance?.subscriptionId === subId && e.provenance?.uid)
       .map((e) => [e.provenance.uid, e]),
   );
+  const sameSubByFp = new Map();
+  for (const e of existing.values()) if (e.startAt) sameSubByFp.set(fpOf(e.title, e.startAt, e.allDay), e);
   // Shared-event dedupe: the same real-world event often arrives through TWO
   // household subscriptions (spouses on a shared Google calendar, or a mutual
-  // invite). Instead of two cards, the first import owns the event and later
-  // subscriptions attach via provenance.alsoSubscriptionIds — the UI renders one
-  // card wearing every source calendar's color. Matched by source UID first
-  // (Google keeps event ids stable across attendee copies), then by an exact
-  // title+start fingerprint for calendars that re-id.
-  const fpOf = (title, startAt) => `${String(title).trim().toLowerCase()}|${startAt}`;
+  // invite) — or already exists as the family's own CANONICAL event (pushed to
+  // Google, then seen again by the sync; that was the duplicate plain-white card).
+  // Instead of two cards, the existing event absorbs the incoming copy and wears the
+  // source calendar's color via provenance.alsoSubscriptionIds. Matched by source UID
+  // first (Google keeps event ids stable across attendee copies), then by the
+  // normalized title+start fingerprint for calendars that re-id. A canonical match
+  // always outranks another sub's linked copy.
   const othersByUid = new Map(); const othersByFp = new Map();
   for (const e of listEvents((e) => e.householdId === hh && e.layer === "linked" && e.provenance?.subscriptionId && e.provenance.subscriptionId !== subId)) {
     if (e.provenance.uid) othersByUid.set(e.provenance.uid, e);
-    if (e.startAt) othersByFp.set(fpOf(e.title, e.startAt), e);
+    if (e.startAt) othersByFp.set(fpOf(e.title, e.startAt, e.allDay), e);
   }
+  for (const e of listEvents((e) => e.householdId === hh && (e.layer ?? "canonical") === "canonical" && e.startAt)) {
+    const gid = e.provenance?.googleEventId ?? e.provenance?.uid;
+    if (gid) othersByUid.set(gid, e);
+    othersByFp.set(fpOf(e.title, e.startAt, e.allDay), e);
+  }
+  // Absorb an incoming copy into an existing card: linked cards convert as before;
+  // a canonical card just records the source (stays canonical, stays the family's).
   const attachTo = (other) => {
     const also = [...new Set([...(other.provenance?.alsoSubscriptionIds ?? []), subId])];
     patchEvent(other.id, { provenance: { ...(other.provenance ?? {}), alsoSubscriptionIds: also } });
   };
   let imported = 0, updated = 0, merged = 0;
-  const seenAlso = new Set(); // uids this sub attached to (owned by another sub)
+  const seenAlso = new Set(); // uids this sub attached to (owned by another sub or canonical)
   for (const ev of parsed) {
     if (!ev.startAt) continue;
     const uid = ev.uid || crypto.createHash("sha1").update(`${ev.title}|${ev.startAt}`).digest("hex");
-    const fields = { title: ev.title, startAt: ev.startAt, endAt: ev.endAt, location: ev.location, allDay: ev.allDay };
+    const fields = { title: ev.title, startAt: ev.startAt, endAt: ev.endAt, location: ev.location, allDay: ev.allDay, ...(ownerActorId ? { ownerId: ownerActorId } : {}) };
     // Google-sourced linked events carry the Google event id + account so in-app edits
     // can write back to Google (two-way). ICS feeds stay read-only mirrors.
     const gprov = googleAccountId ? { via: "google", googleEventId: uid, googleAccountId } : null;
-    const prior = existing.get(uid);
+    let prior = existing.get(uid);
+    if (!prior) {
+      // Same-sub twin under a new uid (feed re-id): fold onto the stored card and
+      // adopt the new uid so the next sync matches directly.
+      const twin = sameSubByFp.get(fpOf(ev.title, ev.startAt, ev.allDay));
+      if (twin && existing.has(twin.provenance?.uid)) prior = twin;
+    }
     if (prior) {
-      // Backfill google provenance onto pre-existing linked events (created before two-way edits).
-      const needsProv = gprov && !prior.provenance?.googleEventId;
-      patchEvent(prior.id, needsProv ? { ...fields, provenance: { ...(prior.provenance ?? {}), ...gprov } } : fields);
-      existing.delete(uid); updated++;
+      // Backfill google provenance onto pre-existing linked events (created before two-way
+      // edits); a re-id'd twin also gets its provenance.uid refreshed to the feed's new uid.
+      const needsProv = (gprov && !prior.provenance?.googleEventId) || prior.provenance?.uid !== uid;
+      patchEvent(prior.id, needsProv ? { ...fields, provenance: { ...(prior.provenance ?? {}), uid, ...(gprov ?? {}) } } : fields);
+      existing.delete(prior.provenance?.uid); updated++;
       continue;
     }
-    const other = othersByUid.get(uid) ?? othersByFp.get(fpOf(ev.title, ev.startAt));
+    const other = othersByUid.get(uid) ?? othersByFp.get(fpOf(ev.title, ev.startAt, ev.allDay));
     if (other) { attachTo(other); seenAlso.add(other.id); merged++; continue; }
     putEvent({
       id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: hh,
       ...fields, endAt: ev.endAt ?? null, spaceId: "sp-family", participantIds: [], driverId: null,
-      ownerId: null, backupOwnerId: null, whatToBring: [], checklist: [], travel: null, reminders: [],
+      ownerId: ownerActorId, backupOwnerId: null, whatToBring: [], checklist: [], travel: null, reminders: [],
       attachments: [], comments: [], mealImpact: null, visibility: "household", category: "Calendar",
       layer: "linked", status: "confirmed", source: sub?.name ?? "Subscribed calendar",
       provenance: { via: gprov ? "google" : "ics", subscriptionId: subId, uid, ...(gprov ?? {}) },
@@ -132,8 +179,8 @@ export async function syncSubscription({ sub, icsText, session }) {
     imported++;
   }
   // This sub no longer sees events it previously attached to (invite withdrawn) —
-  // detach our color from those shared cards.
-  for (const e of listEvents((e) => e.householdId === hh && e.layer === "linked" && (e.provenance?.alsoSubscriptionIds ?? []).includes(subId))) {
+  // detach our color from those shared cards (linked AND canonical absorbers).
+  for (const e of listEvents((e) => e.householdId === hh && (e.provenance?.alsoSubscriptionIds ?? []).includes(subId))) {
     if (!seenAlso.has(e.id)) {
       patchEvent(e.id, { provenance: { ...(e.provenance ?? {}), alsoSubscriptionIds: (e.provenance.alsoSubscriptionIds ?? []).filter((x) => x !== subId) } });
     }
@@ -148,23 +195,26 @@ export async function syncSubscription({ sub, icsText, session }) {
     } else { deleteEventRec(stale.id); removed++; }
   }
   // One-time cleanup for duplicates that landed before dedupe existed: same
-  // household, same uid or fingerprint, different subs → oldest card wins, the
-  // rest fold into alsoSubscriptionIds.
+  // household, same normalized fingerprint → one card wins, linked copies fold
+  // into its alsoSubscriptionIds. A canonical event always wins (the family's own
+  // card is never deleted); otherwise the oldest linked card keeps ownership.
+  // Same-sub twins fold too (the "3× Skip fabletics" leftovers).
   const groups = new Map();
-  for (const e of listEvents((e) => e.householdId === hh && e.layer === "linked" && e.startAt)) {
-    const k = fpOf(e.title, e.startAt);
+  for (const e of listEvents((e) => e.householdId === hh && (e.layer === "linked" || (e.layer ?? "canonical") === "canonical") && e.startAt)) {
+    const k = fpOf(e.title, e.startAt, e.allDay);
     (groups.get(k) ?? groups.set(k, []).get(k)).push(e);
   }
   for (const g of groups.values()) {
     if (g.length < 2) continue;
     g.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
-    const keeper = g[0];
+    const keeper = g.find((e) => (e.layer ?? "canonical") === "canonical") ?? g[0];
     const subsSet = new Set([...(keeper.provenance?.alsoSubscriptionIds ?? [])]);
     let changed = false;
-    for (const dupe of g.slice(1)) {
-      // Only fold cross-subscription copies; same-sub twins are the feed's business.
-      if (!dupe.provenance?.subscriptionId || dupe.provenance.subscriptionId === keeper.provenance?.subscriptionId) continue;
-      subsSet.add(dupe.provenance.subscriptionId);
+    for (const dupe of g) {
+      if (dupe.id === keeper.id) continue;
+      // Only fold linked copies — never delete a canonical (user-owned) event.
+      if (dupe.layer !== "linked" || !dupe.provenance?.subscriptionId) continue;
+      if (dupe.provenance.subscriptionId !== keeper.provenance?.subscriptionId) subsSet.add(dupe.provenance.subscriptionId);
       for (const x of dupe.provenance?.alsoSubscriptionIds ?? []) if (x !== keeper.provenance?.subscriptionId) subsSet.add(x);
       deleteEventRec(dupe.id); removed++; changed = true;
     }
@@ -314,7 +364,7 @@ export async function pushEventToGoogle({ ev, householdId, actorId }) {
 /** Resolve the Google account + event id behind a google-sourced LINKED event.
  * Prefers the provenance stamped at sync time; falls back to the subscription's
  * accountId + provenance.uid for events synced before two-way edits shipped. */
-function linkedGoogleTarget(ev, householdId) {
+function linkedGoogleTarget(ev, householdId, actorId) {
   const p = ev?.provenance ?? {};
   const gid = p.googleEventId ?? p.uid ?? null;
   let account = p.googleAccountId ? getAccountRaw(p.googleAccountId) : null;
@@ -324,19 +374,25 @@ function linkedGoogleTarget(ev, householdId) {
   }
   if (!gid || !account || account.provider !== "google" || account.householdId !== householdId) return null;
   if (!(account.scopes ?? []).some((s) => /calendar/i.test(String(s)))) return null;
+  // Edit-own-only: a member may write back only to the Google account THEY connected —
+  // never to another member's synced calendar. When actorId is omitted (internal/system
+  // callers) the check is skipped and only household scope applies.
+  if (actorId != null && account.connectedByActorId !== actorId) return null;
   return { account, gid };
 }
 
-/** True when a linked event originated in a connected Google Calendar and can be edited two-way. */
-export function isEditableLinkedGoogle(ev, householdId) {
-  return ev?.layer === "linked" && !!linkedGoogleTarget(ev, householdId);
+/** True when a linked event originated in a connected Google Calendar and can be edited
+ * two-way. With actorId, "editable" additionally means the current member owns that
+ * Google account (they connected it). */
+export function isEditableLinkedGoogle(ev, householdId, actorId) {
+  return ev?.layer === "linked" && !!linkedGoogleTarget(ev, householdId, actorId);
 }
 
 /** Edit a google-originated linked event two-way: write to Google FIRST, and only
  * mirror the patch locally once Google accepted it — so the next subscription
  * re-sync (feed = source of truth) agrees instead of clobbering the local edit. */
-export async function editLinkedGoogleEvent({ ev, patch, householdId }) {
-  const target = linkedGoogleTarget(ev, householdId);
+export async function editLinkedGoogleEvent({ ev, patch, householdId, actorId }) {
+  const target = linkedGoogleTarget(ev, householdId, actorId);
   if (!target) return { ok: false, error: "not_linked_google" };
   const merged = { ...ev, ...patch };
   const end = merged.endAt ?? new Date(new Date(merged.startAt).getTime() + 3_600_000).toISOString();
@@ -353,8 +409,8 @@ export async function editLinkedGoogleEvent({ ev, patch, householdId }) {
 
 /** Delete a google-originated linked event on Google, then remove the local mirror.
  * A 404/410 from Google (already gone there) still counts as success. */
-export async function deleteLinkedGoogleEvent({ ev, householdId }) {
-  const target = linkedGoogleTarget(ev, householdId);
+export async function deleteLinkedGoogleEvent({ ev, householdId, actorId }) {
+  const target = linkedGoogleTarget(ev, householdId, actorId);
   if (!target) return { ok: false, error: "not_linked_google" };
   const api = apiForAccount(target.account);
   const r = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(target.gid)}`, { method: "DELETE" });

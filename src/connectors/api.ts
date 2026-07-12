@@ -381,6 +381,9 @@ export interface ServerEvent {
   id: string; householdId: string; title: string; startAt: string | null; endAt: string | null;
   location: string; notes?: string; spaceId: string; participantIds: string[]; driverId: string | null;
   ownerId: string | null; backupOwnerId: string | null;
+  /** May the CURRENT member edit this event? (canonical → adult/owner; linked Google →
+   *  only the member who connected that account). Server-computed per session. */
+  editable?: boolean;
   whatToBring: { item: string; memberId: string | null }[]; checklist: { text: string; done: boolean }[];
   travel: unknown; reminders: unknown[]; attachments: unknown[]; comments: unknown[]; mealImpact: unknown;
   visibility: string; category: string; layer: "canonical" | "linked" | "public"; status: string;
@@ -392,9 +395,22 @@ export interface ServerTask {
   visibility: string; notes: string; listName?: string; source: string; createdBy: string;
   createdAt: string; updatedAt: string; mealId?: string | null;
 }
-export interface ServerMember { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean; color?: string | null }
-export interface CalendarSubscription { id: string; name: string; url: string | null; source: string; lastSyncAt: number | null; lastResult: { imported?: number; updated?: number; removed?: number; error?: string } | null; eventCount: number; createdAt: number }
+export interface ServerMember { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean; color?: string | null; photoFileId?: string | null; aiEnabled?: boolean }
+export interface CalendarSubscription { id: string; name: string; url: string | null; source: string; lastSyncAt: number | null; lastResult: { imported?: number; updated?: number; removed?: number; error?: string } | null; eventCount: number; createdAt: number; accountId?: string | null; accountEmail?: string | null; ownerActorId?: string | null; ownerName?: string | null }
 export interface CalendarSync { ok: boolean; imported?: number; updated?: number; removed?: number; total?: number; error?: string }
+/** One-button calendar sync: re-syncs every subscription AND pulls Google-side edits. */
+export interface CalendarSyncAllResult {
+  ok?: boolean; synced?: number; imported?: number; updated?: number; removed?: number;
+  pulled?: { checked?: number; merged?: number; conflicts?: number; unlinked?: number };
+  errors?: number | string[]; error?: string; message?: string;
+}
+/* ---- help requests ("can you pick up the girls?" — human-to-human asks) ---- */
+export interface HelpRequest {
+  id: string; fromActorId: string; fromName: string; toActorId: string; toName: string;
+  message: string; eventId: string | null; taskId: string | null;
+  status: "pending" | "accepted" | "declined" | "cancelled";
+  responseNote: string | null; createdAt: string; respondedAt: string | null;
+}
 export interface MealIngredient { item: string; have?: boolean }
 export interface Meal { id: string; householdId: string; date: string | null; time?: string | null; slot: string; title: string; notes: string; ingredients: MealIngredient[]; instructions?: string[]; servings?: number | null; recipeUrl?: string; visibility: string; source: string; createdBy: string; createdAt: string; updatedAt: string }
 export interface ServerConversationMessage { role: "user" | "assistant"; text: string; kind?: string; plan?: AgentPlan | null; build?: ChatBuild | null; built?: boolean; builtIds?: { skillId?: string; agentId?: string; triggerId?: string }; model?: string | null; at: string }
@@ -610,7 +626,14 @@ export const backend = {
       es.close(); // not used; EventSource doesn't support POST — use fetch instead
       fetch("/api/assistant/stream", { method: "POST", credentials: "same-origin", headers, body: JSON.stringify(body) })
         .then(async (res) => {
-          if (!res.ok || !res.body) { resolve({ ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }); return; }
+          if (!res.ok || !res.body) {
+            // Surface the server's real error (e.g. 403 ai_disabled for children) instead
+            // of a generic "unreachable" — the body is a small JSON error envelope.
+            let error = "backend_unreachable"; let message: string | undefined = "Backend runtime is not reachable.";
+            try { const j = (await res.json()) as { error?: string; message?: string }; if (j.error) { error = j.error; message = j.message; } } catch { /* not JSON */ }
+            resolve({ ok: false, error, message });
+            return;
+          }
           const reader = res.body.getReader();
           const dec = new TextDecoder();
           let buf = "";
@@ -759,7 +782,7 @@ export const backend = {
   async createMemberRemote(body: { displayName: string; role: string; relationship?: string | null; actorId?: string }): Promise<{ member?: { actorId: string; displayName: string; role: string; relationship: string | null }; error?: string; message?: string }> {
     try { return await req("/members", { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
-  async updateMemberRemote(actorId: string, patch: { displayName?: string; role?: string; relationship?: string | null; color?: string | null }): Promise<{ member?: { actorId: string; displayName: string; role: string; relationship: string | null; color?: string | null }; error?: string; message?: string }> {
+  async updateMemberRemote(actorId: string, patch: { displayName?: string; role?: string; relationship?: string | null; color?: string | null; photoFileId?: string | null; aiEnabled?: boolean }): Promise<{ member?: { actorId: string; displayName: string; role: string; relationship: string | null; color?: string | null; photoFileId?: string | null; aiEnabled?: boolean }; error?: string; message?: string }> {
     try { return await req(`/members/${encodeURIComponent(actorId)}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
   async archiveMemberRemote(actorId: string): Promise<{ ok?: boolean; error?: string; message?: string }> {
@@ -832,6 +855,23 @@ export const backend = {
   async deleteCalendarSubscription(id: string): Promise<{ ok: boolean; removedEvents?: number; error?: string }> {
     try { return await req(`/calendar/subscriptions/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
   },
+  // One "Sync" button: re-sync every subscription and pull Google-side edits in one call.
+  async syncAllCalendars(): Promise<CalendarSyncAllResult> {
+    try { return await req("/calendar/sync-all", { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  /* ---- help requests (human-to-human asks, e.g. "can you drive pickup?") ---- */
+  async helpRequests(): Promise<HelpRequest[]> {
+    try { return (await req<{ helpRequests: HelpRequest[] }>("/help-requests")).helpRequests ?? []; } catch { return []; }
+  },
+  async createHelpRequest(input: { toActorId: string; message: string; eventId?: string; taskId?: string }): Promise<{ helpRequest?: HelpRequest; error?: string; message?: string }> {
+    try { return await req("/help-requests", { method: "POST", body: JSON.stringify(input), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async respondHelpRequest(id: string, response: "accept" | "decline", note?: string): Promise<{ helpRequest?: HelpRequest; error?: string; message?: string }> {
+    try { return await req(`/help-requests/${encodeURIComponent(id)}/respond`, { method: "POST", body: JSON.stringify({ response, note }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  async cancelHelpRequest(id: string): Promise<{ helpRequest?: HelpRequest; ok?: boolean; error?: string; message?: string }> {
+    try { return await req(`/help-requests/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}", mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
   /* ---- server-durable assistant conversations (P1.1) ---- */
   async conversations(): Promise<ServerConversation[]> {
     try { return (await req<{ conversations: ServerConversation[] }>("/conversations")).conversations ?? []; } catch { return []; }
@@ -839,8 +879,8 @@ export const backend = {
   async getConversation(id: string): Promise<ServerConversation | null> {
     try { return (await req<{ conversation: ServerConversation }>(`/conversations/${id}`)).conversation ?? null; } catch { return null; }
   },
-  async createConversation(title: string): Promise<{ conversation?: ServerConversation; error?: string }> {
-    try { return await req("/conversations", { method: "POST", body: JSON.stringify({ title }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  async createConversation(title: string, visibility?: "household" | "personal"): Promise<{ conversation?: ServerConversation; error?: string }> {
+    try { return await req("/conversations", { method: "POST", body: JSON.stringify(visibility ? { title, visibility } : { title }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
   async deleteConversationRemote(id: string): Promise<{ ok: boolean; error?: string }> {
     try { return await req(`/conversations/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }

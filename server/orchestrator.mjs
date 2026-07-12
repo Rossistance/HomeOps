@@ -82,7 +82,7 @@ export async function runAgent({ agentId, goal, skillId, params = {}, session, s
   const before = plan.steps.length;
   const clamped = (plan.steps ?? []).filter((s) => isToolStepAllowed(agent, s.toolId ?? null, session).ok);
   const dropped = before - clamped.length;
-  const run = await startRun({ source, sourceRef: { agentId: agent.id, skillId: null }, plan: { ...plan, steps: clamped }, params, session, title: agent.name });
+  const run = await startRun({ source, sourceRef: { agentId: agent.id, skillId: null }, plan: { ...plan, steps: clamped }, params, session, title: agent.name, visibility: agent.visibility });
   addRouting({ runId: run.id, agentId: agent.id, skillId: null, mode, reason: goal ? "agent goal" : "agent read-only run", stepCount: clamped.length, droppedSteps: dropped });
   return { ok: true, run, droppedSteps: dropped };
 }

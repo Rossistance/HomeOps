@@ -33,6 +33,8 @@ import {
   getContactVerification, putContactVerification, patchContactVerification, deleteContactVerification,
   listFiles, getFileRec, putFileRec, writeFileBlob, readFileBlob, deleteFileRec,
   listPlaybooks, getPlaybook, putPlaybook, deletePlaybookRec,
+  listHelpRequests, getHelpRequest, putHelpRequest, patchHelpRequest,
+  addNotification, getAccountRaw,
 } from "./store.mjs";
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases } from "./engine.mjs";
 import { createBackup, listBackups, readBackup, restoreBackup, backupTick } from "./backup.mjs";
@@ -63,7 +65,7 @@ import {
   publicTrigger, listPublicTriggers, getTriggerSecret, tick, TRIGGER_TYPES,
 } from "./triggers.mjs";
 import { getTrigger } from "./store.mjs";
-import { pushApprovalNotification, deliverNotification, sendVerificationCode } from "./notify.mjs";
+import { pushApprovalNotification, deliverNotification, sendVerificationCode, pushToMember } from "./notify.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
 import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast, sessionFromReq } from "./auth.mjs";
 
@@ -196,6 +198,14 @@ function planGate(g, res, req) {
   const plan = getPlan(g.session.householdId);
   if (plan.active) return null;
   return json(res, 402, { error: "plan_required", plan, message: "Your free trial has ended — subscribe to FamiliOS Plus to keep using the assistant and agents. Your family's data stays fully accessible either way." }, req);
+}
+// Child AI gate: a Child View profile may chat with the assistant only after an adult
+// flips their aiEnabled toggle (PATCH /api/members/:id). Runs after gate() so the 403
+// is about the toggle, never a session/CSRF leak.
+function childAiGate(g, res, req) {
+  if (g.session.role !== "Child View") return null;
+  if (getMember(g.session.actorId)?.aiEnabled === true) return null;
+  return json(res, 403, { error: "ai_disabled", message: "Ask a parent to turn on AI chat for your profile." }, req);
 }
 function audit(event, req, session) {
   appendAudit({
@@ -874,6 +884,10 @@ const handleRequest = async (req, res) => {
       const members = listMembers({ householdId: g.session.householdId }).filter((m) => !m.archived).map((m) => ({
         actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null,
         color: m.color ?? null, spaceIds: m.spaceIds ?? [], isCurrentUser: m.actorId === g.session.actorId,
+        // Self-service profile: an uploaded photo file id or a curated avatar id (e.g. "avatar:03").
+        photoFileId: m.photoFileId ?? null,
+        // Adult-granted AI access for a child (default off).
+        aiEnabled: m.aiEnabled === true,
       }));
       return json(res, 200, { members }, req);
     }
@@ -895,10 +909,18 @@ const handleRequest = async (req, res) => {
     }
     const memberOne = path.match(/^\/api\/members\/([^/]+)$/);
     if (memberOne && method === "PATCH") {
-      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const m = getMember(memberOne[1]);
       if (!m || m.archived) return json(res, 404, { error: "not_found" }, req);
+      // Self-service: a member may edit their OWN presentation (name/photo/color). Changing
+      // relationship, role, or a child's AI access — or editing ANOTHER member — is Adult Admin+.
+      const isSelf = m.actorId === g.session.actorId;
+      const canManage = roleAtLeast(g.session.role, "Adult Admin");
+      if (!canManage && !isSelf) return json(res, 403, { error: "insufficient_role" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      if (!canManage && (body.relationship !== undefined || body.role != null || body.aiEnabled !== undefined)) {
+        return json(res, 403, { error: "insufficient_role", message: "Only an Owner or Adult Admin can change roles or relationships." }, req);
+      }
       const patch = {};
       if (body.displayName != null) { const n = String(body.displayName).trim(); if (!n) return json(res, 400, { error: "name_required" }, req); patch.displayName = n; }
       if (body.relationship !== undefined) patch.relationship = body.relationship;
@@ -913,9 +935,13 @@ const handleRequest = async (req, res) => {
         if (m.role === "Owner" && body.role !== "Owner" && owners.length <= 1) return json(res, 409, { error: "last_owner", message: "The household needs at least one Owner." }, req);
         patch.role = body.role;
       }
+      // Profile photo / curated avatar id (self-service). An explicit null/"" clears it.
+      if (body.photoFileId !== undefined) patch.photoFileId = body.photoFileId ? String(body.photoFileId).slice(0, 120) : null;
+      // Child AI access — an adult toggles whether a child may chat with the assistant.
+      if (body.aiEnabled !== undefined) patch.aiEnabled = !!body.aiEnabled;
       const updated = putMember({ actorId: m.actorId, ...patch });
       audit({ type: "member.update", memberId: m.actorId, fields: Object.keys(patch), ok: true }, req, g.session);
-      return json(res, 200, { member: { actorId: updated.actorId, displayName: updated.displayName, role: updated.role, relationship: updated.relationship ?? null, color: updated.color ?? null } }, req);
+      return json(res, 200, { member: { actorId: updated.actorId, displayName: updated.displayName, role: updated.role, relationship: updated.relationship ?? null, color: updated.color ?? null, photoFileId: updated.photoFileId ?? null, aiEnabled: updated.aiEnabled === true } }, req);
     }
     if (memberOne && method === "DELETE") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -1038,8 +1064,11 @@ const handleRequest = async (req, res) => {
           audit({ type: "tool.execute", connectorId: platform.provider.id, toolId, accountId: account.id, ok: true, action: platform.tool.action }, req, g.session);
           return json(res, 200, { ok: true, result }, req);
         } catch (e) {
-          audit({ type: "tool.execute", connectorId: platform.provider.id, toolId, accountId: account.id, ok: false, error: "provider_error" }, req, g.session);
-          return json(res, 422, { ok: false, error: "provider_error", message: String(e?.message ?? e) }, req);
+          // Typed validation failures (e.code) surface honestly — an empty email body
+          // is invalid_input, not a Google-side error.
+          const code = e?.code === "invalid_input" ? "invalid_input" : "provider_error";
+          audit({ type: "tool.execute", connectorId: platform.provider.id, toolId, accountId: account.id, ok: false, error: code }, req, g.session);
+          return json(res, 422, { ok: false, error: code, message: String(e?.message ?? e) }, req);
         }
       }
 
@@ -1178,7 +1207,17 @@ const handleRequest = async (req, res) => {
     if (path === "/api/events" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const visible = listEvents((e) => e.householdId === g.session.householdId).filter((e) => canSeeEntity(e, g.session));
-      return json(res, 200, { events: visible }, req);
+      // Per-event edit affordance for the clients: a canonical (FamiliOS-owned) event is
+      // editable by an adult or its owner; a linked Google event is editable ONLY by the
+      // member who connected that Google account (edit-own-calendar-only). Everything else
+      // (ICS mirrors, other members' synced events) is read-only.
+      const withEditable = visible.map((e) => ({
+        ...e,
+        editable: e.layer === "canonical"
+          ? (isAdultRole(g.session.role) || e.ownerId === g.session.actorId)
+          : isEditableLinkedGoogle(e, g.session.householdId, g.session.actorId),
+      }));
+      return json(res, 200, { events: withEditable }, req);
     }
     if (path === "/api/events" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -1214,8 +1253,11 @@ const handleRequest = async (req, res) => {
       // source of truth (Google) moves with us. ICS-fed linked/public events remain
       // read-only mirrors — editing them would blur source-of-truth, so we refuse
       // and tell the client to copy.
-      const linkedGoogle = ev.layer === "linked" && isEditableLinkedGoogle(ev, g.session.householdId);
-      if (ev.layer && ev.layer !== "canonical" && !linkedGoogle) return json(res, 409, { error: "read_only_layer", message: "This event is synced from an external calendar and can't be edited here — copy it to a FamiliOS event first." }, req);
+      // Edit-own-only: a linked Google event is two-way editable ONLY by the member who
+      // connected that Google account. Another member's synced event (or an ICS mirror)
+      // is read-only here — you can see it and it syncs, but you can't edit or push it.
+      const linkedGoogle = ev.layer === "linked" && isEditableLinkedGoogle(ev, g.session.householdId, g.session.actorId);
+      if (ev.layer && ev.layer !== "canonical" && !linkedGoogle) return json(res, 409, { error: "read_only_layer", message: "This event is synced from another calendar and can't be edited here — copy it to a FamiliOS event first." }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const { id, householdId, createdBy, createdAt, ifUpdatedAt, ...patch } = body; // never reassign identity/ownership-of-record
       if (ifUpdatedAt && ev.updatedAt && ifUpdatedAt !== ev.updatedAt) {
@@ -1228,7 +1270,7 @@ const handleRequest = async (req, res) => {
         const gPatch = Object.fromEntries(Object.entries({ title, startAt, endAt, location, notes }).filter(([, v]) => v !== undefined));
         if (Object.keys(gPatch).length > 0) {
           if (!externalActionsEnabled(g.session.householdId)) return json(res, 423, { error: "external_actions_disabled" }, req);
-          const r = await editLinkedGoogleEvent({ ev, patch: gPatch, householdId: g.session.householdId });
+          const r = await editLinkedGoogleEvent({ ev, patch: gPatch, householdId: g.session.householdId, actorId: g.session.actorId });
           audit({ type: "event.update", eventId: ev.id, ok: r.ok, target: "google-linked", ...(r.ok ? {} : { error: r.error }) }, req, g.session);
           if (!r.ok) return json(res, 422, { error: r.error, message: r.message ?? "Couldn't update the event in Google Calendar." }, req);
         }
@@ -1251,11 +1293,16 @@ const handleRequest = async (req, res) => {
       const ev = getEvent(eventOne[1]);
       if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       if (!isAdultRole(g.session.role) && ev.ownerId !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
+      // Edit-own-only: a linked event you didn't connect is read-only — refuse rather than
+      // delete the local mirror (which would just re-import on the next sync anyway).
+      if (ev.layer && ev.layer !== "canonical" && !isEditableLinkedGoogle(ev, g.session.householdId, g.session.actorId)) {
+        return json(res, 409, { error: "read_only_layer", message: "This event is synced from another calendar and can't be deleted here." }, req);
+      }
       // Google-linked events delete two-way (Google first, then the local mirror) —
       // deleting only the mirror would just re-import on the next subscription sync.
-      if (ev.layer === "linked" && isEditableLinkedGoogle(ev, g.session.householdId)) {
+      if (ev.layer === "linked" && isEditableLinkedGoogle(ev, g.session.householdId, g.session.actorId)) {
         if (!externalActionsEnabled(g.session.householdId)) return json(res, 423, { error: "external_actions_disabled" }, req);
-        const r = await deleteLinkedGoogleEvent({ ev, householdId: g.session.householdId });
+        const r = await deleteLinkedGoogleEvent({ ev, householdId: g.session.householdId, actorId: g.session.actorId });
         audit({ type: "event.delete", eventId: ev.id, ok: r.ok, target: "google-linked", ...(r.ok ? {} : { error: r.error }) }, req, g.session);
         if (!r.ok) return json(res, 422, { error: r.error, message: r.message ?? "Couldn't delete the event in Google Calendar." }, req);
         return json(res, 200, { ok: true, google: "deleted" }, req);
@@ -1313,6 +1360,69 @@ const handleRequest = async (req, res) => {
       deleteTaskRec(tk.id);
       audit({ type: "task.delete", taskId: tk.id, ok: true }, req, g.session);
       return json(res, 200, { ok: true }, req);
+    }
+
+    /* ---- Help requests: "can you help?" asks between members ----
+     * ANY signed-in member may ask (children and grandparents included — asking for
+     * help must never need a role); only the recipient can answer; the requester or
+     * an adult can cancel while pending. Notifications go to the two people involved
+     * (in-app record + targeted push), never the whole household. */
+    if (path === "/api/help-requests" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const mine = listHelpRequests((h) => h.householdId === g.session.householdId)
+        .filter((h) => h.fromActorId === g.session.actorId || h.toActorId === g.session.actorId || isAdultRole(g.session.role))
+        .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
+      return json(res, 200, { helpRequests: mine }, req);
+    }
+    if (path === "/api/help-requests" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const to = getMember(String(body.toActorId ?? ""));
+      if (!to || to.archived) return json(res, 400, { error: "bad_recipient", message: "Pick a current household member to ask." }, req);
+      const message = String(body.message ?? "").trim().slice(0, 500);
+      if (!message) return json(res, 400, { error: "message_required", message: "Say what you need help with." }, req);
+      const fromName = getMember(g.session.actorId)?.displayName ?? g.session.actorId;
+      const hr = putHelpRequest({
+        id: "hr_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        fromActorId: g.session.actorId, fromName, toActorId: to.actorId, toName: to.displayName,
+        message, eventId: body.eventId ?? null, taskId: body.taskId ?? null,
+        status: "pending", responseNote: null,
+        createdAt: new Date().toISOString(), respondedAt: null,
+      });
+      addNotification({ householdId: g.session.householdId, actorId: to.actorId, channel: "in_app", title: "Can you help?", body: `${fromName}: ${message}` });
+      void pushToMember({ householdId: g.session.householdId, actorId: to.actorId, title: "Can you help?", body: `${fromName}: ${message}`, data: { type: "help_request", id: hr.id } });
+      audit({ type: "help.request", helpRequestId: hr.id, toActorId: to.actorId, ok: true }, req, g.session);
+      return json(res, 200, { helpRequest: hr }, req);
+    }
+    const helpRespond = path.match(/^\/api\/help-requests\/([^/]+)\/respond$/);
+    if (helpRespond && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const hr = getHelpRequest(helpRespond[1]);
+      if (!hr || hr.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (hr.toActorId !== g.session.actorId) return json(res, 403, { error: "forbidden", message: "Only the person who was asked can answer this request." }, req);
+      if (hr.status !== "pending") return json(res, 409, { error: "already_answered", helpRequest: hr }, req);
+      const body = (await readBody(req)) ?? {};
+      if (!["accept", "decline"].includes(body.response)) return json(res, 400, { error: "bad_response", message: 'response must be "accept" or "decline".' }, req);
+      const status = body.response === "accept" ? "accepted" : "declined";
+      const responseNote = String(body.note ?? "").trim().slice(0, 500) || null;
+      const updated = patchHelpRequest(hr.id, { status, responseNote, respondedAt: new Date().toISOString() });
+      const title = `Help request ${status}`;
+      const note = responseNote ? ` — ${responseNote}` : "";
+      addNotification({ householdId: g.session.householdId, actorId: hr.fromActorId, channel: "in_app", title, body: `${hr.toName}: “${hr.message.slice(0, 80)}”${note}` });
+      void pushToMember({ householdId: g.session.householdId, actorId: hr.fromActorId, title, body: `${hr.toName}${note}`, data: { type: "help_request", id: hr.id } });
+      audit({ type: "help.respond", helpRequestId: hr.id, status, ok: true }, req, g.session);
+      return json(res, 200, { helpRequest: updated }, req);
+    }
+    const helpCancel = path.match(/^\/api\/help-requests\/([^/]+)\/cancel$/);
+    if (helpCancel && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const hr = getHelpRequest(helpCancel[1]);
+      if (!hr || hr.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (hr.fromActorId !== g.session.actorId && !isAdultRole(g.session.role)) return json(res, 403, { error: "forbidden" }, req);
+      if (hr.status !== "pending") return json(res, 409, { error: "already_answered", helpRequest: hr }, req);
+      const updated = patchHelpRequest(hr.id, { status: "cancelled" });
+      audit({ type: "help.cancel", helpRequestId: hr.id, ok: true }, req, g.session);
+      return json(res, 200, { helpRequest: updated }, req);
     }
 
     /* ---- Meal plan (family meals) — household/visibility scoped; Limited Member+ writes.
@@ -1531,8 +1641,48 @@ const handleRequest = async (req, res) => {
      * Creating a subscription is an Adult Member+ action; reads are household-scoped. */
     if (path === "/api/calendar/subscriptions" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const subs = listSubscriptions((s) => s.householdId === g.session.householdId).map((s) => ({ id: s.id, name: s.name, url: s.url ?? null, source: s.source, color: s.color ?? null, lastSyncAt: s.lastSyncAt ?? null, lastResult: s.lastResult ?? null, eventCount: s.eventCount ?? 0, createdAt: s.createdAt }));
+      const subs = listSubscriptions((s) => s.householdId === g.session.householdId).map((s) => {
+        // Source account (google subs): the connected account's email + the member who
+        // connected it — so the UI can say WHOSE calendar this is. ICS subs have none.
+        const account = s.accountId ? getAccountRaw(s.accountId) : null;
+        const ownerActorId = account?.connectedByActorId ?? null;
+        return {
+          id: s.id, name: s.name, url: s.url ?? null, source: s.source, color: s.color ?? null,
+          lastSyncAt: s.lastSyncAt ?? null, lastResult: s.lastResult ?? null, eventCount: s.eventCount ?? 0, createdAt: s.createdAt,
+          accountId: s.accountId ?? null,
+          accountEmail: account?.displayName ?? null,
+          ownerActorId,
+          ownerName: ownerActorId ? (getMember(ownerActorId)?.displayName ?? null) : null,
+        };
+      });
       return json(res, 200, { subscriptions: subs }, req);
+    }
+    // One-call calendar sync: re-pull EVERY subscription (google + ics feeds), then merge
+    // Google-side edits back into pushed canonical events — a single "sync now" for
+    // clients, tolerant of individual feed failures.
+    if (path === "/api/calendar/sync-all" && method === "POST") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const subs = listSubscriptions((s) => s.householdId === g.session.householdId);
+      let synced = 0, imported = 0, updated = 0, removed = 0;
+      const errors = [];
+      for (const sub of subs) {
+        try {
+          const r = await syncSubscription({ sub, session: g.session });
+          patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed } : { error: r.error }, eventCount: r.ok ? r.total : (sub.eventCount ?? 0) });
+          if (r.ok) { synced++; imported += r.imported; updated += r.updated; removed += r.removed; }
+          else errors.push({ id: sub.id, error: r.error });
+        } catch (e) { errors.push({ id: sub.id, error: String(e?.message ?? e) }); }
+      }
+      // Merge-back half (same as POST /api/calendar/pull-google-edits) — best-effort:
+      // no connected Google account just means nothing to pull, not a failure.
+      let pulled = { checked: 0, merged: 0, conflicts: 0, unlinked: 0 };
+      try {
+        const p = await pullGoogleEdits({ session: g.session });
+        if (p.ok) pulled = { checked: p.checked, merged: p.merged, conflicts: p.conflicts, unlinked: p.unlinked };
+      } catch { /* best effort */ }
+      audit({ type: "calendar.sync_all", synced, imported, updated, removed, pulled, failed: errors.length, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, synced, imported, updated, removed, pulled, errors }, req);
     }
     if (path === "/api/calendar/subscriptions" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -2599,6 +2749,7 @@ const handleRequest = async (req, res) => {
     }
     if (path === "/api/assistant" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const aiGated = childAiGate(g, res, req); if (aiGated) return aiGated;
       const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       // Prior turns from the durable conversation ride into the model call —
@@ -2647,6 +2798,7 @@ const handleRequest = async (req, res) => {
     // Clients that don't support SSE can fall back to POST /api/assistant unchanged.
     if (path === "/api/assistant/stream" && method === "POST") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const aiGated = childAiGate(g, res, req); if (aiGated) return aiGated;
       const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", ...corsHeaders(req) });
@@ -2704,6 +2856,7 @@ const handleRequest = async (req, res) => {
     // still pause for approval at run time. Adult Admin only (creating agents/automations).
     if (path === "/api/assistant/build" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const aiGated = childAiGate(g, res, req); if (aiGated) return aiGated;
       const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const spec = body.build ?? body;
@@ -2836,7 +2989,8 @@ const handleRequest = async (req, res) => {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       if (!body.token || typeof body.token !== "string") return json(res, 400, { error: "token_required" }, req);
-      addPushToken(body.token);
+      // Record who owns this device so an approval push can target the right person.
+      addPushToken(body.token, { householdId: g.session?.householdId ?? null, actorId: g.session?.actorId ?? null });
       audit({ type: "push.register", ok: true }, req, g.session);
       return json(res, 200, { ok: true }, req);
     }
@@ -2925,6 +3079,10 @@ function materializeBuild(spec, { session, req, emit = () => {} }) {
   if (created.agent && (created.agent.allowedToolIds?.length || created.agent.allowedFunctionIds?.length)) {
     const n = (created.agent.allowedToolIds?.length ?? 0) + (created.agent.allowedFunctionIds?.length ?? 0);
     notes.push(`I preselected ${n} capabilit${n === 1 ? "y" : "ies"} for the new helper from its skill steps — no manual tool wiring needed.`);
+  } else if (created.agent) {
+    // Honest build success: "created" but tool-less is inert (permitted∩available = ∅) —
+    // say so instead of letting the family rely on a helper that can't execute anything.
+    notes.push("Heads up: this helper has no usable tools yet — connect the services it needs or edit it before relying on it.");
   }
   if (created.skill && created.skill.status !== "available") notes.push("The new skill starts as a draft — it becomes available automatically once its connected services are ready and a first run succeeds.");
   if (created.agent && created.agent.status === "Draft") notes.push("The new helper is a draft — open Helper Agents to activate it.");

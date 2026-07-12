@@ -8,6 +8,8 @@ import { suggestAskPrompts } from "@/lib/ai";
 import type { AssistantConversation, AssistantMessage, AutomationRun } from "@/types";
 import { backend, type AgentPlan, type ChatBuild, type EmailReviewMessage, type EmailReviewLabel } from "@/connectors/api";
 
+type ChatScope = "household" | "personal";
+
 export function Assistant() {
   const conversations = useStore((s) => s.data.conversations) ?? [];
   const convId = useStore((s) => s.route.params?.id);
@@ -16,13 +18,31 @@ export function Assistant() {
   const deleteConversation = useStore((s) => s.deleteConversation);
   const navigate = useStore((s) => s.navigate);
   const conv = conversations.find((c) => c.id === convId);
+  // Personal vs Family scope for NEW chats (persisted for the visit; passed as the
+  // conversation's visibility when a chat is created).
+  const [scope, setScope] = useState<ChatScope>("household");
+  const start = (t: string) => void startConversation(t, { visibility: scope });
 
-  if (!conv) return <AssistantHome conversations={conversations} onStart={startConversation} onOpen={(id) => navigate("assistant", { id })} onDismiss={deleteConversation} />;
-  return <Conversation key={conv.id} conv={conv} onSend={(t) => sendToAssistant(conv.id, t)} />;
+  if (!conv) return <AssistantHome conversations={conversations} scope={scope} onScope={setScope} onStart={start} onOpen={(id) => navigate("assistant", { id })} onDismiss={deleteConversation} />;
+  return <Conversation key={conv.id} conv={conv} conversations={conversations} scope={scope} onScope={setScope} onOpen={(id) => navigate("assistant", { id })} onSend={(t, extra) => sendToAssistant(conv.id, t, extra)} />;
+}
+
+/** Personal / Family scope toggle for new chats. */
+function ScopeToggle({ scope, onScope }: { scope: ChatScope; onScope: (s: ChatScope) => void }) {
+  return (
+    <div className="inline-flex shrink-0 rounded-xl border border-ink-900/[0.08] bg-surface-sunken/60 p-0.5" role="tablist" aria-label="Chat scope">
+      {([["personal", "Personal", "Lock"], ["household", "Family", "Users"]] as const).map(([v, label, icon]) => (
+        <button key={v} role="tab" aria-selected={scope === v} onClick={() => onScope(v)} title={v === "personal" ? "New chats are visible only to you" : "New chats are shared with the household"}
+          className={`rounded-[10px] px-2.5 py-1 text-xs font-semibold transition-colors ${scope === v ? "bg-surface text-ink-900 shadow-sm" : "text-ink-500 hover:text-ink-700"}`}>
+          <Icon name={icon} size={11} className="mr-1 inline" />{label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 /* ------------------------------- Home / empty --------------------------- */
-function AssistantHome({ conversations, onStart, onOpen, onDismiss }: { conversations: AssistantConversation[]; onStart: (t: string) => void; onOpen: (id: string) => void; onDismiss: (id: string) => void }) {
+function AssistantHome({ conversations, scope, onScope, onStart, onOpen, onDismiss }: { conversations: AssistantConversation[]; scope: ChatScope; onScope: (s: ChatScope) => void; onStart: (t: string) => void; onOpen: (id: string) => void; onDismiss: (id: string) => void }) {
   const [text, setText] = useState("");
   const data = useStore((s) => s.data);
   const me = useStore((s) => s.currentMember());
@@ -37,6 +57,7 @@ function AssistantHome({ conversations, onStart, onOpen, onDismiss }: { conversa
         </div>
         <h1 className="font-display text-3xl font-semibold tracking-tight text-ink-900">Ask FamiliOS, {first}</h1>
         <p className="mt-1.5 text-sm text-ink-500">Tell me what you need. I'll answer, or draft a plan you can approve and run.</p>
+        <div className="mt-3 flex justify-center"><ScopeToggle scope={scope} onScope={onScope} /></div>
       </div>
 
       <div className="card card-pad">
@@ -87,32 +108,108 @@ function AssistantHome({ conversations, onStart, onOpen, onDismiss }: { conversa
 }
 
 /* ------------------------------ Conversation ---------------------------- */
-function Conversation({ conv, onSend }: { conv: AssistantConversation; onSend: (t: string) => void }) {
+function Conversation({ conv, conversations, scope, onScope, onOpen, onSend }: { conv: AssistantConversation; conversations: AssistantConversation[]; scope: ChatScope; onScope: (s: ChatScope) => void; onOpen: (id: string) => void; onSend: (t: string, extra?: Record<string, unknown>) => void }) {
   const navigate = useStore((s) => s.navigate);
   const deleteConversation = useStore((s) => s.deleteConversation);
+  const toast = useStore((s) => s.toast);
   const [text, setText] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
+  const assistantTopRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [attached, setAttached] = useState<{ id: string; name: string } | null>(null);
+  const [uploading, setUploading] = useState(false);
   const thinking = conv.messages.some((m) => m.status === "thinking");
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [conv.messages.length, thinking]);
-  const submit = () => { const t = text.trim(); if (t && !thinking) { onSend(t); setText(""); } };
+
+  // Scroll rules: a user send follows to the bottom (the thinking indicator); when an
+  // assistant reply ARRIVES, jump to the TOP of that reply so long answers read from
+  // the start instead of the tail.
+  const lastAssistant = [...conv.messages].reverse().find((m) => m.role === "assistant");
+  const arrivedKey = lastAssistant && lastAssistant.status !== "thinking" && lastAssistant.status !== "streaming" ? lastAssistant.id : null;
+  useEffect(() => {
+    const last = conv.messages[conv.messages.length - 1];
+    if (!last || last.role === "user" || last.status === "thinking" || last.status === "streaming") {
+      endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [conv.messages.length]);
+  useEffect(() => {
+    if (arrivedKey) assistantTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [arrivedKey]);
+
+  const attachFile = async (file: File | null) => {
+    if (!file) return;
+    setUploading(true);
+    const base64 = await new Promise<string | undefined>((res) => {
+      const reader = new FileReader();
+      reader.onload = () => { const u = reader.result as string; res(u.includes(",") ? u.split(",")[1] : undefined); };
+      reader.onerror = () => res(undefined);
+      reader.readAsDataURL(file);
+    });
+    if (!base64) { setUploading(false); toast({ kind: "error", title: "Couldn't read that file" }); return; }
+    const up = await backend.uploadFile({ name: file.name, mime: file.type || "application/octet-stream", contentBase64: base64, tags: ["Chat"], source: "chat" });
+    setUploading(false);
+    if (up.file) setAttached({ id: up.file.id, name: up.file.name });
+    else toast({ kind: "error", title: "Upload failed", message: up.message ?? up.error });
+  };
+
+  const submit = () => {
+    const t = text.trim();
+    if (!t || thinking || uploading) return;
+    if (attached) {
+      onSend(`[Attached: ${attached.name}]\n${t}`, { attachedFileId: attached.id, attachedFileName: attached.name });
+      setAttached(null);
+    } else {
+      onSend(t);
+    }
+    setText("");
+  };
+  const others = conversations.filter((c) => c.id !== conv.id).slice(0, 8);
 
   return (
     <div className="animate-fade-in mx-auto flex h-full max-w-3xl flex-col">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <h1 className="font-display truncate text-xl font-semibold text-ink-900">{conv.title}</h1>
-        <div className="flex items-center gap-1.5">
-          <Button size="sm" variant="secondary" onClick={() => navigate("assistant")}><Icon name="Plus" size={14} /> New chat</Button>
-          <Button size="sm" variant="ghost" onClick={() => deleteConversation(conv.id)} aria-label="Delete conversation"><Icon name="Trash2" size={15} /></Button>
+      {/* Pinned header: title + scope toggle + recent chats, above the scrolling list */}
+      <div className="sticky top-0 z-10 mb-3 space-y-2 border-b border-ink-900/[0.06] bg-surface-base/85 pb-2 backdrop-blur-xl">
+        <div className="flex items-center justify-between gap-2">
+          <h1 className="font-display truncate text-xl font-semibold text-ink-900">{conv.title}</h1>
+          <div className="flex items-center gap-1.5">
+            <ScopeToggle scope={scope} onScope={onScope} />
+            <Button size="sm" variant="secondary" onClick={() => navigate("assistant")}><Icon name="Plus" size={14} /> New chat</Button>
+            <Button size="sm" variant="ghost" onClick={() => deleteConversation(conv.id)} aria-label="Delete conversation"><Icon name="Trash2" size={15} /></Button>
+          </div>
         </div>
+        {others.length > 0 && (
+          <div className="flex gap-1.5 overflow-x-auto pb-0.5" aria-label="Recent chats">
+            {others.map((c) => (
+              <button key={c.id} onClick={() => onOpen(c.id)} title={c.title}
+                className="chip max-w-[12rem] shrink-0 bg-surface-sunken text-ink-600 transition-colors hover:bg-surface-overlay">
+                <Icon name="MessageSquare" size={11} /> <span className="truncate">{c.title}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="flex-1 space-y-4 overflow-y-auto pb-4">
-        {conv.messages.map((m) => <MessageRow key={m.id} conversationId={conv.id} m={m} />)}
+        {conv.messages.map((m) => (
+          <div key={m.id} ref={m.id === lastAssistant?.id ? assistantTopRef : undefined} className="scroll-mt-28">
+            <MessageRow conversationId={conv.id} m={m} />
+          </div>
+        ))}
         <div ref={endRef} />
       </div>
 
       <div className="sticky bottom-0 mt-2 border-t border-ink-900/[0.06] bg-surface-base/80 pt-3 backdrop-blur-xl">
+        {attached && (
+          <div className="mb-1.5 flex items-center gap-2 px-1">
+            <span className="chip bg-sky-100 text-sky-700"><Icon name="Paperclip" size={11} /> {attached.name}</span>
+            <button onClick={() => setAttached(null)} aria-label="Remove attachment" className="text-ink-400 transition-colors hover:text-coral-600"><Icon name="X" size={13} /></button>
+          </div>
+        )}
         <div className="card flex items-end gap-2 px-3 py-2">
+          <input ref={fileRef} type="file" className="hidden" onChange={(e) => { void attachFile(e.target.files?.[0] ?? null); e.target.value = ""; }} />
+          <button onClick={() => fileRef.current?.click()} disabled={uploading || thinking} aria-label="Attach a file"
+            className="mb-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-ink-900/[0.08] text-ink-500 transition-colors hover:border-ember-300 hover:text-ember-600 disabled:opacity-50">
+            <Icon name={uploading ? "Loader2" : "Plus"} size={16} className={uploading ? "animate-spin" : ""} />
+          </button>
           <textarea
             value={text} onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
@@ -120,7 +217,7 @@ function Conversation({ conv, onSend }: { conv: AssistantConversation; onSend: (
             className="max-h-40 min-h-[40px] flex-1 resize-none bg-transparent py-2 text-sm text-ink-800 placeholder:text-ink-400 focus:outline-none"
             rows={1} disabled={thinking}
           />
-          <Button variant="ember" onClick={submit} disabled={!text.trim() || thinking}><Icon name="ArrowUp" size={16} /></Button>
+          <Button variant="ember" onClick={submit} disabled={!text.trim() || thinking || uploading}><Icon name="ArrowUp" size={16} /></Button>
         </div>
         <p className="px-1 pt-1.5 text-center text-[11px] text-ink-400">FamiliOS proposes; you approve. Risky actions never run without your sign-off.</p>
       </div>

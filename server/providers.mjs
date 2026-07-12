@@ -34,6 +34,10 @@ export const PROVIDERS = [
     clientIdEnv: "HOMEOPS_OAUTH_GOOGLE_CLIENT_ID",
     clientSecretEnv: "HOMEOPS_OAUTH_GOOGLE_CLIENT_SECRET",
     scopes: [
+      // Identity scopes — enable no tools; they let the connect flow resolve the REAL
+      // account email so Connections shows "alex@…" instead of the literal "Google account".
+      { key: "openid", oauthScope: "openid", label: "Basic identity", risk: "Low", enablesTools: [] },
+      { key: "email", oauthScope: "https://www.googleapis.com/auth/userinfo.email", label: "See your email address", risk: "Low", enablesTools: [] },
       { key: "gmail.read", oauthScope: "https://www.googleapis.com/auth/gmail.readonly", label: "Read Gmail", risk: "Sensitive", enablesTools: ["gmail.search"] },
       { key: "gmail.send", oauthScope: "https://www.googleapis.com/auth/gmail.send", label: "Send email", risk: "High", enablesTools: ["gmail.send"] },
       { key: "gmail.modify", oauthScope: "https://www.googleapis.com/auth/gmail.modify", label: "Organize inbox (labels, archive)", risk: "High", enablesTools: ["gmail.listLabels", "gmail.modifyLabels"] },
@@ -44,7 +48,18 @@ export const PROVIDERS = [
       // id (HOMEOPS_SDM_PROJECT_ID) — the tools fail closed with a setup hint until it's set.
       { key: "smarthome", oauthScope: "https://www.googleapis.com/auth/sdm.service", label: "Google Home devices (Nest thermostats, cameras)", risk: "High", enablesTools: ["smarthome.listDevices", "smarthome.setThermostat"] },
     ],
-    identity: async (api) => { const r = await api("https://www.googleapis.com/oauth2/v2/userinfo"); return { externalAccountId: r.json?.id ?? r.json?.email, displayName: r.json?.email ?? "Google account" }; },
+    identity: async (api) => {
+      // userinfo needs the email/openid scopes; accounts connected before those existed
+      // (or with them declined) fall back to the Gmail profile, then the honest literal.
+      const r = await api("https://www.googleapis.com/oauth2/v2/userinfo");
+      let email = r.json?.email ?? null;
+      let externalId = r.json?.id ?? null;
+      if (!email) {
+        const p = await api("https://gmail.googleapis.com/gmail/v1/users/me/profile");
+        email = p.json?.emailAddress ?? null;
+      }
+      return { externalAccountId: externalId ?? email ?? "google", displayName: email ?? "Google account" };
+    },
     health: async (api) => { const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/profile"); return { ok: r.ok, status: r.ok ? "healthy" : "error", detail: r.json?.emailAddress }; },
     tools: [
       { id: "gmail.search", name: "Search inbox", action: "Read", risk: "Sensitive", requiresApproval: false, scopes: ["gmail.read"], inputs: [{ key: "query", label: "Search query", type: "text", default: "newer_than:7d" }, { key: "maxResults", label: "Max results (≤250, paginates automatically)", type: "text", default: "50" }],
@@ -142,7 +157,10 @@ export const PROVIDERS = [
         } },
       { id: "gmail.send", name: "Send email", action: "Send", risk: "High", requiresApproval: true, scopes: ["gmail.send"], inputs: [{ key: "to", label: "To", type: "text", required: true }, { key: "subject", label: "Subject", type: "text", required: true }, { key: "body", label: "Message", type: "textarea" }],
         run: async (api, input) => {
-          if (!input.to || !input.subject) throw new Error("Provide `to` and `subject`.");
+          // Validation fires BEFORE any Google call (e.code lets callers report the
+          // honest `invalid_input` instead of a generic provider_error).
+          if (!input.to || !input.subject) throw Object.assign(new Error("Provide `to` and `subject`."), { code: "invalid_input" });
+          if (!String(input.body ?? "").trim()) throw Object.assign(new Error("Refusing to send an email with an empty body — compose the message body first."), { code: "invalid_input" });
           const raw = Buffer.from(`To: ${input.to}\r\nSubject: ${input.subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${input.body ?? ""}`, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
           const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ raw }) });
           if (!r.ok) throw new Error(r.json?.error?.message ?? "Gmail send failed");

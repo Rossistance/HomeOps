@@ -148,6 +148,9 @@ function CalendarSubscriptions() {
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-sky-50 text-sky-600"><Icon name="CalendarDays" size={16} /></span>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-semibold text-ink-900">{s.name}</p>
+                {(s.ownerName || s.accountEmail) && (
+                  <p className="truncate text-xs text-ink-500"><Icon name="UserCircle" size={11} className="mr-0.5 inline" /> {[s.ownerName, s.accountEmail].filter(Boolean).join(" · ")}</p>
+                )}
                 <p className="truncate text-xs text-ink-400">{s.url ?? "Pasted .ics"} · {s.eventCount} events{s.lastSyncAt ? ` · synced ${relativeTime(new Date(s.lastSyncAt).toISOString())}` : ""}</p>
                 {s.lastResult?.error && <p className="mt-0.5 text-xs text-coral-600">Last sync: {s.lastResult.error}</p>}
                 {canManage && (

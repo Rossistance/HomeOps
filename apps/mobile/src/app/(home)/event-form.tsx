@@ -141,9 +141,12 @@ export default function EventFormScreen() {
         if (!e) {
           setNotFound(true);
         } else {
-          const lg = e.layer === "linked" && !!e.provenance?.googleEventId;
+          // Edit-own-only: the server tells us whether THIS member may edit this event
+          // (a linked Google event is editable only by the member who connected it).
+          const canEdit = e.editable !== false;
+          const lg = e.layer === "linked" && !!e.provenance?.googleEventId && canEdit;
           setLinkedGoogle(lg);
-          setReadOnly(e.layer !== "canonical" && !lg);
+          setReadOnly(!canEdit || (e.layer !== "canonical" && !lg));
           setGoogleEventId(e.provenance?.googleEventId ?? null);
           setTitle(e.title);
           setLocation(e.location ?? "");
@@ -311,7 +314,7 @@ export default function EventFormScreen() {
         <Notice text="Viewing only — creating and editing events needs Limited Member or higher." ok={false} />
       ) : null}
       {readOnly ? (
-        <Notice text="Synced from an external calendar — read-only here. Edit it at the source." ok={false} />
+        <Notice text="Read-only — this is synced from another calendar (you can only edit your own). Edit it at the source." ok={false} />
       ) : null}
       {linkedGoogle ? (
         <Notice text="Synced from Google Calendar — changes you save here update it in Google too." ok />

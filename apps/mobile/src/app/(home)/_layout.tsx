@@ -10,6 +10,9 @@ export default function HomeLayout() {
       <Stack.Screen name="groceries" options={{ title: "Groceries" }} />
       <Stack.Screen name="kid" options={{ title: "", headerShown: false }} />
       <Stack.Screen name="grandparent" options={{ title: "", headerShown: false }} />
+      <Stack.Screen name="sitter" options={{ title: "", headerShown: false }} />
+      <Stack.Screen name="profile" options={{ title: "My Profile" }} />
+      <Stack.Screen name="help" options={{ title: "Ask for help" }} />
       <Stack.Screen name="calendar" options={{ title: "Calendar" }} />
       <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
       <Stack.Screen

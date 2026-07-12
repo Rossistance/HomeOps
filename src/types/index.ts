@@ -202,6 +202,10 @@ export interface Member {
   spaceIds: string[];
   isCurrentUser?: boolean;
   email?: string;
+  /** Server-owned avatar: an uploaded file id OR an `emoji:🦊` curated avatar. */
+  photoFileId?: string | null;
+  /** Child View only: whether AI chat is enabled for this member (server-enforced). */
+  aiEnabled?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -633,6 +637,8 @@ export interface CalendarEvent {
   layer?: "canonical" | "linked" | "public";
   visibility?: string;
   ownerId?: string | null;
+  /** Server verdict: may the CURRENT member edit this event? */
+  editable?: boolean;
   driverId?: string | null;
   whatToBring?: { item: string; memberId: string | null }[];
   checklist?: { text: string; done: boolean }[];

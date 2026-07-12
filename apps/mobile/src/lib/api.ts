@@ -101,6 +101,11 @@ export interface EventRec {
   driverId: string | null; participantIds: string[]; whatToBring: { item: string; memberId: string | null }[];
   checklist: { text: string; done: boolean }[]; visibility: string; layer: "canonical" | "linked" | "public"; category: string;
   notes?: string; source?: string; provenance?: EventProvenance;
+  /** Linked Google events: the member who connected that calendar (colors + free/busy). */
+  ownerId?: string | null;
+  /** Server-computed: may the current member edit this event? Canonical → adult/owner;
+   *  linked Google → only the member who connected that account (edit-own-calendar-only). */
+  editable?: boolean;
 }
 export interface TaskRec {
   id: string; title: string; type: string; status: string; dueAt: string | null;
@@ -119,6 +124,11 @@ export interface CalendarSubscription {
   id: string; name: string; url: string | null; source: string;
   /** Per-calendar accent (name or hex) — each connected calendar's events render as distinctly colored cards. */
   color?: string | null;
+  /** Owning connected account (Google) — which member's calendar this is. All possibly null (ICS feeds). */
+  accountId?: string | null;
+  accountEmail?: string | null;
+  ownerActorId?: string | null;
+  ownerName?: string | null;
   lastSyncAt: number | null;
   lastResult: { imported?: number; updated?: number; removed?: number; error?: string } | null;
   eventCount: number; createdAt: number;
@@ -153,7 +163,7 @@ export interface PlaybookRec {
   archived: boolean; system: boolean; createdAt: string;
 }
 export interface ArtifactRec { id: string; runId?: string; kind: string; title: string; body?: string; createdAt: number }
-export interface MemberRec { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean; color?: string | null }
+export interface MemberRec { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean; color?: string | null; photoFileId?: string | null; aiEnabled?: boolean }
 // Contact methods — the server-owned delivery registry (per-member email/phone/in-app/
 // dashboard entries with verified + opt-in state and a per-agent allowlist). Same
 // records the web Contacts tab manages; the server enforces the role gates.
@@ -173,6 +183,27 @@ export interface AIProviderRec {
 }
 export interface AIChatResult { ok: boolean; model?: string; text?: string; error?: string; message?: string }
 export interface AIHealthResult { ok: boolean; status?: string; latencyMs?: number; models?: string[]; error?: string; message?: string }
+
+/** "Ask for help" — a lightweight request from one member to another (grandparent,
+ * sitter, …), optionally linked to a calendar event or task. Server-owned. */
+export interface HelpRequestRec {
+  id: string; householdId: string;
+  fromActorId: string; fromName: string;
+  toActorId: string; toName: string;
+  message: string;
+  eventId: string | null; taskId: string | null;
+  status: "pending" | "accepted" | "declined" | "cancelled";
+  responseNote: string | null;
+  createdAt: string; respondedAt: string | null;
+}
+/** Result of POST /api/calendar/sync-all — one button syncs every subscription
+ * and pulls Google-side edits in the same pass. */
+export interface SyncAllResult {
+  ok: boolean; synced?: number; imported?: number; updated?: number; removed?: number;
+  pulled?: { checked?: number; merged?: number; conflicts?: number; unlinked?: number };
+  errors?: { id: string; error: string }[];
+  error?: string; message?: string;
+}
 
 interface Res<T> { status: number; ok: boolean; data: T }
 
@@ -420,6 +451,15 @@ export const api = {
   async deleteMember(actorId: string): Promise<{ ok?: boolean; error?: string; message?: string }> {
     const r = await req<{ ok?: boolean; error?: string; message?: string }>(`/members/${encodeURIComponent(actorId)}`, { method: "DELETE" });
     if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  // Update a member's profile / role. Members edit their own name/photo/color; an Owner or
+  // Adult Admin may also change relationship, role, and a child's aiEnabled. The server
+  // enforces the role floor + last-owner guard; a self-edit of own name/photo is allowed.
+  async patchMember(actorId: string, patch: { displayName?: string; relationship?: string | null; role?: string; color?: string | null; photoFileId?: string | null; aiEnabled?: boolean }): Promise<{ member?: MemberRec; error?: string; message?: string }> {
+    const r = await req<{ member?: MemberRec; error?: string; message?: string }>(`/members/${encodeURIComponent(actorId)}`, { method: "PATCH", body: JSON.stringify(patch) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    if (r.status === 409) return r.data ?? { error: "conflict" };
     return r.data ?? { error: "network" };
   },
   async renameHousehold(name: string): Promise<{ household?: { id: string; name: string | null }; error?: string; message?: string }> {
@@ -745,6 +785,34 @@ export const api = {
   },
   async deleteTrigger(id: string): Promise<{ ok?: boolean; error?: string }> {
     const r = await req<{ ok?: boolean; error?: string }>(`/triggers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+
+  /* ---- One-button calendar sync: every subscription + pull Google edits ---- */
+  async syncAllCalendars(): Promise<SyncAllResult> {
+    const r = await req<SyncAllResult>("/calendar/sync-all", { method: "POST", body: "{}" });
+    if (r.status === 403) return { ok: false, error: "insufficient_role" };
+    return r.data ?? { ok: false, error: "network" };
+  },
+
+  /* ---- Help requests ("Ask for help from a family member") ---- */
+  async helpRequests(): Promise<HelpRequestRec[]> {
+    const r = await req<{ helpRequests: HelpRequestRec[] }>("/help-requests");
+    return r.data?.helpRequests ?? [];
+  },
+  async createHelpRequest(body: { toActorId: string; message: string; eventId?: string; taskId?: string }): Promise<{ helpRequest?: HelpRequestRec; error?: string; message?: string }> {
+    const r = await req<{ helpRequest?: HelpRequestRec; error?: string; message?: string }>("/help-requests", { method: "POST", body: JSON.stringify(body) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async respondHelpRequest(id: string, response: "accept" | "decline", note?: string): Promise<{ helpRequest?: HelpRequestRec; error?: string; message?: string }> {
+    const r = await req<{ helpRequest?: HelpRequestRec; error?: string; message?: string }>(`/help-requests/${encodeURIComponent(id)}/respond`, { method: "POST", body: JSON.stringify({ response, note }) });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  async cancelHelpRequest(id: string): Promise<{ helpRequest?: HelpRequestRec; ok?: boolean; error?: string }> {
+    const r = await req<{ helpRequest?: HelpRequestRec; ok?: boolean; error?: string }>(`/help-requests/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}" });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },

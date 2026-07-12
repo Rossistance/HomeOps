@@ -1,20 +1,79 @@
 // FamiliOS AI — push notifications (Expo). Shared by the run engine (so a run that
 // parks for approval notifies the household even with NO browser open) and by the
 // HTTP layer (API-created approvals). Fire-and-forget; never throws.
-import { getPushTokens, addNotification, appendAudit, getContactMethod } from "./store.mjs";
+import { getPushTokens, addNotification, appendAudit, getContactMethod, getMember, listMembers, canApprove } from "./store.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { executeTool, listConnectors, readinessOf } from "./connectors.mjs";
 
+// Who should be pinged for THIS approval. A personal action (or one the requester can
+// approve themselves) notifies only the requester — a scheduled personal briefing must
+// not fan out to the whole household. A request the requester CAN'T approve (e.g. a child
+// asking for something) notifies the household's allowed approvers.
+export function approvalAudience(approval) {
+  const requester = approval.requestedBy ?? approval.actorId ?? null;
+  const ids = new Set();
+  if (requester) ids.add(requester);
+  const requesterMember = requester ? getMember(requester) : null;
+  const requesterCanApprove = !!requesterMember && canApprove(approval, { role: requesterMember.role, actorId: requester });
+  let broad = false;
+  if (approval.visibility !== "personal" && !requesterCanApprove) {
+    broad = true;
+    for (const m of listMembers({ householdId: approval.householdId ?? "local" })) {
+      if (m.archived) continue;
+      if (canApprove(approval, { role: m.role, actorId: m.actorId })) ids.add(m.actorId);
+    }
+  }
+  return { ids, broad };
+}
+
+// The device tokens an approval notification actually goes to — exported so tests
+// can assert the audience without a real Expo send.
+export function approvalPushTokens(approval) {
+  const { ids, broad } = approvalAudience(approval);
+  const hh = approval.householdId ?? "local";
+  return getPushTokens()
+    .filter((r) => {
+      if (r.householdId != null && r.householdId !== hh) return false;
+      // Legacy tokens (no owner recorded) only ride along when broadcasting to approvers,
+      // so a personal/self-approval never reaches a device we can't attribute.
+      if (r.actorId == null) return broad;
+      return ids.has(r.actorId);
+    })
+    .map((r) => r.token);
+}
+
 export async function pushApprovalNotification(approval) {
   try {
-    const tokens = getPushTokens();
+    const tokens = approvalPushTokens(approval);
     if (!tokens.length) return { ok: false, reason: "no_tokens" };
     const body = `${approval.toolId ?? "Action"}${approval.preview ? " — " + String(approval.preview).slice(0, 80) : ""}`;
     await fetch("https://exp.host/--/api/v2/push/send", {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(tokens.map((to) => ({ to, title: "Approval needed", body, data: { type: "approval", id: approval.id }, sound: "default", badge: 1 }))),
+    });
+    return { ok: true, sent: tokens.length };
+  } catch {
+    return { ok: false, reason: "send_failed" };
+  }
+}
+
+/* ---- Targeted Expo push to ONE member's device(s) ----
+ * Used by help requests (and anything else person-to-person): only tokens owned by
+ * that actor in that household are sent to — never legacy/unattributed tokens, so a
+ * personal ping can't reach a device we can't attribute. Fire-and-forget; never throws. */
+export async function pushToMember({ householdId, actorId, title, body, data }) {
+  try {
+    const hh = householdId ?? "local";
+    const tokens = getPushTokens()
+      .filter((r) => (r.householdId == null || r.householdId === hh) && r.actorId === actorId)
+      .map((r) => r.token);
+    if (!tokens.length) return { ok: false, reason: "no_tokens" };
+    await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(tokens.map((to) => ({ to, title, body: String(body ?? "").slice(0, 160), data: data ?? {}, sound: "default", badge: 1 }))),
     });
     return { ok: true, sent: tokens.length };
   } catch {
@@ -95,6 +154,7 @@ async function deliverViaChannel({ session, channel, to, subject: rawSubject, bo
     }
     if (channel === "email") {
       if (!to) return { ok: false, channel, delivered: false, message: "No email address on this contact method." };
+      if (!text.trim()) return { ok: false, channel, delivered: false, message: "Nothing to send — the message body was empty." };
       const account = listAccountsFor(session.householdId, session.actorId).find((a) => a.provider === "google");
       if (!account) return { ok: false, channel, delivered: false, needsSetup: "google", message: "Connect a Google account (with Send email) in Connections to deliver by email." };
       if (!(account.scopes ?? []).some((s) => /gmail\.send|mail\.google/i.test(String(s)))) return { ok: false, channel, delivered: false, needsSetup: "gmail.send", message: "Reconnect Google and grant the Send email permission." };

@@ -93,7 +93,26 @@ export function toolCatalog(session) {
   return out;
 }
 
-/** Tolerant JSON extraction — handles code fences and surrounding prose. */
+// Escape raw control chars (newlines/tabs) that appear INSIDE JSON string literals —
+// the single most common reason a model's otherwise-valid JSON fails to parse (e.g. a
+// multi-line briefing in an `answer` field). Only touches chars inside unescaped strings.
+function repairJSONControlChars(s) {
+  let out = "", inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (esc) { out += c; esc = false; continue; }
+    if (c === "\\") { out += c; esc = true; continue; }
+    if (c === '"') { inStr = !inStr; out += c; continue; }
+    if (inStr && c === "\n") { out += "\\n"; continue; }
+    if (inStr && c === "\r") { out += "\\r"; continue; }
+    if (inStr && c === "\t") { out += "\\t"; continue; }
+    out += c;
+  }
+  return out;
+}
+
+/** Tolerant JSON extraction — handles code fences, surrounding prose, and repairs the
+ *  common "raw newline inside a string" malformation before giving up. */
 function extractJSON(text) {
   if (!text) return null;
   let t = String(text).trim();
@@ -103,7 +122,23 @@ function extractJSON(text) {
   const last = t.lastIndexOf("}");
   if (first === -1 || last === -1 || last < first) return null;
   const slice = t.slice(first, last + 1);
-  try { return JSON.parse(slice); } catch { return null; }
+  try { return JSON.parse(slice); } catch { /* fall through to a repair attempt */ }
+  try { return JSON.parse(repairJSONControlChars(slice)); } catch { return null; }
+}
+
+// When the model emitted our JSON envelope but it STILL won't parse, never dump the raw
+// JSON into the chat. Recover the human-facing `answer` string if we can; otherwise say
+// we hit a snag. Plain prose (no envelope) passes through unchanged.
+function safeAnswerFallback(rawText) {
+  const t = String(rawText || "").trim();
+  if (!t) return "I'm not sure how to help with that yet.";
+  if (/"kind"\s*:/.test(t) && /"answer"\s*:/.test(t)) {
+    const m = t.match(/"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (m) { try { return JSON.parse('"' + m[1] + '"'); } catch { return m[1]; } }
+    return "I hit a snag composing that — mind trying again?";
+  }
+  if (/^[[{]/.test(t) && /[}\]]$/.test(t)) return "I hit a snag composing that — mind trying again?";
+  return t;
 }
 
 export function normalizePlan(p, catalog, goal) {
@@ -366,8 +401,9 @@ export async function assistantRespond({ message, context, session, providerId, 
   const out = await providerChatWithFallback(id, { messages: [{ role: "system", content: ASSISTANT_SYS }, ...priorTurns, { role: "user", content: user }] });
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
   const parsed = extractJSON(out.text);
-  // Robust chat: if the model didn't return clean JSON, treat its prose as an answer.
-  if (!parsed) return { ok: true, kind: "answer", answer: String(out.text || "").trim() || "I'm not sure how to help with that yet.", model: out.model };
+  // Robust chat: if the model didn't return clean JSON, treat its prose as an answer —
+  // but never leak a raw/broken JSON envelope into the chat.
+  if (!parsed) return { ok: true, kind: "answer", answer: safeAnswerFallback(out.text), model: out.model };
   if (parsed.kind === "lookup") {
     return await performLookup({ id, session, message, parsed });
   }
@@ -448,7 +484,7 @@ export async function assistantStream({ message, context, session, providerId, h
   const out = await providerChatStream(id, { messages: [{ role: "system", content: ASSISTANT_SYS }, ...priorTurns, { role: "user", content: user }] }, onToken);
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
   const parsed = extractJSON(out.text);
-  if (!parsed) return { ok: true, kind: "answer", answer: String(out.text || "").trim() || "I'm not sure how to help with that yet.", model: out.model };
+  if (!parsed) return { ok: true, kind: "answer", answer: safeAnswerFallback(out.text), model: out.model };
   if (parsed.kind === "lookup") {
     // Signal the client that live fetching started (the streamed JSON tokens
     // weren't meaningful), then do the bounded fetch + compose pass.
