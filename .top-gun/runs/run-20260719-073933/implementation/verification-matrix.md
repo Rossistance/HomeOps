@@ -15,6 +15,7 @@ Columns per register-contracts: Check | Level | Command or method | Result | Evi
 | Node story consistency | contract | yaml parse render.yaml + ci.yml; engines/README cross-check | pass | EV-208 | render NODE_VERSION=24 = CI node 24 ⊂ engines >=22.13 <25; README fixed |
 | Node 24 local boot smoke | integration | — | blocked | — | No in-range Node installed locally (20.20.2/22.12.0/25.8.2); install not authorized; deferred to CI on first push |
 | CI data-isolation job local simulation | integration | scripted job steps: fresh-dir server boot :8790, suite beside it, hash pre/post, health | pass | EV-209 | 291/291; sim dir byte-identical; health 200; CI end-to-end proof deferred to first push (declared) |
+| CI data-isolation job END-TO-END (deferred proof landed) | integration (CI) | push 2c53541 → GitHub Actions run 29722760433, job "Test-suite data isolation (live server untouched)" | pass | Actions run 29722760433 (2026-07-20) | All 4 jobs green (server tests, data-isolation, web, mobile); declared deferral from EV-209 now closed |
 | CI end-to-end execution | e2e | — | blocked | — | Runs only on push; git mutations barred this mission |
 | Typecheck (combined, post all fixes) | build/type | npm run typecheck (tsc) | pass | EV-214 | exit 0 |
 | Full server suite beside live backend (final) | integration | npm test (node 25.8.2) + .data hash guard + health | pass | EV-215 | 291/291 pass; server/.data byte-identical; health 200 |

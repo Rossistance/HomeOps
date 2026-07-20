@@ -10,7 +10,7 @@
 | WP-001 two-account live regression | e2e (API) | node t105-wp001-repro.mjs vs LOCAL :8787 | pass | audit/evidence/t105-wp001-regression-transcript.txt | reassigned=true both directions; dedupe 409; cleanup done |
 | Resident data integrity post-restart | data | GET events/tasks/files as owner | pass (events=41 tasks=28) | same transcript | no data loss after backend restart |
 | Web help-surface render (live) | e2e (visual) | playwright smoke + pane | partial | test-failed-1.png | app boots+styled against new server; lock-path blocked: PRE-EXISTING fresh-profile→Onboarding vs spec's Lock expectation; pane origin approval unavailable non-interactive |
-| Native render of new card states | visual (native) | — | blocked | — | appium/appetize creds absent — parity risk, code-traced only |
+| Native render of new card states | visual (native) | — | blocked | — | appium/appetize creds absent — parity risk, code-traced only. ADDENDUM 2026-07-20: lane closed as a requirement by user decision (DEC-10) — native visual confirmation postponed; field-tester feedback on TestFlight builds is the native visual lane |
 | WP-002 categorization unit cases | unit | `node --test apps/mobile/src/lib/spaces.test.mjs` | pass (6/6) | spaces.test.mjs | video.mp4/Friday.pdf fixed; explicit tags win |
 | WP-002 tagged-upload instant listing | integration (API) | live probe vs :8787 | pass | t202-upload-probe-transcript.txt | medical-ids upload listed instantly; cleaned up |
 | WP-003 allDay/date-form fixtures + passthrough | unit/integration | `node --test server/test/allday-events.test.mjs` | pass (7/7) | allday-events.test.mjs | date vs dateTime asserted; exclusive/inclusive end conversion; NO live Google (DEC-08) |
