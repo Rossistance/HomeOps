@@ -3,17 +3,23 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, stopServer, makeSession } from "./harness.mjs";
 
-let ctx, owner;
+let ctx, owner, store, engine;
 before(async () => {
   ctx = await startServer();
   owner = await makeSession(ctx, "m-alex"); // Owner
+  // ISS-001 fix: bind THIS process's store/engine modules to the spawned
+  // server's isolated temp data dir — never the live server/.data. The env
+  // assignment must precede the first import of ../store.mjs in this process
+  // (harness.mjs pre-sets a throwaway dir, but the stall test needs the SAME
+  // dir the server under test uses; SQLite WAL is safely multi-process).
+  process.env.HOMEOPS_DATA_DIR = ctx.dataDir;
+  store = await import("../store.mjs");
+  engine = await import("../engine.mjs");
 });
 after(async () => { await stopServer(ctx); });
 
 test("a run silent for 30+ minutes is swept to failed('stalled'), never spins forever", async () => {
-  // Craft a stuck run directly in the store the server process reads.
-  const store = await import("../store.mjs");
-  const engine = await import("../engine.mjs");
+  // Craft a stuck run directly in the store the server under test reads.
   const staleISO = new Date(Date.now() - 45 * 60_000).toISOString();
   store.createRun({
     id: "run_stalltest", householdId: "local", actorId: "m-alex", source: "manual", sourceRef: {},

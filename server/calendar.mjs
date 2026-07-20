@@ -236,18 +236,32 @@ export async function syncSubscription({ sub, icsText, session }) {
 export function mergeGoogleEdit({ ev, gev }) {
   const prov = ev.provenance ?? {};
   if (!gev || gev.status === "cancelled") return { action: "unlinked" };
+  // All-day normalization (WP-003/ISS-005): Google's `date` form maps back to the
+  // FamiliOS convention — allDay:true + local-midnight ISO stamps, end INCLUSIVE
+  // (Google's end.date is exclusive; a single-day all-day event gets endAt:null).
+  const gAllDay = !!gev.start?.date && !gev.start?.dateTime;
+  const parseGDate = (s) => { const [y, m, d] = String(s).split("-").map(Number); return new Date(y, m - 1, d); };
+  const startAt = gev.start?.dateTime ?? (gev.start?.date ? parseGDate(gev.start.date).toISOString() : null);
+  let endAt = gev.end?.dateTime ?? null;
+  if (!endAt && gev.end?.date) {
+    const inc = parseGDate(gev.end.date); inc.setDate(inc.getDate() - 1);
+    endAt = startAt && +inc > +new Date(startAt) ? inc.toISOString() : null;
+  }
   const fields = {
     title: gev.summary ?? "(untitled)",
-    startAt: gev.start?.dateTime ?? gev.start?.date ?? null,
-    endAt: gev.end?.dateTime ?? gev.end?.date ?? null,
+    startAt,
+    endAt,
+    allDay: gAllDay,
     location: gev.location ?? "",
-    // Event body: Google `description` ↔ FamiliOS `notes`. Both directions carry the
-    // full context text (recipe links, ingredient lists, mini-app references).
-    notes: gev.description ?? "",
+    // Event body: Google `description` ↔ FamiliOS `notes` — with the composed
+    // FamiliOS block (Bring: …) stripped so the round-trip is lossless and the
+    // Bring list is never re-imported into notes (WP-004/DEC-04).
+    notes: stripFamiliosBlock(gev.description),
   };
   const differs = fields.title !== ev.title
     || String(fields.startAt ?? "") !== String(ev.startAt ?? "")
     || String(fields.endAt ?? "") !== String(ev.endAt ?? "")
+    || fields.allDay !== (ev.allDay === true)
     || (fields.location ?? "") !== (ev.location ?? "")
     || (fields.notes ?? "") !== (ev.notes ?? "");
   if (!differs) return { action: "none" };
@@ -330,6 +344,52 @@ export function mealEventNotes(meal) {
   return lines.join("\n").trim();
 }
 
+/* ---- Google description composition (WP-004 / ISS-003, DEC-04) ----
+ * The description pushed to Google = the event's notes PLUS a clearly delimited
+ * FamiliOS block carrying "Bring: …" (the app's logistics data — previously
+ * dropped entirely). The delimiter line makes the round-trip LOSSLESS: the pull
+ * half strips the composed block before comparing/merging into `notes`, so the
+ * Bring list is never re-imported as note text and re-push stays idempotent.
+ * Content INSIDE the block is FamiliOS-owned; Google-side edits to it are
+ * intentionally not merged back (whatToBring stays structured in FamiliOS). */
+export const FAMILIOS_BLOCK_DELIM = "— FamiliOS —";
+
+export function composeGoogleDescription(ev) {
+  const notes = String(ev.notes ?? "").trim();
+  const bring = (ev.whatToBring ?? [])
+    .map((w) => (typeof w === "string" ? w : w?.item))
+    .filter(Boolean);
+  const parts = [];
+  if (notes) parts.push(notes);
+  if (bring.length) parts.push(`${FAMILIOS_BLOCK_DELIM}\nBring: ${bring.join(", ")}`);
+  return parts.join("\n\n");
+}
+
+/** Remove the composed FamiliOS block from a Google description, leaving the
+ * user's own notes text. Pure inverse of composeGoogleDescription's framing. */
+export function stripFamiliosBlock(description) {
+  const s = String(description ?? "");
+  const i = s.indexOf(FAMILIOS_BLOCK_DELIM);
+  return (i === -1 ? s : s.slice(0, i)).replace(/\s+$/, "");
+}
+
+/* ---- Google time forms (WP-003 / ISS-005) ----
+ * All-day events (ev.allDay) push in Google's `date` form (end date EXCLUSIVE per
+ * the Google Calendar contract); timed events keep `dateTime`. startAt/endAt stay
+ * local-midnight ISO timestamps in the FamiliOS store. Pure + unit-testable. */
+const pad2 = (n) => String(n).padStart(2, "0");
+const localDateOf = (v) => { const d = v instanceof Date ? v : new Date(v); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+
+export function googleEventTimes(ev) {
+  if (ev.allDay && ev.startAt) {
+    const endInc = new Date(ev.endAt ?? ev.startAt);
+    const endExc = new Date(endInc.getFullYear(), endInc.getMonth(), endInc.getDate() + 1);
+    return { start: { date: localDateOf(ev.startAt) }, end: { date: localDateOf(endExc) } };
+  }
+  const end = ev.endAt ?? new Date(new Date(ev.startAt).getTime() + 3_600_000).toISOString();
+  return { start: { dateTime: ev.startAt }, end: { dateTime: end } };
+}
+
 /* ---- Push half of two-way sync (shared executor) ----
  * One real Google write used by: the approval-gated push route, the auto-sync
  * PATCH hook (local edit → Google), the server sweep, and meal planning. Sends
@@ -347,14 +407,13 @@ export async function pushEventToGoogle({ ev, householdId, actorId }) {
   if (!account) return { ok: false, error: "no_account" };
   const api = apiForAccount(account);
   const gid = ev.provenance?.googleEventId ?? null;
-  const end = ev.endAt ?? new Date(new Date(ev.startAt).getTime() + 3_600_000).toISOString();
   const url = gid
     ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(gid)}`
     : "https://www.googleapis.com/calendar/v3/calendars/primary/events";
   const r = await api(url, {
     method: gid ? "PATCH" : "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ summary: ev.title, description: ev.notes ?? "", start: { dateTime: ev.startAt }, end: { dateTime: end }, location: ev.location ?? "" }),
+    body: JSON.stringify({ summary: ev.title, description: composeGoogleDescription(ev), ...googleEventTimes(ev), location: ev.location ?? "" }),
   });
   if (!r.ok) return { ok: false, error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status, message: r.json?.error?.message ?? "Google rejected the write." };
   patchEvent(ev.id, { provenance: { ...(ev.provenance ?? {}), via: ev.provenance?.via ?? "user", googleEventId: r.json.id, googleAccountId: account.id, pushedAt: Date.now() } });
@@ -395,12 +454,11 @@ export async function editLinkedGoogleEvent({ ev, patch, householdId, actorId })
   const target = linkedGoogleTarget(ev, householdId, actorId);
   if (!target) return { ok: false, error: "not_linked_google" };
   const merged = { ...ev, ...patch };
-  const end = merged.endAt ?? new Date(new Date(merged.startAt).getTime() + 3_600_000).toISOString();
   const api = apiForAccount(target.account);
   const r = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(target.gid)}`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ summary: merged.title, description: merged.notes ?? "", start: { dateTime: merged.startAt }, end: { dateTime: end }, location: merged.location ?? "" }),
+    body: JSON.stringify({ summary: merged.title, description: composeGoogleDescription(merged), ...googleEventTimes(merged), location: merged.location ?? "" }),
   });
   if (!r.ok) return { ok: false, error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status, message: r.json?.error?.message ?? "Google rejected the edit." };
   const updated = patchEvent(ev.id, { ...patch, provenance: { ...(ev.provenance ?? {}), googleEventId: target.gid, googleAccountId: target.account.id } });

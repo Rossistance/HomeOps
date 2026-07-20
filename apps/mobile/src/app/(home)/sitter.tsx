@@ -8,6 +8,7 @@ import { StyleSheet, View } from "react-native";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
+import { coversDay, eventTimeLabel } from "@/lib/event-days";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
@@ -23,6 +24,7 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
   const [member, setMember] = useState<MemberRec | null>(null);
   const [events, setEvents] = useState<EventRec[]>([]);
   const [assigned, setAssigned] = useState<TaskRec[]>([]);
+  const [allTasks, setAllTasks] = useState<TaskRec[]>([]);
   const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
   const [householdName, setHouseholdName] = useState<string | null>(null);
 
@@ -31,6 +33,7 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
     setMember(members.find((m) => m.actorId === memberId) ?? null);
     setEvents(evts.filter((e) => e.startAt).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))));
     setAssigned(tasks.filter((t) => t.assignedMemberId === memberId && t.status !== "done"));
+    setAllTasks(tasks);
     setHelpRequests(hrs);
     setHouseholdName(hh?.name ?? null);
     setLoading(false);
@@ -42,7 +45,8 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
   const now = new Date();
   const part = now.getHours() < 12 ? "morning" : now.getHours() < 18 ? "afternoon" : "evening";
   const todayStr = now.toDateString();
-  const today = useMemo(() => events.filter((e) => new Date(e.startAt!).toDateString() === todayStr), [events, todayStr]);
+  // Multi-day events (ISS-004) count as "today" on every spanned day.
+  const today = useMemo(() => events.filter((e) => coversDay(e, now)), [events, now]);
   const week = useMemo(() => events.filter((e) => {
     const d = new Date(e.startAt!);
     return d.toDateString() !== todayStr && d.getTime() > now.getTime() && d.getTime() < now.getTime() + 7 * 86400000;
@@ -99,7 +103,7 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
           </Rise>
 
           <Rise index={1}>
-            <HelpRequestsSection memberId={memberId} requests={helpRequests} events={events} onChanged={load} />
+            <HelpRequestsSection memberId={memberId} requests={helpRequests} events={events} tasks={allTasks} onChanged={load} />
           </Rise>
 
           {assigned.length > 0 && (
@@ -142,7 +146,7 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
                   const mine = e.participantIds?.includes(memberId);
                   return (
                     <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, minHeight: 60, paddingHorizontal: spacing.lg, paddingVertical: 13, borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator }}>
-                      <T kind="subMedium" color={mine ? colors.ember : colors.textMuted} style={{ width: 78, fontSize: 15 }}>{time(e.startAt)}</T>
+                      <T kind="subMedium" color={mine ? colors.ember : colors.textMuted} style={{ width: 78, fontSize: 15 }}>{eventTimeLabel(e)}</T>
                       <View style={{ flex: 1, gap: 2 }}>
                         <T kind="rowTitle" style={{ fontSize: 17 }}>{e.title}{mine ? " — with you" : ""}</T>
                         {!!e.location && <T kind="sub" style={{ fontSize: 14 }}>{e.location}</T>}
@@ -161,7 +165,7 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
                 {week.map((e, i) => (
                   <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, minHeight: 56, paddingHorizontal: spacing.lg, paddingVertical: 12, borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator }}>
                     <T kind="subMedium" color={colors.textMuted} style={{ width: 78, fontSize: 14 }}>
-                      {new Date(e.startAt!).toLocaleDateString(undefined, { weekday: "short" })} {time(e.startAt)}
+                      {new Date(e.startAt!).toLocaleDateString(undefined, { weekday: "short" })} {eventTimeLabel(e)}
                     </T>
                     <T kind="rowTitle" style={{ flex: 1, fontSize: 16 }} numberOfLines={1}>{e.title}</T>
                   </View>

@@ -4,11 +4,13 @@
 // the Today member strip (preview=1 shows the "Parent view" back pill).
 // Emphasis: today's family day, the week ahead, gentle reminders, and the
 // "Can you help?" requests the family sent them. Bigger text everywhere.
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { StyleSheet, TextInput, View } from "react-native";
+import * as SecureStore from "expo-secure-store";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
+import { coversDay, eventTimeLabel } from "@/lib/event-days";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale, Button } from "@/components/ui";
@@ -21,25 +23,67 @@ const fmtEventTime = (e: EventRec) => {
   return `${d.toLocaleDateString(undefined, { weekday: "long" })} ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
 };
 
+// Accepted-help confirmations dismissed on THIS device (WP-001/ISS-009): the
+// server keeps the records; dismissal is a local reading preference.
+const DISMISSED_HELP_KEY = "familios_dismissed_help";
+const ACCEPTED_CARD_MAX_AGE_MS = 14 * 86400000; // auto-expire confirmations after 14 days
+
 /** "Can you help?" — pending help requests addressed to this member, with
  * Accept / Decline (decline takes a one-line note), plus recently accepted
- * ones shown as confirmations. Shared by the grandparent and sitter homes. */
-export function HelpRequestsSection({ memberId, requests, events, onChanged }: {
+ * ones shown as confirmations. Shared by the grandparent and sitter homes.
+ * Accepted confirmations have a real lifecycle (ISS-009): one card per linked
+ * item (duplicate-render guard), gone when the linked task completes, when
+ * dismissed, or after 14 days. */
+export function HelpRequestsSection({ memberId, requests, events, tasks = [], onChanged }: {
   memberId: string;
   requests: HelpRequestRec[];
   events: EventRec[];
+  tasks?: TaskRec[];
   onChanged: () => void | Promise<void>;
 }) {
   const { colors, spacing } = useTheme();
   const [decliningId, setDecliningId] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [dismissed, setDismissed] = useState<string[]>([]);
+  useEffect(() => {
+    void SecureStore.getItemAsync(DISMISSED_HELP_KEY)
+      .then((v) => { if (v) setDismissed(JSON.parse(v) as string[]); })
+      .catch(() => { /* first run */ });
+  }, []);
+  const dismiss = (id: string) => {
+    tapHaptic("select");
+    setDismissed((prev) => {
+      const next = [...prev.filter((x) => x !== id), id].slice(-100);
+      void SecureStore.setItemAsync(DISMISSED_HELP_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  };
 
   const pending = requests.filter((r) => r.status === "pending" && r.toActorId === memberId);
-  const accepted = requests
-    .filter((r) => r.status === "accepted" && r.toActorId === memberId)
-    .sort((a, b) => String(b.respondedAt ?? "").localeCompare(String(a.respondedAt ?? "")))
-    .slice(0, 3);
+  const accepted = useMemo(() => {
+    const fresh = requests
+      .filter((r) => r.status === "accepted" && r.toActorId === memberId)
+      .filter((r) => !dismissed.includes(r.id))
+      // Auto-expire: completed linked task, or older than the age cap.
+      .filter((r) => {
+        const linked = r.taskId ? tasks.find((t) => t.id === r.taskId) : null;
+        if (linked && linked.status === "done") return false;
+        const at = Date.parse(r.respondedAt ?? "");
+        return !(Number.isFinite(at) && Date.now() - at > ACCEPTED_CARD_MAX_AGE_MS);
+      })
+      .sort((a, b) => String(b.respondedAt ?? "").localeCompare(String(a.respondedAt ?? "")));
+    // Duplicate-render guard: one card per underlying item (newest wins).
+    const seen = new Set<string>();
+    const out: HelpRequestRec[] = [];
+    for (const r of fresh) {
+      const key = r.taskId ?? r.eventId ?? `${r.fromActorId}:${r.message}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(r);
+    }
+    return out.slice(0, 3);
+  }, [requests, memberId, dismissed, tasks]);
   if (pending.length === 0 && accepted.length === 0) return null;
 
   const eventOf = (id: string | null) => (id ? events.find((e) => e.id === id) ?? null : null);
@@ -113,11 +157,16 @@ export function HelpRequestsSection({ memberId, requests, events, onChanged }: {
         })}
         {accepted.map((r) => {
           const ev = eventOf(r.eventId);
+          const headline = r.kind === "offer" ? `${r.fromName} is helping you` : `You're helping ${r.fromName}`;
+          const moved = r.kind !== "offer" && !!r.taskId; // ask + linked task = it moved to me
           return (
             <Card key={r.id} style={{ backgroundColor: colors.sageBg, borderColor: "transparent", gap: 4 }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                 <Sym name="checkmark.circle.fill" size={15} color={colors.sage} />
-                <T kind="subMedium" color={colors.text} style={{ flex: 1 }}>{r.kind === "offer" ? `${r.fromName} is helping you` : `You're helping ${r.fromName}`}</T>
+                <T kind="subMedium" color={colors.text} style={{ flex: 1 }}>{headline}{moved ? " (task moved to you)" : ""}</T>
+                <PressableScale onPress={() => dismiss(r.id)} haptic={null} hitSlop={14} accessibilityRole="button" accessibilityLabel={`Dismiss: ${headline}`}>
+                  <Sym name="xmark" size={13} color={colors.textMuted} />
+                </PressableScale>
               </View>
               <T kind="sub" style={{ fontSize: 14 }} numberOfLines={2}>
                 {r.message}{ev ? ` · ${ev.title}` : ""}
@@ -139,6 +188,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
   const [member, setMember] = useState<MemberRec | null>(null);
   const [events, setEvents] = useState<EventRec[]>([]);
   const [reminders, setReminders] = useState<TaskRec[]>([]);
+  const [allTasks, setAllTasks] = useState<TaskRec[]>([]);
   const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
   const [householdName, setHouseholdName] = useState<string | null>(null);
 
@@ -147,6 +197,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
     setMember(members.find((m) => m.actorId === memberId) ?? null);
     setEvents(evts.filter((e) => e.startAt).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))));
     setReminders(tasks.filter((t) => t.assignedMemberId === memberId && t.status !== "done"));
+    setAllTasks(tasks);
     setHelpRequests(hrs);
     setHouseholdName(hh?.name ?? null);
     setLoading(false);
@@ -158,7 +209,8 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
   const now = new Date();
   const part = now.getHours() < 12 ? "morning" : now.getHours() < 18 ? "afternoon" : "evening";
   const todayStr = now.toDateString();
-  const today = useMemo(() => events.filter((e) => new Date(e.startAt!).toDateString() === todayStr), [events, todayStr]);
+  // Multi-day events (ISS-004) count as "today" on every spanned day.
+  const today = useMemo(() => events.filter((e) => coversDay(e, now)), [events, now]);
   const week = useMemo(() => events.filter((e) => {
     const d = new Date(e.startAt!);
     return d.toDateString() !== todayStr && d.getTime() > now.getTime() && d.getTime() < now.getTime() + 7 * 86400000;
@@ -214,7 +266,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
           </Rise>
 
           <Rise index={1}>
-            <HelpRequestsSection memberId={memberId} requests={helpRequests} events={events} onChanged={load} />
+            <HelpRequestsSection memberId={memberId} requests={helpRequests} events={events} tasks={allTasks} onChanged={load} />
           </Rise>
 
           {reminders.length > 0 && (
@@ -256,7 +308,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
                   const mine = e.participantIds?.includes(memberId);
                   return (
                     <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, minHeight: 60, paddingHorizontal: spacing.lg, paddingVertical: 13, borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator }}>
-                      <T kind="subMedium" color={mine ? colors.ember : colors.textMuted} style={{ width: 78, fontSize: 15 }}>{time(e.startAt)}</T>
+                      <T kind="subMedium" color={mine ? colors.ember : colors.textMuted} style={{ width: 78, fontSize: 15 }}>{eventTimeLabel(e)}</T>
                       <View style={{ flex: 1, gap: 2 }}>
                         <T kind="rowTitle" style={{ fontSize: 17 }}>{e.title}{mine ? " — with you" : ""}</T>
                         {!!e.location && <T kind="sub" style={{ fontSize: 14 }}>{e.location}</T>}
@@ -275,7 +327,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
                 {week.map((e, i) => (
                   <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, minHeight: 56, paddingHorizontal: spacing.lg, paddingVertical: 12, borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator }}>
                     <T kind="subMedium" color={colors.textMuted} style={{ width: 78, fontSize: 14 }}>
-                      {new Date(e.startAt!).toLocaleDateString(undefined, { weekday: "short" })} {time(e.startAt)}
+                      {new Date(e.startAt!).toLocaleDateString(undefined, { weekday: "short" })} {eventTimeLabel(e)}
                     </T>
                     <T kind="rowTitle" style={{ flex: 1, fontSize: 16 }} numberOfLines={1}>{e.title}</T>
                   </View>

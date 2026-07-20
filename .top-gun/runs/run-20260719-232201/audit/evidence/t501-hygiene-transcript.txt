@@ -1,0 +1,3 @@
+help-requests after purge: 1 hr_2fbb6b0a4fd83213:pending
+TG residue: 0
+integrity: events= 41 tasks= 28

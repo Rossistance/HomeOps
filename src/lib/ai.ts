@@ -496,6 +496,120 @@ export function suggestAskPrompts(data: AppData, member?: Member): AskSuggestion
   return out.slice(0, 4);
 }
 
+/* ------------------------------------------------------------------------- *
+ * No-provider chat fallback — when Ask FamiliOS has no connected AI
+ * provider, this is what lets the surface keep its "every task resolves
+ * locally" promise instead of dead-ending. It classifies a chat message into
+ * something the deterministic engine can genuinely do (a plan it can draft,
+ * a household-data question it can answer from live state, or a capability
+ * question) versus open-ended reasoning that honestly needs a provider —
+ * and only ever proposes what it can actually deliver.
+ * ------------------------------------------------------------------------- */
+
+export type LocalAskKind = "plan" | "capability" | "data" | "unsupported";
+
+export interface LocalAskAnswer {
+  kind: LocalAskKind;
+  /** Chat-ready text (markdown-safe) describing the answer. */
+  text: string;
+  /** Present when `kind === "plan"` — a real, approvable automation proposal. */
+  plan?: { plan: WorkflowPlan; agentId: string; agentName: string; approvalRequired: boolean; triggerType: TriggerType };
+}
+
+const CAPABILITY_RE = /what can you (help|do)|what do you do|how (can|do) you help|what are you (able|capable)/i;
+const CALENDAR_RE = /\b(calendar|schedule)\b.*\btoday\b|today'?s (events|agenda|schedule)|what'?s (happening|going on) today/i;
+const APPROVAL_RE = /\bapproval|waiting on me|pending (my )?approval\b/i;
+const OVERDUE_RE = /\bover ?due\b|\btasks?\b.*\b(due|left|open)\b/i;
+const UNREAD_RE = /\bmissed\b|\bunread\b|summarize.*(thread|conversation|messages)/i;
+const DRAFT_AGENT_RE = /finish setting up|draft (agent|helper)/i;
+const ACTION_RE = /\b(plan|remind(er)?|draft|organize|schedule|track|summar(y|ize|ise)|automat|set ?up|create|build|watch|monitor)\b/i;
+
+/** Plain-language summary of what the local rules engine can do, drawn from
+ *  the real intent catalog rather than a hand-maintained marketing blurb. */
+export function describeLocalCapabilities(): string {
+  const examples = INTENTS.slice(0, 6).map((i) => i.label.toLowerCase()).join(", ");
+  return `Without a connected AI provider, I run on FamiliOS's built-in rules engine — I can still draft a real, approvable plan for things like ${examples}, and more. Try "Plan…", "Remind me…", "Draft…", or "Organize…", or ask about your calendar, approvals, or tasks. Nothing runs without your approval.`;
+}
+
+/** Answers a factual question about the household's own live data with no
+ *  reasoning model required — the same signals that power the suggestion
+ *  chips (see `suggestAskPrompts`), read directly instead of guessed at. */
+export function answerLocalDataQuestion(text: string, data: AppData, member?: Member): string | null {
+  const now = Date.now();
+  if (CALENDAR_RE.test(text)) {
+    const todays = data.events
+      .filter((e) => new Date(e.startAt).toDateString() === new Date().toDateString())
+      .sort((a, b) => +new Date(a.startAt) - +new Date(b.startAt));
+    return todays.length
+      ? `Today's schedule:\n${todays.map((e) => `- ${e.title}${e.location ? ` (${e.location})` : ""} — ${new Date(e.startAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`).join("\n")}`
+      : "Nothing on the calendar today — a calm day.";
+  }
+  if (APPROVAL_RE.test(text)) {
+    const pending = data.approvals.filter((a) => a.status === "Pending");
+    return pending.length
+      ? `${pending.length} approval${pending.length > 1 ? "s" : ""} waiting on you:\n${pending.slice(0, 6).map((a) => `- ${a.title}`).join("\n")}`
+      : "Nothing is waiting on your approval right now.";
+  }
+  if (OVERDUE_RE.test(text)) {
+    const overdue = data.tasks.filter((t) => t.status !== "done" && t.dueAt && new Date(t.dueAt).getTime() < now);
+    const wantsMine = /\bme\b|\bmy\b/i.test(text) && member;
+    const list = wantsMine ? overdue.filter((t) => t.assignedMemberId === member!.id) : overdue;
+    return list.length
+      ? `${list.length} overdue:\n${list.slice(0, 8).map((t) => `- ${t.title}`).join("\n")}`
+      : "Nothing overdue — you're caught up.";
+  }
+  if (UNREAD_RE.test(text)) {
+    const unread = data.threads.filter((t) => t.unread);
+    if (!unread.length) return "No unread messages right now.";
+    const t0 = unread[0];
+    const body = data.messages.filter((m) => m.threadId === t0.id).map((m) => m.body).join(" ");
+    return `"${t0.title}": ${body ? summarize(body, 2) : t0.preview || "No preview available."}`;
+  }
+  if (DRAFT_AGENT_RE.test(text)) {
+    const drafts = data.agents.filter((a) => a.status === "Draft");
+    return drafts.length
+      ? `You have a draft helper agent, "${drafts[0].name}" — open Helper Agents to finish setting it up.`
+      : "No draft agents waiting right now.";
+  }
+  return null;
+}
+
+/** Classifies and answers a chat message with the local, deterministic
+ *  engine only — no network call, no external provider. Used by the
+ *  Assistant surface when no AI provider is connected so the surface keeps
+ *  the "every task resolves locally" promise instead of dead-ending. */
+export function answerLocally(text: string, data: AppData, member?: Member): LocalAskAnswer {
+  const t = text.trim();
+  if (!t) return { kind: "unsupported", text: describeLocalCapabilities() };
+
+  if (CAPABILITY_RE.test(t)) return { kind: "capability", text: describeLocalCapabilities() };
+
+  const dataAnswer = answerLocalDataQuestion(t, data, member);
+  if (dataAnswer) return { kind: "data", text: dataAnswer };
+
+  const routed = routeToAgent(t, data.agents);
+  const intent = detectIntent(t);
+  const intentScore = scoreIntent(t, intent);
+  if (intentScore > 0 || ACTION_RE.test(t)) {
+    const parsed = parseAgentPrompt(t);
+    const agentId = routed?.id ?? "";
+    const agentName = routed?.name ?? parsed.name;
+    const triggerType = detectTrigger(t, intent.defaultTrigger);
+    const plan = buildWorkflowPlan(t, { agentId, agentName });
+    const { gates } = detectApprovalGates(t);
+    return {
+      kind: "plan",
+      text: "Here's a plan the local rules engine can build — review it and approve to create the automation.",
+      plan: { plan, agentId, agentName, approvalRequired: gates.length > 0, triggerType },
+    };
+  }
+
+  return {
+    kind: "unsupported",
+    text: `Connecting an AI provider unlocks open-ended answers like this one. Locally, I can already help with things like ${INTENTS.slice(0, 5).map((i) => i.label.toLowerCase()).join(", ")}, and more — try "Plan…", "Remind me…", or "Draft…", or add a provider in Settings → AI Providers.`,
+  };
+}
+
 /** Provider router — local resolves everything today; cloud adapters are
  *  declared but disabled by default (see Settings). */
 export function activeProviderLabel(provider: string): string {

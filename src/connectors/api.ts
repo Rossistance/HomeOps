@@ -764,7 +764,7 @@ export const backend = {
     try { return (await req<{ members: ServerMember[] }>("/members")).members ?? []; } catch { return []; }
   },
   // Pre-auth profile picker + one-time household claim (demo roster → your family).
-  async profiles(): Promise<{ profiles: { actorId: string; displayName: string; role: string; relationship: string | null; pinRequired: boolean }[]; claimed: boolean; householdName?: string | null } | null> {
+  async profiles(): Promise<{ profiles: { actorId: string; displayName: string; role: string; pinRequired: boolean }[]; claimed: boolean; householdName?: string | null } | null> {
     try { return await req("/profiles"); } catch { return null; }
   },
   async appendConversationMessage(id: string, body: { text: string; kind?: string; runId?: string }): Promise<{ conversation?: ServerConversation; error?: string }> {

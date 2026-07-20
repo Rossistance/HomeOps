@@ -4,6 +4,7 @@
 // and adds a destructive delete. Synced (linked/public) events are read-only.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Switch, TextInput, View } from "react-native";
+import * as SecureStore from "expo-secure-store";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import { api, type ApprovalRec, type EventRec, type MemberRec } from "@/lib/api";
@@ -23,6 +24,8 @@ import { Sym } from "@/components/ui/symbol";
 import { T } from "@/components/ui/text";
 
 const MANAGE_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member"];
+// Remembered "also update Google on save" consent (WP-004/ISS-008, DEC-06).
+const ALSO_GOOGLE_KEY = "familios_save_also_google";
 
 /** Merge a calendar day and a clock time into one local Date. */
 function stamp(day: Date, time: Date): Date {
@@ -122,15 +125,35 @@ export default function EventFormScreen() {
   const [start, setStart] = useState<Date>(nextFullHour);
   const [hasEnd, setHasEnd] = useState(false);
   const [end, setEnd] = useState<Date>(() => { const d = nextFullHour(); d.setHours(d.getHours() + 1); return d; });
+  // WP-003/ISS-004: the end has its own DAY — camps, trips, and overnights span days.
+  const [endDay, setEndDay] = useState<Date>(() => new Date());
+  // WP-003/ISS-005: all-day events — real model concept, not a faked time.
+  const [allDay, setAllDay] = useState(false);
   const [driverId, setDriverId] = useState<string | null>(null);
   const [bring, setBring] = useState<{ item: string; memberId: string | null }[]>([]);
   const [bringInput, setBringInput] = useState("");
+  // WP-003/ISS-006: general notes — the server has stored EventRec.notes all
+  // along (and Google description mirrors it); the editor finally exposes it.
+  const [notes, setNotes] = useState("");
 
   const [busy, setBusy] = useState<"save" | "delete" | "push" | null>(null);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
   // Google push (canonical events only) — approval-gated exactly as web does it.
   const [googleEventId, setGoogleEventId] = useState<string | null>(null);
   const [pushApproval, setPushApproval] = useState<ApprovalRec | null>(null);
+  // WP-004/ISS-008 (DEC-06): ONE primary Save with an inline, remembered
+  // "also update Google" consent — the approval gate stays; nothing external
+  // happens silently. Remembered per device.
+  const [alsoGoogle, setAlsoGoogle] = useState(false);
+  useEffect(() => {
+    void SecureStore.getItemAsync(ALSO_GOOGLE_KEY)
+      .then((v) => { if (v === "1") setAlsoGoogle(true); })
+      .catch(() => { /* first run */ });
+  }, []);
+  const setAlsoGoogleRemembered = (v: boolean) => {
+    setAlsoGoogle(v);
+    void SecureStore.setItemAsync(ALSO_GOOGLE_KEY, v ? "1" : "0").catch(() => {});
+  };
 
   useEffect(() => {
     void (async () => {
@@ -150,13 +173,15 @@ export default function EventFormScreen() {
           setGoogleEventId(e.provenance?.googleEventId ?? null);
           setTitle(e.title);
           setLocation(e.location ?? "");
+          setNotes(e.notes ?? "");
           setDriverId(e.driverId);
           setBring(e.whatToBring.map((w) => ({ item: w.item, memberId: w.memberId })));
           const s = e.startAt ? new Date(e.startAt) : null;
           if (s && !isNaN(+s)) {
-            setScheduled(true); setDay(s); setStart(s);
+            setScheduled(true); setDay(s); setStart(s); setEndDay(s);
+            setAllDay(e.allDay === true);
             const en = e.endAt ? new Date(e.endAt) : null;
-            if (en && !isNaN(+en)) { setHasEnd(true); setEnd(en); }
+            if (en && !isNaN(+en)) { setHasEnd(true); setEnd(en); setEndDay(en); }
           } else {
             setScheduled(false);
           }
@@ -166,7 +191,14 @@ export default function EventFormScreen() {
     })();
   }, [id]);
 
-  const endInvalid = scheduled && hasEnd && +stamp(day, end) <= +stamp(day, start);
+  /** Local midnight of a calendar day — the all-day anchor (keeps ISO timestamps
+   * so every existing sort/render path holds; renderers key off `allDay`). */
+  const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+  // Cross-day validation (ISS-004): the end may be a later DAY; same-day timed
+  // ends must still be after the start; all-day ends may share the start day.
+  const endInvalid = scheduled && hasEnd && (allDay
+    ? +midnight(endDay) < +midnight(day)
+    : +stamp(endDay, end) <= +stamp(day, start));
   const canSave = canManage && !readOnly && title.trim().length > 0 && !endInvalid && busy === null;
 
   const addBring = useCallback(() => {
@@ -179,18 +211,29 @@ export default function EventFormScreen() {
   const save = async () => {
     if (!canSave) return;
     setBusy("save"); setNotice(null);
-    const startAt = scheduled ? stamp(day, start).toISOString() : null;
-    const endAt = scheduled && hasEnd ? stamp(day, end).toISOString() : null;
+    // All-day events anchor at local midnight and carry the explicit allDay flag;
+    // timed events merge each calendar day with its clock time (end may cross days).
+    const startAt = !scheduled ? null : allDay ? midnight(day).toISOString() : stamp(day, start).toISOString();
+    const endAt = !scheduled || !hasEnd ? null : allDay ? midnight(endDay).toISOString() : stamp(endDay, end).toISOString();
     // Include anything still typed into the bring field so it isn't silently lost.
     const pendingBring = bringInput.split(",").map((s) => s.trim()).filter(Boolean).map((item) => ({ item, memberId: null as string | null }));
     const whatToBring = [...bring, ...pendingBring];
-    const body = { title: title.trim(), startAt, endAt, location: location.trim(), driverId, whatToBring };
+    const body = { title: title.trim(), startAt, endAt, allDay: scheduled && allDay, notes: notes.trim(), location: location.trim(), driverId, whatToBring };
     const r = isEdit
       ? await api.updateEvent(id, body)
       : await api.createEvent({ ...body, visibility: "household" });
     setBusy(null);
     if (r.event) {
       tapHaptic("success");
+      // One-save (DEC-06): with the remembered consent ON, saving also updates
+      // Google — through the SAME approval gate (first push surfaces the inline
+      // approval panel; nothing external happens silently).
+      if (alsoGoogle && isEdit && !linkedGoogle) {
+        const pushed = await push();
+        if (pushed?.ok) router.back();
+        // needsApproval or error: stay on the form — the approval panel/notice shows.
+        return;
+      }
       router.back();
     } else {
       setNotice({
@@ -230,7 +273,7 @@ export default function EventFormScreen() {
   // Push this canonical event TO Google. Approval-first: the first call returns a
   // pending approval; approving it and pushing again (with the id) does the write.
   const push = async (approvalId?: string) => {
-    if (!id) return;
+    if (!id) return undefined;
     setBusy("push"); setNotice(null);
     const r = await api.pushEventToGoogle(id, approvalId);
     setBusy(null);
@@ -253,6 +296,7 @@ export default function EventFormScreen() {
         ok: false,
       });
     }
+    return r;
   };
   // One tap once the panel is shown: approve through the same server gate, then
   // immediately execute the push with the consumed approval.
@@ -350,12 +394,25 @@ export default function EventFormScreen() {
         </View>
         {scheduled ? (
           <View style={{ borderTopWidth: 1, borderTopColor: colors.border, paddingTop: spacing.sm, gap: spacing.xs }}>
-            <PickerField label="Date" value={day} mode="date" onChange={setDay} disabled={readOnly || !canManage} />
-            <PickerField label="Starts" value={start} mode="time" onChange={setStart} disabled={readOnly || !canManage} />
+            {/* All-day (ISS-005): a real model flag — time pickers disappear, no fake times */}
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 40 }}>
+              <T kind="bodyMedium" color={colors.textSecondary}>All-day</T>
+              <Switch
+                value={allDay}
+                onValueChange={(v) => { tapHaptic("select"); setAllDay(v); }}
+                trackColor={{ true: colors.ember }}
+                disabled={readOnly || !canManage}
+                accessibilityLabel="All-day event"
+              />
+            </View>
+            <PickerField label={hasEnd ? "Start date" : "Date"} value={day} mode="date" onChange={setDay} disabled={readOnly || !canManage} />
+            {!allDay ? <PickerField label="Starts" value={start} mode="time" onChange={setStart} disabled={readOnly || !canManage} /> : null}
             {hasEnd ? (
               <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-                <View style={{ flex: 1 }}>
-                  <PickerField label="Ends" value={end} mode="time" onChange={setEnd} disabled={readOnly || !canManage} />
+                <View style={{ flex: 1, gap: spacing.xs }}>
+                  {/* End DAY picker (ISS-004): camps and overnights span days */}
+                  <PickerField label="End date" value={endDay} mode="date" onChange={setEndDay} disabled={readOnly || !canManage} />
+                  {!allDay ? <PickerField label="Ends" value={end} mode="time" onChange={setEnd} disabled={readOnly || !canManage} /> : null}
                 </View>
                 {!readOnly && canManage ? (
                   <PressableScale haptic="select" hitSlop={8} onPress={() => setHasEnd(false)} accessibilityRole="button" accessibilityLabel="Remove end time">
@@ -368,18 +425,18 @@ export default function EventFormScreen() {
                 haptic="select"
                 onPress={() => {
                   const d = stamp(day, start); d.setHours(d.getHours() + 1);
-                  setEnd(d); setHasEnd(true);
+                  setEnd(d); setEndDay(day); setHasEnd(true);
                 }}
                 accessibilityRole="button"
                 accessibilityLabel="Add end time"
                 style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 8 }}
               >
                 <Sym name="plus.circle" size={15} color={colors.ember} />
-                <T kind="subMedium" color={colors.ember}>Add end time</T>
+                <T kind="subMedium" color={colors.ember}>{allDay ? "Add end date" : "Add end time"}</T>
               </PressableScale>
             ) : null}
             {endInvalid ? (
-              <T kind="sub" color={colors.coral}>End time must be after the start.</T>
+              <T kind="sub" color={colors.coral}>{allDay ? "The end date can't be before the start date." : "The end must be after the start (use End date for overnights)."}</T>
             ) : null}
           </View>
         ) : (
@@ -400,6 +457,21 @@ export default function EventFormScreen() {
           editable={!readOnly && canManage}
           accessibilityLabel="Event location"
           returnKeyType="done"
+        />
+      </Well>
+
+      {/* Notes (ISS-006 — carried into the Google description on push) */}
+      <SectionHeader title="Notes" />
+      <Well>
+        <TextInput
+          style={[inputStyle, { minHeight: 72, textAlignVertical: "top" }]}
+          placeholder="Anything the family should know (optional)"
+          placeholderTextColor={colors.textFaint}
+          value={notes}
+          onChangeText={setNotes}
+          editable={!readOnly && canManage}
+          multiline
+          accessibilityLabel="Event notes"
         />
       </Well>
 
@@ -480,25 +552,37 @@ export default function EventFormScreen() {
               </View>
             </Well>
           ) : null}
+          {/* One-save (ISS-008/DEC-06): the separate "Update in Google" button is
+              gone — a remembered inline consent rides along with the primary Save.
+              The first push still goes through the approval gate (panel above). */}
+          {isEdit && !linkedGoogle ? (
+            <Well style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+              <Sym name="arrow.up.circle" size={16} color={colors.textSecondary} />
+              <View style={{ flex: 1 }}>
+                <T kind="bodyMedium" color={colors.textSecondary}>
+                  {googleEventId ? "Also update in Google Calendar" : "Also add to my Google Calendar"}
+                </T>
+                <T kind="sub" color={colors.textFaint}>
+                  {alsoGoogle ? "Saving syncs Google too — you approve the first push." : "Off — saving changes FamiliOS only."}
+                </T>
+              </View>
+              <Switch
+                value={alsoGoogle}
+                onValueChange={(v) => { tapHaptic("select"); setAlsoGoogleRemembered(v); }}
+                trackColor={{ true: colors.ember }}
+                disabled={busy !== null}
+                accessibilityLabel="Also update Google Calendar when saving"
+              />
+            </Well>
+          ) : null}
           <Button
-            title={isEdit ? "Save changes" : "Add event"}
+            title={isEdit ? (alsoGoogle && !linkedGoogle ? "Save & update Google" : "Save changes") : "Add event"}
             variant="ember"
             full
-            loading={busy === "save"}
+            loading={busy === "save" || (busy === "push" && !pushApproval)}
             disabled={!canSave}
             onPress={() => void save()}
           />
-          {isEdit && !linkedGoogle ? (
-            <Button
-              title={googleEventId ? "Update in Google" : "Push to Google"}
-              variant="neutral"
-              icon="arrow.up.circle"
-              full
-              loading={busy === "push" && !pushApproval}
-              disabled={busy !== null || !!pushApproval}
-              onPress={() => void push()}
-            />
-          ) : null}
           {isEdit ? (
             <Button
               title="Delete event"

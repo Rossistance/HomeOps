@@ -1,0 +1,55 @@
+{
+  "_contract": "Top Gun runtime-driver registry v1 — consumed by the top-gun plugin's capability-task-matcher (references/runtime-drivers.md). Each driver is probed and classified per session; cloud drivers without credentials are BLOCKED, never available.",
+  "product": "FamiliOS — web PWA (Vite/React, root) + native iOS (Expo SDK 56, apps/mobile, bundle ai.familios.app)",
+  "drivers": [
+    {
+      "id": "playwright-web",
+      "platform": "web",
+      "role": "primary",
+      "runner": "@playwright/test — tests/topgun/playwright.config.ts (projects: web-chromium, web-webkit-iphone)",
+      "probe": "npx playwright --version",
+      "env": [],
+      "artifacts": [
+        "tests/topgun/.artifacts/web/report (HTML report)",
+        "tests/topgun/.artifacts/web/results (traces, screenshots, videos)"
+      ],
+      "notes": "webServer boots `npm run dev` (backend :8787 + Vite :5173; requires Node >=22.13 for node:sqlite) unless one is already running. web-webkit-iphone (WebKit + iPhone profile) approximates iOS Safari/PWA behavior — it is web evidence, never native-iOS evidence. PWA/service-worker specs need a production build surface: set TOPGUN_PWA_BASEURL."
+    },
+    {
+      "id": "appium-device-cloud",
+      "platform": "ios-device",
+      "role": "deep",
+      "runner": "webdriverio + node:test — tests/topgun/appium/run.mjs (caps in tests/topgun/appium/caps/)",
+      "probe": "node tests/topgun/appium/run.mjs --probe",
+      "env": [
+        "BROWSERSTACK_USERNAME + BROWSERSTACK_ACCESS_KEY + BROWSERSTACK_APP_ID (primary)",
+        "or LT_USERNAME + LT_ACCESS_KEY + LT_APP_ID (alternate)",
+        "or APPIUM_REMOTE_URL + APPIUM_APP (generic endpoint)"
+      ],
+      "artifacts": [
+        "cloud session URL, video, device + network logs (vendor dashboard)",
+        "tests/topgun/.artifacts/appium/ (local evidence notes)"
+      ],
+      "notes": "WebDriverAgent is vendor-managed; nothing iOS-native runs on this PC. App artifact: `eas build -p ios --profile preview` in apps/mobile, then upload via tests/topgun/appium/upload-browserstack.mjs. Preview/production builds bake EXPO_PUBLIC_API_URL=https://homeops-ai.onrender.com — that backend is LIVE family data, so the default lane is non-mutating; mutation specs require TOPGUN_ALLOW_MUTATIONS=1 and a disposable backend/tenant."
+    },
+    {
+      "id": "appetize-sim",
+      "platform": "ios-sim",
+      "role": "light",
+      "runner": "@appetize/playwright — tests/topgun/appetize/appetize.config.ts",
+      "probe": "APPETIZE_API_TOKEN and APPETIZE_PUBLIC_KEY present in env",
+      "env": ["APPETIZE_API_TOKEN", "APPETIZE_PUBLIC_KEY"],
+      "artifacts": [
+        "tests/topgun/.artifacts/appetize/ (screenshots)",
+        "Appetize session logs + shareable session link"
+      ],
+      "notes": "Requires a SIMULATOR build (not .ipa): `eas build -p ios --profile simulator` in apps/mobile (profile added for this harness), upload via tests/topgun/appetize/upload-appetize.mjs. Simulator evidence cannot prove push, camera, biometrics, or real-device performance — escalate those to appium-device-cloud."
+    }
+  ],
+  "routing": {
+    "shared-logic/forms/navigation/data-flows": "playwright-web",
+    "pwa (manifest/service-worker/offline/install)": "playwright-web (TOPGUN_PWA_BASEURL surface); real-device Safari via device cloud only when standalone-mode truth is required",
+    "ios-ui-sanity/screenshots/quick-repro": "appetize-sim, escalate findings to appium-device-cloud",
+    "native-only (permissions, push, deep links, secure store, real rendering/perf, upgrade, store readiness)": "appium-device-cloud"
+  }
+}

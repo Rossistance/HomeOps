@@ -12,3 +12,7 @@ server/.data/
 
 # Tenancy spike scratch output
 server/spike/out/
+
+# Top Gun test harness — credentials and run artifacts, never in git
+tests/topgun/.env.topgun
+tests/topgun/.artifacts/

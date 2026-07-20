@@ -6,10 +6,11 @@ import { ScrollView, Switch, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import { readAsStringAsync } from "expo-file-system/legacy";
-import { api } from "@/lib/api";
+import { api, type FileRec } from "@/lib/api";
+import { decideSpace, explicitTagOf, spaceLabelOf } from "@/lib/spaces";
 import { useTheme } from "@/theme";
 import {
-  T, Button, Chip, ChipRow, Well, Row, SymTile, PressableScale, Sym, HSheet, SheetCTA, Notice, useConfirmFlash,
+  T, Button, Chip, ChipRow, Well, Row, SymTile, PressableScale, Sym, HSheet, SheetCTA, Notice,
 } from "@/components/ui";
 
 const MAX_BYTES = 5 * 1024 * 1024;
@@ -23,10 +24,10 @@ interface Picked { name: string; base64: string; mime: string; size: number }
 export function UploadSheet({ visible, onClose, onUploaded }: {
   visible: boolean;
   onClose: () => void;
-  onUploaded: () => void;
+  /** Called with the uploaded record — the library shows the persistent "Saved to <category>" confirmation (WP-002). */
+  onUploaded: (file: FileRec) => void;
 }) {
   const { colors, spacing } = useTheme();
-  const { flash, show } = useConfirmFlash();
   const [file, setFile] = useState<Picked | null>(null);
   // Optional 2nd page (e.g. the back of an ID) — uploaded as ONE logical file.
   const [backPage, setBackPage] = useState<Picked | null>(null);
@@ -128,7 +129,10 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
     if (!file || busy) return;
     setBusy(true); setNote(null);
     const tags: string[] = [];
-    if (space !== SPACES[0]) tags.push(spaceTag(space));
+    // Explicit filing, always (WP-002/ISS-002): "Let Famili decide" runs the
+    // unit-tested name heuristic and files the result EXPLICITLY — never a
+    // silent untagged fallback. The library banner then names the real category.
+    tags.push(space === SPACES[0] ? explicitTagOf(decideSpace(customName.trim() || file.name)) : spaceTag(space));
     if (sensitive) tags.push("sensitive");
     // The typed name wins, exactly as typed — except a lost dot-extension is
     // restored from the original so the file stays openable.
@@ -150,7 +154,10 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
         : `Upload failed: ${r.message ?? r.error ?? "unknown error"}`);
       return;
     }
-    show("upload", () => { onUploaded(); close(); });
+    // WP-002: no more 800 ms flash — hand the record to the library, which shows
+    // the persistent "Saved to <category> · View" confirmation until dismissed.
+    onUploaded(r.file);
+    close();
   }
 
   return (
@@ -220,13 +227,16 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
               </View>
 
               <Well>
-                <T kind="detail">Famili will file it and keep it in your household library.</T>
+                <T kind="detail">
+                  {space === SPACES[0]
+                    ? `Famili will file this under ${spaceLabelOf(decideSpace(customName.trim() || file.name))} — pick a space above to change that.`
+                    : `Filed under ${space} in your household library.`}
+                </T>
               </Well>
             </>
           )}
         </ScrollView>
       </HSheet>
-      {flash}
     </>
   );
 }

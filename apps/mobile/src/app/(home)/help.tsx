@@ -169,7 +169,9 @@ export default function HelpScreen() {
       kind: mode,
     });
     setBusy(false);
-    if (!r.helpRequest) {
+    // A 409 duplicate_request carries the EXISTING record alongside the error —
+    // check the error first so "already asked" is never presented as a new send.
+    if (r.error || !r.helpRequest) {
       setNote(`Couldn't send: ${r.message ?? r.error ?? "unknown error"}`);
       return;
     }

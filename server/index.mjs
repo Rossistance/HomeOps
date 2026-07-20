@@ -573,8 +573,13 @@ const handleRequest = async (req, res) => {
     if (path === "/api/profiles" && method === "GET") {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
       const pinSet = !!(getSettings(CURRENT_TENANT).ownerPinHash || process.env.HOMEOPS_BOOTSTRAP_PIN);
+      // Pre-auth privacy (ISS-009): this endpoint answers BEFORE any session exists,
+      // so it must carry the minimum the Lock screen needs — actorId, displayName,
+      // role, pinRequired. Relationship strings (which include child ages, e.g.
+      // "Child (age 9)", and caregiver details) are deliberately excluded; they are
+      // available post-auth via /api/members.
       const profiles = listMembers({ householdId: "local" }).filter((m) => !m.archived).map((m) => ({
-        actorId: m.actorId, displayName: m.displayName, role: m.role, relationship: m.relationship ?? null,
+        actorId: m.actorId, displayName: m.displayName, role: m.role,
         pinRequired: pinSet && (m.role === "Owner" || m.role === "Adult Admin"),
       }));
       return json(res, 200, {
@@ -1237,6 +1242,8 @@ const handleRequest = async (req, res) => {
       const ev = putEvent({
         id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         title: String(body.title).trim(), startAt: body.startAt ?? null, endAt: body.endAt ?? null,
+        // WP-003/ISS-005: all-day is an explicit model concept (Google pushes use the `date` form).
+        allDay: body.allDay === true,
         location: body.location ?? "", notes: typeof body.notes === "string" ? body.notes : "", spaceId: body.spaceId ?? "sp-family",
         participantIds: Array.isArray(body.participantIds) ? body.participantIds : [],
         driverId: body.driverId ?? null, ownerId: body.ownerId ?? g.session.actorId, backupOwnerId: body.backupOwnerId ?? null,
@@ -1397,6 +1404,21 @@ const handleRequest = async (req, res) => {
       // Direction: "ask" (default) = requester asking `to` to help with the requester's
       // item; "offer" = requester offering to help with `to`'s item. Recipient is `to` either way.
       const kind = body.kind === "offer" ? "offer" : "ask";
+      // WP-001 (ISS-009 root): refuse a duplicate PENDING request for the same
+      // (taskId, recipient) — re-asking piled up records that rendered as duplicate
+      // cards. 409 returns the existing record so clients can point at it.
+      if (body.taskId) {
+        const existing = listHelpRequests((h) =>
+          h.householdId === g.session.householdId && h.status === "pending" &&
+          h.taskId === body.taskId && h.toActorId === String(body.toActorId ?? ""));
+        if (existing.length) {
+          return json(res, 409, {
+            error: "duplicate_request",
+            message: `${to.displayName} was already asked about this — waiting on their answer.`,
+            helpRequest: existing[0],
+          }, req);
+        }
+      }
       const fromName = getMember(g.session.actorId)?.displayName ?? g.session.actorId;
       const hr = putHelpRequest({
         id: "hr_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
@@ -1425,6 +1447,18 @@ const handleRequest = async (req, res) => {
       const status = body.response === "accept" ? "accepted" : "declined";
       const responseNote = String(body.note ?? "").trim().slice(0, 500) || null;
       const updated = patchHelpRequest(hr.id, { status, responseNote, respondedAt: new Date().toISOString() });
+      // WP-001 (ISS-001): accepting help with a linked task TRANSFERS the task.
+      // ask   → the helper is the recipient (hr.toActorId, the acceptor);
+      // offer → the helper is the offerer (hr.fromActorId).
+      // A missing/deleted task is reported honestly as reassigned:false — never faked.
+      let reassignedTask = null;
+      if (status === "accepted" && hr.taskId) {
+        const linked = getTask(hr.taskId);
+        if (linked && linked.householdId === g.session.householdId) {
+          const helperId = hr.kind === "offer" ? hr.fromActorId : hr.toActorId;
+          reassignedTask = patchTask(linked.id, { assignedMemberId: helperId });
+        }
+      }
       // Copy tracks direction: the notified party is always the creator (hr.fromActorId).
       // ask → "X accepted your request"; offer → "X accepted your help offer".
       const noun = hr.kind === "offer" ? "help offer" : "request";
@@ -1432,8 +1466,8 @@ const handleRequest = async (req, res) => {
       const note = responseNote ? ` — ${responseNote}` : "";
       addNotification({ householdId: g.session.householdId, actorId: hr.fromActorId, channel: "in_app", title, body: `${hr.toName} ${status} your ${noun}${note}` });
       void pushToMember({ householdId: g.session.householdId, actorId: hr.fromActorId, title, body: `${hr.toName} ${status} your ${noun}${note}`, data: { type: "help_request", id: hr.id } });
-      audit({ type: "help.respond", helpRequestId: hr.id, status, ok: true }, req, g.session);
-      return json(res, 200, { helpRequest: updated }, req);
+      audit({ type: "help.respond", helpRequestId: hr.id, status, reassigned: !!reassignedTask, ...(reassignedTask ? { taskId: reassignedTask.id, assignedMemberId: reassignedTask.assignedMemberId } : {}), ok: true }, req, g.session);
+      return json(res, 200, { helpRequest: updated, reassigned: !!reassignedTask, ...(reassignedTask ? { task: reassignedTask } : {}) }, req);
     }
     const helpCancel = path.match(/^\/api\/help-requests\/([^/]+)\/cancel$/);
     if (helpCancel && method === "POST") {

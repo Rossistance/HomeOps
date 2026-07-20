@@ -267,12 +267,31 @@ export function StorageBanner() {
   );
 }
 
+// T-02: an honest, always-visible signal that server-backed features (connectors, AI
+// providers, approvals) aren't fully working right now — the backend is unreachable, or
+// this session is local-only (see Store.isLocalSession). Mirrors StorageBanner's pattern
+// so it reads as the same "system status" vocabulary, but uses `amber` (warning) rather
+// than `coral` (attention/danger) per the status-color vocabulary in DESIGN_SYSTEM.md.
+// Rendered in the shared shell body (not inside the desktop-only Sidebar), so it's the
+// same on mobile and desktop — unlike the sidebar's RuntimePill, which mobile never sees.
+export function DegradedBanner() {
+  const degraded = useStore((s) => s.isDegraded());
+  const message = useStore((s) => s.degradedMessage());
+  if (!degraded || !message) return null;
+  return (
+    <div role="status" className="flex items-center gap-2 bg-amber-500 px-4 py-2 text-sm font-medium text-ink-900">
+      <Icon name="TriangleAlert" size={16} className="shrink-0" /> {message}
+    </div>
+  );
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-full">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <StorageBanner />
+        <DegradedBanner />
         <Topbar />
         <main className="flex-1 overflow-y-auto px-3 pb-24 pt-5 sm:px-5 lg:px-8 lg:pb-10">
           <div className="mx-auto w-full max-w-7xl">{children}</div>

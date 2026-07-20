@@ -4,7 +4,15 @@
 // fallback, honest null when a page has no structured recipe).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { htmlToText, decodeEntities, friendlyDuration, recipeFromHtml, extractTitle } from "../web.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import { join } from "node:path";
+
+// ../web.mjs transitively imports ../store.mjs (getSecret); point the store at an
+// isolated temp dir BEFORE that first import so this test can never resolve the
+// live server/.data (ISS-001 guard in store.mjs enforces this).
+process.env.HOMEOPS_DATA_DIR ||= fs.mkdtempSync(join(os.tmpdir(), "homeops-webtools-"));
+const { htmlToText, decodeEntities, friendlyDuration, recipeFromHtml, extractTitle } = await import("../web.mjs");
 
 test("htmlToText strips scripts/styles, keeps block structure, decodes entities", () => {
   const html = `<html><head><style>p{color:red}</style><script>alert(1)</script></head>

@@ -1,0 +1,10 @@
+{
+  "platformName": "iOS",
+  "appium:automationName": "XCUITest",
+  "appium:deviceName": "${TOPGUN_IOS_DEVICE:-iPhone 15}",
+  "appium:platformVersion": "${TOPGUN_IOS_OS:-17}",
+  "appium:app": "${APPIUM_APP}",
+  "appium:bundleId": "ai.familios.app",
+  "appium:newCommandTimeout": 180,
+  "appium:autoAcceptAlerts": false
+}

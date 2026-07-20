@@ -40,6 +40,24 @@ function fmtTime(iso: string | null): string | null {
   return isNaN(+d) ? null : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
+/** WP-003/ISS-004: every local day an event spans (start day → end day inclusive),
+ * so multi-day events render on each spanned day. Capped defensively at 60 days. */
+function spanKeys(e: EventRec): string[] {
+  if (!e.startAt || isNaN(+new Date(e.startAt))) return [];
+  const start = new Date(e.startAt);
+  const keys = [dayKey(start)];
+  const end = e.endAt ? new Date(e.endAt) : null;
+  if (end && !isNaN(+end)) {
+    const cur = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    for (let i = 0; i < 60; i++) {
+      cur.setDate(cur.getDate() + 1);
+      if (dayKey(cur) > dayKey(end)) break;
+      keys.push(dayKey(cur));
+    }
+  }
+  return keys;
+}
+
 /** Full date+time for the conflict cards (falls back to "No date"). */
 function fmtStamp(iso: string | null | undefined): string {
   if (!iso) return "No date";
@@ -198,15 +216,19 @@ export default function CalendarScreen() {
     [colorOf, subColorsOf],
   );
 
-  // Upcoming = anything undated or starting within the last 12h onward (ported).
+  // Upcoming = anything undated, starting within the last 12h onward, or a
+  // multi-day event still running (its END hasn't passed the window).
   const upcoming = useMemo(() => [...events]
-    .filter((e) => !e.startAt || new Date(e.startAt).getTime() >= Date.now() - 12 * 3600e3)
+    .filter((e) => !e.startAt
+      || new Date(e.startAt).getTime() >= Date.now() - 12 * 3600e3
+      || (e.endAt ? new Date(e.endAt).getTime() >= Date.now() - 12 * 3600e3 : false))
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))), [events]);
   const byDay = useMemo(() => {
     const map: Record<string, EventRec[]> = {};
     for (const e of upcoming) {
-      const k = e.startAt && !isNaN(+new Date(e.startAt)) ? dayKey(new Date(e.startAt)) : "undated";
-      (map[k] ??= []).push(e);
+      const keys = spanKeys(e);
+      if (keys.length === 0) { (map["undated"] ??= []).push(e); continue; }
+      for (const k of keys) (map[k] ??= []).push(e);
     }
     return map;
   }, [upcoming]);
@@ -225,8 +247,7 @@ export default function CalendarScreen() {
   const byDayAll = useMemo(() => {
     const map: Record<string, EventRec[]> = {};
     for (const e of events) {
-      if (!e.startAt || isNaN(+new Date(e.startAt))) continue;
-      (map[dayKey(new Date(e.startAt))] ??= []).push(e);
+      for (const k of spanKeys(e)) (map[k] ??= []).push(e);
     }
     for (const k of Object.keys(map)) map[k].sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
     return map;
@@ -612,8 +633,9 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
   // Google-originated linked events are editable two-way (server writes to Google
   // first) — they open the form like canonical ones. ICS/public stay expand-only.
   const editable = canonical || (e.layer === "linked" && !!e.provenance?.googleEventId);
-  const start = fmtTime(e.startAt);
-  const end = fmtTime(e.endAt);
+  // All-day events show "All day" on the rail — never a faked midnight (ISS-005).
+  const start = e.allDay ? "All day" : fmtTime(e.startAt);
+  const end = e.allDay ? null : fmtTime(e.endAt);
   const driver = nameOf(e.driverId);
   const bring = e.whatToBring;
   const checklistDone = e.checklist.filter((c) => c.done).length;

@@ -1,0 +1,20 @@
+{
+  "platformName": "iOS",
+  "appium:automationName": "XCUITest",
+  "appium:deviceName": "${TOPGUN_IOS_DEVICE:-iPhone 15}",
+  "appium:platformVersion": "${TOPGUN_IOS_OS:-17}",
+  "appium:app": "${LT_APP_ID}",
+  "appium:newCommandTimeout": 180,
+  "appium:autoAcceptAlerts": false,
+  "lt:options": {
+    "username": "${LT_USERNAME}",
+    "accessKey": "${LT_ACCESS_KEY}",
+    "project": "FamiliOS",
+    "build": "topgun-ios",
+    "isRealMobile": true,
+    "w3c": true,
+    "video": true,
+    "devicelog": true,
+    "network": true
+  }
+}

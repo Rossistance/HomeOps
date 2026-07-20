@@ -1,0 +1,15 @@
+== LOGIN Ross -> 200 actor=m-owner role=Owner
+== CREATE member TG-T105-Helper -> 200 m-d894c4ca
+== LOGIN TG-T105-Helper -> 200 actor=m-d894c4ca role=Limited Member
+== TASK create -> 200 tk_b1a717563f3f2295 assigned=m-owner
+== ASK -> 200 hr_0c846f7a8a14c61a
+== ACCEPT -> 200 reassigned=true task.assignedMemberId=m-d894c4ca
+>>> DISCRIMINATOR: task.assignedMemberId after accept = m-d894c4ca (helper=m-d894c4ca)
+>>> helper's assigned list contains task: true
+== DEDUPE: first=200 second=409 error=duplicate_request existing=true
+== OFFER-ACCEPT -> 200 reassigned=true task.assignedMemberId=m-d894c4ca (offerer=m-d894c4ca)
+== CLEANUP task tk_b1a717563f3f2295 -> 200
+== CLEANUP task tk_ba2d4a50e2e8c239 -> 200
+== TG-T105 help-request residue (terminal, purged in T-501 sweep): hr_fe0c30bad43569dc:accepted, hr_0dfac6db32e590cb:cancelled, hr_0c846f7a8a14c61a:accepted
+== CLEANUP member m-d894c4ca -> 200
+== INTEGRITY: events=41 files=0 tasks=28

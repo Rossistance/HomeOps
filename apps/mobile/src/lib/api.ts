@@ -101,6 +101,9 @@ export interface EventRec {
   driverId: string | null; participantIds: string[]; whatToBring: { item: string; memberId: string | null }[];
   checklist: { text: string; done: boolean }[]; visibility: string; layer: "canonical" | "linked" | "public"; category: string;
   notes?: string; source?: string; provenance?: EventProvenance;
+  /** WP-003/ISS-005: all-day events — no times shown; Google push uses the `date` form.
+   *  startAt/endAt stay local-midnight ISO timestamps so existing sort/render paths hold. */
+  allDay?: boolean;
   /** Linked Google events: the member who connected that calendar (colors + free/busy). */
   ownerId?: string | null;
   /** Server-computed: may the current member edit this event? Canonical → adult/owner;
@@ -823,8 +826,10 @@ export const api = {
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
-  async respondHelpRequest(id: string, response: "accept" | "decline", note?: string): Promise<{ helpRequest?: HelpRequestRec; error?: string; message?: string }> {
-    const r = await req<{ helpRequest?: HelpRequestRec; error?: string; message?: string }>(`/help-requests/${encodeURIComponent(id)}/respond`, { method: "POST", body: JSON.stringify({ response, note }) });
+  // WP-001: accepting a help request with a linked task transfers the task —
+  // the server reports the transfer as {reassigned, task} so UIs can say so.
+  async respondHelpRequest(id: string, response: "accept" | "decline", note?: string): Promise<{ helpRequest?: HelpRequestRec; reassigned?: boolean; task?: TaskRec; error?: string; message?: string }> {
+    const r = await req<{ helpRequest?: HelpRequestRec; reassigned?: boolean; task?: TaskRec; error?: string; message?: string }>(`/help-requests/${encodeURIComponent(id)}/respond`, { method: "POST", body: JSON.stringify({ response, note }) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },

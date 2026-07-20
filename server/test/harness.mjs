@@ -16,6 +16,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, "..", "index.mjs");
 const ORIGIN = "http://localhost:5173";
 
+// Belt-and-suspenders for ISS-001: make the TEST PROCESS itself incapable of
+// resolving the live server/.data. If a test file (or anything it imports)
+// pulls in ../store.mjs without choosing its own data dir first, it lands in
+// this throwaway temp dir instead of the real store. startServer() still gives
+// every spawned server its own separate mkdtemp dir below.
+if (!process.env.HOMEOPS_DATA_DIR) {
+  process.env.HOMEOPS_DATA_DIR = fs.mkdtempSync(join(os.tmpdir(), "homeops-test-proc-"));
+}
+
 /**
  * Start a fresh server instance. Returns a context object with helpers.
  * PORT=0 lets the OS assign a free port (no collisions, ever); the harness

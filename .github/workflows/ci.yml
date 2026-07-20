@@ -26,6 +26,46 @@ jobs:
         env:
           FAMILIOS_BROWSER: "0"
 
+  data-isolation:
+    # ISS-001 reproduction gate: boot a REAL server on the default server/.data,
+    # then run the whole suite beside it and require the data dir byte-identical
+    # and the server still healthy afterward. This is the exact scenario that
+    # once wedged a live backend (a test bare-importing store.mjs resolved the
+    # default data dir and ran the stall sweeper against the live tenant DB).
+    name: Test-suite data isolation (live server untouched)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --include=dev
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      - name: Boot a live server on the default data dir
+        run: |
+          node server/index.mjs > server.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 100); do
+            curl -sf http://localhost:8787/api/health > /dev/null && break
+            sleep 0.2
+          done
+          curl -sf http://localhost:8787/api/health
+          sleep 2   # let boot-time writes settle before the pre-hash
+      - name: Hash server/.data before the suite
+        run: find server/.data -type f -print0 | sort -z | xargs -0 sha256sum | tee /tmp/data-pre.txt
+      - name: Run the full suite beside the live server
+        run: npm test
+        env:
+          FAMILIOS_BROWSER: "0"
+      - name: Assert server/.data byte-identical and server still healthy
+        run: |
+          find server/.data -type f -print0 | sort -z | xargs -0 sha256sum | tee /tmp/data-post.txt
+          diff /tmp/data-pre.txt /tmp/data-post.txt
+          curl -sf http://localhost:8787/api/health
+          kill "$(cat server.pid)" || true
+
   web:
     name: Web typecheck + build
     runs-on: ubuntu-latest

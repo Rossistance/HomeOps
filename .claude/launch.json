@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "homeops",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeExecutable": "C:\\Users\\rhixon\\AppData\\Roaming\\nvm\\v25.8.2\\node.exe",
+      "runtimeArgs": ["scripts/dev.mjs"],
       "port": 5173,
       "autoPort": false
     }

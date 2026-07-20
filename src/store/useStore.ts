@@ -190,6 +190,17 @@ export function screenAllowedForMember(screen: ScreenId, member: { role?: string
   return scoped.includes(screen);
 }
 
+/** Households seeded entirely on this device (buildEmptyData / buildSeedData — see
+ * src/data/seed.ts) always use the fixed ids "hh-local" / "hh-harper", regardless of
+ * whether they were later successfully registered with a server. loginAs uses this to
+ * recognize "this household may simply not be known to THIS server" and fall back to a
+ * client-only session (T-03) instead of hard-failing — a sample or freshly-created
+ * household should never dead-end on a stranger's Lock screen just because the backend
+ * it's talking to already belongs to someone else. */
+function isLocalOnlyHousehold(d: AppData): boolean {
+  return d.household.id === "hh-local" || d.household.id === "hh-harper";
+}
+
 /** Map a connector display name / alias to its backend connector id. */
 // IDs here MUST match real backend connector/provider ids (server/connectors.mjs,
 // server/providers.mjs) — a fictional id (the previous "gmail"/"gcal" split) silently
@@ -306,6 +317,12 @@ interface UIState {
   session: Session | null;     // backend/persona session (who is acting + role)
   needsOnboarding: boolean;    // true on a fresh, no-data first run
   authBusy: boolean;
+  // T-03: true when `session` is a client-only session — the server never confirmed
+  // this actor (sample data, a locally-created household, or the backend was simply
+  // unreachable at sign-in). loginAs mints this instead of hard-failing so a sample or
+  // not-yet-registered household never dead-ends on someone else's Lock screen. Server-
+  // only features keep degrading honestly through their own typed-error paths.
+  isLocalSession: boolean;
 }
 
 export interface Store extends UIState {
@@ -324,9 +341,14 @@ export interface Store extends UIState {
   loginAs: (memberId: string, pin?: string, fallback?: { displayName: string; role: string }) => Promise<boolean>;
   logout: () => Promise<void>;
   loginWithEmail: (email: string, password: string) => Promise<boolean>;
-  signupHousehold: (input: { email: string; password: string; ownerName: string; householdName?: string; inviteToken?: string }) => Promise<boolean>;
+  signupHousehold: (input: { email: string; password: string; ownerName: string; householdName?: string; inviteToken?: string; resetLocalData?: boolean }) => Promise<boolean>;
   currentRole: () => Role;
   canAccess: (screen: ScreenId) => boolean;
+  // T-02: a single source of truth for "server-backed features are known to be
+  // unavailable right now" — the backend is unreachable, or this session is local-only
+  // (see isLocalSession above). Drives the global degraded-mode banner.
+  isDegraded: () => boolean;
+  degradedMessage: () => string | null;
 
   /* navigation + UI */
   navigate: (screen: ScreenId, params?: Record<string, string>) => void;
@@ -532,6 +554,20 @@ export const useStore = create<Store>((set, get) => {
     set((s) => ({ toasts: [...s.toasts, { ...t, id }] }));
   };
 
+  /** Mint a client-only session (T-03) — used whenever the backend won't confirm a
+   * server actor for a household that's local-only anyway (sample/unregistered) or the
+   * backend is simply unreachable. Never claims server capabilities: connectors,
+   * approvals, and AI providers still gate through their own real typed-error paths
+   * (loadBackend/hydrateFromServer run normally and report whatever the server says). */
+  const establishLocalSession = (m: { id: string; displayName: string; role: string }, memberId: string, message: string, opts?: { toastTitle?: string }) => {
+    const session: Session = { actorId: m.id, actorName: m.displayName, role: m.role, csrf: "", householdId: "local" };
+    commit((d) => d.members.forEach((x) => (x.isCurrentUser = x.id === memberId)));
+    set({ session, authBusy: false, isLocalSession: true });
+    toast({ kind: "warn", title: opts?.toastTitle ?? "Signed in locally", message });
+    void get().loadBackend();
+    return true;
+  };
+
   return {
     /* ----- initial UI state (data replaced on init) ----- */
     data: buildSeedData(),
@@ -544,6 +580,7 @@ export const useStore = create<Store>((set, get) => {
     session: null,
     needsOnboarding: false,
     authBusy: false,
+    isLocalSession: false,
 
     /* ----------------------------- lifecycle ----------------------------- */
     init: async () => {
@@ -592,7 +629,8 @@ export const useStore = create<Store>((set, get) => {
     bootstrapSession: async () => {
       const s = await backend.session();
       if (s) {
-        set({ session: s });
+        // A cookie-backed session always came from the server — never a local fallback.
+        set({ session: s, isLocalSession: false });
         // align the active persona with the authenticated session actor
         commit((d) => { if (d.members.some((m) => m.id === s.actorId)) d.members.forEach((m) => (m.isCurrentUser = m.id === s.actorId)); });
         void get().loadBackend();
@@ -619,30 +657,43 @@ export const useStore = create<Store>((set, get) => {
         if (claim.session) {
           const s = claim.session;
           commit((d) => d.members.forEach((x) => (x.isCurrentUser = x.id === s.actorId)));
-          set({ session: s, authBusy: false });
+          set({ session: s, authBusy: false, isLocalSession: false });
           toast({ kind: "success", title: "Household registered with the backend", message: "Your profile now owns the server household — connections and AI providers are unlocked." });
           void get().loadBackend();
           return true;
         }
+        // Claim failed (most commonly: this server already has a different household)
+        // — fall through to the local-session fallback below instead of hard-failing.
       }
       if (r.error === "unknown_actor" || r.error === "member_archived") {
+        // T-03: a sample or locally-created household simply may not exist on THIS
+        // server (never claimed, or claimed by someone else) — keep the profile usable
+        // on this device rather than stranding it behind a stranger's roster.
+        // `member_archived` is included: claiming a server ARCHIVES the demo roster in
+        // the server registry, so on a claimed server the sample members answer
+        // "archived" rather than "unknown" — but the server's verdict about its own
+        // old demo roster has no authority over this device's local-only household.
+        if (isLocalOnlyHousehold(get().data)) {
+          return establishLocalSession(m, memberId, "This profile isn't registered with this server — you're using it locally on this device only. Register it (Settings) or connect a different server to unlock connections, AI providers, and approvals.");
+        }
         set({ authBusy: false, session: null });
         toast({ kind: "error", title: r.error === "member_archived" ? "Profile removed" : "Profile not registered with the backend", message: r.message ?? "Ask an Owner to add this profile in Settings → Household." });
         return false;
       }
-      // Local-first fallback ONLY when the backend is unreachable (offline dev):
-      // establish a local persona so role-gated UI works; server mutations stay
-      // gated server-side and server-backed screens will show their offline states.
-      const session: Session = r.session ?? { actorId: m.id, actorName: m.displayName, role: m.role, csrf: "", householdId: "local" };
-      if (!r.session) toast({ kind: "warn", title: "Backend offline", message: "Signed in locally — connections, AI providers, and approvals stay unavailable until the backend is reachable." });
+      if (!r.session) {
+        // Local-first fallback ONLY when the backend is unreachable (offline dev):
+        // establish a local persona so role-gated UI works; server mutations stay
+        // gated server-side and server-backed screens will show their offline states.
+        return establishLocalSession(m, memberId, "The FamiliOS server isn't reachable — signed in locally on this device only. Connections, AI providers, and approvals stay unavailable until it's back.", { toastTitle: "Backend offline" });
+      }
       commit((d) => d.members.forEach((x) => (x.isCurrentUser = x.id === memberId)));
-      set({ session, authBusy: false });
+      set({ session: r.session, authBusy: false, isLocalSession: false });
       void get().loadBackend();
       return true;
     },
     logout: async () => {
       await backend.logout();
-      set({ session: null });
+      set({ session: null, isLocalSession: false });
       toast({ kind: "info", title: "Signed out", message: "Pick a profile to continue." });
     },
     // C1.4 self-serve identity: email sign-in / household creation. On success the
@@ -657,12 +708,18 @@ export const useStore = create<Store>((set, get) => {
         toast({ kind: "error", title: "Sign-in failed", message: r.error === "invalid_credentials" ? "Wrong email or password." : r.message ?? "The backend is unreachable." });
         return false;
       }
-      set({ session: r.session, authBusy: false, needsOnboarding: false });
+      set({ session: r.session, authBusy: false, needsOnboarding: false, isLocalSession: false });
       void get().loadBackend();
       void get().hydrateFromServer();
       return true;
     },
-    signupHousehold: async (input: { email: string; password: string; ownerName: string; householdName?: string; inviteToken?: string }) => {
+    signupHousehold: async (input: { email: string; password: string; ownerName: string; householdName?: string; inviteToken?: string; resetLocalData?: boolean }) => {
+      // T-03: "Create household" on an already-claimed server routes here instead of
+      // the local-claim path (which would orphan the new household behind a stranger's
+      // roster). This browser's prior local data (sample content, a previous local-only
+      // household) isn't this new server household's — start it from a clean template so
+      // the post-signup hydrate doesn't leave stale local agents/automations lying around.
+      if (input.resetLocalData) set({ data: buildEmptyData(input.householdName ?? "My Household", input.ownerName) });
       set({ authBusy: true });
       const r = await backend.signup(input);
       if (!r.session) {
@@ -674,7 +731,7 @@ export const useStore = create<Store>((set, get) => {
         toast({ kind: "error", title: "Couldn't create the account", message: msg });
         return false;
       }
-      set({ session: r.session, authBusy: false, needsOnboarding: false });
+      set({ session: r.session, authBusy: false, needsOnboarding: false, isLocalSession: false });
       toast({ kind: "success", title: input.inviteToken ? "Welcome to the household!" : "Your household is ready", message: input.inviteToken ? "You've joined — everything the family shares is here." : "You're the Owner. Invite your family from Settings whenever you're ready." });
       void get().loadBackend();
       void get().hydrateFromServer();
@@ -682,12 +739,27 @@ export const useStore = create<Store>((set, get) => {
     },
     currentRole: () => get().session?.role as Role ?? get().currentMember().role,
     canAccess: (screen) => screenAllowedForMember(screen, get().currentMember(), (get().session?.role as Role) ?? get().currentMember().role),
+    isDegraded: () => !get().backendOnline || get().isLocalSession,
+    degradedMessage: () => {
+      if (!get().backendOnline) return "Can't reach the FamiliOS server — connections, AI providers, and approvals are unavailable until it's back.";
+      if (get().isLocalSession) return "This profile isn't registered with this server — you're working locally on this device only. Connections, AI providers, and approvals stay off until it's registered.";
+      return null;
+    },
     reseed: async () => {
+      // End any server-backed session FIRST. A live session's hydrate treats the
+      // server roster as authoritative and would immediately clobber the fresh
+      // sample members (the ISS-003 orphaning race: reseed on a claimed server
+      // used to leave household=hh-harper but members=<server roster>, so the
+      // sample owner could never sign in and the user dead-ended on Lock).
+      await backend.logout().catch(() => { /* offline is fine — no session to end */ });
+      set({ session: null, isLocalSession: false });
       await clearAppData();
       const data = buildSeedData();
       await saveAppData(data).catch(() => {});
       set({ data });
       const owner = data.members.find((m) => m.isCurrentUser) ?? data.members[0];
+      // With no server session, loginAs on a claimed/foreign server resolves to a
+      // local (on-device) session for the sample household instead of dead-ending.
       if (owner) await get().loginAs(owner.id);
       toast({ kind: "success", title: "Sample data reset", message: "The Harper household sample has been restored." });
     },
@@ -696,7 +768,7 @@ export const useStore = create<Store>((set, get) => {
       // onboarding so the user can create (or import) their own household.
       await backend.logout().catch(() => {});
       await clearAppData().catch(() => {});
-      set({ session: null, needsOnboarding: true, connectors: [], providers: [], accounts: [], spaceFilter: "all", route: { screen: "dashboard" } });
+      set({ session: null, isLocalSession: false, needsOnboarding: true, connectors: [], providers: [], accounts: [], spaceFilter: "all", route: { screen: "dashboard" } });
     },
     importData: (data) => {
       set({ data });
@@ -1125,14 +1197,24 @@ export const useStore = create<Store>((set, get) => {
         const m = c.messages.find((x) => x.id === aMsgId); if (!m) return;
         if (!r.ok) {
           m.status = "error";
-          m.error = r.message ?? r.error;
-          m.text = r.error === "ai_disabled"
+          // Keep the MACHINE-READABLE code in m.error — the Assistant UI keys the
+          // local-engine fallback off `m.error === "no_provider"`; prose belongs in
+          // m.text. (Previously this stored r.message, so the fallback never fired
+          // when the server attached a human message to the error.)
+          let code = r.error ?? "unknown";
+          // In a local on-device session the server refuses with authentication_
+          // required — but the truthful chat-surface state is simply that no server-
+          // side AI provider is available HERE. Same when the backend is unreachable.
+          // Route both to the local-engine fallback instead of a dead-end.
+          if (code === "backend_unreachable" || (get().isLocalSession && (code === "authentication_required" || code === "forbidden"))) {
+            code = "no_provider";
+          }
+          m.error = code;
+          m.text = code === "ai_disabled"
             ? "AI chat isn't turned on for your profile yet. Ask a parent to switch it on in Household → Members, and I'll be right here!"
-            : r.error === "no_provider"
+            : code === "no_provider"
             ? "I need an AI provider to think. Connect one in Settings → AI Providers, then ask me again."
-            : r.error === "backend_unreachable"
-              ? "I can't reach the FamiliOS runtime. Make sure it's running (npm run dev), then try again."
-              : "I couldn't reach the AI provider just now. Check it's configured and reachable in Settings → AI Providers, then ask me again.";
+            : "I couldn't reach the AI provider just now. Check it's configured and reachable in Settings → AI Providers, then ask me again.";
         } else if (r.kind === "plan" && r.plan) {
           // Auto-run (C-intel): the server already started executing this plan —
           // attach the run so the card shows live status instead of a Run button.
@@ -1335,7 +1417,16 @@ export const useStore = create<Store>((set, get) => {
     externalActionsEnabled: true,
     loadBackend: async () => {
       const [health, connectors, prov, accounts] = await Promise.all([backend.health(), backend.connectors(), backend.providers(), backend.accounts()]);
-      set({ backendHealth: health, backendOnline: !!health, connectors, providers: prov.providers, accounts, externalActionsEnabled: health ? health.externalActionsEnabled : true });
+      // Unauthenticated/local sessions get null back from these endpoints — keep the
+      // previous (or empty) lists instead of clobbering state with undefined, which
+      // used to white-screen any screen that maps over connectors/providers.
+      set({
+        backendHealth: health, backendOnline: !!health,
+        connectors: connectors ?? get().connectors ?? [],
+        providers: prov?.providers ?? get().providers ?? [],
+        accounts: accounts ?? get().accounts ?? [],
+        externalActionsEnabled: health ? health.externalActionsEnabled : true,
+      });
       if (health) {
         void get().migrateAgentsToServer();
         void get().migrateContactMethodsToServer();

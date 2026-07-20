@@ -1,0 +1,69 @@
+
+== LOGIN Ross (m-owner, Owner)
+   POST /session -> 200 {"session": {"actorId": "m-owner", "actorName": "Ross", "role": "Owner", "csrf": "9a5638317c4cc0d244c4fff410e1d6484a7fcc3da45ad1ab", "householdId": "local"}, "token": "3b7f69849c7b73d61698be615b398d233d8a2ec14d7c7ab694a90e8853214446"}
+
+== CREATE disposable member TG-Beannie-Test (Limited Member / Grandmother)
+   POST /members -> 200 {"member": {"actorId": "m-96f01b0a", "displayName": "TG-Beannie-Test", "role": "Limited Member", "relationship": "Grandmother", "color": null}}
+
+== LOGIN TG-Beannie-Test
+   POST /session -> 200 {"session": {"actorId": "m-96f01b0a", "actorName": "TG-Beannie-Test", "role": "Limited Member", "csrf": "118c5676980cc5dc5d3429dea44429e05a015d60f1835c60", "householdId": "local"}, "token": "bd79bcc77fd143405a7041ea2027a07b64e497b9343c208ae1cc97a1cbaaad9e"}
+
+== TF-008 STEP 1: Ross creates task 'TG-clean up guest room' assigned to himself
+   POST /tasks -> 200 {"task": {"id": "tk_4374eb47b9ba3507", "householdId": "local", "title": "TG-clean up guest room", "type": "task", "status": "todo", "dueAt": null, "assignedMemberId": "m-owner", "spaceId": "sp-family", "priority": "medium", "amount": null, "visibility": "household", "notes": "", "source": "user", "c
+
+== TF-008 STEP 2: Ross asks Beannie for help (kind=ask, linked task)
+   POST /help-requests -> 200 {"helpRequest": {"id": "hr_182e615a01d60814", "householdId": "local", "fromActorId": "m-owner", "fromName": "Ross", "toActorId": "m-96f01b0a", "toName": "TG-Beannie-Test", "kind": "ask", "message": "Can you take care of 'TG-clean up guest room'?", "eventId": null, "taskId": "tk_4374eb47b9ba3507", "s
+
+== TF-008 STEP 3: Beannie accepts
+   POST /help-requests/hr_182e615a01d60814/respond -> 200 {"helpRequest": {"id": "hr_182e615a01d60814", "householdId": "local", "fromActorId": "m-owner", "fromName": "Ross", "toActorId": "m-96f01b0a", "toName": "TG-Beannie-Test", "kind": "ask", "message": "Can you take care of 'TG-clean up guest room'?", "eventId": null, "taskId": "tk_4374eb47b9ba3507", "s
+
+== TF-008 STEP 4: task ownership after accept (DISCRIMINATOR)
+   GET /tasks -> 200 {"tasks": [{"id": "li_2b17a6608793f237", "householdId": "local", "title": "Sheet-pan sausage and veggies: potatoes, bell peppers, zucchini, red onion, olive oil, Italian seasoning", "type": "list", "status": "todo", "listName": "Grocery", "spaceId": "sp-family", "priority": "low", "visibility": "hou
+   >>> task.assignedMemberId after accept = m-owner (Ross=m-owner, Beannie=m-96f01b0a)
+
+== TF-008 STEP 5: Beannie's task list contains the task?
+   GET /tasks -> 200 {"tasks": [{"id": "li_2b17a6608793f237", "householdId": "local", "title": "Sheet-pan sausage and veggies: potatoes, bell peppers, zucchini, red onion, olive oil, Italian seasoning", "type": "list", "status": "todo", "listName": "Grocery", "spaceId": "sp-family", "priority": "low", "visibility": "hou
+   >>> tasks assigned to Beannie = []
+
+== TF-008 STEP 6: Ross re-asks the SAME task (dedupe probe)
+   POST /help-requests -> 200 {"helpRequest": {"id": "hr_aebec80fee2e049b", "householdId": "local", "fromActorId": "m-owner", "fromName": "Ross", "toActorId": "m-96f01b0a", "toName": "TG-Beannie-Test", "kind": "ask", "message": "Can you take care of 'TG-clean up guest room'?", "eventId": null, "taskId": "tk_4374eb47b9ba3507", "s
+   >>> second ask accepted by server (no dedupe): hr_aebec80fee2e049b
+
+== TF-008 STEP 7: Beannie accepts again -> accepted duplicates
+   POST /help-requests/hr_aebec80fee2e049b/respond -> 200 {"helpRequest": {"id": "hr_aebec80fee2e049b", "householdId": "local", "fromActorId": "m-owner", "fromName": "Ross", "toActorId": "m-96f01b0a", "toName": "TG-Beannie-Test", "kind": "ask", "message": "Can you take care of 'TG-clean up guest room'?", "eventId": null, "taskId": "tk_4374eb47b9ba3507", "s
+   GET /help-requests -> 200 {"helpRequests": [{"id": "hr_aebec80fee2e049b", "householdId": "local", "fromActorId": "m-owner", "fromName": "Ross", "toActorId": "m-96f01b0a", "toName": "TG-Beannie-Test", "kind": "ask", "message": "Can you take care of 'TG-clean up guest room'?", "eventId": null, "taskId": "tk_4374eb47b9ba3507", 
+   >>> accepted help-requests for same task rendered as cards = 2 (ids: ['hr_aebec80fee2e049b', 'hr_182e615a01d60814'])
+
+== TF-008 STEP 8: offer direction — Beannie offers, Ross accepts; ownership still fixed?
+   POST /help-requests -> 200 {"helpRequest": {"id": "hr_1380f011aac54045", "householdId": "local", "fromActorId": "m-96f01b0a", "fromName": "TG-Beannie-Test", "toActorId": "m-owner", "toName": "Ross", "kind": "offer", "message": "I can help with 'TG-clean up guest room'.", "eventId": null, "taskId": "tk_4374eb47b9ba3507", "stat
+   POST /help-requests/hr_1380f011aac54045/respond -> 200 {"helpRequest": {"id": "hr_1380f011aac54045", "householdId": "local", "fromActorId": "m-96f01b0a", "fromName": "TG-Beannie-Test", "toActorId": "m-owner", "toName": "Ross", "kind": "offer", "message": "I can help with 'TG-clean up guest room'.", "eventId": null, "taskId": "tk_4374eb47b9ba3507", "stat
+   GET /tasks -> 200 {"tasks": [{"id": "li_2b17a6608793f237", "householdId": "local", "title": "Sheet-pan sausage and veggies: potatoes, bell peppers, zucchini, red onion, olive oil, Italian seasoning", "type": "list", "status": "todo", "listName": "Grocery", "spaceId": "sp-family", "priority": "low", "visibility": "hou
+   >>> task.assignedMemberId after offer-accept = m-owner
+
+== TF-012 STEP 1: upload attempt #1 (medical-ids tag)
+   POST /files -> 200 {"file": {"id": "file_05064c6e3f688e07", "householdId": "local", "name": "TG_IMG_A.jpg", "mime": "image/jpeg", "sizeBytes": 1000, "pageCount": 1, "pageBlobIds": ["file_05064c6e3f688e07"], "pageNames": [null], "tags": ["medical-ids"], "visibility": "household", "spaceId": "sp-family", "uploadedBy": "
+
+== TF-012 STEP 2: upload attempt #2 (same category, new name)
+   POST /files -> 200 {"file": {"id": "file_2d93f8b62ea83669", "householdId": "local", "name": "TG_IMG_B.jpg", "mime": "image/jpeg", "sizeBytes": 1000, "pageCount": 1, "pageBlobIds": ["file_2d93f8b62ea83669"], "pageNames": [null], "tags": ["medical-ids"], "visibility": "household", "spaceId": "sp-family", "uploadedBy": "
+
+== TF-012 STEP 3: list files — both present?
+   GET /files -> 200 {"files": [{"id": "file_2d93f8b62ea83669", "householdId": "local", "name": "TG_IMG_B.jpg", "mime": "image/jpeg", "sizeBytes": 1000, "pageCount": 1, "pageBlobIds": ["file_2d93f8b62ea83669"], "pageNames": [null], "tags": ["medical-ids"], "visibility": "household", "spaceId": "sp-family", "uploadedBy":
+   >>> files present after 2 uploads: ['TG_IMG_B.jpg', 'TG_IMG_A.jpg']
+
+== TF-012 STEP 4: session round-trip (logout + fresh login) then re-list + content check
+   DELETE /session -> 200 {"ok": true}
+   POST /session -> 200 {"session": {"actorId": "m-owner", "actorName": "Ross", "role": "Owner", "csrf": "fb83d97f5540cde39a1fbb2c26c58d16055c0634dc5e3f80", "householdId": "local"}, "token": "576b209c0905cec80c11d1a852c9182b31f5cf158cca144308a3f380a13b4e0a"}
+   GET /files -> 200 {"files": [{"id": "file_2d93f8b62ea83669", "householdId": "local", "name": "TG_IMG_B.jpg", "mime": "image/jpeg", "sizeBytes": 1000, "pageCount": 1, "pageBlobIds": ["file_2d93f8b62ea83669"], "pageNames": [null], "tags": ["medical-ids"], "visibility": "household", "spaceId": "sp-family", "uploadedBy":
+   GET /files/file_2d93f8b62ea83669/content -> 200 {"name": "TG_IMG_B.jpg", "mime": "image/jpeg", "page": 0, "pageCount": 1, "contentBase64": "VEctVEVTVC1NRURJQ0FMLUlELUJZVEVTLVRHLVRFU1QtTUVESUNBTC1JRC1CWVRFUy1URy1URVNULU1FRElDQUwtSUQtQllURVMtVEctVEVTVC1NRURJQ0FMLUlELUJZVEVTLVRHLVRFU1QtTUVESUNBTC1JRC1CWVRFUy1URy1URVNULU1FRElDQUwtSUQtQllURVMtVEctVEVT
+   >>> after session round-trip: present=['TG_IMG_B.jpg', 'TG_IMG_A.jpg'], attempt-2 bytes intact=True
+
+== TF-012 STEP 5: oversize probe (>5MB base64) — expect 413 too_large
+   POST /files -> 413 {"error": "too_large", "message": "Files are capped at ~5 MB."}
+   >>> oversize upload -> status=413 error=too_large
+
+== CLEANUP: delete test files + task; cancel nothing pending; archive member
+   DELETE /files/file_05064c6e3f688e07 -> 200 {"ok": true}
+   DELETE /files/file_2d93f8b62ea83669 -> 200 {"ok": true}
+   DELETE /tasks/tk_4374eb47b9ba3507 -> 200 {"ok": true}
+   DELETE /members/m-96f01b0a -> 200 {"ok": true}
+   >>> member delete -> 200 {"ok": true}

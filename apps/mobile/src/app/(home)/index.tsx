@@ -10,6 +10,7 @@ import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type ApprovalRec, type EventRec, type EvolutionRec, type HelpRequestRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
+import { coversDay, eventTimeLabel } from "@/lib/event-days";
 import { memberColor } from "@/lib/member-colors";
 import { isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
@@ -94,6 +95,8 @@ function AdminToday() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [householdName, setHouseholdName] = useState<string | null>(null);
   const [helpBusyId, setHelpBusyId] = useState<string | null>(null);
+  // WP-001: calm confirmation after accepting help that transferred a task to me.
+  const [justHelped, setJustHelped] = useState<{ name: string; taskTitle: string | null } | null>(null);
 
   const load = useCallback(async () => {
     const [h, aps, evts, tks, mem, hh, memries, evos, rns, hrs] = await Promise.all([
@@ -126,7 +129,8 @@ function AdminToday() {
     const d = new Date(iso);
     return d.toDateString() === now.toDateString();
   };
-  const todayEvents = events.filter((e) => isToday(e.startAt)).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
+  // Multi-day events (ISS-004) count as "today" on every spanned day.
+  const todayEvents = events.filter((e) => coversDay(e, now)).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
   const upcoming = events
     .filter((e) => e.startAt && !isToday(e.startAt) && new Date(e.startAt).getTime() > now.getTime())
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
@@ -153,7 +157,14 @@ function AdminToday() {
     setHelpBusyId(h.id);
     const r = await api.respondHelpRequest(h.id, response, note);
     setHelpBusyId(null);
-    if (r.helpRequest) { tapHaptic(response === "accept" ? "success" : "select"); void load(); }
+    if (r.helpRequest) {
+      tapHaptic(response === "accept" ? "success" : "select");
+      // Server says the linked task moved to me — confirm it in card language.
+      if (response === "accept" && r.reassigned && h.kind !== "offer") {
+        setJustHelped({ name: h.fromName, taskTitle: r.task?.title ?? null });
+      }
+      void load();
+    }
   }, [load]);
   const declineHelp = useCallback((h: HelpRequestRec) => {
     if (Platform.OS === "ios") {
@@ -325,7 +336,7 @@ function AdminToday() {
                 upcoming.length > 0 ? (
                   <T kind="sub">
                     Next: {upcoming[0].title} · {new Date(upcoming[0].startAt!).toLocaleDateString(undefined, { weekday: "short" })}{" "}
-                    {new Date(upcoming[0].startAt!).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                    {eventTimeLabel(upcoming[0])}
                   </T>
                 ) : null
               ) : (
@@ -347,7 +358,7 @@ function AdminToday() {
                             return c ? <View key={pid} style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c }} /> : null;
                           })}
                           <T kind="detail" color={colors.textMuted}>
-                            {e.startAt ? new Date(e.startAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : "All day"}
+                            {eventTimeLabel(e)}
                           </T>
                         </View>
                       </View>
@@ -403,10 +414,22 @@ function AdminToday() {
                 ? <Badge label={String(pending.length)} fg={colors.onEmber} bg={colors.ember} />
                 : <SeeAll onPress={() => router.push("/inbox")} />}
             />
-            {pending.length === 0 && helpToMe.length === 0 && helpFromMe.length === 0 ? (
+            {pending.length === 0 && helpToMe.length === 0 && helpFromMe.length === 0 && !justHelped ? (
               <Card><T kind="sub">All caught up — nothing waiting on you.</T></Card>
             ) : (
               <View style={{ gap: spacing.sm }}>
+                {/* confirmation: accepting moved the linked task to me (WP-001) */}
+                {justHelped && (
+                  <Card style={{ backgroundColor: colors.sageBg, borderColor: "transparent", flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                    <Sym name="checkmark.circle.fill" size={16} color={colors.sage} />
+                    <T kind="subMedium" style={{ flex: 1 }} numberOfLines={2}>
+                      You're helping {justHelped.name}{justHelped.taskTitle ? ` — ${justHelped.taskTitle}` : ""} (task moved to you)
+                    </T>
+                    <PressableScale onPress={() => setJustHelped(null)} haptic={null} hitSlop={14} accessibilityRole="button" accessibilityLabel="Dismiss helping confirmation">
+                      <Sym name="xmark" size={13} color={colors.textMuted} />
+                    </PressableScale>
+                  </Card>
+                )}
                 {pending.length > 0 && (
                   <Card padded={false}>
                     {pending.slice(0, 5).map((a, i) => {
@@ -506,7 +529,7 @@ function AdminToday() {
                       <T kind="detail" numberOfLines={1}>
                         {new Date(e.startAt!).toLocaleDateString(undefined, { weekday: "short" })}
                         {" · "}
-                        {new Date(e.startAt!).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                        {eventTimeLabel(e)}
                         {e.location ? ` · ${e.location}` : ""}
                       </T>
                     </View>

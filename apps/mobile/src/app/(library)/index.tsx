@@ -13,6 +13,9 @@ import {
   SectionHeader, SheetCTA, SkeletonCards, Sym, SymTile, T, Well,
 } from "@/components/ui";
 import { UploadSheet } from "@/components/sheets/upload-sheet";
+// Categorization is pure + unit-tested (WP-002/ISS-002): explicit space tags win,
+// heuristics use word boundaries — see lib/spaces.test.mjs.
+import { SPACE_DEFS, spaceOf, type SpaceKey } from "@/lib/spaces";
 
 const KTYPES = ["note", "reference", "contact", "medical", "instructions"] as const;
 
@@ -21,21 +24,6 @@ const isTextMime = (mime: string) => mime.startsWith("text/") || /json|csv|markd
 const fileIcon = (mime: string) => (mime.startsWith("image/") ? "photo" : isTextMime(mime) ? "doc.text" : "doc");
 
 type Tab = "files" | "knowledge";
-
-// The four handoff spaces, matched against real file spaceId/tags/name keywords.
-const SPACE_DEFS = [
-  { key: "school", label: "School", icon: "graduationcap", tint: "sky", match: /school|class|teacher|homework|permission/i },
-  { key: "medical", label: "Medical & IDs", icon: "heart", tint: "lavender", sensitive: true, match: /medic|health|passport|id|insurance-card|sensitive/i },
-  { key: "bills", label: "Bills & Receipts", icon: "tag", tint: "amber", match: /bill|receipt|invoice|utility|statement/i },
-  { key: "home", label: "Home", icon: "wrench.adjustable", tint: "sage", match: /./ },
-] as const;
-type SpaceKey = (typeof SPACE_DEFS)[number]["key"];
-
-function spaceOf(f: FileRec): SpaceKey {
-  const hay = `${f.spaceId} ${f.tags.join(" ")} ${f.name}`;
-  for (const s of SPACE_DEFS) if (s.match.test(hay)) return s.key;
-  return "home";
-}
 
 export default function LibraryScreen() {
   const { session } = useSession();
@@ -60,6 +48,9 @@ export default function LibraryScreen() {
   const [spaceFilter, setSpaceFilter] = useState<SpaceKey | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [expandedArtifact, setExpandedArtifact] = useState<string | null>(null);
+  // WP-002: persistent save confirmation — stays until dismissed, names the REAL
+  // rendered category (computed by the same spaceOf the list uses).
+  const [justUploaded, setJustUploaded] = useState<FileRec | null>(null);
 
   const load = useCallback(async () => {
     const [f, m, a, k] = await Promise.all([api.files(), api.memory(), api.artifacts(), api.knowledge()]);
@@ -163,7 +154,9 @@ export default function LibraryScreen() {
   const badgeFor = (f: FileRec) => {
     const sensitive = f.visibility === "private" || f.tags.includes("sensitive");
     if (sensitive) return { label: "Sensitive", fg: colors.lavender, bg: colors.lavenderBg };
-    if (Date.now() - Date.parse(f.createdAt) < 5 * 60 * 1000) return { label: "Processing", fg: colors.sky, bg: colors.skyBg };
+    // "New" is an honest time-based claim; the old "Processing" implied pending
+    // work that didn't exist (ISS-002 — uploads are complete the moment they land).
+    if (Date.now() - Date.parse(f.createdAt) < 5 * 60 * 1000) return { label: "New", fg: colors.sky, bg: colors.skyBg };
     return null;
   };
 
@@ -202,6 +195,26 @@ export default function LibraryScreen() {
       </Rise>
 
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
+
+      {/* WP-002: persistent, dismissable save confirmation with tap-through */}
+      {justUploaded ? (
+        <Card style={{ backgroundColor: colors.sageBg, borderColor: "transparent", flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+          <Sym name="checkmark.circle.fill" size={16} color={colors.sage} />
+          <T kind="subMedium" style={{ flex: 1 }} numberOfLines={2}>
+            Saved to {spaceLabel(spaceOf(justUploaded))} — {justUploaded.name}
+          </T>
+          <PressableScale
+            onPress={() => { tapHaptic("select"); setTab("files"); setSpaceFilter(spaceOf(justUploaded)); setQuery(""); }}
+            haptic={null} hitSlop={12} accessibilityRole="button" accessibilityLabel={`View ${justUploaded.name} in ${spaceLabel(spaceOf(justUploaded))}`}
+            style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.surface }}
+          >
+            <T kind="subMedium" color={colors.sage}>View</T>
+          </PressableScale>
+          <PressableScale onPress={() => setJustUploaded(null)} haptic={null} hitSlop={14} accessibilityRole="button" accessibilityLabel="Dismiss upload confirmation">
+            <Sym name="xmark" size={13} color={colors.textMuted} />
+          </PressableScale>
+        </Card>
+      ) : null}
 
       {!loaded ? (
         <SkeletonCards count={4} />
@@ -431,7 +444,7 @@ export default function LibraryScreen() {
         </>
       )}
 
-      <UploadSheet visible={uploadOpen} onClose={() => setUploadOpen(false)} onUploaded={() => void load()} />
+      <UploadSheet visible={uploadOpen} onClose={() => setUploadOpen(false)} onUploaded={(f) => { setJustUploaded(f); void load(); }} />
       <KnowledgeSheet
         item={editingK}
         visible={kOpen}

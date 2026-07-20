@@ -1,0 +1,1 @@
+FamiliOS backend (control plane v1.2.0) listening on http://localhost:8787 — env=development, origins=http://localhost:5173,http://127.0.0.1:5173,http://192.168.4.24:8787,http://192.168.4.24:8081

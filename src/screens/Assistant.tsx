@@ -4,7 +4,7 @@ import { Card, Button, Badge, RiskBadge, IconButton } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { InlineApprovals } from "@/components/InlineApprovals";
 import { MarkdownContent } from "@/lib/markdown";
-import { suggestAskPrompts } from "@/lib/ai";
+import { suggestAskPrompts, answerLocally } from "@/lib/ai";
 import type { AssistantConversation, AssistantMessage, AutomationRun } from "@/types";
 import { backend, type AgentPlan, type ChatBuild, type EmailReviewMessage, type EmailReviewLabel } from "@/connectors/api";
 
@@ -189,9 +189,9 @@ function Conversation({ conv, conversations, scope, onScope, onOpen, onSend }: {
       </div>
 
       <div className="flex-1 space-y-4 overflow-y-auto pb-4">
-        {conv.messages.map((m) => (
+        {conv.messages.map((m, i) => (
           <div key={m.id} ref={m.id === lastAssistant?.id ? assistantTopRef : undefined} className="scroll-mt-28">
-            <MessageRow conversationId={conv.id} m={m} />
+            <MessageRow conversationId={conv.id} m={m} precedingUserText={i > 0 && conv.messages[i - 1].role === "user" ? conv.messages[i - 1].text : undefined} />
           </div>
         ))}
         <div ref={endRef} />
@@ -242,7 +242,7 @@ function PhaseStrip({ status, runStatus }: { status?: string; runStatus?: string
   );
 }
 
-function MessageRow({ conversationId, m }: { conversationId: string; m: AssistantMessage }) {
+function MessageRow({ conversationId, m, precedingUserText }: { conversationId: string; m: AssistantMessage; precedingUserText?: string }) {
   const run = useStore((s) => m.runId ? s.data.runs?.find((r) => r.id === m.runId) : undefined);
   if (m.role === "user") {
     return (
@@ -252,15 +252,28 @@ function MessageRow({ conversationId, m }: { conversationId: string; m: Assistan
     );
   }
   const isGenerating = m.status === "thinking" || m.status === "streaming";
+  // No AI provider connected: the backend honestly reports `error: "no_provider"`
+  // rather than faking a response. Instead of leaving that as a dead end, hand the
+  // original request to the local deterministic engine (src/lib/ai.ts) — the same
+  // one the Workflow Builder's "built-in rules engine" already uses — so planning
+  // and household-data requests still get a real, approvable answer. Genuinely
+  // open-ended requests still get an honest, SCOPED prompt to connect a provider
+  // (never the blanket wall). Provider-configured behavior is untouched below.
+  const noProvider = m.status === "error" && m.error === "no_provider";
   return (
     <div className="flex gap-2.5">
       <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-ember-400 to-ember-600 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3)]"><Icon name="Sparkles" size={15} /></div>
       <div className="min-w-0 flex-1 space-y-2.5">
         {isGenerating
           ? <PhaseStrip status={m.status} />
-          : m.status === "error"
-            ? <div className="text-sm text-coral-600">{m.text}{m.error && <p className="mt-0.5 text-xs text-ink-400">Details: {m.error}</p>}</div>
-            : <MarkdownContent text={m.text} />}
+          : noProvider
+            ? <LocalFallbackCard originalText={precedingUserText ?? ""} />
+            : m.status === "error"
+              ? <div className="text-sm text-coral-600">{m.text}{m.error && <p className="mt-0.5 text-xs text-ink-400">Details: {m.error}</p>}</div>
+              : <>
+                  <MarkdownContent text={m.text} />
+                  {m.model && <p className="flex items-center gap-1 text-[11px] text-ink-400"><Icon name="Sparkles" size={11} /> Answered by {m.model}.</p>}
+                </>}
         {/* Phase strip for an active dispatched run */}
         {run && (run.status === "Running" || run.status === "Queued" || run.status === "Waiting for Approval") && (
           <PhaseStrip runStatus={run.status} />
@@ -270,6 +283,74 @@ function MessageRow({ conversationId, m }: { conversationId: string; m: Assistan
         {/* Item 3: after a completed run that touched Gmail labels, an inline review card. */}
         {m.runId && run && run.status === "Completed" && <EmailReviewCard runId={m.runId} />}
       </div>
+    </div>
+  );
+}
+
+/* --------------------------- Local engine fallback ----------------------- *
+ * Shown in place of the "no AI provider" wall. Classifies the original
+ * request with the local deterministic engine (answerLocally, src/lib/ai.ts)
+ * and renders whatever it can genuinely deliver: a real household-data
+ * answer, a capability summary, or an approvable automation plan — the same
+ * local rules engine that already powers the Workflow Builder's fallback.
+ * Anything truly open-ended gets an honest, scoped nudge to connect a
+ * provider instead of a dead-end wall. */
+function LocalFallbackCard({ originalText }: { originalText: string }) {
+  const data = useStore((s) => s.data);
+  const member = useStore((s) => s.currentMember());
+  const createAutomation = useStore((s) => s.createAutomation);
+  const navigate = useStore((s) => s.navigate);
+  const [created, setCreated] = useState(false);
+  const answer = useMemo(() => answerLocally(originalText, data, member), [originalText, data, member]);
+
+  const approve = () => {
+    if (!answer.plan) return;
+    createAutomation({
+      name: originalText.slice(0, 48) || answer.plan.agentName,
+      description: originalText,
+      agentId: answer.plan.agentId,
+      plan: answer.plan.plan,
+      approvalRequired: answer.plan.approvalRequired,
+      // T-05: the trigger the local engine actually detected (e.g. "Every morning
+      // at 7am…" → Schedule), never hardcoded to Manual.
+      triggerType: answer.plan.triggerType,
+      status: "active",
+      enabled: true,
+    });
+    setCreated(true);
+  };
+
+  return (
+    <div className="space-y-2.5">
+      <MarkdownContent text={answer.text} />
+      {answer.kind === "plan" && answer.plan && (
+        <div className="rounded-2xl border border-ink-900/[0.06] bg-surface-sunken/50 p-3">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <Badge color="sky"><Icon name="Zap" size={10} /> {answer.plan.triggerType}</Badge>
+            {answer.plan.approvalRequired && <Badge color="coral"><Icon name="ShieldAlert" size={10} /> approval</Badge>}
+          </div>
+          <ol className="space-y-1">
+            {answer.plan.plan.steps.map((s) => (
+              <li key={s.id} className="text-xs text-ink-600">
+                {s.order}. {s.label}
+                {s.needsApproval && <Icon name="ShieldAlert" size={11} className="ml-1 inline text-coral-500" />}
+              </li>
+            ))}
+          </ol>
+          {created ? (
+            <p className="mt-2.5 flex items-center gap-1.5 text-xs text-sage-600"><Icon name="CheckCircle2" size={13} /> Added to Automations — approve any gated steps when it runs.</p>
+          ) : (
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="ember" onClick={approve}><Icon name="Check" size={13} /> Approve & create automation</Button>
+              <span className="text-xs text-ink-400">Creates a draft — gated steps still ask for approval.</span>
+            </div>
+          )}
+        </div>
+      )}
+      {answer.kind === "unsupported" && (
+        <Button size="sm" variant="secondary" onClick={() => navigate("settings")}><Icon name="Plug" size={13} /> Connect an AI provider</Button>
+      )}
+      <p className="flex items-center gap-1 text-[11px] text-ink-400"><Icon name="Cpu" size={11} /> Answered by the local rules engine{answer.kind === "unsupported" ? " — no provider connected" : "."}</p>
     </div>
   );
 }

@@ -18,6 +18,16 @@
         "EXPO_PUBLIC_API_URL": "https://homeops-ai.onrender.com"
       }
     },
+    "simulator": {
+      "distribution": "internal",
+      "ios": {
+        "simulator": true,
+        "buildConfiguration": "Release"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://homeops-ai.onrender.com"
+      }
+    },
     "production": {
       "autoIncrement": true,
       "ios": {

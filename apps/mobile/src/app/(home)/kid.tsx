@@ -9,6 +9,7 @@ import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming, ZoomIn } from "react-native-reanimated";
 import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
+import { coversDay, eventTimeLabel } from "@/lib/event-days";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic, motion } from "@/theme";
 import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
@@ -52,8 +53,8 @@ export function KidHome({ memberId, preview = false }: { memberId: string; previ
     setKid(members.find((m) => m.actorId === memberId) ?? null);
     setChores(tasks.filter((t) => t.assignedMemberId === memberId && t.type !== "bill"));
     // The whole family's day (read-only) — the kid sees where everyone is going.
-    const today = new Date().toDateString();
-    setEvents(evts.filter((e) => e.startAt && new Date(e.startAt).toDateString() === today)
+    // Multi-day events (ISS-004) count as "today" on every spanned day.
+    setEvents(evts.filter((e) => coversDay(e, new Date()))
       .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))));
     setHelpRequests(hrs);
     setLoading(false);
@@ -215,7 +216,7 @@ export function KidHome({ memberId, preview = false }: { memberId: string; previ
                   return (
                     <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: 13, borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator }}>
                       <T kind="subMedium" color={mine ? colors.ember : colors.textMuted} style={{ width: 70 }}>
-                        {new Date(e.startAt!).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                        {eventTimeLabel(e)}
                       </T>
                       <View style={{ flex: 1, gap: 2 }}>
                         <T kind="rowTitle">{e.title}{mine ? " — you" : ""}</T>

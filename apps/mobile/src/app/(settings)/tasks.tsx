@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, TextInput, View } from "react-native";
 import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withSequence, withSpring } from "react-native-reanimated";
-import { api, type MemberRec, type TaskRec } from "@/lib/api";
+import { api, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic, type HearthColors } from "@/theme";
@@ -95,8 +95,9 @@ function TaskCheck({ done, onPress }: { done: boolean; onPress: () => void }) {
 }
 
 /* -------------------------------- row ---------------------------------- */
-function TaskRow({ t, members, last, showGroup, onToggle, onLongPress }: {
+function TaskRow({ t, members, last, showGroup, helping, onToggle, onLongPress }: {
   t: TaskRec; members: MemberRec[]; last: boolean; showGroup: boolean;
+  helping?: string | null; // helper's name when an accepted help request moved/covers this task (WP-001)
   onToggle: () => void; onLongPress: () => void;
 }) {
   const { colors, spacing } = useTheme();
@@ -130,6 +131,12 @@ function TaskRow({ t, members, last, showGroup, onToggle, onLongPress }: {
                   </T>
                 </View>
               ) : null}
+              {helping ? (
+                <View accessibilityLabel={`${helping} is helping with this`} style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.lavenderBg, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 999 }}>
+                  <Sym name="hand.raised.fill" size={10} color={colors.lavender} />
+                  <T kind="caption" color={colors.lavender}>{helping} is helping</T>
+                </View>
+              ) : null}
               {showGroup ? <T kind="caption" color={colors.textFaint}>{groupOf(t)}</T> : null}
             </View>
           ) : null}
@@ -152,6 +159,7 @@ export default function TasksScreen() {
 
   const [tasks, setTasks] = useState<TaskRec[]>([]);
   const [members, setMembers] = useState<MemberRec[]>([]);
+  const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -165,19 +173,32 @@ export default function TasksScreen() {
   const [adding, setAdding] = useState(false);
 
   const load = useCallback(async () => {
-    const [tks, mems] = await Promise.all([api.tasks(), api.members()]);
+    const [tks, mems, hrs] = await Promise.all([api.tasks(), api.members(), api.helpRequests()]);
     if (mems.length === 0 && !(await api.health())) {
       setError("The FamiliOS server didn't answer.");
     } else {
       setError(null);
       setTasks(tks);
       setMembers(mems);
+      setHelpRequests(hrs);
     }
     setLoading(false);
   }, []);
   useEffect(() => { if (session) void load(); }, [session, load]);
   useRevSync(useCallback(() => { void load(); }, [load]));
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
+
+  // WP-001 helping indicator: task id → helper's first name, from accepted help
+  // requests linked to that task (ask → recipient helps; offer → offerer helps).
+  const helperFor = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const h of helpRequests) {
+      if (h.status !== "accepted" || !h.taskId) continue;
+      const name = h.kind === "offer" ? h.fromName : h.toName;
+      if (name) map.set(h.taskId, name.split(" ")[0]);
+    }
+    return map;
+  }, [helpRequests]);
 
   const open = useMemo(() => tasks.filter((t) => t.status !== "done"), [tasks]);
   const done = useMemo(() => tasks.filter((t) => t.status === "done"), [tasks]);
@@ -349,6 +370,7 @@ export default function TasksScreen() {
                 members={members}
                 last={i === items.length - 1}
                 showGroup={false}
+                helping={helperFor.get(t.id) ?? null}
                 onToggle={() => void toggle(t)}
                 onLongPress={() => menuFor(t)}
               />

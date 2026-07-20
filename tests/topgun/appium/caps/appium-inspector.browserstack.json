@@ -1,0 +1,17 @@
+{
+  "_usage": "Paste into Appium Inspector (BrowserStack cloud tab, or Remote Host hub-cloud.browserstack.com, path /wd/hub, SSL on) after replacing the ${…} values — Inspector does not substitute env vars. Used for live element mapping only; see ../../docs/INSPECTOR-GUIDE.md.",
+  "platformName": "iOS",
+  "appium:automationName": "XCUITest",
+  "appium:deviceName": "iPhone 15",
+  "appium:platformVersion": "17",
+  "appium:app": "${BROWSERSTACK_APP_ID}",
+  "appium:newCommandTimeout": 600,
+  "bstack:options": {
+    "userName": "${BROWSERSTACK_USERNAME}",
+    "accessKey": "${BROWSERSTACK_ACCESS_KEY}",
+    "projectName": "FamiliOS",
+    "buildName": "topgun-ios",
+    "sessionName": "inspector-mapping",
+    "debug": true
+  }
+}

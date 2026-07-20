@@ -1,0 +1,21 @@
+{
+  "platformName": "iOS",
+  "appium:automationName": "XCUITest",
+  "appium:deviceName": "${TOPGUN_IOS_DEVICE:-iPhone 15}",
+  "appium:platformVersion": "${TOPGUN_IOS_OS:-17}",
+  "appium:app": "${BROWSERSTACK_APP_ID}",
+  "appium:newCommandTimeout": 180,
+  "appium:autoAcceptAlerts": false,
+  "bstack:options": {
+    "userName": "${BROWSERSTACK_USERNAME}",
+    "accessKey": "${BROWSERSTACK_ACCESS_KEY}",
+    "projectName": "FamiliOS",
+    "buildName": "topgun-ios",
+    "sessionName": "${TOPGUN_SESSION_NAME:-ios-smoke}",
+    "appiumVersion": "2.12.1",
+    "debug": true,
+    "networkLogs": true,
+    "deviceLogs": true,
+    "video": true
+  }
+}

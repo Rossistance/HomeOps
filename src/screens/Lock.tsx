@@ -14,7 +14,7 @@ import { brand } from "@/brand";
  * iOS app shows — so archived demo members and sample data can never appear.
  * The local store is only a fallback when the backend is unreachable.
  */
-interface LockProfile { id: string; displayName: string; role: string; initials: string; avatarColor: string; pinRequired?: boolean }
+interface LockProfile { id: string; displayName: string; role: string; initials: string; avatarColor: string; pinRequired?: boolean; origin: "server" | "local" }
 
 const AV = ["ember", "sage", "sky", "lavender", "amber", "ink"];
 const colorFor = (name: string) => AV[[...name].reduce((a, c) => a + c.charCodeAt(0), 0) % AV.length];
@@ -60,26 +60,40 @@ export function Lock() {
   };
 
   useEffect(() => {
+    // A reachable server always yields a `profiles` array (possibly empty) — only a
+    // network/parse failure returns null. Track those separately: "offline" (server
+    // genuinely unreachable) is a different, honest story from "reachable, but this
+    // browser's household isn't the one it knows about" (handled below via the merge).
     void backend.profiles().then((r) => {
-      if (!r || !r.profiles?.length) { setOffline(!r); return; }
+      if (!r) { setOffline(true); setServerProfiles(null); return; }
+      setOffline(false);
       setServerProfiles(r.profiles.map((p) => ({
         id: p.actorId, displayName: p.displayName, role: p.role,
         initials: initialsOf(p.displayName), avatarColor: colorFor(p.displayName),
-        pinRequired: p.pinRequired,
+        pinRequired: p.pinRequired, origin: "server" as const,
       })));
-      const name = (r as { householdName?: string | null }).householdName;
-      if (name) setHouseholdName(name);
+      if (r.householdName) setHouseholdName(r.householdName);
     });
   }, []);
 
-  // Server registry is the truth; local members appear only when it's unreachable.
-  const members = serverProfiles ?? data.members.map((m) => ({
+  const localMembers: LockProfile[] = data.members.map((m) => ({
     id: m.id, displayName: m.displayName, role: m.role,
-    initials: m.initials, avatarColor: m.avatarColor,
-    pinRequired: m.role === "Owner" || m.role === "Adult Admin",
+    initials: m.initials, avatarColor: m.avatarColor, origin: "local" as const,
   }));
+  // T-03: the server is reachable and answered with SOMEONE's roster, but none of this
+  // browser's local household is in it — this server already belongs to a different
+  // household. Rather than hiding the local household behind that roster (the old
+  // behavior — "create/reset sample" would then dead-end here with no way back in),
+  // merge it in, clearly labelled as local-only.
+  const localIds = new Set(localMembers.map((m) => m.id));
+  const foreignServer = serverProfiles !== null && serverProfiles.length > 0 && !serverProfiles.some((p) => localIds.has(p.id));
+  const members: LockProfile[] =
+    serverProfiles === null ? localMembers                                   // fully offline → local roster only
+    : foreignServer ? [...serverProfiles, ...localMembers]                   // claimed by someone else → merge
+    : serverProfiles.length > 0 ? serverProfiles                             // matches / includes our household
+    : localMembers;                                                          // reachable but an empty roster
   const owner = members.find((m) => m.role === "Owner");
-  const subtitle = householdName ?? (serverProfiles ? null : data.household.name);
+  const subtitle = householdName ?? (serverProfiles && !foreignServer ? null : data.household.name);
 
   const choose = async (p: LockProfile) => {
     const elevated = p.role === "Owner" || p.role === "Adult Admin";
@@ -101,12 +115,17 @@ export function Lock() {
           <div className="relative z-10 flex flex-col items-center">
             <span className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/10 text-ember-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] backdrop-blur"><Icon name="House" size={28} /></span>
             <h1 className="font-display text-2xl font-semibold leading-tight tracking-tight sm:text-3xl">Who's using {brand.shortName}?</h1>
-            <p className="mt-2 max-w-md text-sm leading-relaxed text-white/70">{subtitle ? `${subtitle} · ` : ""}choose a profile to continue. Your role controls what you can see and do.</p>
+            <p className="mt-2 max-w-md text-sm leading-relaxed text-white/70">
+              {subtitle ? `${subtitle} — choose a profile to continue.` : "Choose a profile to continue."} Your role controls what you can see and do.
+            </p>
           </div>
         </div>
 
         {offline && (
-          <p className="mb-4 text-center text-xs text-amber-600">The backend is unreachable — showing local profiles. Server features stay locked until it's back.</p>
+          <p role="status" className="mb-4 text-center text-xs text-amber-600">The backend is unreachable — showing local profiles. Server features stay locked until it's back.</p>
+        )}
+        {foreignServer && (
+          <p role="status" className="mb-4 text-center text-xs text-amber-600">This server is already registered to a different household — profiles marked “On this device” exist only in this browser.</p>
         )}
 
         <div className="stagger grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -116,7 +135,13 @@ export function Lock() {
                 <Avatar initials={m.initials} color={m.avatarColor} size={48} />
                 <p className="font-display mt-2.5 truncate text-base font-semibold text-ink-900">{m.displayName}</p>
                 <p className="text-xs font-medium text-ink-500">{m.role}</p>
-                {m.pinRequired && <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-ink-400"><Icon name="Lock" size={10} /> may need PIN</span>}
+                {/* Only claim a PIN is required when the server itself said so — offline or
+                    locally-derived rows can't actually be checked against anything, so
+                    guessing "may need PIN" was misleading. Local-only rows instead say so
+                    plainly (T-03) rather than being silently indistinguishable from the
+                    server's real roster. */}
+                {m.origin === "server" && m.pinRequired && <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-ink-400"><Icon name="Lock" size={10} /> PIN required</span>}
+                {m.origin === "local" && foreignServer && <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-amber-600"><Icon name="Laptop" size={10} /> On this device — not registered with this server</span>}
               </span>
             </Card>
           ))}

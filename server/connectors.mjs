@@ -397,9 +397,26 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
     if (toolId === "weather.current") {
       const cfg = getConnectorConfig("weather");
       const lat = cfg.fields?.latitude ?? "40.7128", lon = cfg.fields?.longitude ?? "-74.0060";
+      // Honest failure path (mirrors the rss/http siblings): a broken upstream must
+      // surface as provider_error, never as a hollow {location,fetchedAt} "success"
+      // with every reading silently dropped by JSON undefined-stripping.
       const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code,wind_speed_10m`);
-      const j = await r.json();
-      result = { location: cfg.fields?.label ?? "Home", temperatureC: j?.current?.temperature_2m, windKph: j?.current?.wind_speed_10m, weatherCode: j?.current?.weather_code, fetchedAt: new Date().toISOString() };
+      if (!r.ok) {
+        const bodyPreview = (await r.text().catch(() => "")).slice(0, 200);
+        appendAudit({ type: "tool.execute", ...base, ok: false, error: "provider_error", code: r.status, detail: bodyPreview });
+        return { ok: false, error: "provider_error", message: `Weather lookup failed — Open-Meteo returned HTTP ${r.status}${bodyPreview ? ` (${bodyPreview})` : ""}.` };
+      }
+      let j;
+      try { j = await r.json(); } catch {
+        appendAudit({ type: "tool.execute", ...base, ok: false, error: "provider_error", code: r.status, detail: "non-JSON body" });
+        return { ok: false, error: "provider_error", message: "Weather lookup failed — Open-Meteo returned an unreadable (non-JSON) response." };
+      }
+      if (!j?.current || typeof j.current.temperature_2m !== "number") {
+        const detail = String(j?.reason ?? "").slice(0, 200);
+        appendAudit({ type: "tool.execute", ...base, ok: false, error: "provider_error", code: r.status, detail: detail || "missing current conditions" });
+        return { ok: false, error: "provider_error", message: `Weather lookup failed — the provider response had no current conditions${detail ? ` (${detail})` : ""}.` };
+      }
+      result = { location: cfg.fields?.label ?? "Home", temperatureC: j.current.temperature_2m, windKph: j.current.wind_speed_10m, weatherCode: j.current.weather_code, fetchedAt: new Date().toISOString() };
     } else if (toolId === "rss.latest") {
       const cfg = getConnectorConfig("rss");
       const r = await safeFetch(cfg.fields.feedUrl, { headers: { "user-agent": "FamiliOS/1.0" } }, { allowLoopback: false });

@@ -1,0 +1,14 @@
+== P1: create event WITH notes + MULTI-DAY span via API (fields the mobile form cannot express)
+   create -> 200; stored notes='TG notes-field probe: pack the tent'; startAt=2026-07-25T21:00:00.000Z; endAt=2026-07-27T14:00:00.000Z (span crosses 2 days: True)
+== P2: PATCH from mobile-shaped body (no notes key) — are notes preserved?
+   patch -> 200; notes after mobile-shaped patch = 'TG notes-field probe: pack the tent'
+== P3: push to Google with no connected account — honest failure path
+   push -> 422; error=needs_reconnect; message='Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.'; needsApproval=None
+== P4: unscheduled (startAt null) is the only no-time representation; all-day probe: date-only startAt
+   create date-only startAt -> 200; stored startAt='2026-07-25' (server stores verbatim; no allDay flag in record: False)
+== P5: Child View role journey — visibility filtering
+   kid sees TG events: ['TG-allday probe', 'TG-campout (multi-day probe)']; kid create event -> 403 (insufficient_role); kid upload -> 403 (insufficient_role)
+== CLEANUP
+   del event 200
+   del event 200
+   del member 200

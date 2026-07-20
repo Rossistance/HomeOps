@@ -11,6 +11,7 @@ import { ExecutionMonitor } from "@/components/runs/ExecutionMonitor";
 import { ServerTriggersPanel } from "@/components/triggers/ServerTriggers";
 import { relativeTime, fmtDateTime } from "@/lib/dates";
 import { useAdvancedMode } from "@/lib/prefs";
+import { detectTrigger, detectIntent } from "@/lib/ai";
 import { PlanPreview, useConnectables } from "@/screens/Agents";
 import type { Automation, TriggerType, WorkflowPlan, WorkflowTemplate } from "@/types";
 import type { AgentPlan } from "@/connectors/api";
@@ -162,6 +163,11 @@ function WorkflowBuilder({ onActivated }: { onActivated: () => void }) {
   const [busy, setBusy] = useState(false);
   const [plan, setPlan] = useState<AgentPlan | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  // Local rules-engine preview (no AI provider needed). Kept separate from `plan`
+  // (the provider-generated AgentPlan shape) since planFromPrompt returns a
+  // WorkflowPlan — previewed here so the resolved trigger is visible BEFORE the
+  // automation is created, instead of creating it blind.
+  const [localPreview, setLocalPreview] = useState<{ plan: WorkflowPlan; agentId: string; agentName: string; approvalRequired: boolean; triggerType: TriggerType } | null>(null);
 
   const samples = [
     "Every morning, send me a family briefing with appointments, school events, chores, and bills due.",
@@ -173,7 +179,7 @@ function WorkflowBuilder({ onActivated }: { onActivated: () => void }) {
     setBusy(true);
     const r = await planAgentFromGoal(prompt.trim());
     setBusy(false);
-    if (r.ok && r.plan) { setPlan(r.plan); setPicked(new Set(r.plan.connectorIds)); }
+    if (r.ok && r.plan) { setLocalPreview(null); setPlan(r.plan); setPicked(new Set(r.plan.connectorIds)); }
   };
   const activate = async (run: boolean) => {
     if (!plan) return;
@@ -182,9 +188,30 @@ function WorkflowBuilder({ onActivated }: { onActivated: () => void }) {
     setPlan(null); setPrompt(""); setPicked(new Set());
     onActivated();
   };
-  const fallback = () => {
-    const r = planFromPrompt(prompt.trim());
-    createAutomation({ name: prompt.slice(0, 48), description: prompt, agentId: r.agentId, plan: r.plan, approvalRequired: r.approvalRequired, status: "active", enabled: true });
+  const previewFallback = () => {
+    const text = prompt.trim();
+    const r = planFromPrompt(text);
+    // T-05: derive the trigger with detectTrigger() — the same function the
+    // engine already uses internally to label the plan's "Trigger" row — instead
+    // of leaving it to createAutomation's "Manual" default. Detection logic is
+    // untouched; this just wires its result through to automation creation.
+    const triggerType = detectTrigger(text, detectIntent(text).defaultTrigger);
+    setPlan(null);
+    setLocalPreview({ ...r, triggerType });
+  };
+  const activateFallback = () => {
+    if (!localPreview) return;
+    createAutomation({
+      name: prompt.slice(0, 48),
+      description: prompt,
+      agentId: localPreview.agentId,
+      plan: localPreview.plan,
+      approvalRequired: localPreview.approvalRequired,
+      triggerType: localPreview.triggerType,
+      status: "active",
+      enabled: true,
+    });
+    setLocalPreview(null);
     setPrompt("");
     onActivated();
   };
@@ -200,13 +227,11 @@ function WorkflowBuilder({ onActivated }: { onActivated: () => void }) {
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Button variant="ember" disabled={!prompt.trim() || busy} onClick={generate}>{busy ? <><Icon name="Loader2" size={16} className="animate-spin" /> Generating…</> : <><Icon name="Sparkles" size={16} /> Generate plan</>}</Button>
-          <button className="text-xs text-ink-400 underline" disabled={!prompt.trim()} onClick={fallback}>or use the built-in rules engine</button>
+          <button className="text-xs text-ink-400 underline" disabled={!prompt.trim()} onClick={previewFallback}>or use the built-in rules engine</button>
         </div>
       </Card>
       <Card className="card-pad">
-        {!plan ? (
-          <EmptyState icon="Workflow" title="Your workflow plan appears here" message="Describe a routine and your AI provider drafts a real, tool-by-tool plan before you activate it." />
-        ) : (
+        {plan ? (
           <>
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <p className="font-display text-base font-semibold text-ink-900">Generated plan</p>
@@ -217,6 +242,21 @@ function WorkflowBuilder({ onActivated }: { onActivated: () => void }) {
             </div>
             <PlanPreview plan={plan} picked={picked} onToggle={(id) => setPicked((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; })} connectables={connectables} />
           </>
+        ) : localPreview ? (
+          <>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="font-display text-base font-semibold text-ink-900">Built-in rules engine plan</p>
+                {/* T-05: the resolved trigger, shown before the user confirms — so
+                    "Every morning at 7am…" visibly reads as Schedule, not Manual. */}
+                <p className="mt-0.5 flex items-center gap-1 text-xs text-ink-500"><Icon name="Zap" size={12} /> Trigger: <span className="font-medium text-ink-700">{localPreview.triggerType}</span></p>
+              </div>
+              <Button variant="ember" size="sm" onClick={activateFallback}><Icon name="Check" size={15} /> Activate</Button>
+            </div>
+            <PlanView plan={localPreview.plan} approvalRequired={localPreview.approvalRequired} />
+          </>
+        ) : (
+          <EmptyState icon="Workflow" title="Your workflow plan appears here" message="Describe a routine and your AI provider drafts a real, tool-by-tool plan before you activate it." />
         )}
       </Card>
     </div>

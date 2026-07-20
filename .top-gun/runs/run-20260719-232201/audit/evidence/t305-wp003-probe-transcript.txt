@@ -1,0 +1,8 @@
+== LOGIN -> 200
+== P1 create -> 200 notes= "TG-T305 pack sunscreen" endAt= 2026-07-27T14:00:00.000Z
+== P1 patch preserves notes: true endAt intact: true
+== P2 allDay create -> 200 allDay= true
+== P2 GET round-trip allDay= true startAt= 2026-07-25T04:00:00.000Z
+== CLEANUP ev_889692ae8b58a9c4 -> 200
+== CLEANUP ev_b44d16f72a9d52c9 -> 200
+== INTEGRITY events after cleanup: 41 TG-T305 residue: 0

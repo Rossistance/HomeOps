@@ -1,10 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "@/store/useStore";
 import { Button, Card, Field, TextInput } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { brand } from "@/brand";
 import { importBackup } from "@/storage/backup";
 import { setAdvancedMode } from "@/lib/prefs";
+import { backend } from "@/connectors/api";
 
 /**
  * First-run onboarding. A fresh, no-data launch lands here (no auto-seeded
@@ -13,12 +14,30 @@ import { setAdvancedMode } from "@/lib/prefs";
  */
 export function Onboarding() {
   const complete = useStore((s) => s.completeOnboarding);
+  const signupHousehold = useStore((s) => s.signupHousehold);
   const toast = useStore((s) => s.toast);
-  const [mode, setMode] = useState<"choose" | "create">("choose");
+  const [mode, setMode] = useState<"choose" | "create" | "create-claimed">("choose");
   const [household, setHousehold] = useState("");
   const [owner, setOwner] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // T-03: check up front whether this server already belongs to a different household.
+  // If it does, "Create household" must register a real account with the server (the
+  // email-signup path) instead of the local-only path, which would silently create the
+  // household only in this browser and then strand it behind the other household's
+  // Lock screen roster. `claimed === null` means "unknown" (still checking, or the
+  // server couldn't be reached) — in that case the local-only flow stays the default.
+  const [claimed, setClaimed] = useState<boolean | null>(null);
+  const [serverUnreachable, setServerUnreachable] = useState(false);
+  useEffect(() => {
+    void backend.profiles().then((r) => {
+      if (!r) { setServerUnreachable(true); return; }
+      setClaimed(r.claimed);
+    });
+  }, []);
 
   const onImport = async (file: File) => {
     setBusy(true);
@@ -26,6 +45,16 @@ export function Onboarding() {
     setBusy(false);
     if (!r.ok || !r.data) { toast({ kind: "error", title: "Import failed", message: r.error }); return; }
     await complete("import", { data: r.data });
+  };
+
+  const onCreateClaimed = async () => {
+    setBusy(true);
+    setAdvancedMode(false);
+    await signupHousehold({
+      email: email.trim(), password, ownerName: owner.trim(),
+      householdName: household.trim() || undefined, resetLocalData: true,
+    });
+    setBusy(false);
   };
 
   return (
@@ -37,13 +66,19 @@ export function Onboarding() {
           <p className="mt-2 max-w-xl text-sm text-ink-600">{brand.oneLiner} Let's set up your household. Everything stays on this device until you connect a provider.</p>
         </div>
 
+        {serverUnreachable && (
+          <p role="status" className="mb-4 flex items-center justify-center gap-1.5 text-center text-xs text-amber-600">
+            <Icon name="TriangleAlert" size={13} className="shrink-0" /> Can't reach the FamiliOS server right now — you can still create a household, explore the sample, or restore a backup locally on this device.
+          </p>
+        )}
+
         {mode === "choose" ? (
           <div className="stagger grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <ChoiceCard index={0} icon="HousePlus" title="Create household" body="Start fresh with your own household and an owner profile." action="Create" onClick={() => setMode("create")} primary />
+            <ChoiceCard index={0} icon="HousePlus" title="Create household" body={claimed ? "This server already has a household — create your own account to get a private space on it." : "Start fresh with your own household and an owner profile."} action="Create" onClick={() => setMode(claimed ? "create-claimed" : "create")} primary />
             <ChoiceCard index={1} icon="Upload" title="Restore a backup" body="Import a FamiliOS backup file you exported earlier." action={busy ? "Importing…" : "Choose file"} onClick={() => fileRef.current?.click()} />
             <ChoiceCard index={2} icon="Sparkles" title="Explore the sample" body="Load the Harper family — clearly-labelled sample data to explore features." action="Load sample" onClick={() => complete("sample")} />
           </div>
-        ) : (
+        ) : mode === "create" ? (
           <Card className="card-pad mx-auto max-w-lg animate-scale-in">
             <button className="mb-3 inline-flex items-center gap-1 text-sm text-ink-500 hover:text-ink-800" onClick={() => setMode("choose")}><Icon name="ChevronLeft" size={15} /> Back</button>
             <h2 className="font-display text-xl font-semibold text-ink-900">Create your household</h2>
@@ -58,6 +93,23 @@ export function Onboarding() {
             </div>
             <div className="mt-4 flex justify-end">
               <Button variant="ember" disabled={busy || !owner.trim()} onClick={async () => { setBusy(true); setAdvancedMode(false); await complete("blank", { householdName: household, ownerName: owner }); }}>
+                <Icon name="Check" size={15} /> Create household
+              </Button>
+            </div>
+          </Card>
+        ) : (
+          <Card className="card-pad mx-auto max-w-lg animate-scale-in">
+            <button className="mb-3 inline-flex items-center gap-1 text-sm text-ink-500 hover:text-ink-800" onClick={() => setMode("choose")}><Icon name="ChevronLeft" size={15} /> Back</button>
+            <h2 className="font-display text-xl font-semibold text-ink-900">Create your household</h2>
+            <p className="mb-4 text-sm text-ink-500">This server already belongs to a different household. Create your own account and you'll get a completely separate, private space on it.</p>
+            <div className="space-y-3">
+              <Field label="Household name (optional)"><TextInput value={household} placeholder="The Rivera Family" onChange={(e) => setHousehold(e.target.value)} /></Field>
+              <Field label="Your name (owner)"><TextInput value={owner} placeholder="Your name" onChange={(e) => setOwner(e.target.value)} /></Field>
+              <Field label="Email"><TextInput type="email" value={email} placeholder="you@example.com" onChange={(e) => setEmail(e.target.value)} /></Field>
+              <Field label="Password"><TextInput type="password" value={password} placeholder="At least 8 characters" onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void onCreateClaimed(); }} /></Field>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button variant="ember" disabled={busy || !owner.trim() || !email.trim() || password.length < 8} onClick={() => void onCreateClaimed()}>
                 <Icon name="Check" size={15} /> Create household
               </Button>
             </div>

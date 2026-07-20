@@ -28,7 +28,7 @@ npm run build      # typecheck (tsc) + production build (vite)
 npm run typecheck  # type-check only
 ```
 
-Requirements: Node 18+ (built on Node 20). No external accounts are required to run it — out of the box the **Weather** connector is live (real Open-Meteo calls) and the **Webhook Receiver** accepts real inbound events. Everything else shows an honest "Setup required" state until you configure it.
+Requirements: Node 22.13+ but below 25 (`package.json` engines; `node:sqlite` is flag-free from 22.13 / 24 LTS) — CI and the Render deployment both run Node 24. No external accounts are required to run it — out of the box the **Weather** connector is live (real Open-Meteo calls) and the **Webhook Receiver** accepts real inbound events. Everything else shows an honest "Setup required" state until you configure it.
 
 ## Deploy
 

@@ -17,6 +17,12 @@ services:
       mountPath: /data
       sizeGB: 1
     envVars:
+      # Pin the production Node to the same major CI tests on (.github/workflows/ci.yml
+      # uses node-version: 24). Inside package.json engines '>=22.13 <25'; node:sqlite
+      # (tenant store, ADR-001) is flag-free from 22.13 / 24 LTS. Without this pin,
+      # Render may boot an untested Node major and break the sqlite-backed store.
+      - key: NODE_VERSION
+        value: "24"
       - key: NODE_ENV
         value: production
       - key: HOMEOPS_ENV

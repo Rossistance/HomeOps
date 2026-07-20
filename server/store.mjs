@@ -12,6 +12,21 @@ import { currentTenant, runWithTenant, RESIDENT_TENANT } from "./tenant-context.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Data dir is overridable (HOMEOPS_DATA_DIR) so the test harness can point at an
 // isolated temp directory and never touch the real server/.data store.
+//
+// Hard guard (ISS-001): inside a `node --test` process (NODE_TEST_CONTEXT is set)
+// this module must NEVER fall back to the live server/.data. A bare
+// `import("../store.mjs")` from a test once resolved the default dir, ran the
+// stall sweeper against the live tenant DB, and wedged the running backend's
+// node:sqlite handle into permanent disk I/O errors. Fail loudly instead.
+if (process.env.NODE_TEST_CONTEXT && !process.env.HOMEOPS_DATA_DIR) {
+  throw new Error(
+    "server/store.mjs: refusing to open the default server/.data from a test process " +
+    "(NODE_TEST_CONTEXT is set but HOMEOPS_DATA_DIR is not). This would point the test at " +
+    "LIVE data and can corrupt a running backend. Fix: set process.env.HOMEOPS_DATA_DIR to an " +
+    "isolated temp dir BEFORE the first import of ../store.mjs (see server/test/harness.mjs), " +
+    "or seed through the spawned test server's API instead of importing the store directly."
+  );
+}
 const DATA_DIR = process.env.HOMEOPS_DATA_DIR
   ? process.env.HOMEOPS_DATA_DIR
   : join(__dirname, ".data");
