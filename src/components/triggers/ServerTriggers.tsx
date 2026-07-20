@@ -20,18 +20,41 @@ const INTERVALS = [
   { label: "Daily", ms: 24 * 60 * 60_000 },
 ];
 
+// Terminal outcomes only (ISS-009): the server now settles lastStatus to completed /
+// failed / expired / waiting_for_approval instead of leaving a permanent "started".
 function statusColor(s: string | null): "sage" | "amber" | "coral" | "sky" | "gray" {
   if (!s) return "gray";
-  if (s.startsWith("error")) return "coral";
-  if (s === "completed" || s === "started") return "sage";
+  if (s.startsWith("error") || s === "failed" || s === "expired" || s === "cancelled") return "coral";
+  if (s === "completed" || s === "succeeded") return "sage";
   if (s.startsWith("waiting")) return "amber";
-  return "sky";
+  return "sky"; // an older/never-fired record — not "started" read as success anymore
+}
+function statusLabel(s: string): string {
+  return s.replace(/^error:/, "").replace(/_/g, " ");
+}
+
+// The server now resolves a human schedule plus anchor/tzSource alongside the raw
+// fields (WP-002/WP-006 — see server/triggers.mjs publicTrigger). The shared
+// ServerTrigger type predates that addition, so it's widened defensively here
+// rather than trusted blindly; a light client fallback covers any record an older
+// server hasn't stamped yet. Never render raw intervalMs.
+type ServerTriggerX = ServerTrigger & { scheduleText?: string; anchor?: string | null; tzSource?: "household" | "server" | null };
+function fallbackScheduleText(t: ServerTriggerX): string {
+  if (t.type === "recurring" && t.intervalMs) {
+    const m = Math.round(t.intervalMs / 60_000);
+    if (m % 1440 === 0) return m === 1440 ? "Daily" : `Every ${m / 1440} days`;
+    if (m % 60 === 0) return m === 60 ? "Hourly" : `Every ${m / 60} hours`;
+    return `Every ${m} min`;
+  }
+  if (t.type === "schedule" && t.nextRunAt) return `Once · ${new Date(t.nextRunAt).toLocaleString()}`;
+  const labels: Record<string, string> = { webhook: "On webhook", connector_event: "On new data", manual: "Manual only" };
+  return labels[t.type] ?? "Manual only";
 }
 
 export function ServerTriggersPanel() {
   const navigate = useStore((s) => s.navigate);
   const toast = useStore((s) => s.toast);
-  const [triggers, setTriggers] = useState<ServerTrigger[]>([]);
+  const [triggers, setTriggers] = useState<ServerTriggerX[]>([]);
   const [loading, setLoading] = useState(true);
   const [showNew, setShowNew] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -86,11 +109,17 @@ export function ServerTriggersPanel() {
               <Toggle checked={t.enabled} onChange={() => toggle(t)} ariaLabel="Enabled" />
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-400">
-              {t.type === "recurring" && t.intervalMs && <span className="flex items-center gap-1"><Icon name="Repeat" size={11} /> every {Math.round(t.intervalMs / 60000)}m</span>}
-              {t.nextRunAt && t.enabled && <span className="flex items-center gap-1"><Icon name="Clock" size={11} /> next {relativeTime(new Date(t.nextRunAt).toISOString())}</span>}
+              {/* Human schedule text from the server — never the raw intervalMs. */}
+              <span className="flex items-center gap-1"><Icon name="Clock" size={11} /> {t.scheduleText ?? fallbackScheduleText(t)}</span>
+              {t.nextRunAt && t.enabled && <span className="flex items-center gap-1"><Icon name="ArrowRight" size={11} /> next {relativeTime(new Date(t.nextRunAt).toISOString())}</span>}
               {t.fireCount > 0 && <span className="flex items-center gap-1"><Icon name="Activity" size={11} /> fired {t.fireCount}×</span>}
-              {t.lastStatus && <Badge color={statusColor(t.lastStatus)}>{t.lastStatus}</Badge>}
+              {t.lastStatus && <Badge color={statusColor(t.lastStatus)}>{statusLabel(t.lastStatus)}</Badge>}
             </div>
+            {t.tzSource === "server" && (
+              <p className="mt-1.5 flex items-center gap-1 rounded-lg bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+                <Icon name="TriangleAlert" size={11} /> Household time zone isn't set — this schedule uses the server's time zone instead.
+              </p>
+            )}
             {t.lastFiredAt && (
               <p className="mt-1 text-[11px] text-ink-400">
                 Last fired {fmtDateTime(new Date(t.lastFiredAt).toISOString())}

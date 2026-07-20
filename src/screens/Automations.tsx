@@ -391,7 +391,23 @@ function RunHistory() {
             </button>
             {open === r.id && (
               <div className="mt-3 space-y-1 border-t border-ink-900/[0.06] pt-3">
-                {r.steps.map((st, i) => <div key={i} className="flex items-center gap-2 text-sm"><Icon name={st.status === "done" ? "CheckCircle2" : st.status === "blocked" ? "Lock" : "Circle"} size={14} className={st.status === "done" ? "text-sage-500" : st.status === "blocked" ? "text-coral-500" : "text-ink-300"} /><span className="text-ink-600">{st.label}</span>{st.agentName && <span className="text-xs text-ink-400">· {st.agentName}</span>}</div>)}
+                {r.steps.map((st, i) => (
+                  <div key={i} className="text-sm">
+                    <div className="flex items-center gap-2">
+                      <Icon
+                        name={st.status === "done" ? "CheckCircle2" : st.status === "blocked" ? "Lock" : st.status === "running" ? "Loader2" : st.status === "skipped" ? "SkipForward" : "Circle"}
+                        size={14}
+                        className={st.status === "done" ? "text-sage-500" : st.status === "blocked" ? "text-coral-500" : st.status === "running" ? "animate-spin text-sky-500" : st.status === "skipped" ? "text-amber-600" : "text-ink-300"}
+                      />
+                      <span className="text-ink-600">{st.label}</span>
+                      {st.agentName && <span className="text-xs text-ink-400">· {st.agentName}</span>}
+                    </div>
+                    {/* "skipped" bundles no-delivery-tool, policy-clamped, and denied/
+                        expired-approval steps — `detail` (set distinctly server-side)
+                        names which one this was, so it's never a silent gray dot. */}
+                    {st.status === "skipped" && st.detail && <p className="ml-5 mt-0.5 text-xs text-amber-700">{st.detail}</p>}
+                  </div>
+                ))}
                 {subs.length > 0 && <div className="well mt-2 p-2.5"><p className="mb-1 text-xs font-semibold uppercase text-ink-400">Subagents (multi-agent)</p>{subs.map((s) => <div key={s.id} className="flex items-center gap-2 text-sm text-ink-600"><Icon name={s.icon} size={13} /> {s.name} — {s.outputSummary}</div>)}</div>}
                 {r.error && <p className="text-sm text-coral-600">{r.error}</p>}
                 {r.status === "Waiting for Approval" && <InlineApprovals runId={r.id} />}

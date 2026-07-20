@@ -26,6 +26,16 @@ import { humanDetail } from "@/lib/format";
 // system, deleted with the old screens) shadows the ui/ directory otherwise.
 import { Badge, Button, Card, EmptyState, MarkdownText, Notice, PressableScale, Sym, SymTile, T } from "@/components/ui";
 
+// The server returns richer creation data than the shared BuildResult/ChatBuild
+// types declare (WP-006): created.agent carries its REAL post-build `status` —
+// Active only when the build also stood up an automation to run it, Draft
+// otherwise (ISS-007, see server/index.mjs materializeBuild()) — and
+// created.automation carries a human `scheduleText`/`anchor` alongside
+// `nextRunAt`, never raw intervalMs. Widened defensively here rather than
+// trusted blindly, same as the mobile Automations screen does for TriggerRec.
+type BuiltAgentInfo = { id: string; name: string; status?: "Active" | "Draft" | "Paused" | "Needs Attention" | "Archived" };
+type BuiltAutomationInfo = { id: string; name: string; type?: string; scheduleText?: string; anchor?: string | null; nextRunAt?: string | number | null };
+
 interface Msg {
   id: string;
   role: "user" | "assistant";
@@ -33,6 +43,8 @@ interface Msg {
   plan?: AgentPlan;
   build?: ChatBuild;
   built?: boolean;
+  builtAgent?: BuiltAgentInfo;
+  builtAutomation?: BuiltAutomationInfo;
   error?: boolean;
   runId?: string; // plan messages that the server already started executing
 }
@@ -49,6 +61,11 @@ export default function AskScreen() {
   const { session } = useSession();
   const { startRun, activeRun } = useRun();
   const canBuild = session?.role === "Owner" || session?.role === "Adult Admin";
+  // ISS-011: the server already demotes a build proposal to a plain answer for
+  // anyone below Adult Admin on THEIR OWN turn (server/index.mjs demoteBuildForRole)
+  // — this covers the other path, a build card an Owner/Admin proposed earlier
+  // that's still visible when a Guest opens a shared household conversation.
+  const isGuest = session?.role === "Guest/Helper";
 
   const [text, setText] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
@@ -432,13 +449,15 @@ export default function AskScreen() {
     if (res.ok) {
       tapHaptic("success");
       const cr = res.created ?? {};
+      const builtAgent: BuiltAgentInfo | undefined = cr.agent;
+      const builtAutomation: BuiltAutomationInfo | undefined = cr.automation;
       const parts = [
         cr.skill && `skill “${cr.skill.name}”`,
         cr.agent && `helper “${cr.agent.name}”`,
         cr.automation && `automation “${cr.automation.name}”`,
         ...(res.updated ?? []).filter((u) => u.ok).map((u) => `updated ${u.kind}`),
       ].filter(Boolean);
-      setMsgs((m) => m.map((x) => (x.id === msgId ? { ...x, built: true } : x)).concat({
+      setMsgs((m) => m.map((x) => (x.id === msgId ? { ...x, built: true, builtAgent, builtAutomation } : x)).concat({
         id: msgId + "done", role: "assistant",
         text: `Done — I set up ${parts.join(", ")}.${res.notes?.length ? "\n\n" + res.notes.map((n) => `- ${n}`).join("\n") : ""}`,
       }));
@@ -678,13 +697,19 @@ export default function AskScreen() {
                   </Card>
                   {plan ? <PlanCard plan={plan} autoRun={!!m.runId} onRun={() => void runPlan(plan)} /> : null}
                   {build ? (
-                    <BuildCard
-                      build={build}
-                      built={!!m.built}
-                      busy={buildingId === m.id}
-                      canBuild={canBuild}
-                      onBuild={() => void runBuild(m.id, build)}
-                    />
+                    isGuest && !m.built ? (
+                      <BuildGuidance build={build} />
+                    ) : (
+                      <BuildCard
+                        build={build}
+                        built={!!m.built}
+                        builtAgent={m.builtAgent}
+                        builtAutomation={m.builtAutomation}
+                        busy={buildingId === m.id}
+                        canBuild={canBuild}
+                        onBuild={() => void runBuild(m.id, build)}
+                      />
+                    )
                   ) : null}
                 </View>
               </Animated.View>
@@ -709,9 +734,22 @@ export default function AskScreen() {
                     backgroundColor: ["succeeded", "done", "completed"].includes(s.status) ? colors.sage
                       : s.status === "running" ? colors.ember
                       : s.status === "failed" ? colors.coral
-                      : s.status === "waiting_approval" ? colors.amber : colors.textFaint,
+                      : ["waiting_approval", "waiting_for_approval", "skipped_no_tool", "skipped", "expired"].includes(s.status) ? colors.amber
+                      : colors.textFaint,
                   }} />
-                  <T kind="sub" color={colors.textSecondary} numberOfLines={1} style={{ flex: 1 }}>{s.title}</T>
+                  <View style={{ flex: 1 }}>
+                    <T kind="sub" color={colors.textSecondary} numberOfLines={1}>{s.title}</T>
+                    {/* WP-003/WP-004: a step that did not deliver says so RIGHT HERE, at
+                        the same weight as the step title. Burying it — or leaving it as a
+                        neutral grey dot — is how "3/3 finished" came to mean "nothing sent". */}
+                    {["skipped_no_tool", "skipped", "expired"].includes(s.status) ? (
+                      <T kind="sub" color={colors.amber} numberOfLines={2}>
+                        {s.status === "skipped_no_tool" ? "Not sent — no delivery tool for this step"
+                          : s.status === "expired" ? "Expired — nothing was sent"
+                          : `Skipped — ${String(s.detail ?? "not permitted").replace(/^Not permitted:\s*/, "")}`}
+                      </T>
+                    ) : null}
+                  </View>
                 </View>
               ))}
             </Card>
@@ -952,13 +990,20 @@ function PlanCard({ plan, onRun, autoRun }: { plan: AgentPlan; onRun: () => void
 }
 
 /** Proposed build: entities to create/update, Owner/Adult Admin approve action. */
-function BuildCard({ build, built, busy, canBuild, onBuild }: {
-  build: ChatBuild; built: boolean; busy: boolean; canBuild: boolean; onBuild: () => void;
+function BuildCard({ build, built, builtAgent, builtAutomation, busy, canBuild, onBuild }: {
+  build: ChatBuild; built: boolean; builtAgent?: BuiltAgentInfo; builtAutomation?: BuiltAutomationInfo;
+  busy: boolean; canBuild: boolean; onBuild: () => void;
 }) {
   const { colors, spacing } = useTheme();
   const edits = build.edits ?? [];
   const editOnly = !build.skill && !build.agent && !build.automation && edits.length > 0;
   const skillSteps = build.skill?.steps?.length ?? 0;
+  // A build only lands its new agent Active when it's ALSO standing up an
+  // automation to run it — otherwise the agent stays a Draft until someone
+  // activates it (ISS-007, see server/index.mjs materializeBuild()). Read the
+  // proposal's own shape rather than assuming "built = live".
+  const willActivate = !!build.agent && !!build.automation;
+  const proposedSchedule = (build.automation as { scheduleText?: string } | null | undefined)?.scheduleText;
   return (
     <Card>
       <T kind="h3" color={colors.text}>{built ? "Built" : editOnly ? "I'll update this" : "I'll set this up"}</T>
@@ -971,14 +1016,14 @@ function BuildCard({ build, built, busy, canBuild, onBuild }: {
           />
         ) : null}
         {build.agent ? <EntityRow icon="cpu" fg={colors.lavender} bg={colors.lavenderBg} kind="Helper" name={build.agent.name} sub={build.agent.purpose} /> : null}
-        {build.automation ? <EntityRow icon="clock.arrow.circlepath" fg={colors.amber} bg={colors.amberBg} kind="Automation" name={build.automation.name} sub={build.automation.type} /> : null}
+        {build.automation ? <EntityRow icon="clock.arrow.circlepath" fg={colors.amber} bg={colors.amberBg} kind="Automation" name={build.automation.name} sub={proposedSchedule ?? build.automation.type} /> : null}
         {edits.map((e, i) => (
           <EntityRow key={i} icon="pencil" fg={colors.textMuted} bg={colors.surfaceSunken} kind={`Update ${e.kind}`} name={e.id} sub={e.summary} />
         ))}
       </View>
       {built ? (
         <View style={{ marginTop: spacing.md }}>
-          <Notice ok text="Done — your new helper is live with its tools preselected. Find it under Helper Agents." />
+          <Notice ok text={builtSummary(build, builtAgent, builtAutomation)} />
         </View>
       ) : !canBuild ? (
         <T kind="sub" style={{ marginTop: spacing.md }}>Only an Owner or Adult Admin can build helpers.</T>
@@ -989,10 +1034,52 @@ function BuildCard({ build, built, busy, canBuild, onBuild }: {
             variant="ember" icon="hammer.fill" full loading={busy} onPress={onBuild}
           />
           <T kind="sub" center>
-            {editOnly ? "Changes are versioned and reversible." : "Creates a draft — gated steps still ask for approval."}
+            {editOnly
+              ? "Changes are versioned and reversible."
+              : willActivate
+                ? `Starts Active and runs ${proposedSchedule ?? "on its schedule"} — gated steps still pause for approval.`
+                : build.agent
+                  ? "Creates a Draft — it won't run until you activate it, and gated steps still pause for approval when it does."
+                  : "Gated steps still pause for approval."}
           </T>
         </View>
       )}
+    </Card>
+  );
+}
+
+/** Honest post-build copy: what actually landed, and its real lifecycle state —
+ * never "live" for a Draft (ISS-007). Prefers the server's own status/schedule
+ * over guessing from the proposal. */
+function builtSummary(build: ChatBuild, agent?: BuiltAgentInfo, automation?: BuiltAutomationInfo): string {
+  if (agent) {
+    const name = agent.name || build.agent?.name || "your helper";
+    if (agent.status === "Draft") return `Done — “${name}” is saved as a Draft — it won't run until you activate it in Helper Agents.`;
+    if (automation) return `Done — “${name}” is Active and runs ${automation.scheduleText ?? "on its schedule"}.`;
+    return `Done — “${name}” is set up. Find it under Helper Agents.`;
+  }
+  if (build.skill) return `Done — the “${build.skill.name}” skill is saved.`;
+  return "Done — your changes are saved.";
+}
+
+/** A Guest/Helper role sees this instead of the full proposal card: guidance,
+ * not a build card with no way to act on it (ISS-011). The server already
+ * demotes a build response to a plain answer for anyone below Adult Admin on
+ * THEIR OWN turn (server/index.mjs demoteBuildForRole) — this covers the other
+ * path, a card an Owner/Admin proposed earlier that's still visible when a
+ * Guest opens a shared household conversation. Reuses Card/T/SymTile — no new
+ * layout primitive. */
+function BuildGuidance({ build }: { build: ChatBuild }) {
+  const { colors, spacing } = useTheme();
+  return (
+    <Card>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+        <SymTile name="person.badge.clock" color={colors.lavender} bg={colors.lavenderBg} size={30} iconSize={14} />
+        <T kind="h3" color={colors.text} style={{ flex: 1 }}>Needs an Owner or Adult Admin</T>
+      </View>
+      <T kind="sub" style={{ marginTop: spacing.sm }}>
+        {build.summary ? `Famili drafted this: ${build.summary}. ` : ""}Guest accounts can't set up helpers or automations — ask an Owner or Adult Admin in your household to open this chat and approve it.
+      </T>
     </Card>
   );
 }

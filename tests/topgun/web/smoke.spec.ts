@@ -1,12 +1,14 @@
 import { expect, test } from "@playwright/test";
-import { expectRuntimeOnline, getProfiles, signIn, watchPageErrors } from "./helpers";
+import { expectRuntimeOnline, getProfiles, seedReturningUserState, signIn, watchPageErrors } from "./helpers";
 
 // TC-WEB smoke lane: app boots, session establishes, shell + backend link are truthful.
 // Profiles are resolved from /api/profiles (real household or seeded Harpers) — nothing
-// is hardcoded to seed data.
+// is hardcoded to seed data. Every test seeds the returning-user local state first
+// (see seedReturningUserState) — a fresh browser profile otherwise boots to Onboarding.
 
 test("app boots to the profile lock screen with the server roster", async ({ page }) => {
   const errors = watchPageErrors(page);
+  await seedReturningUserState(page);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: /who.s using/i })).toBeVisible({ timeout: 20_000 });
   await expect(page.getByText(/choose a profile to continue/i)).toBeVisible();

@@ -1,7 +1,7 @@
 // FamiliOS AI — push notifications (Expo). Shared by the run engine (so a run that
 // parks for approval notifies the household even with NO browser open) and by the
 // HTTP layer (API-created approvals). Fire-and-forget; never throws.
-import { getPushTokens, addNotification, appendAudit, getContactMethod, getMember, listMembers, canApprove } from "./store.mjs";
+import { getPushTokens, addNotification, appendAudit, getContactMethod, getMember, listMembers, canApprove, getSettings, getAgent } from "./store.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { executeTool, listConnectors, readinessOf } from "./connectors.mjs";
@@ -10,6 +10,10 @@ import { executeTool, listConnectors, readinessOf } from "./connectors.mjs";
 // approve themselves) notifies only the requester — a scheduled personal briefing must
 // not fan out to the whole household. A request the requester CAN'T approve (e.g. a child
 // asking for something) notifies the household's allowed approvers.
+function externalActionsEnabled(householdId) {
+  try { return getSettings(householdId).externalActionsEnabled !== false; } catch { return true; }
+}
+
 export function approvalAudience(approval) {
   const requester = approval.requestedBy ?? approval.actorId ?? null;
   const ids = new Set();
@@ -95,6 +99,8 @@ export async function pushToMember({ householdId, actorId, title, body, data }) 
  * the method's per-agent allowlist is enforced. */
 const CHANNEL_FOR = { "In-App": "in_app", "Family Dashboard": "dashboard", Email: "email", "Phone/Text": "sms" };
 const EXTERNAL_TYPES = ["Email", "Phone/Text"];
+// Channels that actually leave the house — the ones the kill switch must govern.
+const EXTERNAL_CHANNELS = ["email", "sms"];
 
 export async function deliverNotification({ session, methodId, methodType, to, title, body, agentId }) {
   let method = null;
@@ -125,6 +131,12 @@ export async function deliverNotification({ session, methodId, methodType, to, t
     // A registry-resolved method delivers to the method's OWNER (that's who the
     // address belongs to); the ad-hoc path keeps notifying the calling actor.
     recipientActorId: method?.memberId ?? session.actorId,
+    // WP-005 — WHOSE MAILBOX SENDS IT. A scheduled fire runs as the "scheduler" system
+    // actor, which owns no Google account, so an unattended send would have failed
+    // "not connected" even with everything correctly configured. Accounts are per-actor
+    // by design, so the agent's OWNER is the honest sending identity — the person who
+    // built the helper and granted it the allowlist in the first place.
+    senderActorIds: [session.actorId, ...(agentId ? [getAgent(agentId)?.createdBy].filter(Boolean) : [])],
   });
 }
 
@@ -143,10 +155,21 @@ export async function sendVerificationCode({ session, method, code }) {
   });
 }
 
-async function deliverViaChannel({ session, channel, to, subject: rawSubject, body, recipientActorId }) {
+async function deliverViaChannel({ session, channel, to, subject: rawSubject, body, recipientActorId, senderActorIds }) {
   const text = String(body ?? "").slice(0, 2000);
   const subject = String(rawSubject ?? "FamiliOS").slice(0, 140);
   try {
+    // WP-005 SECURITY — KILL SWITCH COVERAGE. The household's "pause external actions"
+    // switch was enforced in the engine's provider-tool path and inside the sms
+    // connector, but the EMAIL branch below called Gmail directly and never consulted
+    // it. That gap did not matter while nothing could reach this path unattended; the
+    // moment homeops.notify_contact makes it schedulable, an un-honored kill switch
+    // becomes a family flipping "stop" and mail going out anyway. Checked here, once,
+    // for every external channel — including the verification-code path.
+    if (EXTERNAL_CHANNELS.includes(channel) && !externalActionsEnabled(session?.householdId)) {
+      appendAudit({ type: "notify.blocked_by_kill_switch", channel, householdId: session?.householdId });
+      return { ok: false, channel, delivered: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch — nothing was sent. Turn them back on in Settings to allow this." };
+    }
     if (channel === "in_app" || channel === "dashboard") {
       const rec = addNotification({ householdId: session.householdId, actorId: recipientActorId ?? session.actorId, channel, title: subject, body: text, to: to ?? null });
       appendAudit({ type: "notify.deliver", channel, ok: true, householdId: session.householdId });
@@ -155,8 +178,22 @@ async function deliverViaChannel({ session, channel, to, subject: rawSubject, bo
     if (channel === "email") {
       if (!to) return { ok: false, channel, delivered: false, message: "No email address on this contact method." };
       if (!text.trim()) return { ok: false, channel, delivered: false, message: "Nothing to send — the message body was empty." };
-      const account = listAccountsFor(session.householdId, session.actorId).find((a) => a.provider === "google");
+      // Try the acting actor first, then the fallback identities (the agent's owner)
+      // — first Google account found wins.
+      const candidates = [...new Set([session.actorId, ...(senderActorIds ?? [])].filter(Boolean))];
+      let account = null;
+      for (const actorId of candidates) {
+        account = listAccountsFor(session.householdId, actorId).find((a) => a.provider === "google");
+        if (account) break;
+      }
       if (!account) return { ok: false, channel, delivered: false, needsSetup: "google", message: "Connect a Google account (with Send email) in Connections to deliver by email." };
+      // WP-005: a STALE account is not a working one. An expired/revoked Google grant
+      // would otherwise sail past these guards and fail deep inside the Gmail call,
+      // surfacing as an opaque provider error rather than the one thing the family can
+      // act on: reconnect. Say it plainly, before spending the request.
+      if (["needs_reconnect", "revoked", "expired"].includes(account.status)) {
+        return { ok: false, channel, delivered: false, needsSetup: "google_reconnect", message: `Your Google connection needs to be re-authorized (it's currently "${account.status}") — reconnect it in Connections and this will send. Nothing was sent.` };
+      }
       if (!(account.scopes ?? []).some((s) => /gmail\.send|mail\.google/i.test(String(s)))) return { ok: false, channel, delivered: false, needsSetup: "gmail.send", message: "Reconnect Google and grant the Send email permission." };
       const api = apiForAccount(account);
       const raw = Buffer.from(`To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${text}`, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

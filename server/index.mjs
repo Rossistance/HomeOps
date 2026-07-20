@@ -62,7 +62,7 @@ import {
 import { getFunction, listFunctionVersions } from "./store.mjs";
 import {
   createTrigger, updateTrigger, deleteTrigger, fireTrigger, fireWebhookTrigger, fireConnectorEvent,
-  publicTrigger, listPublicTriggers, getTriggerSecret, tick, TRIGGER_TYPES,
+  publicTrigger, listPublicTriggers, getTriggerSecret, tick, TRIGGER_TYPES, registerTriggerRunHooks, scheduleTextFor,
 } from "./triggers.mjs";
 import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, pushToMember } from "./notify.mjs";
@@ -1119,7 +1119,7 @@ const handleRequest = async (req, res) => {
         if (out.error) return json(res, out.error === "unknown_skill" ? 404 : 422, { error: out.error }, req);
         run = out.run;
       } else if (body.plan && typeof body.plan === "object") {
-        run = await startRun({ source: body.source ?? "manual", sourceRef: body.sourceRef ?? {}, plan: body.plan, params: body.params ?? {}, session: g.session });
+        run = await startRun({ source: body.source ?? "manual", sourceRef: clientSourceRef(body.sourceRef), plan: body.plan, params: body.params ?? {}, session: g.session });
       } else {
         return json(res, 400, { error: "plan_or_skill_required" }, req);
       }
@@ -2014,7 +2014,11 @@ const handleRequest = async (req, res) => {
         // path); a non-adult can never self-attest an address they merely typed.
         verified: fixed ? true : (isAdultRole(g.session.role) && !!body.verified),
         optInStatus: fixed ? "Opted In" : (isAdultRole(g.session.role) && OPT_IN_STATES.includes(body.optInStatus) ? body.optInStatus : "Pending"),
-        allowedAgentIds: Array.isArray(body.allowedAgentIds) ? body.allowedAgentIds.filter((a) => typeof a === "string") : [],
+        // SECURITY (finding C3): same adult gate on CREATE — otherwise the whole
+        // check above is bypassed by setting the allowlist at creation time.
+        allowedAgentIds: (isAdultRole(g.session.role) && Array.isArray(body.allowedAgentIds))
+          ? body.allowedAgentIds.filter((a) => typeof a === "string" && (() => { const x = getAgent(a); return x && (x.householdId === g.session.householdId || x.householdId === "local"); })())
+          : [],
         createdBy: g.session.actorId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
       audit({ type: "contact_method.create", contactMethodId: cm.id, memberId, methodType: cm.type, ok: true }, req, g.session);
@@ -2107,11 +2111,34 @@ const handleRequest = async (req, res) => {
         if (!validContactValue(cm.type, v)) return json(res, 400, { error: "invalid_value" }, req);
         // A changed address is a NEW address — honesty requires re-verification,
         // and any code sent to the OLD address must stop working immediately.
-        if (v !== cm.value) { patch.value = v; patch.verified = false; patch.optInStatus = "Pending"; patch.verifiedVia = null; deleteContactVerification(cm.id); }
+        // SECURITY (adversarial review, finding C2): a changed address is a NEW address,
+        // so verification resets — and the PER-AGENT SEND ALLOWLIST must reset with it.
+        // Leaving `allowedAgentIds` intact let the method's owner (any role, including
+        // Child View) repoint an adult-granted standing consent at an address they
+        // control, re-verify via the household's own SMS connector, and receive the
+        // family's automated messages at an outside number. Granting an agent send
+        // rights is an adult act; re-granting after a repoint must be one too.
+        if (v !== cm.value) {
+          patch.value = v; patch.verified = false; patch.optInStatus = "Pending"; patch.verifiedVia = null;
+          patch.verifiedBy = null; patch.verifiedAt = null; patch.allowedAgentIds = [];
+          deleteContactVerification(cm.id);
+        }
       }
       if (body.allowedAgentIds != null) {
         if (!Array.isArray(body.allowedAgentIds)) return json(res, 400, { error: "bad_allowed_agents" }, req);
-        patch.allowedAgentIds = body.allowedAgentIds.filter((a) => typeof a === "string");
+        // SECURITY (adversarial review, finding C3): this allowlist IS the standing
+        // consent that lets an agent send to this address unattended, with no per-run
+        // approval. It was the only field on this record NOT adult-gated — so a
+        // Guest could self-verify an address they control and then grant an agent
+        // permission to mail it every morning, with no adult ever involved. It is
+        // adult-only, and every id must resolve to an agent in THIS household.
+        if (!isAdultRole(g.session.role)) {
+          return json(res, 403, { error: "insufficient_role", message: "Allowing a helper to message a contact is an adult decision — ask an adult to grant it." }, req);
+        }
+        const ids = body.allowedAgentIds.filter((a) => typeof a === "string");
+        const bad = ids.filter((id) => { const a = getAgent(id); return !a || (a.householdId !== g.session.householdId && a.householdId !== "local"); });
+        if (bad.length) return json(res, 400, { error: "unknown_agent", message: "One of those helpers doesn't exist in this household.", ids: bad }, req);
+        patch.allowedAgentIds = ids;
       }
       if (body.verified != null) {
         // The honest path to verified is the code loop (send-verification → verify).
@@ -2155,6 +2182,22 @@ const handleRequest = async (req, res) => {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const methodType = String(body.methodType ?? body.channel ?? "In-App");
+      // SECURITY (adversarial review, finding H2): this route reaches the SAME external
+      // delivery path as the scheduler, but had no role floor and made the per-agent
+      // allowlist optional — a caller who simply omitted `agentId` skipped gate 3
+      // entirely and could text any verified method in the household. Since WP-005
+      // rests its whole consent story on that allowlist, an authenticated-but-
+      // unprivileged bypass of it cannot stand. External channels now require an adult;
+      // in-app/dashboard notifications stay open to everyone (they reach no one outside).
+      // The hole is specifically messaging SOMEONE ELSE unattended; notifying your own
+      // verified address is legitimate and stays open to every role.
+      const target = typeof body.methodId === "string" ? getContactMethod(body.methodId) : null;
+      const external = ["Email", "Phone/Text"].includes(methodType)
+        || (target && ["Email", "Phone/Text"].includes(target.type));
+      const ownMethod = target && target.memberId === g.session.actorId;
+      if (external && !ownMethod && !isAdultRole(g.session.role)) {
+        return json(res, 403, { error: "insufficient_role", message: "Messaging someone else outside the household is an adult action." }, req);
+      }
       const out = await deliverNotification({
         session: g.session, methodId: typeof body.methodId === "string" ? body.methodId : null,
         methodType, to: body.to ?? null, title: body.title, body: body.body,
@@ -2816,6 +2859,7 @@ const handleRequest = async (req, res) => {
       const histConv = body.conversationId ? getConversation(body.conversationId) : null;
       const history = histConv && canSeeConversation(histConv, g.session) ? histConv.messages : [];
       const out = await assistantRespond({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history });
+      demoteBuildForRole(out, g.session);
       // Do-requests EXECUTE immediately (C-intel): a plan from chat auto-starts as a
       // durable server run — no "Run plan" click. Approval-gated steps still pause
       // for human sign-off inside the run, and results append back to this thread.
@@ -2869,6 +2913,8 @@ const handleRequest = async (req, res) => {
           { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history },
           (_tok) => { tokenCount++; if (tokenCount % 4 === 0) res.write(`data: ${JSON.stringify({ type: "progress", tokens: tokenCount })}\n\n`); },
         );
+        demoteBuildForRole(out, g.session); // ISS-011 — the streaming path gates identically
+
         // Do-requests auto-execute here too (see POST /api/assistant): the run starts
         // before the "done" event so the client can attach to it immediately.
         if (out.ok && out.kind === "plan" && out.plan && roleAtLeast(g.session.role, "Limited Member")) {
@@ -2928,7 +2974,13 @@ const handleRequest = async (req, res) => {
         persistBuildOutcome(body.conversationId, g.session, out);
         return json(res, 200, { ok: true, ...out }, req);
       } catch (e) {
-        return json(res, 422, { ok: false, error: "build_failed", message: String(e?.message ?? e) }, req);
+        // WP-001 slice 3 — the refusal must reach the FAMILY, not just the HTTP client.
+        // A build that cannot run is reported in the thread in plain language, so the
+        // user never walks away believing an automation was set up.
+        const code = e?.code ?? "build_failed";
+        const message = String(e?.message ?? e).replace(/^unrunnable_automation:\s*/, "");
+        persistBuildFailure(body.conversationId, g.session, code, message);
+        return json(res, 422, { ok: false, error: code, message }, req);
       }
     }
     // Streaming variant (UC.6): same materialize, but emits an SSE event per entity as it's
@@ -2948,7 +3000,10 @@ const handleRequest = async (req, res) => {
         persistBuildOutcome(body.conversationId, g.session, out);
         res.write(`data: ${JSON.stringify({ type: "done", result: { ok: true, ...out } })}\n\n`);
       } catch (e) {
-        res.write(`data: ${JSON.stringify({ type: "done", result: { ok: false, error: "build_failed", message: String(e?.message ?? e) } })}\n\n`);
+        const code = e?.code ?? "build_failed";
+        const message = String(e?.message ?? e).replace(/^unrunnable_automation:\s*/, "");
+        persistBuildFailure(body.conversationId, g.session, code, message);
+        res.write(`data: ${JSON.stringify({ type: "done", result: { ok: false, error: code, message } })}\n\n`);
       }
       res.end();
       return;
@@ -3079,6 +3134,34 @@ const handleRequest = async (req, res) => {
   }
 };
 
+/* ---- SECURITY (WP-005 adversarial review, finding C1) ----
+ * `sourceRef` is not decoration: the engine reads `sourceRef.agentId` to decide which
+ * agent's POLICY applies (engine.mjs) and, since WP-005, which agent's standing
+ * send-consent applies (a contact method's per-agent allowlist). POST /api/runs/start
+ * previously forwarded the caller's `sourceRef` verbatim, so any Limited Member could
+ * name any agent and inherit its send authority — reading the allowlists first from
+ * GET /api/contact-methods. That turns "the allowlist IS the approval" into "the
+ * caller picks their own identity", which is not an allowlist at all.
+ *
+ * Agent identity is therefore SERVER-ASSIGNED ONLY: it is set by runAgent/runSkill/
+ * fireTrigger, never accepted from a request body. Clients may still pass harmless
+ * correlation fields. */
+// Only the AUTHORITY-BEARING fields are stripped. The rest of sourceRef is benign
+// correlation metadata (conversationId, isRepair, repairedFrom, via …) that the chat
+// layer legitimately sets and depends on, so a blanket allow-list would break it.
+// These four are exactly the fields the server reads to decide what a run MAY DO:
+//   agentId      → whose tool policy applies, and (WP-005) whose send consent applies
+//   skillId      → attribution the policy path and save-offer gating key off
+//   triggerId    → which automation's status this run writes back to
+//   automationId → the same, on the legacy field name
+const SERVER_ASSIGNED_SOURCEREF = ["agentId", "skillId", "triggerId", "automationId"];
+function clientSourceRef(raw) {
+  if (!raw || typeof raw !== "object") return {};
+  const out = { ...raw };
+  for (const k of SERVER_ASSIGNED_SOURCEREF) delete out[k];
+  return out;
+}
+
 function publicSkill(s) {
   // All fields are non-secret — expose the full skill record to authenticated same-household clients.
   return s;
@@ -3102,8 +3185,17 @@ function materializeBuild(spec, { session, req, emit = () => {} }) {
     // permitted∩available rendered them inert despite the chat saying "created".
     const stepToolIds = (spec.skill?.steps ?? []).map((s) => s?.tool_id).filter(Boolean);
     const derived = deriveCapabilitiesFromSteps(stepToolIds, session);
+    // WP-001 slice 5 — ONE lifecycle, decided (DEC-I01). An agent that the same build
+    // is about to put on a SCHEDULE lands Active. A Draft agent behind an enabled
+    // trigger is the false-success shape in miniature: the chat says it's set up, the
+    // schedule is real, and a status field nobody surfaced quietly says otherwise.
+    // Safety still lives where it always did — the per-step approval gate — not in a
+    // Draft flag that never blocked a run anyway. Builds with NO automation keep Draft:
+    // nothing fires unattended, so there is nothing to misrepresent.
+    const landsActive = !!(spec.automation && typeof spec.automation === "object");
     const agent = createAgent({
       ...spec.agent, skillIds,
+      status: spec.agent.status ?? (landsActive ? "Active" : "Draft"),
       allowedToolIds: [...new Set([...(Array.isArray(spec.agent.allowedToolIds) ? spec.agent.allowedToolIds : []), ...derived.allowedToolIds])],
       allowedFunctionIds: [...new Set([...(Array.isArray(spec.agent.allowedFunctionIds) ? spec.agent.allowedFunctionIds : []), ...derived.allowedFunctionIds])],
     }, session);
@@ -3113,13 +3205,32 @@ function materializeBuild(spec, { session, req, emit = () => {} }) {
   }
   if (spec.automation && typeof spec.automation === "object") {
     const a = spec.automation;
+    // WP-001 slice 1 — TARGET LINKAGE. The automation must carry what it should RUN,
+    // not merely who should run it. Previously an agent target was `{kind:"agent",
+    // agentId}` with no skillId and no goal, so every scheduled fire fell through
+    // runAgent's third branch into buildReadonlyPlan — a zero-effect "status pass"
+    // that reported success while delivering nothing (ISS-001, EV-011/EV-015).
+    // Now the built skill (or, failing that, the agent's own instructions) rides on
+    // the target so the fire executes the recipe the chat actually built.
+    const goalFromSpec = String(spec.agent?.instructions ?? spec.summary ?? "").trim() || null;
     const target = a.target ?? (created.agent
-      ? { kind: "agent", agentId: created.agent.id, params: a.params ?? {} }
+      ? { kind: "agent", agentId: created.agent.id, skillId: created.skill?.id ?? null, goal: created.skill ? null : goalFromSpec, params: a.params ?? {} }
       : created.skill
         ? { kind: "skill", skillId: created.skill.id, params: a.params ?? {} }
         : a.target);
+    // WP-001 slice 3 — REFUSE THE UNRUNNABLE. An automation whose resolved target can
+    // neither run a skill nor plan from a goal has nothing to execute; creating it
+    // would manufacture exactly the silent no-op this work package exists to kill.
+    // Fail loudly at build time (caller maps the throw to 422) instead.
+    const resolvedTarget = target ?? {};
+    const runnable = !!(resolvedTarget.skillId || String(resolvedTarget.goal ?? "").trim());
+    if (!runnable) {
+      const err = new Error("unrunnable_automation: this automation has nothing to run — it needs a skill to execute or instructions to work from.");
+      err.code = "unrunnable_automation";
+      throw err;
+    }
     const trig = createTrigger({ ...a, target }, session, Date.now());
-    created.automation = { id: trig.id, name: trig.name, type: trig.type, enabled: trig.enabled };
+    created.automation = { id: trig.id, name: trig.name, type: trig.type, enabled: trig.enabled, anchor: trig.anchor ?? null, nextRunAt: trig.nextRunAt ?? null, scheduleText: scheduleTextFor(trig) };
     audit({ type: "assistant.build", entity: "automation", triggerId: trig.id, ok: true }, req, session);
     emit({ type: "progress", entity: "automation", action: "created", id: trig.id, name: trig.name });
   }
@@ -3156,7 +3267,17 @@ function materializeBuild(spec, { session, req, emit = () => {} }) {
     notes.push("Heads up: this helper has no usable tools yet — connect the services it needs or edit it before relying on it.");
   }
   if (created.skill && created.skill.status !== "available") notes.push("The new skill starts as a draft — it becomes available automatically once its connected services are ready and a first run succeeds.");
-  if (created.agent && created.agent.status === "Draft") notes.push("The new helper is a draft — open Helper Agents to activate it.");
+  if (created.agent && created.agent.status === "Draft") notes.push("The new helper is a draft — open Helper Agents to activate it. Nothing runs on its own until you do.");
+  // WP-001 slice 1 + WP-002 — say what will run, and when, in the family's words.
+  // The build card previously announced a schedule without ever naming the recipe
+  // behind it, which is how "created" and "does nothing" coexisted for so long.
+  if (created.automation) {
+    const runs = created.skill ? `“${created.skill.name}”` : (created.agent ? `“${created.agent.name}”` : "this automation");
+    const when = created.automation.scheduleText ?? "on its schedule";
+    notes.push(`${when === "on its schedule" ? "On its schedule" : when} it will run ${runs}${created.agent && created.skill ? ` as “${created.agent.name}”` : ""}.`);
+    const gated = (spec.skill?.steps ?? []).filter((s) => s?.approval_required).map((s) => s?.name).filter(Boolean);
+    if (gated.length) notes.push(`${gated.length === 1 ? `The “${gated[0]}” step` : `These steps — ${gated.join(", ")} —`} will ask for your approval each time, so nothing goes out unattended until you allow it.`);
+  }
   if (updated.some((u) => !u.ok)) notes.push("Some edits couldn't be applied (the target wasn't found in your household).");
   return { created, updated, notes };
 }
@@ -3187,6 +3308,33 @@ function persistBuildOutcome(conversationId, session, out) {
     at: new Date().toISOString(),
   });
 }
+// WP-001 slice 3 — the other half of persistBuildOutcome: when a build is REFUSED,
+// the conversation says so. Silence here is what let a family believe an automation
+// existed when the server had declined to create one.
+/* ---- WP-006 (ISS-011): ROLE-AWARE PROPOSALS ----
+ * The assistant would happily hand a Guest/Helper a full build card — "here's the
+ * helper I'll create, confirm?" — and the confirm then 403'd on /api/assistant/build,
+ * because creating durable agents is Adult Admin only. A dead card is worse than a
+ * refusal: it looks like progress and ends in a wall. So a build proposal aimed at
+ * someone who cannot build is demoted, HERE at the single server authority, into a
+ * plain answer that says what was understood and who can actually set it up. */
+function demoteBuildForRole(out, session) {
+  if (!out?.ok || out.kind !== "build" || roleAtLeast(session.role, "Adult Admin")) return;
+  const what = String(out.build?.summary ?? out.build?.agent?.name ?? "that helper").slice(0, 160);
+  out.kind = "answer";
+  out.answer = `I can see what you're after — ${what}. Setting up a helper that runs on its own needs an adult admin on this household, so I can't create it from your account. Ask one of them to say the same thing to me and I'll build it, or I can just do it manually for you right now if you'd like.`;
+  delete out.build;
+}
+
+function persistBuildFailure(conversationId, session, code, message) {
+  if (!conversationId) return;
+  const conv = getConversation(conversationId);
+  if (!canSeeConversation(conv, session)) return;
+  const text = code === "unrunnable_automation"
+    ? `I couldn't set that automation up: ${message} Tell me what it should actually do on each run — the steps to take, or the skill it should use — and I'll build it properly.`
+    : `I couldn't finish setting that up: ${message} Nothing was created.`;
+  appendConversationMessage(conv.id, { role: "assistant", kind: "status", buildError: code, text, at: new Date().toISOString() });
+}
 function publicApproval(a) {
   // NOTE: the approval record deliberately never stores the raw input — only
   // `inputHash` (the consume-once integrity check against whatever input is supplied
@@ -3207,6 +3355,9 @@ function publicRun(r) {
       index: s.index, toolId: s.toolId, functionId: s.functionId, title: s.title, detail: s.detail,
       requiresApproval: s.requiresApproval, risk: s.risk, connectorId: s.connectorId, connectorName: s.connectorName,
       attribution: s.attribution, status: s.status, approvalId: s.approvalId, attempts: s.attempts, input: s.input ?? {},
+      // WP-003: the truth flags travel to both clients so a skipped step renders as
+      // skipped rather than falling into an unknown-status default.
+      effectClaimed: !!s.effectClaimed, clampedOut: s.clampedOut ?? null,
       result: s.result ?? null, toolCalls: s.toolCalls ?? [], startedAt: s.startedAt, finishedAt: s.finishedAt,
     })),
   };
@@ -3237,6 +3388,7 @@ server.listen(PORT, () => {
   // overwriting a Settings-made choice (see bootstrapAIFromEnv).
   try { const boot = bootstrapAIFromEnv(); if (boot.length) console.log(`[ai] bootstrapped from env: ${boot.join(", ")}`); } catch { /* non-fatal */ }
   registerAssistantRunHooks(); // inline chat results + one-shot self-repair for conversation runs
+  registerTriggerRunHooks();   // WP-001: write each run's TERMINAL status back to its trigger
   // Recovery + sweeps + trigger tick run once PER HOUSEHOLD, each inside that
   // household's tenant context — one family's broken state never blocks another's.
   void forEachTenant(() => recoverRuns()); // re-drive any runs that were mid-flight at shutdown

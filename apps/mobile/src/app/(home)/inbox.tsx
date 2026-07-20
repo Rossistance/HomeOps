@@ -306,9 +306,15 @@ export default function InboxScreen() {
               <SectionHeader title="Recently decided" />
               <Card padded={false} style={{ opacity: 0.85 }}>
                 {decided.map((a, i) => {
+                  // WP-004: statusColor() doesn't recognize "expired" and would fall to
+                  // its neutral gray default — an expired approval means nothing was
+                  // sent, which deserves the same visible caution as a denial, not a
+                  // shrug.
                   const sc = a.status === "approved" || a.status === "consumed"
                     ? { fg: colors.sage, bg: colors.sageBg }
-                    : statusColor(colors, a.status);
+                    : a.status === "expired"
+                      ? { fg: colors.coral, bg: colors.coralBg }
+                      : statusColor(colors, a.status);
                   return (
                     <Row
                       key={a.id}

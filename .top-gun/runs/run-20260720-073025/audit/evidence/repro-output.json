@@ -1,0 +1,294 @@
+{
+  "startedAt": "2026-07-20T07:56:54.570Z",
+  "head": "c0c4596",
+  "repros": {
+    "A_build_seam": {
+      "assistantResult": {
+        "ok": true,
+        "kind": "build",
+        "answer": "I'll set up a Morning Briefing helper that emails wrhixon@gmail.com every day at 7 AM."
+      },
+      "buildResult": {
+        "ok": true,
+        "created": {
+          "skill": {
+            "id": "skl_f614c39fbbb3f93a8fe3",
+            "name": "TG-Morning Briefing",
+            "status": "draft"
+          },
+          "agent": {
+            "id": "agt_e31260e21d8145c6f0f8",
+            "name": "TG-Morning Briefing Agent",
+            "status": "Draft",
+            "allowedToolIds": [
+              "web.search",
+              "gmail.send"
+            ],
+            "allowedFunctionIds": []
+          },
+          "automation": {
+            "id": "trg_c2a39f7f9c1a8f6388e8",
+            "name": "TG-Daily 7AM briefing",
+            "type": "recurring",
+            "enabled": true
+          }
+        },
+        "notes": [
+          "I preselected 2 capabilities for the new helper from its skill steps — no manual tool wiring needed.",
+          "The new skill starts as a draft — it becomes available automatically once its connected services are ready and a first run succeeds.",
+          "The new helper is a draft — open Helper Agents to activate it."
+        ]
+      },
+      "trigger": {
+        "id": "trg_c2a39f7f9c1a8f6388e8",
+        "type": "recurring",
+        "enabled": true,
+        "intervalMs": 86400000,
+        "nextRunAt": 1784620615233,
+        "nextRunAt_iso": "2026-07-21T07:56:55.233Z",
+        "createdAt_iso": "2026-07-20T07:56:55.168Z",
+        "nextRunAt_minus_createdAt_h": "24.00",
+        "target": {
+          "kind": "agent",
+          "agentId": "agt_e31260e21d8145c6f0f8",
+          "skillId": null,
+          "goal": null,
+          "params": {}
+        }
+      },
+      "agent": {
+        "id": "agt_e31260e21d8145c6f0f8",
+        "status": "Draft",
+        "visibility": "household",
+        "skillIds": [
+          "skl_f614c39fbbb3f93a8fe3"
+        ],
+        "allowedToolIds": [
+          "web.search",
+          "gmail.send"
+        ],
+        "allowedFunctionIds": []
+      },
+      "fire": {
+        "status": 200,
+        "ok": true,
+        "runId": "run_3799903ed7db69254408"
+      },
+      "run": {
+        "id": "run_3799903ed7db69254408",
+        "status": "completed",
+        "error": null,
+        "title": "TG-Morning Briefing Agent",
+        "source": "trigger",
+        "sourceRef": {
+          "agentId": "agt_e31260e21d8145c6f0f8",
+          "skillId": null
+        },
+        "steps": [
+          {
+            "index": 0,
+            "toolId": "web.search",
+            "title": "Search the web",
+            "status": "succeeded",
+            "detail": "{\"engine\":\"duckduckgo\",\"query\":\"Read current data via Web Search & Reading.\",\"results\":[{\"title\":\"Reading Data from the Web: Web Scraping & Regular Expressions - Summet\",\"url\":\"https://www.summet.com/",
+            "requiresApproval": false,
+            "approvalId": null
+          }
+        ]
+      },
+      "triggerAfterFire": {
+        "lastStatus": "queued",
+        "lastRunId": "run_3799903ed7db69254408",
+        "fireCount": 1
+      },
+      "conversationMessages": [
+        {
+          "role": "user",
+          "text": "create an agent that sends a daily morning briefing email to wrhixon@gmail.com every day at 7 AM. It should include the 7-day weather, calendar and tasks for the next 7 days, top 5 global and local news stories with links, and family updates.",
+          "runId": null
+        },
+        {
+          "role": "assistant",
+          "kind": "build",
+          "text": "I'll set up a Morning Briefing helper that emails wrhixon@gmail.com every day at 7 AM.",
+          "runId": null
+        },
+        {
+          "role": "assistant",
+          "kind": "build_result",
+          "text": "Done — I set up skill “TG-Morning Briefing”, helper “TG-Morning Briefing Agent”, automation “TG-Daily 7AM briefing”.\n\n• I preselected 2 capabilities for the new helper from its skill steps — no manual tool wiring needed.\n• The new skill starts as a draft — it becomes available automatically once its",
+          "runId": null
+        }
+      ]
+    },
+    "B_nullsend_plan": {
+      "assistantResult": {
+        "ok": true,
+        "kind": "plan",
+        "autoStartedRun": "run_552b387690434f63daac"
+      },
+      "run": {
+        "id": "run_552b387690434f63daac",
+        "status": "completed",
+        "error": null,
+        "title": "TG-Send briefing email now",
+        "source": "assistant",
+        "sourceRef": {
+          "conversationId": "conv_e1d3ff200c2c86f1",
+          "via": "chat"
+        },
+        "steps": [
+          {
+            "index": 0,
+            "toolId": "web.search",
+            "title": "Get weather",
+            "status": "succeeded",
+            "detail": "{\"engine\":\"duckduckgo\",\"query\":\"7 day weather forecast\",\"results\":[{\"title\":\"7-Day Forecast 35.07N 85.27W - National Weather Service\",\"url\":\"https://forecast.weather.gov/zipcity.php?inputstring=Chatta",
+            "requiresApproval": false,
+            "approvalId": null
+          },
+          {
+            "index": 1,
+            "toolId": null,
+            "title": "Compose the briefing",
+            "status": "succeeded",
+            "detail": "Composed the morning briefing: weather clear all week; no calendar conflicts; 5 headlines gathered.",
+            "requiresApproval": false,
+            "approvalId": null
+          },
+          {
+            "index": 2,
+            "toolId": null,
+            "title": "Send email to wrhixon@gmail.com",
+            "status": "succeeded",
+            "detail": "Composed the morning briefing: weather clear all week; no calendar conflicts; 5 headlines gathered.",
+            "requiresApproval": false,
+            "approvalId": null
+          }
+        ]
+      },
+      "conversationMessages": [
+        {
+          "role": "user",
+          "text": "TG: send me the morning briefing email right now",
+          "runId": null
+        },
+        {
+          "role": "assistant",
+          "kind": "plan",
+          "text": "On it — composing today's briefing and sending it to wrhixon@gmail.com now.",
+          "runId": "run_552b387690434f63daac"
+        },
+        {
+          "role": "assistant",
+          "kind": "run_result",
+          "status": "completed",
+          "text": "Done — \"TG-Send briefing email now\" finished (3/3 steps).\n\nComposed the morning briefing: weather clear all week; no calendar conflicts; 5 headlines gathered.\n\nComposed the morning briefing: weather clear all week; no calendar conflicts; 5 headlines gathered.",
+          "runId": "run_552b387690434f63daac"
+        },
+        {
+          "role": "assistant",
+          "kind": "build",
+          "text": "That worked. Want me to save \"TG-Send briefing email now\" as a reusable helper, so next time it's one tap?",
+          "runId": null
+        }
+      ]
+    },
+    "B2_gmail_unconnected_plan": {
+      "assistantResult": {
+        "ok": true,
+        "kind": "plan",
+        "autoStartedRun": "run_e144617c26931169f94a"
+      },
+      "run": {
+        "id": "run_e144617c26931169f94a",
+        "status": "waiting_for_approval",
+        "error": null,
+        "title": "TG-Send briefing via gmail",
+        "source": "assistant",
+        "sourceRef": {
+          "conversationId": "conv_032f738ca7f6ec86",
+          "via": "chat"
+        },
+        "steps": [
+          {
+            "index": 0,
+            "toolId": null,
+            "title": "Compose the briefing",
+            "status": "succeeded",
+            "detail": "Composed the morning briefing: weather clear all week; no calendar conflicts; 5 headlines gathered.",
+            "requiresApproval": false,
+            "approvalId": null
+          },
+          {
+            "index": 1,
+            "toolId": "gmail.send",
+            "title": "Send email to wrhixon@gmail.com",
+            "status": "waiting_for_approval",
+            "detail": "",
+            "requiresApproval": true,
+            "approvalId": "apr_d94179bcfbd7e03e71eea7f6"
+          }
+        ]
+      },
+      "conversationMessages": [
+        {
+          "role": "user",
+          "text": "TG: email me the briefing via gmail now",
+          "runId": null
+        },
+        {
+          "role": "assistant",
+          "kind": "plan",
+          "text": "On it — sending the briefing to wrhixon@gmail.com.",
+          "runId": "run_e144617c26931169f94a"
+        }
+      ]
+    },
+    "C_clamp_seam": {
+      "agent": {
+        "id": "agt_ae2017324fde8340d57b",
+        "allowedToolIds": [
+          "web.search"
+        ]
+      },
+      "fire": {
+        "ok": true,
+        "runId": "run_b987de138b5b4d7973be"
+      },
+      "run": {
+        "id": "run_b987de138b5b4d7973be",
+        "status": "completed",
+        "error": null,
+        "title": "TG-Clamp Agent",
+        "source": "trigger",
+        "sourceRef": {
+          "agentId": "agt_ae2017324fde8340d57b",
+          "skillId": null
+        },
+        "steps": [
+          {
+            "index": 0,
+            "toolId": "web.search",
+            "title": "Research",
+            "status": "succeeded",
+            "detail": "{\"engine\":\"duckduckgo\",\"query\":\"morning briefing material\",\"results\":[{\"title\":\"PDF 7-Step Morning Briefing Checklist - reclaro\",\"url\":\"https://reclaro.com/downloads/7-step-morning-briefing-checklist.",
+            "requiresApproval": false,
+            "approvalId": null
+          },
+          {
+            "index": 1,
+            "toolId": null,
+            "title": "Compose",
+            "status": "succeeded",
+            "detail": "Composed the morning briefing: weather clear all week; no calendar conflicts; 5 headlines gathered.",
+            "requiresApproval": false,
+            "approvalId": null
+          }
+        ]
+      },
+      "note": "planFromGoal returned 3 steps incl. gmail.send; orchestrator clamp drops disallowed steps before startRun"
+    }
+  },
+  "finishedAt": "2026-07-20T07:57:01.098Z"
+}

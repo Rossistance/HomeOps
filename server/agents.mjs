@@ -8,7 +8,7 @@
 import crypto from "node:crypto";
 import {
   listAgents, getAgent, putAgent, patchAgent, deleteAgentRec,
-  readJSON, writeJSON,
+  readJSON, writeJSON, listContactMethods, patchContactMethod,
 } from "./store.mjs";
 import { toolCatalog } from "./planner.mjs";
 import { listPublicFunctions } from "./functions.mjs";
@@ -132,6 +132,16 @@ export function deleteAgent(id) {
   if (existing.system) return { error: "system_agent_protected" };
   snapshotAgent(existing);
   deleteAgentRec(id);
+  // SECURITY (adversarial review, finding H1): deleting a helper is how a family
+  // expects to REVOKE it. Its standing send-consent lives on the contact methods that
+  // allowlisted it, not on the agent record, so deleting the agent alone left live
+  // grants pointing at an id that no longer resolves. Purge them here so revocation
+  // means what a family thinks it means.
+  try {
+    for (const m of listContactMethods((c) => (c.allowedAgentIds ?? []).includes(id))) {
+      patchContactMethod(m.id, { allowedAgentIds: (m.allowedAgentIds ?? []).filter((a) => a !== id) });
+    }
+  } catch { /* revocation is best-effort; the engine also hard-fails unknown agents */ }
   return { ok: true };
 }
 

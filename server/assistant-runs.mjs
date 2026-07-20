@@ -17,7 +17,7 @@ import {
   getConversation, appendConversationMessage, getMember, appendAudit,
   recordAiUsage, aiBudgetExhausted, getSettings, runWithTenant,
 } from "./store.mjs";
-import { onRunFinished, startRun } from "./engine.mjs";
+import { onRunFinished, onRunParked, startRun } from "./engine.mjs";
 import { toolCatalog, normalizePlan } from "./planner.mjs";
 import { providerChatWithFallback } from "./ai.mjs";
 
@@ -29,15 +29,60 @@ Respond with ONLY JSON (no prose, no fences):
 { "diagnosis": string, "plan": { "title": string, "summary": string, "steps": [ { "toolId": string|null, "title": string, "detail": string, "input": object, "requiresApproval": boolean } ] } }
 "diagnosis" is one plain sentence naming what broke and what you changed.`;
 
+/* ---- WP-003 (ISS-002, FEAT-014): the run summary tells the truth ----
+ * The old summary counted `succeeded` steps and called it done: "Done — finished (3/3)".
+ * It could not distinguish a briefing that was EMAILED from one that was merely
+ * COMPOSED, so the family read success either way (EV-012). The rewrite separates what
+ * was delivered from what was only prepared, and names — in plain words — every step
+ * that did not happen and why. The warm voice stays; the certainty is now earned. */
+const SUCCESS_STATUSES = ["succeeded", "done", "completed"];
+
+export function summarizeOutcome(run) {
+  const steps = run.steps ?? [];
+  const succeeded = steps.filter((s) => SUCCESS_STATUSES.includes(s.status));
+  // "Delivered" = a real tool ran and it was the kind of step that reaches the outside
+  // world (approval-gated sends/writes are exactly those the family cares about).
+  const delivered = succeeded.filter((s) => s.toolId && (s.requiresApproval || /send|notify|email|sms|post|deliver/i.test(String(s.toolId))));
+  const composed = succeeded.filter((s) => !s.toolId);
+  const noTool = steps.filter((s) => s.status === "skipped_no_tool");
+  const skipped = steps.filter((s) => s.status === "skipped");
+  const parked = steps.filter((s) => s.status === "waiting_for_approval");
+  const expired = steps.filter((s) => s.status === "expired");
+  const failed = steps.filter((s) => s.status === "failed");
+  return { steps, succeeded, delivered, composed, noTool, skipped, parked, expired, failed, anyEffect: delivered.length > 0 };
+}
+
+function shortfallLines(o) {
+  const lines = [];
+  for (const s of o.noTool) lines.push(`• Not sent — "${s.title}" had no delivery tool behind it, so nothing left the house.`);
+  for (const s of o.skipped) lines.push(`• Skipped — "${s.title}": ${String(s.detail ?? "not permitted").replace(/^Not permitted:\s*/, "not permitted — ")}`);
+  for (const s of o.expired) lines.push(`• Expired — "${s.title}" was waiting on approval and the window closed. Nothing was sent.`);
+  for (const s of o.failed) lines.push(`• Failed — "${s.title}": ${String(s.detail ?? "unknown error").slice(0, 160)}`);
+  return lines;
+}
+
 function runOutcomeText(run) {
-  const done = run.steps.filter((s) => ["succeeded", "done", "completed"].includes(s.status)).length;
-  const reasoning = run.steps.filter((s) => !s.toolId && s.result?.text).map((s) => s.result.text).join("\n\n").trim();
-  if (run.status === "completed") {
-    const body = reasoning ? `\n\n${reasoning.slice(0, 1200)}` : "";
-    return `Done — "${run.title}" finished (${done}/${run.steps.length} steps).${body}`;
+  const o = summarizeOutcome(run);
+  const reasoning = o.composed.filter((s) => s.result?.text).map((s) => s.result.text).join("\n\n").trim();
+  const body = reasoning ? `\n\n${reasoning.slice(0, 1200)}` : "";
+  const shortfalls = shortfallLines(o);
+  const caveat = shortfalls.length ? `\n\n${shortfalls.join("\n")}` : "";
+
+  if (run.status === "expired") {
+    return `That approval expired — nothing was sent for "${run.title}". Ask me again when you're ready and I'll re-run it.${caveat}`;
   }
-  const bad = run.steps.find((s) => s.status === "failed");
-  return `"${run.title}" failed at step ${bad ? bad.index + 1 : "?"}${bad ? ` (${bad.title})` : ""}: ${run.error ?? "unknown error"}.`;
+  if (run.status === "completed") {
+    // The headline must match the strongest thing that actually happened. A run with
+    // nothing but composition says so up front, rather than burying it under "Done".
+    const head = o.anyEffect
+      ? `Done — "${run.title}" ran and delivered ${o.delivered.length} step${o.delivered.length === 1 ? "" : "s"}.`
+      : shortfalls.length
+        ? `I finished "${run.title}", but nothing was actually sent.`
+        : `Done — "${run.title}" finished (${o.succeeded.length}/${o.steps.length} steps).`;
+    return `${head}${caveat}${body}`;
+  }
+  const bad = o.failed[0];
+  return `"${run.title}" failed at step ${bad ? bad.index + 1 : "?"}${bad ? ` (${bad.title})` : ""}: ${run.error ?? "unknown error"}.${caveat}`;
 }
 
 function appendToConversation(run, message) {
@@ -132,12 +177,35 @@ function offerToSaveAgent(run, { repaired } = {}) {
 // and a run that came from an already-saved skill/agent is skipped (nothing new to save).
 function worthSavingAsHelper(run) {
   if (run.sourceRef?.skillId || run.sourceRef?.agentId || run.sourceRef?.savedFrom) return false;
-  const toolSteps = run.steps.filter((s) => s.toolId).length;
-  return toolSteps >= 1 && run.steps.length >= 2;
+  // WP-003: gate on what SUCCEEDED, not on what was planned. The old check counted
+  // planned tool steps, so a run whose only send was a toolless no-op still got the
+  // cheerful "That worked — want me to save it?" offer. Offering to immortalize a
+  // recipe that just failed to deliver is the false success at its most galling.
+  const o = summarizeOutcome(run);
+  if (o.noTool.length || o.skipped.length || o.expired.length || o.failed.length) return false;
+  const ranRealTool = o.succeeded.filter((s) => s.toolId).length;
+  return ranRealTool >= 1 && run.steps.length >= 2;
 }
 
 /** Wire the hooks. Called once at boot. */
 export function registerAssistantRunHooks() {
+  // WP-004 (ISS-004) — a run that PARKS says so in the thread, immediately. Before
+  // this, a scheduled 7 AM briefing that stopped at its approval step left the
+  // conversation showing "On it —" indefinitely: the run was alive, waiting, and
+  // completely invisible. The message names the step, the deadline, and where to act.
+  onRunParked((run, { approvalId, expiresAt } = {}) => runWithTenant(run.householdId, async () => {
+    if (!run.sourceRef?.conversationId) return;
+    const step = run.steps?.[run.cursor];
+    const mins = expiresAt ? Math.max(1, Math.round((expiresAt - Date.now()) / 60000)) : null;
+    const window = mins ? ` It expires in about ${mins} minute${mins === 1 ? "" : "s"}.` : "";
+    appendToConversation(run, {
+      kind: "status",
+      runId: run.id,
+      approvalId: approvalId ?? null,
+      text: `Waiting for your approval before "${step?.title ?? run.title}" can run — nothing has been sent yet.${window} Review it in your Inbox to let it through.`,
+    });
+  }));
+
   onRunFinished((run) => runWithTenant(run.householdId, async () => {
     if (!run.sourceRef?.conversationId) return;
     // 1. Durable inline result for every conversation-born run.

@@ -139,8 +139,15 @@ export default function ActivityScreen() {
   // Dismissed proposals drop off the list; keep pending + accepted (incl. auto-applied).
   const improvements = evolutions.filter((e) => e.status !== "rejected");
 
+  // WP-003/WP-004: a step that did NOT deliver must never read as neutral-pending.
+  // `not_sent` (no delivery tool behind a send step), `skipped` (agent policy refused)
+  // and `expired` (approval window closed) all land amber — the same weight as a
+  // waiting gate — so a non-delivery is as visible as a success.
   const stepDot = (s: string) =>
-    s === "done" ? colors.sage : s === "running" ? colors.ember : s === "blocked" ? colors.amber : colors.textFaint;
+    s === "done" ? colors.sage
+      : s === "running" ? colors.ember
+        : s === "blocked" || s === "not_sent" || s === "skipped" || s === "expired" ? colors.amber
+          : colors.textFaint;
 
   // Live-run tone: running reads ember (it's ours, right now); waiting reads amber.
   const liveTone = activeRun
@@ -194,7 +201,10 @@ export default function ActivityScreen() {
                       </View>
                       {s.status === "done" ? <Sym name="checkmark.circle.fill" size={15} color={colors.sage} />
                         : s.status === "blocked" ? <Sym name="pause.circle.fill" size={15} color={colors.amber} />
-                        : s.status === "running" ? <Sym name="ellipsis" size={15} color={colors.ember} /> : null}
+                        : s.status === "not_sent" ? <Sym name="exclamationmark.circle.fill" size={15} color={colors.amber} />
+                          : s.status === "skipped" ? <Sym name="forward.circle.fill" size={15} color={colors.amber} />
+                            : s.status === "expired" ? <Sym name="clock.badge.exclamationmark.fill" size={15} color={colors.amber} />
+                              : s.status === "running" ? <Sym name="ellipsis" size={15} color={colors.ember} /> : null}
                     </View>
                   ))}
                 </View>

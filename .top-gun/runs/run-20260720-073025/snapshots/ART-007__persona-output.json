@@ -1,0 +1,47 @@
+{
+  "startedAt": "2026-07-20T08:01:31.830Z",
+  "passes": {
+    "JRN2_morgan_build": {
+      "kind": "build",
+      "buildOk": true,
+      "agentTools": [
+        "homeops.send_notification_draft"
+      ],
+      "run": {
+        "status": "completed",
+        "steps": []
+      }
+    },
+    "JRN3_lily_child": {
+      "assistant": {
+        "status": 403,
+        "error": "ai_disabled"
+      },
+      "build": {
+        "status": 403,
+        "error": "insufficient_role"
+      }
+    },
+    "JRN4_sam_guest": {
+      "assistant": {
+        "status": 200,
+        "kind": "build"
+      },
+      "build": {
+        "status": 403,
+        "error": "insufficient_role"
+      }
+    },
+    "JRN5_notify_gate": {
+      "status": 200,
+      "data": {
+        "ok": false,
+        "channel": "email",
+        "delivered": false,
+        "needsSetup": "google",
+        "message": "Connect a Google account (with Send email) in Connections to deliver by email."
+      }
+    }
+  },
+  "finishedAt": "2026-07-20T08:01:34.974Z"
+}

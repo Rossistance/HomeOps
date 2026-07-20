@@ -1,4 +1,5 @@
 import { expect, type Page } from "@playwright/test";
+import { buildEmptyData } from "../../../src/data/seed";
 
 /**
  * Profiles come from the SERVER registry (/api/profiles) — on a fresh/dev backend that's
@@ -6,6 +7,29 @@ import { expect, type Page } from "@playwright/test";
  * household. Tests therefore resolve profiles dynamically instead of hardcoding names.
  * Override with TOPGUN_WEB_PROFILE when a specific member should be used.
  */
+
+/**
+ * Seed the "returning user" state a fresh Playwright profile lacks.
+ *
+ * App boot (src/store/useStore.ts init → src/storage/db.ts loadAppData) shows
+ * Onboarding when NO local AppData exists, and the Lock screen when data exists
+ * but no session does. A fresh browser context always lands on Onboarding, so
+ * every spec that assumes the Lock screen must seed local data first.
+ *
+ * loadAppData checks IndexedDB then falls through to localStorage
+ * ("homeops-ai:appdata") — a fresh context has an empty IndexedDB, so seeding
+ * localStorage via addInitScript (runs before the app's own scripts) is enough.
+ * The payload comes from the app's own buildEmptyData so the schema can never
+ * drift from what the store expects. No backend calls, no backend writes.
+ *
+ * Must be called BEFORE the first page.goto().
+ */
+export async function seedReturningUserState(page: Page) {
+  const data = buildEmptyData("TG Harness Household", "TG Harness Local");
+  await page.addInitScript((json: string) => {
+    try { window.localStorage.setItem("homeops-ai:appdata", json); } catch { /* storage unavailable → app shows its own banner */ }
+  }, JSON.stringify(data));
+}
 export interface LockProfile {
   actorId: string;
   displayName: string;
@@ -46,6 +70,7 @@ export async function pickProfile(
  * those, or target a child/guest profile.
  */
 export async function signIn(page: Page, opts: { name?: string; role?: RegExp } = {}) {
+  await seedReturningUserState(page); // fresh profiles otherwise land on Onboarding, never Lock
   await page.goto("/");
   await expect(commandPalette(page).or(lockHeading(page)).first()).toBeVisible({ timeout: 20_000 });
   if (await commandPalette(page).isVisible()) return; // already in a session

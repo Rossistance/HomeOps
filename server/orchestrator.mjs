@@ -57,12 +57,12 @@ export async function runAssistantPlan({ plan, session, conversationId, agentId 
 //   • neither  → a read-only pass over the agent's permitted, available read tools.
 // In every case the durable executor re-validates each step against the agent policy,
 // so a denied / unpermitted tool can never enter the run.
-export async function runAgent({ agentId, goal, skillId, params = {}, session, source = "agent" } = {}) {
+export async function runAgent({ agentId, goal, skillId, params = {}, session, source = "agent", sourceRef = {} } = {}) {
   const agent = selectAgent({ agentId, session });
   if (!agent) return { error: "unknown_agent" };
 
   if (skillId) {
-    return await runSkill({ skillId, agentId: agent.id, params, session, source });
+    return await runSkill({ skillId, agentId: agent.id, params, session, source, sourceRef });
   }
 
   let plan;
@@ -77,12 +77,19 @@ export async function runAgent({ agentId, goal, skillId, params = {}, session, s
     mode = "deterministic";
   }
 
-  // Clamp the plan to the agent's allow/deny policy BEFORE the run starts. Disallowed
-  // tool steps are dropped (recorded in routing); reasoning steps are always kept.
-  const before = plan.steps.length;
-  const clamped = (plan.steps ?? []).filter((s) => isToolStepAllowed(agent, s.toolId ?? null, session).ok);
-  const dropped = before - clamped.length;
-  const run = await startRun({ source, sourceRef: { agentId: agent.id, skillId: null }, plan: { ...plan, steps: clamped }, params, session, title: agent.name, visibility: agent.visibility });
+  // WP-003 (ISS-005) — CLAMP VISIBLY, NEVER SILENTLY. Disallowed tool steps used to be
+  // FILTERED OUT of the plan before the run started. The run then completed with the
+  // steps that remained and reported success, while the one step the user actually
+  // cared about — "email the briefing" — had been deleted without a trace anywhere the
+  // family could see (EV-014). Now the step SURVIVES into the run carrying its refusal,
+  // and the engine records it as `skipped` with the honest reason. Nothing executes that
+  // policy forbids; the difference is purely that the omission is now visible.
+  const clamped = (plan.steps ?? []).map((s) => {
+    const verdict = isToolStepAllowed(agent, s.toolId ?? null, session);
+    return verdict.ok ? s : { ...s, clampedOut: { reason: verdict.reason, message: verdict.message ?? "Not permitted for this agent." } };
+  });
+  const dropped = clamped.filter((s) => s.clampedOut).length;
+  const run = await startRun({ source, sourceRef: { agentId: agent.id, skillId: null, ...sourceRef }, plan: { ...plan, steps: clamped }, params, session, title: agent.name, visibility: agent.visibility });
   addRouting({ runId: run.id, agentId: agent.id, skillId: null, mode, reason: goal ? "agent goal" : "agent read-only run", stepCount: clamped.length, droppedSteps: dropped });
   return { ok: true, run, droppedSteps: dropped };
 }

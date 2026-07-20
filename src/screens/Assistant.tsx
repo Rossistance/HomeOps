@@ -623,9 +623,19 @@ function RunStatus({ run }: { run: AutomationRun }) {
       </div>
       <ul className="space-y-1">
         {run.steps.map((st, i) => (
-          <li key={i} className="flex items-center gap-2 text-xs">
-            <Icon name={st.status === "done" ? "CheckCircle2" : st.status === "blocked" ? "Lock" : st.status === "running" ? "Loader2" : "Circle"} size={13} className={st.status === "done" ? "text-sage-500" : st.status === "blocked" ? "text-amber-600" : st.status === "running" ? "animate-spin text-sky-500" : "text-ink-300"} />
-            <span className="text-ink-600">{st.label}</span>
+          <li key={i} className="text-xs">
+            <div className="flex items-center gap-2">
+              {/* "skipped" covers three honest non-successes (no delivery tool, policy
+                  clamp, or a denied/expired approval) — never the neutral default a
+                  status this codebase doesn't recognize used to fall into. */}
+              <Icon
+                name={st.status === "done" ? "CheckCircle2" : st.status === "blocked" ? "Lock" : st.status === "running" ? "Loader2" : st.status === "skipped" ? "SkipForward" : "Circle"}
+                size={13}
+                className={st.status === "done" ? "text-sage-500" : st.status === "blocked" ? "text-amber-600" : st.status === "running" ? "animate-spin text-sky-500" : st.status === "skipped" ? "text-amber-600" : "text-ink-300"}
+              />
+              <span className="text-ink-600">{st.label}</span>
+            </div>
+            {st.status === "skipped" && st.detail && <p className="ml-5 mt-0.5 text-[11px] text-amber-700">{st.detail}</p>}
           </li>
         ))}
       </ul>

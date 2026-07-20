@@ -11,7 +11,12 @@ export interface RunStepState {
   title: string;
   detail: string;
   requiresApproval: boolean;
-  status: "pending" | "running" | "done" | "blocked";
+  // WP-004: "not_sent" (claimed an effect but had no delivery tool), "skipped"
+  // (policy forbade the step, or its approval was denied), and "expired" (the
+  // approval window closed unattended) are their own honest states — none of them
+  // may fall into "pending"/"done", which is exactly the false-success bug class
+  // this run surface is meant to fix.
+  status: "pending" | "running" | "done" | "blocked" | "not_sent" | "skipped" | "expired";
   output?: string;
   approvalId?: string;
 }
@@ -38,6 +43,12 @@ function mapStepStatus(s: string, approvalId: string | null): RunStepState["stat
   switch (s) {
     case "done": case "completed": case "succeeded": return "done";
     case "running": case "in_progress": return "running";
+    // A step that CLAIMED it would send/email/notify but had no delivery tool behind
+    // it is not a success — the old default read this as "pending" (neutral), which is
+    // how a run that delivered nothing could still look like it was still working.
+    case "skipped_no_tool": return "not_sent";
+    case "skipped": return "skipped"; // policy forbade it, or its approval was denied
+    case "expired": return "expired"; // the approval window closed before a decision
     case "blocked": case "waiting_approval": case "waiting_for_approval": case "failed": case "error": return "blocked";
     default: return approvalId ? "blocked" : "pending";
   }
@@ -46,8 +57,11 @@ function mapStepStatus(s: string, approvalId: string | null): RunStepState["stat
 function mapRunStatus(s: string): ActiveRun["status"] {
   switch (s) {
     case "completed": case "succeeded": return "completed";
-    case "failed": case "error": case "cancelled": return "failed";
-    case "waiting_approval": case "waiting_for_approval": case "paused": return "waiting";
+    case "failed": case "error": case "cancelled": case "expired": return "failed";
+    // WP-004: a connector/provider wait is just as "parked" as an approval wait — it
+    // used to fall through to the `running` default, which is how a run stuck
+    // waiting on a connector kept reading as "still going" long after polling gave up.
+    case "waiting_approval": case "waiting_for_approval": case "waiting_for_connector": case "waiting_for_provider": case "paused": return "waiting";
     default: return "running";
   }
 }
@@ -65,7 +79,14 @@ function toActiveRun(run: RunRec, startedAt: string): ActiveRun {
       requiresApproval: !!st.approvalId,
       status: mapStepStatus(st.status, st.approvalId),
       approvalId: st.approvalId ?? undefined,
-      output: st.status === "waiting_approval" || st.approvalId ? "Waiting for your approval in the Inbox." : undefined,
+      // The server already names what happened ("Not sent — this step had no delivery
+      // tool…", "Not permitted: …", "Approval expired before a decision.") — surface
+      // that verbatim rather than a generic label, so the caveat is never buried.
+      output: st.status === "waiting_approval" || st.approvalId
+        ? "Waiting for your approval in the Inbox."
+        : (st.status === "skipped_no_tool" || st.status === "skipped" || st.status === "expired") && st.detail
+          ? st.detail
+          : undefined,
     })),
     startedAt,
     completedAt: status === "completed" || status === "failed" ? new Date().toISOString() : undefined,

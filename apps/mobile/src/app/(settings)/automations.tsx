@@ -16,6 +16,11 @@ import { Badge, Button, Card, EmptyState, ErrorState, HScreen, Notice, Pressable
 // target.agentId (not top-level agentId), the last outcome is the string
 // `lastStatus` (not a lastResult object), and schedule state is nextRunAt (ms).
 // Read all of it defensively on top of the shared TriggerRec.
+// WP-002/WP-006 (see server/triggers.mjs publicTrigger): the server now resolves a
+// human schedule plus anchor/tzSource alongside the raw fields, and settles
+// lastStatus to a TERMINAL value (completed/failed/expired/waiting_for_approval)
+// instead of a permanent "started" (ISS-009). The shared TriggerRec type predates
+// all of this, so it's widened defensively here rather than trusted blindly.
 type TriggerX = TriggerRec & {
   target?: { kind?: string; agentId?: string | null; skillId?: string | null; goal?: string | null } | null;
   nextRunAt?: number | null;
@@ -26,6 +31,13 @@ type TriggerX = TriggerRec & {
   event?: string | null;
   webhookPath?: string | null;
   system?: boolean;
+  /** "HH:MM" wall-clock anchor, e.g. "07:00" for a daily 7 AM briefing. */
+  anchor?: string | null;
+  /** Which clock the anchor resolved against — discloses a server-local fallback
+   * when the household never set a timezone, instead of hiding it. */
+  tzSource?: "household" | "server" | null;
+  /** Ready-to-render human schedule, e.g. "Daily · 7:00 AM" — never raw intervalMs. */
+  scheduleText?: string;
 };
 type RunX = RunRec & { source?: string; sourceRef?: { triggerId?: string | null } | null; createdAt?: string | number };
 
@@ -63,7 +75,10 @@ function typeBadge(c: HearthColors, type: string): { fg: string; bg: string; ico
 }
 
 // "every 30 min" / "daily at 7:00 AM" / "runs Jul 9, 7:00 AM" — human words, not ms.
-function scheduleText(t: TriggerX): string {
+// Fallback only: the server now sends a ready-made `scheduleText` (preferred
+// wherever a trigger is rendered below) — this covers a record from before that
+// field existed.
+function fallbackScheduleText(t: TriggerX): string {
   const at = (ms: number | null | undefined, style: Intl.DateTimeFormatOptions) =>
     ms ? new Date(ms).toLocaleString(undefined, style) : null;
   if (t.type === "recurring" && t.intervalMs) {
@@ -88,15 +103,20 @@ function scheduleText(t: TriggerX): string {
   return "fires on demand";
 }
 
-// lastStatus is a run-status string ("completed", "started", …) or "error:<code>".
+// lastStatus is now a TERMINAL run-status string (ISS-009: completed, failed,
+// expired, waiting_for_approval, …) or "error:<code>" — never a permanent
+// "started". A bare "started"/"queued" can still show up for a run mid-flight or
+// a record from before the terminal writeback landed; render it neutrally rather
+// than as a false "ok".
 function lastResultBadge(c: HearthColors, t: TriggerX): { label: string; fg: string; bg: string } | null {
   const raw = t.lastStatus ?? (t.lastResult ? (t.lastResult.ok ? "completed" : "failed") : null);
   if (!raw) return null;
-  if (raw.startsWith("error") || raw === "failed" || raw === "denied") return { label: "error", fg: c.coral, bg: c.coralBg };
-  if (raw === "started" || raw === "running" || raw === "waiting_approval" || raw === "pending") {
-    return { label: raw.replace(/_/g, " "), fg: c.amber, bg: c.amberBg };
+  if (raw.startsWith("error") || raw === "failed" || raw === "denied" || raw === "expired" || raw === "cancelled") {
+    return { label: raw.replace(/^error:/, "").replace(/_/g, " "), fg: c.coral, bg: c.coralBg };
   }
-  return { label: "ok", fg: c.sage, bg: c.sageBg };
+  if (raw.startsWith("waiting")) return { label: raw.replace(/_/g, " "), fg: c.amber, bg: c.amberBg };
+  if (raw === "completed" || raw === "succeeded") return { label: "completed", fg: c.sage, bg: c.sageBg };
+  return { label: raw.replace(/_/g, " "), fg: c.textMuted, bg: c.surfaceSunken };
 }
 
 function friendly(error?: string, message?: string): string {
@@ -115,12 +135,20 @@ function friendly(error?: string, message?: string): string {
 // vocabulary in lib/run-context.tsx but keeps failed/waiting distinct for glyphs.
 const LIVE_POLL_MS = 1800;
 const LIVE_POLL_MAX_MS = 3 * 60 * 1000;
-type StepVis = "pending" | "running" | "done" | "failed" | "waiting";
+type StepVis = "pending" | "running" | "done" | "failed" | "waiting" | "not_sent" | "skipped" | "expired";
 type RunVis = "running" | "waiting" | "completed" | "failed";
 
+// WP-004: a step that claimed an effect (send/email/notify) but had no delivery tool
+// behind it, one a policy clamped, and one whose approval window closed unattended
+// each get their own honest glyph below — none of them may fall into the neutral
+// "pending" default, which is exactly how a run that delivered nothing used to read
+// as though it was still quietly working.
 function stepVis(st: RunRec["steps"][number]): StepVis {
   const s = st.status;
   if (s === "done" || s === "completed" || s === "succeeded") return "done";
+  if (s === "skipped_no_tool") return "not_sent";
+  if (s === "expired") return "expired";
+  if (s === "skipped") return "skipped";
   if (s === "failed" || s === "error") return "failed";
   if (s === "waiting_approval" || s === "waiting_for_approval" || s === "blocked" || s === "paused" || st.approvalId) return "waiting";
   if (s === "running" || s === "in_progress") return "running";
@@ -129,8 +157,8 @@ function stepVis(st: RunRec["steps"][number]): StepVis {
 function runVis(s: string): RunVis {
   switch (s) {
     case "completed": case "succeeded": return "completed";
-    case "failed": case "error": case "cancelled": return "failed";
-    case "waiting_approval": case "waiting_for_approval": case "paused": return "waiting";
+    case "failed": case "error": case "cancelled": case "expired": return "failed";
+    case "waiting_approval": case "waiting_for_approval": case "waiting_for_connector": case "waiting_for_provider": case "paused": return "waiting";
     default: return "running";
   }
 }
@@ -194,6 +222,9 @@ function LiveRunCard({ triggerName, run, onDismiss }: { triggerName: string; run
                   {v === "running" ? <ActivityIndicator size="small" color={colors.ember} />
                     : v === "done" ? <Sym name="checkmark.circle.fill" size={16} color={colors.sage} />
                     : v === "failed" ? <Sym name="xmark.circle.fill" size={16} color={colors.coral} />
+                    : v === "not_sent" ? <Sym name="envelope.badge.exclamationmark" size={16} color={colors.amber} />
+                    : v === "expired" ? <Sym name="exclamationmark.triangle.fill" size={16} color={colors.amber} />
+                    : v === "skipped" ? <Sym name="minus.circle.fill" size={16} color={colors.textMuted} />
                     : v === "waiting" ? <Sym name="hourglass" size={16} color={colors.amber} />
                     : <Sym name="circle" size={13} color={colors.textFaint} />}
                 </View>
@@ -201,6 +232,12 @@ function LiveRunCard({ triggerName, run, onDismiss }: { triggerName: string; run
                   <T kind="subMedium" color={v === "pending" ? colors.textMuted : colors.text}>{s.title}</T>
                   {v === "waiting" ? (
                     <T kind="sub" color={colors.amber}>Waiting for approval in your Inbox</T>
+                  ) : v === "not_sent" ? (
+                    <T kind="sub" color={colors.amber} numberOfLines={2}>{s.detail || "Not sent — this step had no delivery tool behind it."}</T>
+                  ) : v === "expired" ? (
+                    <T kind="sub" color={colors.amber} numberOfLines={2}>{s.detail || "Expired — nothing was sent."}</T>
+                  ) : v === "skipped" ? (
+                    <T kind="sub" color={colors.textMuted} numberOfLines={2}>{s.detail || "Skipped — not permitted."}</T>
                   ) : v === "failed" && s.detail ? (
                     <T kind="sub" numberOfLines={2}>{s.detail}</T>
                   ) : null}
@@ -352,7 +389,7 @@ export default function AutomationsScreen() {
 
   const menu = (t: TriggerX) => {
     tapHaptic("select");
-    Alert.alert(t.name, scheduleText(t), [
+    Alert.alert(t.name, t.scheduleText ?? fallbackScheduleText(t), [
       { text: "Test run", onPress: () => void testRun(t) },
       {
         text: "Delete…", style: "destructive",
@@ -437,8 +474,16 @@ export default function AutomationsScreen() {
               <View style={{ gap: 4 }}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
                   <Sym name="clock" size={12} color={colors.textFaint} />
-                  <T kind="caption" color={colors.textMuted} numberOfLines={1} style={{ flex: 1 }}>{scheduleText(t)}</T>
+                  <T kind="caption" color={colors.textMuted} numberOfLines={1} style={{ flex: 1 }}>{t.scheduleText ?? fallbackScheduleText(t)}</T>
                 </View>
+                {t.tzSource === "server" ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                    <Sym name="exclamationmark.triangle" size={12} color={colors.amber} />
+                    <T kind="caption" color={colors.amber} numberOfLines={2} style={{ flex: 1 }}>
+                      Household time zone isn't set — this uses the server's time zone instead.
+                    </T>
+                  </View>
+                ) : null}
                 {linkage ? (
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
                     <Sym name="sparkles" size={12} color={colors.textFaint} />

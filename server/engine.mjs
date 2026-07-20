@@ -25,7 +25,7 @@ import { getAgent } from "./store.mjs";
 import { isToolStepAllowed, partialUpdateAgent } from "./agents.mjs";
 import { partialUpdateSkill } from "./skills.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
-import { proposeEvolution, judgeEvolutionConfidence, INTERNAL_INPUTS } from "./planner.mjs";
+import { proposeEvolution, judgeEvolutionConfidence, INTERNAL_INPUTS, claimsExternalEffect } from "./planner.mjs";
 import { providerChat } from "./ai.mjs";
 
 const RUN_STEP_TIMEOUT_MS = 60_000;
@@ -53,6 +53,29 @@ function fireRunFinished(runId) {
   if (!run) return;
   for (const cb of _runFinishedHooks) {
     try { void Promise.resolve(cb(run)).catch(() => {}); } catch { /* observer-only */ }
+  }
+}
+
+/* ---- WP-004: PARKED-RUN hooks (ISS-004) ----
+ * A run that parks for approval used to emit an SSE event and nothing else. With no
+ * browser open — the normal case for a 7 AM scheduled fire — the conversation kept its
+ * last optimistic line ("On it —") forever and the family learned nothing (EV-013).
+ * Parking is a real, reportable outcome, so it gets a hook of its own.
+ * Fired at most ONCE per run (a resume that re-parks on a LATER step fires again, but
+ * re-entering _drive on the same parked step does not — that duplicate message is the
+ * failure mode this guard exists to prevent). */
+const _runParkedHooks = [];
+export function onRunParked(cb) { _runParkedHooks.push(cb); }
+const _parkedAnnounced = new Set();
+function fireRunParked(runId, { stepIndex, approvalId, expiresAt } = {}) {
+  const key = `${runId}:${stepIndex}`;
+  if (_parkedAnnounced.has(key)) return;
+  _parkedAnnounced.add(key);
+  if (_parkedAnnounced.size > 5000) _parkedAnnounced.clear(); // bounded; re-announce is benign
+  const run = getRun(runId);
+  if (!run) return;
+  for (const cb of _runParkedHooks) {
+    try { void Promise.resolve(cb(run, { stepIndex, approvalId, expiresAt })).catch(() => {}); } catch { /* observer-only */ }
   }
 }
 
@@ -252,7 +275,10 @@ function resolveTool(toolId, householdId) {
 // has been consumed. Returns { ok, result } | { ok:false, error, message, waiting? }.
 async function execResolved(resolved, input, ctx, approvalId) {
   if (resolved.kind === "internal") {
-    return await resolved.def.run({ householdId: ctx.householdId, actorId: ctx.actorId, runId: ctx.runId }, input);
+    // WP-005: the acting AGENT travels with the call. homeops.notify_contact enforces
+    // the recipient's per-agent allowlist, and it cannot do that without knowing who
+    // is acting — an unattributed send would silently skip that gate.
+    return await resolved.def.run({ householdId: ctx.householdId, actorId: ctx.actorId, runId: ctx.runId, agentId: ctx.agentId ?? null }, input);
   }
   if (resolved.kind === "function") {
     // HARD RULE: a registered function executes in a run ONLY when its live state is
@@ -326,6 +352,18 @@ export async function startRun({ source = "manual", sourceRef = {}, plan, params
       connectorId: resolved?.connectorId ?? null,
       connectorName: resolved?.connectorName ?? null,
       attribution: resolved?.kind ?? (s.toolId ? "unknown" : "reasoning"),
+      // WP-003: both truth flags ride into the durable run so the trace, the summary,
+      // and both clients read the same verdict the planner/orchestrator reached.
+      //
+      // The effect-claim check is RE-EVALUATED here rather than merely copied, because
+      // `normalizePlan` is not on every path into a run. A deterministic skill's steps
+      // come through `buildPlanFromSkill`, and `POST /api/runs/start` accepts a raw
+      // plan — both skip normalization entirely. Since the chat-built briefing runs as
+      // a SKILL, trusting the upstream flag would have left the user's exact scenario
+      // still reporting a toolless "Send email" step as succeeded. startRun is the one
+      // choke point every run passes through, so the verdict is settled here.
+      effectClaimed: s.effectClaimed ?? claimsExternalEffect({ toolId: s.toolId ?? null, title: s.title, detail: s.detail }),
+      clampedOut: s.clampedOut ?? null,
       status: "pending",
       approvalId: null,
       idempotencyKey: null,
@@ -405,7 +443,37 @@ async function _drive(runId) {
       return { ok: true, status: "completed" };
     }
     const step = run.steps[i];
-    if (["succeeded", "skipped"].includes(step.status)) { patchRun(runId, { cursor: i + 1 }); continue; }
+    if (["succeeded", "skipped", "skipped_no_tool"].includes(step.status)) { patchRun(runId, { cursor: i + 1 }); continue; }
+
+    // WP-003 (ISS-005) — a step the agent's policy forbids is recorded as SKIPPED and
+    // left in the trace. It never executes (that is the point of the clamp), but the
+    // family can now see that it was asked for and refused, instead of the step simply
+    // ceasing to exist between the plan and the run.
+    if (step.clampedOut) {
+      patchRunStep(runId, i, { status: "skipped", detail: `Not permitted: ${step.clampedOut.message}`, finishedAt: Date.now() });
+      appendAudit({ type: "run.step_clamped", runId, toolId: step.toolId, reason: step.clampedOut.reason, householdId: run.householdId });
+      patchRun(runId, { cursor: i + 1 });
+      emit(runId, "run.step");
+      continue;
+    }
+
+    // WP-003 (ISS-002) — THE FALSE-SUCCESS SEAM. A toolless step that claims to send,
+    // email, text, or notify cannot possibly have done so: there is no tool behind it.
+    // It used to be marked `succeeded`, which is how a run that delivered nothing
+    // reported "finished (3/3)" and the chat said "That worked". It is now terminal-
+    // but-honest: `skipped_no_tool`, naming what was missing. The run can still
+    // complete — the composition was real work — but no step lies about an effect.
+    if (!step.toolId && step.effectClaimed) {
+      patchRunStep(runId, i, {
+        status: "skipped_no_tool",
+        detail: `Not sent — this step had no delivery tool behind it. Connect the service it needs (or allow it for this helper) and run it again.`,
+        finishedAt: Date.now(),
+      });
+      appendAudit({ type: "run.step_skipped_no_tool", runId, title: step.title, householdId: run.householdId, actorId: run.actorId });
+      patchRun(runId, { cursor: i + 1 });
+      emit(runId, "run.step");
+      continue;
+    }
 
     // Reasoning step (no tool) — the LLM works over prior step results and stores
     // {text, data}; later steps draw on `data` (e.g. which message ids to act on).
@@ -459,7 +527,17 @@ async function _drive(runId) {
     // plan slipped one in. Availability is enforced separately below; this is policy.
     if (run.sourceRef?.agentId) {
       const agent = getAgent(run.sourceRef.agentId);
-      if (agent) {
+      // SECURITY (adversarial review, finding H1 + L4): an agentId that does not
+      // resolve — or resolves into another household — used to SKIP the policy check
+      // entirely, while still being forwarded as the acting identity for send
+      // authority. Deleting an agent is how a family expects to revoke it, so a run
+      // naming a deleted agent must fail closed, never run unpoliced.
+      if (!agent || (agent.householdId !== run.householdId && agent.householdId !== "local")) {
+        patchRunStep(runId, i, { status: "failed", detail: "This run names a helper that no longer exists in this household, so its permissions can't be checked.", finishedAt: Date.now() });
+        appendAudit({ type: "run.policy_block", runId, toolId: step.toolId, agentId: run.sourceRef.agentId, reason: "unknown_agent", householdId: run.householdId });
+        return finishFailed(runId, "agent_policy_unknown_agent");
+      }
+      {
         const verdict = isToolStepAllowed(agent, step.toolId, { householdId: run.householdId, actorId: run.actorId });
         if (!verdict.ok) {
           patchRunStep(runId, i, { status: "failed", detail: verdict.message ?? "Blocked by agent policy.", finishedAt: Date.now() });
@@ -509,6 +587,9 @@ async function _drive(runId) {
         // no browser open. Fire-and-forget; no-op when no device tokens are registered.
         pushApprovalNotification(a).catch(() => {});
         emit(runId, "run.waiting_for_approval");
+        // WP-004: tell the CONVERSATION too — a push notification is not a record, and
+        // a scheduled fire parks with nobody watching.
+        fireRunParked(runId, { stepIndex: i, approvalId: a.id, expiresAt: a.expiresAt ?? null });
         return { ok: true, status: "waiting_for_approval", approvalId: a.id };
       }
       const appr = getApproval(stepNow.approvalId);
@@ -554,7 +635,7 @@ async function _drive(runId) {
     let out;
     const t0 = Date.now();
     try {
-      out = await withTimeout(execResolved(resolved, stepNow.input, { householdId: run.householdId, actorId: run.actorId, runId, accountId: run.params?.accountId }, approvalId), RUN_STEP_TIMEOUT_MS);
+      out = await withTimeout(execResolved(resolved, stepNow.input, { householdId: run.householdId, actorId: run.actorId, runId, accountId: run.params?.accountId, agentId: run.sourceRef?.agentId ?? null }, approvalId), RUN_STEP_TIMEOUT_MS);
     } catch (e) {
       out = { ok: false, error: "timeout", message: String(e?.message ?? e) };
     }
@@ -626,27 +707,39 @@ function finishFailed(runId, error) {
   appendAudit({ type: "run.failed", runId, error, failureClass: classifyFailure(error), householdId: run?.householdId });
   if (run) {
     recordFailureEvolution(run); // real, evidence-backed proposal (deterministic baseline)
-    // Consecutive-failure alert: the same agent/automation failing twice in a
-    // row is a broken routine, not a blip — tell the Owner now, in-app.
-    try {
-      const refId = run.sourceRef?.agentId || run.sourceRef?.automationId || null;
-      if (refId) {
-        const siblings = listRuns({ householdId: run.householdId, limit: 50 })
-          .filter((r) => (r.sourceRef?.agentId || r.sourceRef?.automationId) === refId && r.id !== run.id && ["completed", "failed"].includes(r.status))
-          .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
-        if (siblings[0]?.status === "failed") {
-          addNotification({
-            householdId: run.householdId, actorId: run.actorId, channel: "In-App", to: null,
-            title: "An agent keeps failing",
-            body: `"${run.title}" has failed twice in a row (${classifyFailure(error)}). Check its details in Agents — it may need a connection fixed or its instructions adjusted.`,
-          });
-        }
-      }
-    } catch { /* alerting must never mask the original failure */ }
+    notifyRepeatedNonDelivery(run, classifyFailure(error));
   }
   emit(runId, "run.failed");
   fireRunFinished(runId);
   return { ok: false, status: "failed", error };
+}
+
+/* ---- WP-004 (ISS-008): "this routine keeps not delivering" ----
+ * The same agent/automation coming up empty TWICE IN A ROW is a broken routine, not a
+ * blip — so the Owner hears about it in-app. Previously only `failed` counted, which
+ * meant a briefing whose approval expired every single morning could go silent
+ * indefinitely without ever tripping the alert (EV-026). Expiry is non-delivery too,
+ * and non-delivery is the thing the family actually cares about. */
+const NON_DELIVERY = ["failed", "expired"];
+function notifyRepeatedNonDelivery(run, failureClass) {
+  if (!run) return;
+  try {
+    const refId = run.sourceRef?.agentId || run.sourceRef?.automationId || run.sourceRef?.triggerId || null;
+    if (!refId) return;
+    const siblings = listRuns({ householdId: run.householdId, limit: 50 })
+      .filter((r) => (r.sourceRef?.agentId || r.sourceRef?.automationId || r.sourceRef?.triggerId) === refId
+        && r.id !== run.id && ["completed", ...NON_DELIVERY].includes(r.status))
+      .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
+    if (!NON_DELIVERY.includes(siblings[0]?.status)) return;
+    const why = run.status === "expired"
+      ? "its approval expired before anyone decided, both times"
+      : `${failureClass ?? classifyFailure(run.error)}, twice in a row`;
+    addNotification({
+      householdId: run.householdId, actorId: run.actorId, channel: "In-App", to: null,
+      title: "An automation keeps not finishing",
+      body: `"${run.title}" hasn't delivered twice in a row (${why}). Check it in Agents — it may need a connection fixed, an approval allowlisted, or its instructions adjusted.`,
+    });
+  } catch { /* alerting must never mask the original outcome */ }
 }
 
 // Evidence-backed improvement proposal from a real failed run. Writes a
@@ -797,6 +890,13 @@ export async function expireStaleRuns() {
       patchRun(r.id, { status: "expired", error: "approval_expired", finishedAt: Date.now(), lease: null });
       appendAudit({ type: "run.expired", runId: r.id, householdId: run.householdId });
       emit(r.id, "run.expired");
+      // WP-004 (ISS-004/EV-007): expiry is TERMINAL, so it must reach the run-finished
+      // observers like every other terminal state. Skipping the hook here is why an
+      // expired approval produced total silence — no chat message, no trigger status,
+      // no keeps-failing signal. A run that quietly died is the worst of the false
+      // successes, because nothing at all marks the moment it stopped mattering.
+      notifyRepeatedNonDelivery(getRun(r.id));
+      fireRunFinished(r.id);
       expired++; // count only runs actually transitioned
     }).catch(() => {}));
   }

@@ -6,7 +6,7 @@ import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { api, type AgentRec, type ApprovalRec, type RunRec, type TriggerRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { useTheme, statusColor } from "@/theme";
+import { useTheme, statusColor, type HearthColors } from "@/theme";
 import {
   T, Card, Badge, Chip, ChipRow, Row, SectionHeader, SkeletonCards, ErrorState,
   Rise, HScreen, PressableScale, Sym, useConfirmFlash,
@@ -14,6 +14,20 @@ import {
 import { agentIcon, agentTint, humanSchedule } from "@/lib/agent-meta";
 
 type RunX = RunRec & { sourceRef?: { agentId?: string | null } | null; createdAt?: string | number };
+
+// WP-004: the shared statusColor() helper doesn't know "waiting_for_approval",
+// "waiting_for_connector"/"waiting_for_provider", or "expired" — they fall to its
+// neutral gray default, which reads as "nothing to see here" for a run that is
+// either parked waiting on the household or one that expired unattended (sent
+// nothing). Override just those cases; everything else still defers to the shared
+// helper so its palette stays the single source of truth.
+function runToneOverride(colors: HearthColors, status: string) {
+  if (status === "waiting_for_approval" || status === "waiting_for_connector" || status === "waiting_for_provider") {
+    return { fg: colors.amber, bg: colors.amberBg };
+  }
+  if (status === "expired") return { fg: colors.coral, bg: colors.coralBg };
+  return statusColor(colors, status);
+}
 
 function connectorChips(toolIds: string[] | undefined): string[] {
   if (!toolIds?.length) return [];
@@ -232,7 +246,7 @@ export default function AgentDetailScreen() {
             <T kind="sub">No runs yet.</T>
           ) : (
             runs.map((r, i) => {
-              const tone = statusColor(colors, r.status);
+              const tone = runToneOverride(colors, r.status);
               const done = r.steps.filter((s) => ["done", "completed", "succeeded"].includes(s.status)).length;
               return (
                 <Row

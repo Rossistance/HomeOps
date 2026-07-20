@@ -121,7 +121,14 @@ export function ExecutionMonitor() {
                 )}
               </div>
             </div>
-            {sel.error && <p className="mb-2 text-sm text-coral-600">{sel.error}</p>}
+            {/* An expired run's raw error ("approval_expired") is machine-readable, not
+                a message a family member should read — say plainly what happened and
+                what to do next instead. */}
+            {sel.status === "expired" ? (
+              <p className="mb-2 text-sm text-amber-600">Expired — nothing was sent. Review in Inbox.</p>
+            ) : sel.error ? (
+              <p className="mb-2 text-sm text-coral-600">{sel.error}</p>
+            ) : null}
             <RunTimeline
               run={sel}
               busy={busy}

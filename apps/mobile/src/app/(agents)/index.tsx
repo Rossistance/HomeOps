@@ -14,6 +14,22 @@ import { agentIcon, agentTint, scheduleForAgent } from "@/lib/agent-meta";
 
 type AgentX = AgentRec & { system?: boolean; icon?: string };
 type RunX = RunRec & { sourceRef?: { agentId?: string | null } | null; createdAt?: string | number };
+// The server now resolves a human `scheduleText` (plus anchor/tzSource) on every
+// trigger (WP-002/WP-006, see server/triggers.mjs publicTrigger) — the shared
+// TriggerRec type predates that, so it's widened defensively here rather than
+// trusted blindly, same as the Automations screen does.
+type TriggerX = TriggerRec & { scheduleText?: string; anchor?: string | null; tzSource?: "household" | "server" | null };
+
+// Prefer the server's own schedule text over lib/agent-meta.ts's humanSchedule(),
+// which only knows intervalMs/runAt and predates anchors — and disclose a
+// household-timezone-not-set fallback rather than hiding it (ISS-009/WP-006).
+function scheduleTextForAgent(agentId: string, triggers: TriggerX[]): string | null {
+  const mine = triggers.find((t) => t.agentId === agentId && t.enabled !== false);
+  if (!mine) return null;
+  const base = mine.scheduleText ?? scheduleForAgent(agentId, triggers);
+  if (!base) return base;
+  return mine.tzSource === "server" ? `${base} · server time zone (household's isn't set)` : base;
+}
 
 const FILTERS = ["All", "Active", "Attention", "Paused"] as const;
 type Filter = (typeof FILTERS)[number];
@@ -53,7 +69,7 @@ export default function AgentsScreen() {
 
   const [agents, setAgents] = useState<AgentX[]>([]);
   const [runs, setRuns] = useState<RunX[]>([]);
-  const [triggers, setTriggers] = useState<TriggerRec[]>([]);
+  const [triggers, setTriggers] = useState<TriggerX[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -182,7 +198,7 @@ export default function AgentsScreen() {
         const st = stats.get(a.id);
         const count = a.runCount ?? st?.count ?? 0;
         const last = toMs(a.lastRunAt ?? null) ?? st?.last ?? null;
-        const schedule = scheduleForAgent(a.id, triggers);
+        const schedule = scheduleTextForAgent(a.id, triggers);
         return (
           <Rise key={a.id} index={i + 2}>
             <PressableCard

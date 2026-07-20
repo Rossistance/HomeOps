@@ -2,8 +2,9 @@
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
-import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings } from "./store.mjs";
+import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods } from "./store.mjs";
 import { mealEventNotes, pushEventToGoogle } from "./calendar.mjs";
+import { deliverNotification } from "./notify.mjs";
 import crypto from "node:crypto";
 
 const eid = (p) => p + "_" + crypto.randomBytes(8).toString("hex");
@@ -396,6 +397,88 @@ export const INTERNAL_FUNCTIONS = {
         body, meta: { to, channel: input?.channel ?? "unspecified" }, createdBy: ctx.actorId,
       });
       return { ok: true, result: { id: rec.id, draft: true, to } };
+    },
+  },
+
+  /* ================================================================= *
+   * WP-005 — REAL UNATTENDED DELIVERY, over the fail-closed registry
+   * ================================================================= *
+   * The gap this closes (ISS-006): the engine had NO reachable path to actually
+   * deliver an email or text on a schedule. `gmail.send` exists but is approval-gated
+   * with a 30-minute TTL, so a 7 AM briefing parked at 07:00 and expired unread at
+   * 07:30, every single day. `send_notification_draft` only ever wrote a draft. The
+   * result was a household that had explicitly asked for a daily email and could not
+   * be given one by any route.
+   *
+   * WHY THIS IS ALLOWED TO SEND WITHOUT A PER-RUN APPROVAL — the consent already
+   * happened, earlier and more deliberately than a 07:00 push notification ever
+   * could. Three independent gates, ALL enforced inside deliverNotification and ALL
+   * fail-closed, must already be true:
+   *   1. the contact method is VERIFIED (someone proved control of that address),
+   *   2. it is OPTED IN (the recipient agreed to receive messages), and
+   *   3. this specific agent is on that method's `allowedAgentIds` allowlist.
+   * Gate 3 IS the standing approval, granted per-agent per-address by a human in the
+   * contact-method UI. Nothing here can invent a recipient: the tool refuses any
+   * address that does not already resolve to such a method.
+   *
+   * Deliberate design choices, each closing a way this could have gone wrong:
+   *   • No free-form recipient. A raw `to` is RESOLVED against the registry and
+   *     refused if it doesn't match a verified method — it can never create one.
+   *     Without this, "email the briefing to X" could reach any address a model
+   *     hallucinated, unattended.
+   *   • No agent, no send. deliverNotification only enforces the allowlist when an
+   *     agentId is supplied; an unattributed run would slip past gate 3 entirely.
+   *     So this refuses to act without an acting agent, rather than relying on a
+   *     caller to remember to pass one.
+   *   • The household kill switch is honored (see notify.mjs) — a family hitting
+   *     "pause" stops this, mid-schedule, with nothing sent.
+   *   • Every delivery is audited by the existing notify audit rows.                */
+  "homeops.notify_contact": {
+    id: "homeops.notify_contact",
+    name: "Send to a contact method",
+    action: "Send",
+    risk: "High",
+    // The registry allowlist is the standing consent; a second per-run approval gate
+    // here would recreate the 30-minute expiry race this work package exists to end.
+    // Safety lives in the three fail-closed gates below, not in a daily interruption.
+    requiresApproval: false,
+    connectorId: "homeops",
+    connectorName: "FamiliOS",
+    async run(ctx, input) {
+      const agentId = ctx?.agentId ?? null;
+      if (!agentId) {
+        return { ok: false, error: "no_acting_agent", message: "This send needs to run as a specific helper, because the recipient's allowlist is granted per helper. Run it from an agent or automation." };
+      }
+      const body = String(input?.body ?? input?.message ?? "").trim();
+      if (!body) return { ok: false, error: "empty_body", message: "Nothing to send — the message body was empty." };
+      const subject = String(input?.subject ?? input?.title ?? "A note from FamiliOS").slice(0, 140);
+
+      // Resolve the recipient to an EXISTING registry method. Never create one, never
+      // fall back to a raw address: an unregistered recipient is a hard, honest stop.
+      let methodId = input?.methodId ? String(input.methodId) : null;
+      if (!methodId) {
+        const wanted = String(input?.to ?? "").trim().toLowerCase();
+        if (!wanted) return { ok: false, error: "no_recipient", message: "No recipient — give me a contact method to send to." };
+        const match = listContactMethods((m) => m.householdId === ctx.householdId && String(m.value ?? "").trim().toLowerCase() === wanted);
+        if (!match.length) {
+          return {
+            ok: false, error: "method_not_registered", needsSetup: "contact_method",
+            message: `I can't send to ${input.to} yet — it isn't a verified contact method for this household. Add and verify it in Contact Methods, then allow this helper to message it, and I'll deliver it automatically from then on.`,
+          };
+        }
+        methodId = match[0].id;
+      }
+
+      // deliverNotification enforces verified + opted-in + per-agent allowlist and
+      // returns an honest, actionable refusal for each. Nothing is sent unless all pass.
+      const out = await deliverNotification({
+        session: { householdId: ctx.householdId, actorId: ctx.actorId },
+        methodId, title: subject, body, agentId,
+      });
+      if (!out.ok || !out.delivered) {
+        return { ok: false, error: out.error ?? "not_delivered", needsSetup: out.needsSetup, message: out.message ?? "The message was not delivered." };
+      }
+      return { ok: true, result: { delivered: true, channel: out.channel, methodId, message: out.message } };
     },
   },
 };

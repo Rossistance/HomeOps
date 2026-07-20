@@ -66,7 +66,13 @@ function mapRunStatus(s: string): RunStatus {
 function mapStepStatus(s: string): RunStep["status"] {
   if (s === "succeeded") return "done";
   if (s === "running") return "running";
-  if (s === "skipped") return "skipped"; // a denied/expired gate never ran — don't show it as done
+  // WP-004: none of these are a success — a denied/expired approval gate never ran,
+  // a policy-clamped step never ran, a toolless step that claimed to send/email/notify
+  // never delivered, and an approval window that closed unattended sent nothing. The
+  // RunStep type has no dedicated literal for each, so all three share "skipped" —
+  // but `detail` (set distinctly server-side for each case) still names exactly what
+  // happened, so the caveat is never lost, only bucketed.
+  if (s === "skipped" || s === "skipped_no_tool" || s === "expired") return "skipped";
   if (s === "waiting_for_approval" || s === "blocked" || s === "failed") return "blocked";
   return "pending";
 }
@@ -105,13 +111,19 @@ function runFromServer(sr: ServerRun, ctx: { agentId: string; automationId?: str
   const waitingSummary = sr.status === "waiting_for_connector" || sr.status === "waiting_for_provider"
     ? "Paused — connect the required service to continue."
     : "Paused — approve the gated step to finish.";
+  // WP-004: "expired" collapses into the "Failed" bucket (RunStatus has no dedicated
+  // literal for it), but it means something distinct — the approval window closed
+  // before anyone decided, so nothing was sent. Say that plainly instead of the
+  // generic "some couldn't complete" failure copy.
   const outputSummary = status === "Waiting for Approval"
     ? waitingSummary
-    : status === "Failed"
-      ? `${ran} step(s) ran; some couldn't complete — see details.`
-      : status === "Completed"
-        ? `Completed ${ran} live action(s).`
-        : "Running…";
+    : sr.status === "expired"
+      ? "Expired — nothing was sent. Review in Inbox."
+      : status === "Failed"
+        ? `${ran} step(s) ran; some couldn't complete — see details.`
+        : status === "Completed"
+          ? `Completed ${ran} live action(s).`
+          : "Running…";
   return {
     id: sr.id,
     automationId: ctx.automationId,
@@ -1233,14 +1245,38 @@ export const useStore = create<Store>((set, get) => {
       // lines, the repaired run, the save-as-helper offer) land in this thread.
       if (r.ok && r.kind === "plan" && r.run?.id) {
         const runId = r.run.id;
+        // The exact text this turn's message was optimistically set to above — used
+        // below to detect whether anything has already replaced it before we do.
+        const optimisticText = r.answer || r.plan?.summary || "On it — doing it now.";
         void (async () => {
+          const TERMINAL_RAW = ["completed", "failed", "cancelled", "expired"];
+          let last: ServerRun | null = null;
           for (let i = 0; i < 60; i++) {
             await new Promise((res) => setTimeout(res, 2500));
             await get().hydrateFromServer();
-            const run = get().data.runs.find((x) => x.id === runId);
-            if (run && ["Completed", "Failed", "Cancelled", "Expired"].includes(run.status)) break;
+            // d.runs isn't necessarily populated for a server-auto-started plan run —
+            // ask the server directly so the honesty check below reflects real status,
+            // not a lookup that can silently miss.
+            last = await backend.getRun(runId);
+            if (last && TERMINAL_RAW.includes(last.status)) break;
           }
           for (const d of [4000, 10000, 22000]) setTimeout(() => void get().hydrateFromServer(), d);
+          // WP-004: polling gives up after ~2.5 minutes. A run that's still parked
+          // (waiting on approval/connector) or that expired unattended must not leave
+          // the optimistic "On it —" text as the last word in the thread.
+          if (last && last.status !== "completed") {
+            const honest =
+              last.status === "waiting_for_approval" ? "Still waiting on your approval — nothing has been sent yet. Check Approvals."
+              : last.status === "waiting_for_connector" || last.status === "waiting_for_provider" ? "Still paused — connect the required service to continue. Nothing has been sent yet."
+              : last.status === "expired" ? "Expired — nothing was sent. Review in Inbox."
+              : last.status === "failed" ? `Didn't finish: ${last.error ?? "a step failed."}`
+              : "This hasn't finished yet — nothing has been sent. Check Activity for its latest status.";
+            commit((d) => {
+              const c = d.conversations?.find((x) => x.id === conversationId);
+              const mm = c?.messages.find((x) => x.id === aMsgId);
+              if (mm && mm.text === optimisticText) mm.text = honest;
+            });
+          }
         })();
       }
     },

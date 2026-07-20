@@ -24,6 +24,9 @@ export const INTERNAL_INPUTS = {
   "homeops.plan_meal": [{ key: "title", required: true }, { key: "date" }, { key: "slot" }, { key: "ingredients" }],
   "homeops.attach_note_or_file_reference": [{ key: "eventId", required: true }, { key: "note" }, { key: "fileRef" }],
   "homeops.send_notification_draft": [{ key: "to" }, { key: "body", required: true }, { key: "subject" }, { key: "channel" }],
+  // WP-005: the registry delivery tool — the one path that can actually deliver on a
+  // schedule without a per-run approval race.
+  "homeops.notify_contact": [{ key: "to" }, { key: "methodId" }, { key: "subject" }, { key: "body", required: true }],
   "homeops.write_memory": [{ key: "text", required: true }, { key: "scope" }],
   "homeops.create_artifact": [{ key: "title", required: true }, { key: "body" }, { key: "kind" }],
   "homeops.create_approval": [{ key: "subject", required: true }, { key: "detail" }],
@@ -141,6 +144,35 @@ function safeAnswerFallback(rawText) {
   return t;
 }
 
+/* ---- WP-003 (ISS-002): EFFECT-CLAIMING STEPS ----
+ * A step with `toolId: null` is a REASONING step — the engine thinks, writes text, and
+ * moves on. Nothing leaves the house. But models routinely emit toolless steps titled
+ * "Send email to wrhixon@gmail.com", and the engine dutifully marked them `succeeded`.
+ * The run then read 3/3 complete and the chat said "That worked" — for a run that had
+ * composed a briefing and sent absolutely nothing (EV-012). That single mismatch is the
+ * user's whole complaint.
+ *
+ * So: detect a toolless step whose own words CLAIM an external effect, and mark it.
+ * The engine refuses to call it a success, and the summary says what didn't happen.
+ * Deliberately narrow — it matches delivery verbs against the step's title/detail only.
+ * "Compose the briefing", "Summarize the week", "Decide which items matter" are honest
+ * reasoning steps and are untouched, which is the regression this guard must not cause. */
+const EFFECT_VERBS = /\b(send|sends|sending|sent|email|e-mail|emails|emailing|text|texts|texting|sms|message|messages|messaging|notify|notifies|notifying|deliver|delivers|delivering|dispatch|post|posts|publish|publishes|share|shares|forward|forwards|reply|replies|alert|alerts)\b/i;
+// Guard against reasoning steps that merely TALK about a later delivery
+// ("draft the email body", "decide who to notify") rather than claiming to do it.
+const PREPARATORY = /\b(draft|drafts|drafting|compose|composes|composing|prepare|prepares|preparing|write|writes|writing|decide|decides|deciding|choose|chooses|choosing|select|selects|selecting|summarize|summarizes|summarizing|plan|plans|planning|review|reviews|reviewing)\b/i;
+
+export function claimsExternalEffect(step) {
+  if (!step || step.toolId) return false;
+  const title = String(step.title ?? "");
+  const detail = String(step.detail ?? "");
+  const text = `${title} ${detail}`;
+  if (!EFFECT_VERBS.test(text)) return false;
+  // If the TITLE leads with preparatory language, treat it as composition, not delivery.
+  if (PREPARATORY.test(title) && !EFFECT_VERBS.test(title)) return false;
+  return true;
+}
+
 export function normalizePlan(p, catalog, goal) {
   const byId = new Map(catalog.map((t) => [t.toolId, t]));
   const icon = ICONS.includes(p.icon) ? p.icon : "Bot";
@@ -150,10 +182,12 @@ export function normalizePlan(p, catalog, goal) {
   const rawSteps = Array.isArray(p.steps) ? p.steps : [];
   const steps = rawSteps.slice(0, 12).map((s) => {
     const t = s && s.toolId ? byId.get(s.toolId) : undefined;
+    const base = { toolId: t ? s.toolId : null, title: String(s?.title ?? t?.name ?? "Step"), detail: String(s?.detail ?? "") };
     return {
-      toolId: t ? s.toolId : null,
-      title: String(s?.title ?? t?.name ?? "Step"),
-      detail: String(s?.detail ?? ""),
+      ...base,
+      // WP-003: a toolless step that claims to SEND is flagged here, once, so every
+      // downstream consumer (engine, summary, both clients) sees the same verdict.
+      effectClaimed: claimsExternalEffect(base),
       requiresApproval: t ? t.requiresApproval : !!s?.requiresApproval,
       risk: t?.risk ?? (RISKS.includes(s?.risk) ? s.risk : "Low"),
       connectorId: t?.connectorId ?? null,
@@ -260,7 +294,10 @@ Meal planning ("plan N meals", "what's for dinner this week"):
 Build rules:
 - skill.steps[].tool_id must be an exact catalog id (or null for a reasoning step); set approval_required true for any send/write/pay step.
 - Prefer internal "homeops.*" tools (always available) for family data; only reference external tools (gmail/sms/etc.) the user clearly asked for.
+- DELIVERY ON A SCHEDULE: when a recurring automation must email or text someone, use "homeops.notify_contact" ({to or methodId, subject, body}), NOT "gmail.send". notify_contact delivers through the household's verified contact-method registry, which is what lets an unattended 7 AM run actually send; gmail.send waits for a human approval that nobody is awake to give. Reserve "gmail.send" for one-off sends the user is present for.
+- If the recipient isn't a verified contact method yet, still plan the notify_contact step — it returns an honest setup prompt naming exactly what to verify, which is more useful than omitting the delivery.
 - automation.type is one of "recurring" (set intervalMs in ms), "schedule" (set runAt ISO), "webhook", or "manual".
+- When the user names a TIME OF DAY ("every day at 7 AM", "each morning at 6:30", "weekly on Sunday at 8"), you MUST set automation.anchor to that time as 24-hour "HH:MM" (7 AM → "07:00", 6:30 AM → "06:30", 8 PM → "20:00") IN ADDITION to intervalMs. The anchor is what makes it fire at that hour; intervalMs alone would fire at whatever time the user happened to ask.
 - Keep it minimal: a skill alone is fine; add an agent only if it should be owned/long-lived; add an automation only if it should run on a schedule/event.
 - To CHANGE an EXISTING helper/recipe instead of creating a new one ("add a step to…", "make X also…", "change the instructions for…"), DO NOT create a duplicate — use "edits" referencing the exact id from the context's existingAgents / existingSkills, with only the fields that change.
 
@@ -268,7 +305,7 @@ Respond with ONLY a JSON object (no prose, no markdown fences), one of:
 { "kind": "answer", "answer": string }
 { "kind": "lookup", "answer": string, "queries": [string], "readUrls": [string] }  — "answer" is one short working sentence ("Checking the latest headlines…"); "queries" is 1-3 plain-English web searches; "readUrls" is 0-2 exact URLs worth reading in full (usually empty — search snippets often suffice).
 { "kind": "plan", "answer": string, "plan": { "title": string, "summary": string, "icon": string, "spaceType": string, "instructions": string, "trigger": { "type": string, "detail": string }, "steps": [ { "toolId": string|null, "title": string, "detail": string, "input": object, "requiresApproval": boolean } ], "approvalGates": [string], "risk": "Low"|"Medium"|"High"|"Sensitive" } }
-{ "kind": "build", "answer": string, "build": { "summary": string, "skill": { "name": string, "description": string, "domain": string, "planner_guidance": string, "steps": [ { "name": string, "tool_id": string|null, "approval_required": boolean } ], "risk_level": "Low"|"Medium"|"High"|"Sensitive" } | null, "agent": { "name": string, "purpose": string, "instructions": string } | null, "automation": { "name": string, "type": "recurring"|"schedule"|"webhook"|"manual", "intervalMs": number | null, "runAt": string | null } | null, "edits": [ { "kind": "agent"|"skill", "id": string, "summary": string, "patch": object } ] } }
+{ "kind": "build", "answer": string, "build": { "summary": string, "skill": { "name": string, "description": string, "domain": string, "planner_guidance": string, "steps": [ { "name": string, "tool_id": string|null, "approval_required": boolean } ], "risk_level": "Low"|"Medium"|"High"|"Sensitive" } | null, "agent": { "name": string, "purpose": string, "instructions": string } | null, "automation": { "name": string, "type": "recurring"|"schedule"|"webhook"|"manual", "intervalMs": number | null, "runAt": string | null, "anchor": string | null } | null, "edits": [ { "kind": "agent"|"skill", "id": string, "summary": string, "patch": object } ] } }
 For a plan or build, "answer" is one friendly sentence summarizing what you'll set up or change.`;
 
 /**
@@ -439,7 +476,18 @@ function normalizeBuild(b) {
   }
   if (b.automation && typeof b.automation === "object") {
     const type = ["recurring", "schedule", "webhook", "manual"].includes(b.automation.type) ? b.automation.type : "manual";
-    out.automation = { name: String(b.automation.name ?? "New automation").slice(0, 80), type, intervalMs: Number(b.automation.intervalMs) > 0 ? Number(b.automation.intervalMs) : null, runAt: b.automation.runAt ?? null };
+    // WP-002 (ISS-003): `anchor` is the field that lets "every day at 7 AM" mean 07:00.
+    // Without it the build spec could only express an INTERVAL, so the scheduler had
+    // nothing to anchor to and fell back to creation-time + 24h (EV-011). Validated
+    // here rather than trusted: anything that isn't a real HH:MM becomes null.
+    const anchor = /^\d{1,2}:\d{2}$/.test(String(b.automation.anchor ?? "")) ? String(b.automation.anchor).trim() : null;
+    const anchorOk = anchor && Number(anchor.split(":")[0]) <= 23 && Number(anchor.split(":")[1]) <= 59 ? anchor : null;
+    out.automation = {
+      name: String(b.automation.name ?? "New automation").slice(0, 80), type,
+      intervalMs: Number(b.automation.intervalMs) > 0 ? Number(b.automation.intervalMs) : null,
+      runAt: b.automation.runAt ?? null,
+      anchor: anchorOk,
+    };
   }
   // Edits to existing entities — only safe, declared fields are forwarded (the
   // materialize endpoint re-validates + versions via partialUpdate).
