@@ -73,14 +73,17 @@ const PLAN_NULLSEND_RESPONSE = {
   },
 };
 // Control case: an all-real-tool plan must KEEP today's success copy (the guard against
-// this suite's own fix becoming a new false negative).
+// this suite's own fix becoming a new false negative). Both tools are real AND local:
+// web.search was here originally, but CI runners are bot-walled by every search engine,
+// so the run honestly failed the step and the control asserted on network weather
+// instead of the summary seam. Internal tools keep the control hermetic.
 const PLAN_ALLREAL_RESPONSE = {
   kind: "plan", answer: "On it.",
   plan: {
-    title: "TG-All real tools", summary: "Search and remember.", icon: "Bot", spaceType: "Personal", instructions: "",
+    title: "TG-All real tools", summary: "Plan dinner and remember.", icon: "Bot", spaceType: "Personal", instructions: "",
     trigger: { type: "Manual", detail: "" },
     steps: [
-      { toolId: "web.search", title: "Look something up", detail: "search", input: { query: "family dinner ideas" }, requiresApproval: false },
+      { toolId: "homeops.create_task", title: "Add a dinner-prep task", detail: "task", input: { title: "TG-test: prep pasta night" }, requiresApproval: false },
       { toolId: "homeops.write_memory", title: "Remember it", detail: "note the preference", input: { text: "TG-test: the family likes pasta night", scope: "household" }, requiresApproval: false },
     ],
     approvalGates: [], risk: "Low",
