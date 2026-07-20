@@ -39,6 +39,7 @@ import { playbookCatalog } from "@/data/playbooksCatalog";
 import { workflowTemplates } from "@/data/workflowTemplates";
 import { loadAppData, saveAppData, clearAppData, detectStorageMode, type StorageMode } from "@/storage/db";
 import { uid } from "@/lib/ids";
+import { mergeServerAuthoritative } from "@/store/reconcile";
 import { pushActivity, executeAgentRun, subagentDefsFor, processFile } from "@/lib/runtime";
 import { parseAgentPrompt, buildWorkflowPlan, routeToAgent, detectApprovalGates } from "@/lib/ai";
 import { buildSearchIndex, search } from "@/lib/search";
@@ -1552,8 +1553,13 @@ export const useStore = create<Store>((set, get) => {
         verified: c.verified, optInStatus: c.optInStatus, allowedAgentIds: c.allowedAgentIds ?? [],
       });
       commit((d) => {
-        const evIds = new Set(events.map((e) => e.id));
-        d.events = [...events.map(mapEvent), ...d.events.filter((e) => !evIds.has(e.serverId ?? e.id))];
+        // Events are server-authoritative AND churn-prone: Google Calendar re-syncs
+        // re-key the same event, so the old "keep locals whose id isn't in the current
+        // server set" merge let stale copies pile up (prod: 41 server events → 511 in
+        // the client store, the same DBT session under 4 ids). mergeServerAuthoritative
+        // drops anything that ever had a serverId but isn't in the current set, keeping
+        // only genuinely-local (offline/un-synced) events. Self-heals on the next hydrate.
+        d.events = mergeServerAuthoritative(events.map(mapEvent), d.events);
         // Contact methods are server-owned (the delivery registry). Before the one-time
         // migration completes, local-only entries survive so nothing vanishes from the UI;
         // once migrated, the server is fully authoritative — including DELETIONS, so a
