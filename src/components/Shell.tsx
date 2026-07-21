@@ -67,11 +67,16 @@ export const NAV_GROUPS: NavGroup[] = [
 export const NAV: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
 const MOBILE_PRIMARY: ScreenId[] = ["dashboard", "agents", "automations", "messages"];
 
+// WP-001: server truth, not the local `data.approvals`/local-only mirror — a run parked
+// by a scheduled trigger or another device must show up here too, not just one this
+// session happened to start and poll itself.
 function useBadges() {
   const data = useStore((s) => s.data);
+  const serverApprovals = useStore((s) => s.serverApprovals);
+  const serverNotifications = useStore((s) => s.serverNotifications);
   return {
-    approvals: data.approvals.filter((a) => a.status === "Pending").length,
-    messages: data.threads.filter((t) => t.unread).length,
+    approvals: serverApprovals.filter((a) => a.status === "pending").length,
+    messages: data.threads.filter((t) => t.unread).length + serverNotifications.filter((n) => !n.read).length,
   };
 }
 
@@ -88,8 +93,13 @@ function NavList({ onNavigate, grouped = true }: { onNavigate?: () => void; grou
       <button key={it.id} onClick={() => { navigate(it.id); onNavigate?.(); }} aria-current={active ? "page" : undefined} className={cn("nav-link w-full", active && "nav-link-active")}>
         <Icon name={it.icon} size={18} />
         <span className="flex-1 text-left">{it.label}</span>
-        {it.id === "messages" && badges.approvals > 0 && <span className="rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-ink-900">{badges.approvals}</span>}
-        {it.id === "messages" && badges.messages > 0 && <span className="rounded-full bg-coral-500 px-1.5 py-0.5 text-[10px] font-bold text-white">{badges.messages}</span>}
+        {/* aria-hidden: these are supplementary counts, not the button's identity — the
+            nav item's accessible name must stay exactly its label regardless of how many
+            approvals/notifications are pending, so the count digits don't get glued onto
+            "Messages & Approvals" for assistive tech (or for a11y-name-based test/tooling
+            queries elsewhere in the app). */}
+        {it.id === "messages" && badges.approvals > 0 && <span aria-hidden="true" className="rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-ink-900">{badges.approvals}</span>}
+        {it.id === "messages" && badges.messages > 0 && <span aria-hidden="true" className="rounded-full bg-coral-500 px-1.5 py-0.5 text-[10px] font-bold text-white">{badges.messages}</span>}
       </button>
     );
   };
@@ -173,7 +183,8 @@ function Topbar() {
   const spaces = useStore((s) => s.data.spaces);
   // Scoped roles (child/grandparent/sitter) can't open the approvals screen — don't tease it.
   const canSeeApprovals = useStore((s) => s.canAccess("messages"));
-  const approvals = useStore((s) => (canSeeApprovals ? s.data.approvals.filter((a) => a.status === "Pending").length : 0));
+  // WP-001: server truth, matching useBadges() above.
+  const approvals = useStore((s) => (canSeeApprovals ? s.serverApprovals.filter((a) => a.status === "pending").length : 0));
   const navigate = useStore((s) => s.navigate);
   const [drawer, setDrawer] = useState(false);
   useEffect(() => {

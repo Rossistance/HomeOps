@@ -44,7 +44,7 @@ import { pushActivity, executeAgentRun, subagentDefsFor, processFile } from "@/l
 import { parseAgentPrompt, buildWorkflowPlan, routeToAgent, detectApprovalGates } from "@/lib/ai";
 import { buildSearchIndex, search } from "@/lib/search";
 import { getAdvancedMode, setAdvancedMode } from "@/lib/prefs";
-import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge } from "@/connectors/api";
+import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge, type BackendApproval, type ServerNotification } from "@/connectors/api";
 
 /** A plan shape the live runner can execute (AgentPlan satisfies this). */
 export interface RunnableStep { toolId: string | null; title: string; detail: string; input: Record<string, unknown>; requiresApproval: boolean }
@@ -84,7 +84,7 @@ const PARKED_RUN = ["waiting_for_approval", "waiting_for_connector", "waiting_fo
 // (which messages, what label, the literal draft text) the human is being asked to
 // approve, not a description OF a description. A long comma-joined id list (e.g. 93
 // message ids) collapses to a count — the ids themselves aren't meaningful to a human.
-function formatApprovalInput(input: Record<string, unknown> | undefined | null): string {
+export function formatApprovalInput(input: Record<string, unknown> | undefined | null): string {
   if (!input) return "";
   const lines: string[] = [];
   for (const [key, raw] of Object.entries(input)) {
@@ -418,6 +418,17 @@ export interface Store extends UIState {
   externalActionsEnabled: boolean;
   loadBackend: () => Promise<void>;
   hydrateFromServer: () => Promise<void>;
+
+  /* WP-001: server-truth approvals + notifications feed. Messages » Inbox/Approvals,
+   * the nav badge, and the Dashboard "Needs you" card all read THESE — never the local
+   * `data.approvals` mirror, which only fills in when this session actively polled a run
+   * it started (see syncServerRun above). Refreshed by the existing hydrate/poll loop;
+   * also refreshed on-demand (tab mount, right after a decide/mark-read). */
+  serverApprovals: BackendApproval[];
+  serverNotifications: ServerNotification[];
+  refreshApprovalsAndNotifications: () => Promise<void>;
+  decideServerApproval: (id: string, approve: boolean) => Promise<boolean>;
+  markServerNotificationRead: (id: string) => Promise<boolean>;
   migrateAgentsToServer: () => Promise<void>;
   migrateContactMethodsToServer: () => Promise<void>;
   configureConnector: (id: string, values: Record<string, string>) => Promise<void>;
@@ -1460,6 +1471,39 @@ export const useStore = create<Store>((set, get) => {
     backendHealth: null,
     backendOnline: false,
     externalActionsEnabled: true,
+    serverApprovals: [],
+    serverNotifications: [],
+    // Single source for both server-truth lists — called from hydrateFromServer (the
+    // existing hydrate/poll loop) AND on-demand (Approvals/Inbox tab mount, right after a
+    // decide or mark-read) so the UI never waits out the ~15s background poll to show a
+    // just-created or just-decided approval.
+    refreshApprovalsAndNotifications: async () => {
+      const [serverApprovals, serverNotifications] = await Promise.all([backend.listApprovals(), backend.notifications()]);
+      set({ serverApprovals, serverNotifications });
+    },
+    decideServerApproval: async (id, approve) => {
+      const dec = await backend.decideApproval(id, approve);
+      if (dec.error || !dec.approval) {
+        toast({
+          kind: "error",
+          title: approve ? "Approval failed" : "Could not deny",
+          message: dec.error === "expired" ? "This request expired — ask the agent to re-submit." : "Could not record the decision on the server.",
+        });
+        return false;
+      }
+      await get().refreshApprovalsAndNotifications();
+      toast({ kind: approve ? "success" : "info", title: approve ? "Approved" : "Denied", message: dec.approval.preview || undefined });
+      return true;
+    },
+    markServerNotificationRead: async (id) => {
+      // Optimistic flip so the row updates immediately; refreshed for real on the next
+      // hydrate. A failed request reverts on the following refresh rather than rolling
+      // back locally — the read state is inconsequential enough not to warrant a second
+      // network round-trip just to undo it.
+      set((s) => ({ serverNotifications: s.serverNotifications.map((n) => (n.id === id ? { ...n, read: true } : n)) }));
+      const r = await backend.markNotificationRead(id);
+      return !!r.ok;
+    },
     loadBackend: async () => {
       const [health, connectors, prov, accounts] = await Promise.all([backend.health(), backend.connectors(), backend.providers(), backend.accounts()]);
       // Unauthenticated/local sessions get null back from these endpoints — keep the
@@ -1497,6 +1541,11 @@ export const useStore = create<Store>((set, get) => {
     // from the server member registry (the client can render but never mint roles). If the
     // backend is offline this is a no-op and the local-first cache continues to render.
     hydrateFromServer: async () => {
+      // WP-001: piggyback the approvals + notifications refresh on this same hydrate/poll
+      // loop (initial load, the 15s revision-changed poll, and every explicit call below)
+      // instead of standing up a second polling loop. Fire-and-forget — independent of the
+      // AppData reconciliation this function otherwise does.
+      void get().refreshApprovalsAndNotifications();
       const [events, tasks, members, conversations, memory, serverAgents, contactMethods, household, files, knowledge] = await Promise.all([
         backend.events(), backend.tasks(), backend.members(), backend.conversations(), backend.memory(), backend.agents(), backend.contactMethods(), backend.household(), backend.files(), backend.knowledge(),
       ]);

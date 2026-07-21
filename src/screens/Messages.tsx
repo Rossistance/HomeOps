@@ -1,21 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useStore } from "@/store/useStore";
+import { useStore, formatApprovalInput } from "@/store/useStore";
 import {
   PageHeader, Card, Button, Badge, Tabs, Modal, Field, TextInput, TextArea, Select, EmptyState, RiskBadge, Avatar, StatusDot, Checkbox,
 } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { relativeTime, fmtDateTime } from "@/lib/dates";
 import { cn } from "@/lib/cn";
-import { backend } from "@/connectors/api";
-import type { ApprovalRequest, MessageThread } from "@/types";
+import { backend, type BackendApproval, type ServerNotification, type ServerRun } from "@/connectors/api";
+import type { MessageThread, RiskLevel } from "@/types";
 
 export function Messages() {
   const data = useStore((s) => s.data);
+  const serverApprovals = useStore((s) => s.serverApprovals);
+  const serverNotifications = useStore((s) => s.serverNotifications);
   const params = useStore((s) => s.route.params);
   const [tab, setTab] = useState("inbox");
 
-  const pending = data.approvals.filter((a) => a.status === "Pending").length;
-  const unread = data.threads.filter((t) => t.unread).length;
+  // WP-001: server truth for both counts — see the Approvals/Inbox components below.
+  const pending = serverApprovals.filter((a) => a.status === "pending").length;
+  const unread = data.threads.filter((t) => t.unread).length + serverNotifications.filter((n) => !n.read).length;
 
   useEffect(() => {
     if (params?.tab) setTab(params.tab);
@@ -40,6 +43,9 @@ export function Messages() {
 
 function Inbox() {
   const data = useStore((s) => s.data);
+  const serverNotifications = useStore((s) => s.serverNotifications);
+  const refresh = useStore((s) => s.refreshApprovalsAndNotifications);
+  const markNotifRead = useStore((s) => s.markServerNotificationRead);
   const params = useStore((s) => s.route.params);
   const sendMessage = useStore((s) => s.sendMessage);
   const resolveThread = useStore((s) => s.resolveThread);
@@ -48,10 +54,17 @@ function Inbox() {
   const markRead = useStore((s) => s.markThreadRead);
   const navigate = useStore((s) => s.navigate);
   const threads = useMemo(() => [...data.threads].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || +new Date(b.updatedAt) - +new Date(a.updatedAt)), [data.threads]);
+  // WP-001: unread SERVER notifications, newest first — merged into this same timeline.
+  const notifRows = useMemo(() => [...serverNotifications].sort((a, b) => b.createdAt - a.createdAt), [serverNotifications]);
   const [selected, setSelected] = useState<string | null>(threads[0]?.id ?? null);
+  const [expandedNotifId, setExpandedNotifId] = useState<string | null>(null);
   const [reply, setReply] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+
+  // Fetch fresh on mount — don't wait out the background poll to show a notification
+  // that just landed (e.g. right after opening this tab from a nav-badge click).
+  useEffect(() => { void refresh(); }, [refresh]);
 
   useEffect(() => {
     if (params?.thread) { setSelected(params.thread); markRead(params.thread); }
@@ -63,11 +76,40 @@ function Inbox() {
 
   const open = (t: MessageThread) => { setSelected(t.id); markRead(t.id); };
   const send = () => { if (reply.trim() && thread) { sendMessage(thread.id, reply.trim()); setReply(""); setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 50); } };
+  // Mark-read persists server-side immediately; expanding shows the full body inline.
+  const openNotif = (n: ServerNotification) => {
+    setExpandedNotifId((cur) => (cur === n.id ? null : n.id));
+    if (!n.read) void markNotifRead(n.id);
+  };
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[20rem_1fr]">
       <div>
         <Button variant="primary" size="sm" className="mb-3 w-full" onClick={() => setComposeOpen(true)}><Icon name="Plus" size={15} /> New family update</Button>
+        {notifRows.length > 0 && (
+          <div className="mb-3">
+            <p className="section-title mb-1.5 px-1">Notifications</p>
+            <div className="space-y-1.5">
+              {notifRows.map((n) => (
+                <button
+                  key={n.id}
+                  onClick={() => openNotif(n)}
+                  aria-label={`Notification: ${n.title}`}
+                  className={cn("w-full rounded-2xl border p-3 text-left transition-all pressable", !n.read ? "border-sky-200/70 bg-sky-50" : "border-ink-900/[0.06] bg-surface-sunken/60 hover:bg-surface-raised hover:shadow-e1")}
+                >
+                  <div className="flex items-center gap-2">
+                    {!n.read && <span className="h-2 w-2 shrink-0 rounded-full bg-sky-500" aria-hidden="true" />}
+                    <p className={cn("flex-1 truncate text-sm", !n.read ? "font-bold text-ink-900" : "font-medium text-ink-700")}>{n.title}</p>
+                    {!n.read && <Badge color="sky">Unread</Badge>}
+                  </div>
+                  <p className="mt-0.5 truncate text-xs text-ink-500">{n.body}</p>
+                  <p className="mt-0.5 text-[11px] text-ink-400">{relativeTime(new Date(n.createdAt))}</p>
+                  {expandedNotifId === n.id && <p className="mt-1.5 whitespace-pre-wrap border-t border-ink-900/[0.06] pt-1.5 text-xs text-ink-600">{n.body}</p>}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="space-y-1.5">
           {threads.map((t) => (
             <button key={t.id} onClick={() => open(t)} className={cn("w-full rounded-2xl border p-3 text-left transition-all pressable", selected === t.id ? "border-ink-900/10 bg-surface-raised shadow-e1" : "border-ink-900/[0.06] bg-surface-sunken/60 hover:bg-surface-raised hover:shadow-e1")}>
@@ -157,13 +199,57 @@ function ComposeModal({ open, onClose, onCreated }: { open: boolean; onClose: ()
 
 /* ----------------------------- Approvals -------------------------------- */
 
+// WP-001: source chip — "what started the run this approval gates," derived from the
+// run record's server-authoritative `source` (server/engine.mjs startRun()). Falls back
+// gracefully for any value not explicitly named here rather than showing "undefined."
+function runSourceLabel(source?: string | null): string {
+  switch (source) {
+    case "assistant": return "From chat";
+    case "trigger": return "Scheduled";
+    case "agent": return "Agent";
+    case "skill": return "Skill";
+    case "manual": return "Manual";
+    default: return source ? `${source.charAt(0).toUpperCase()}${source.slice(1)}` : "Run";
+  }
+}
+
+function ExpiryCountdown({ expiresAt }: { expiresAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const ms = expiresAt - now;
+  if (ms <= 0) return <span className="text-coral-600">expired</span>;
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const sec = totalSec % 60;
+  return <span>{h > 0 ? `${h}h ${m}m` : `${m}m ${sec}s`} left</span>;
+}
+
 function Approvals() {
-  const approvals = useStore((s) => s.data.approvals);
+  // WP-001: GET /api/approvals is the single source of truth here — it surfaces every
+  // approval this actor may observe, including one parked by a run this session never
+  // started or polled (another device, a scheduled trigger, a prior session). The local
+  // approvals mirror on AppData is a write-side convenience other screens (InlineApprovals)
+  // still use during the deprecation window; it is never read for this render.
+  const serverApprovals = useStore((s) => s.serverApprovals);
+  const decide = useStore((s) => s.decideServerApproval);
+  const refresh = useStore((s) => s.refreshApprovalsAndNotifications);
   const params = useStore((s) => s.route.params);
-  const pending = approvals.filter((a) => a.status === "Pending");
-  const decided = approvals.filter((a) => a.status !== "Pending");
+  const [runs, setRuns] = useState<ServerRun[]>([]);
+  const pending = serverApprovals.filter((a) => a.status === "pending");
+  const decided = serverApprovals.filter((a) => a.status !== "pending");
   const [openId, setOpenId] = useState<string | null>(params?.approval ?? null);
+
+  // Fetch fresh on mount rather than waiting out the background poll, and pull the runs
+  // list so a pending card can show the REAL resolved step input (see ApprovalCard),
+  // not just the approval's short preview label.
+  useEffect(() => { void refresh(); void backend.runs().then(setRuns); }, [refresh]);
   useEffect(() => { if (params?.approval) setOpenId(params.approval); }, [params?.approval]);
+
+  const runFor = (approvalId: string) => runs.find((r) => r.steps.some((s) => s.approvalId === approvalId)) ?? null;
 
   return (
     <div className="space-y-6">
@@ -173,79 +259,71 @@ function Approvals() {
       <div>
         <p className="section-title mb-2">Pending ({pending.length})</p>
         {pending.length === 0 ? <EmptyState icon="CheckCircle2" title="Nothing to approve" message="Your helpers have everything they need." /> : (
-          <div className="space-y-3">{pending.map((a) => <ApprovalCard key={a.id} approval={a} expanded={openId === a.id} onToggle={() => setOpenId(openId === a.id ? null : a.id)} />)}</div>
+          <div className="space-y-3">{pending.map((a) => <ApprovalCard key={a.id} approval={a} run={runFor(a.id)} expanded={openId === a.id} onToggle={() => setOpenId(openId === a.id ? null : a.id)} onDecide={(approve) => decide(a.id, approve)} />)}</div>
         )}
       </div>
       {decided.length > 0 && (
         <div>
           <p className="section-title mb-2">Decided</p>
-          <div className="space-y-2">{decided.map((a) => <ApprovalCard key={a.id} approval={a} expanded={openId === a.id} onToggle={() => setOpenId(openId === a.id ? null : a.id)} />)}</div>
+          <div className="space-y-2">{decided.map((a) => <ApprovalCard key={a.id} approval={a} run={runFor(a.id)} expanded={openId === a.id} onToggle={() => setOpenId(openId === a.id ? null : a.id)} onDecide={(approve) => decide(a.id, approve)} />)}</div>
         </div>
       )}
     </div>
   );
 }
 
-function ApprovalCard({ approval: a, expanded, onToggle }: { approval: ApprovalRequest; expanded: boolean; onToggle: () => void }) {
-  const data = useStore((s) => s.data);
-  const approve = useStore((s) => s.approveRequest);
-  const deny = useStore((s) => s.denyRequest);
-  const askChanges = useStore((s) => s.askAgentForChanges);
-  const [editing, setEditing] = useState(false);
-  const [edited, setEdited] = useState(a.previewContent);
-  const [askMode, setAskMode] = useState(false);
-  const [note, setNote] = useState("");
-  const agent = data.agents.find((ag) => ag.id === a.requestedByAgentId);
-  const space = data.spaces.find((s) => s.id === a.spaceId);
-  const decider = data.members.find((m) => m.id === a.decisionByMemberId);
-  const pending = a.status === "Pending";
+/** Family-readable labels for the server's approval-status vocabulary. `consumed` is the
+ *  engine's consume-once bookkeeping for an approval that was approved AND used by its
+ *  run — to a family member that is simply "Approved" (raw states stay in Advanced/audit). */
+function approvalStatusLabel(status: string): string {
+  const map: Record<string, string> = { pending: "Pending", approved: "Approved", consumed: "Approved", denied: "Denied", expired: "Expired" };
+  return map[status] ?? status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function ApprovalCard({ approval: a, run, expanded, onToggle, onDecide }: { approval: BackendApproval; run: ServerRun | null; expanded: boolean; onToggle: () => void; onDecide: (approve: boolean) => Promise<boolean> }) {
+  const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
+  const pending = a.status === "pending";
+  // The approval record itself deliberately never stores the raw input (server/index.mjs
+  // publicApproval) — only the originating run step does. Correlate by approvalId so the
+  // card shows the REAL resolved input, not a generic description of a description.
+  const step = run?.steps.find((s) => s.approvalId === a.id) ?? null;
+  const title = step?.title || a.preview || a.toolId;
+  const resolvedInput = formatApprovalInput(step?.input);
+
+  const act = async (approve: boolean) => {
+    setBusy(approve ? "approve" : "deny");
+    try { await onDecide(approve); } finally { setBusy(null); }
+  };
 
   return (
     <Card className="card-pad">
       <button className="flex w-full items-start justify-between gap-3 text-left" onClick={onToggle}>
         <div className="min-w-0">
-          <p className="font-display text-lg font-semibold text-ink-900">{a.title}</p>
-          <p className="text-xs text-ink-500">{agent?.name} · {space?.name} · {a.category}</p>
+          <p className="font-display text-lg font-semibold text-ink-900">{title}</p>
+          <p className="text-xs text-ink-500">{a.category} · {a.connectorId}</p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <RiskBadge level={a.riskLevel} />
-          {!pending && <Badge color={a.status === "Denied" || a.status === "Execution Failed" ? "coral" : a.status === "Changes Requested" ? "amber" : a.status === "Executing" ? "sky" : "sage"}>{a.status}</Badge>}
+          <Badge color="lavender">{runSourceLabel(run?.source)}</Badge>
+          <RiskBadge level={(a.risk as RiskLevel) ?? "High"} />
+          {!pending && <Badge color={a.status === "denied" || a.status === "expired" ? "coral" : "sage"}>{approvalStatusLabel(a.status)}</Badge>}
         </div>
       </button>
       {expanded && (
         <div className="mt-3 space-y-3 border-t border-ink-900/[0.06] pt-3 text-sm">
-          {a.status === "Executing" && <div className="flex items-center gap-2 rounded-2xl border border-sky-200/70 bg-sky-50 px-3 py-2 text-sky-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]"><Icon name="Loader2" size={15} className="animate-spin" /> Executing the approved action…</div>}
-          {a.executionOk !== undefined && (
-            <div className={cn("rounded-2xl px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]", a.executionOk ? "border border-sage-200/70 bg-sage-50 text-sage-700" : "border border-coral-200/70 bg-coral-50 text-coral-700")}>
-              <p className="flex items-center gap-2 font-medium"><Icon name={a.executionOk ? "CheckCircle2" : "XCircle"} size={15} /> {a.executionOk ? "Executed successfully" : "Execution failed"}{a.executionMs ? ` · ${(a.executionMs / 1000).toFixed(1)}s` : ""}</p>
-              {a.executionResult && <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-xs">{a.executionResult.slice(0, 800)}</pre>}
-            </div>
-          )}
-          <Detail label="Proposed action" value={a.proposedAction} />
-          <Detail label="Data used" value={a.dataUsedSummary} />
-          <Detail label="Recipient / target" value={a.recipientSummary} />
+          {step?.detail && <Detail label="Proposed action" value={step.detail} />}
           <div>
-            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-500">Preview</p>
-            {editing ? <TextArea value={edited} onChange={(e) => setEdited(e.target.value)} className="min-h-[120px]" /> : <pre className="well whitespace-pre-wrap p-3 text-sm text-ink-700">{a.previewContent}</pre>}
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-500">Resolved input</p>
+            <pre className="well whitespace-pre-wrap p-3 text-sm text-ink-700">{resolvedInput || a.preview || "No additional detail was recorded for this approval."}</pre>
           </div>
-          {askMode && <Field label="What should the agent change?"><TextArea value={note} onChange={(e) => setNote(e.target.value)} /></Field>}
-          <p className="text-xs text-ink-400">{pending ? `Requested ${relativeTime(a.createdAt)}` : `${a.status} by ${decider?.displayName ?? "you"} · ${fmtDateTime(a.decisionAt ?? a.updatedAt)}`}</p>
+          <p className="text-xs text-ink-400">
+            {pending
+              ? <>Requested {relativeTime(new Date(a.createdAt))}{a.expiresAt ? <> · <ExpiryCountdown expiresAt={a.expiresAt} /></> : null}</>
+              : `${approvalStatusLabel(a.status)} · ${fmtDateTime(new Date(a.decidedAt ?? a.createdAt))}`}
+          </p>
           {pending && (
             <div className="flex flex-wrap items-center gap-2">
-              {!editing && !askMode && <>
-                <Button variant="success" onClick={() => approve(a.id)}><Icon name="Check" size={15} /> Approve</Button>
-                <Button variant="danger" onClick={() => deny(a.id)}><Icon name="X" size={15} /> Deny</Button>
-                {/* "Edit before approval" only rewrites the preview text — meaningless for a
-                    server-driven run gate, which executes the frozen step input. So it stays
-                    limited to legacy client gates. "Ask for changes", by contrast, is fully
-                    wired for server-managed gates: it re-plans from the original steps + your
-                    feedback and starts a revised run (store `askAgentForChanges`). It was
-                    previously hidden here, so users could never reach that loop. */}
-                {!a.serverManaged && <Button variant="secondary" onClick={() => setEditing(true)}><Icon name="Pencil" size={14} /> Edit before approval</Button>}
-                <Button variant="ghost" onClick={() => setAskMode(true)}><Icon name="MessageCircleQuestion" size={14} /> Ask for changes</Button>
-              </>}
-              {editing && <><Button variant="success" onClick={() => { approve(a.id, edited); setEditing(false); }}><Icon name="Check" size={15} /> Approve edited</Button><Button variant="ghost" onClick={() => setEditing(false)}>Cancel</Button></>}
-              {askMode && <><Button variant="primary" disabled={!note.trim()} onClick={() => { askChanges(a.id, note.trim()); setAskMode(false); setNote(""); }}>Send to agent</Button><Button variant="ghost" onClick={() => setAskMode(false)}>Cancel</Button></>}
+              <Button variant="success" disabled={!!busy} onClick={() => act(true)}><Icon name={busy === "approve" ? "Loader2" : "Check"} size={15} className={busy === "approve" ? "animate-spin" : ""} /> Approve</Button>
+              <Button variant="danger" disabled={!!busy} onClick={() => act(false)}><Icon name={busy === "deny" ? "Loader2" : "X"} size={15} className={busy === "deny" ? "animate-spin" : ""} /> Deny</Button>
             </div>
           )}
         </div>

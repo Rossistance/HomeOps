@@ -100,14 +100,18 @@ export interface ConnectorProvider {
 }
 export interface BackendApproval { id: string; connectorId: string; toolId: string; status: string; risk: string; category: string; preview: string; createdAt: number; expiresAt: number; decidedBy: string | null; decidedAt: number | null }
 export interface AIProvider {
-  id: string; name: string; kind: "cloud" | "local"; local: boolean; needsKey: boolean; needsBaseUrl: boolean;
+  id: string; name: string; kind: "cloud" | "local"; local: boolean; needsKey: boolean;
+  // keyOptional: a local provider (e.g. LM Studio) that runs fine with no key but can
+  // ALSO be gated behind a bearer token depending on the build — Settings offers the
+  // field, but nothing requires it the way needsKey does.
+  keyOptional: boolean; needsBaseUrl: boolean;
   docs: string; defaultBaseUrl: string; defaultModel: string; baseUrl: string; model: string; keySet: boolean;
   // Truthful readiness vocabulary (P1.3): a default URL/key alone is not proof of reachability.
   readiness: "not_configured" | "needs_health_check" | "configured" | "healthy" | "unreachable";
   health?: { ok: boolean; status: string; at: number | null; latencyMs: number | null } | null;
   active: boolean; updatedAt: string | null;
 }
-export interface AIHealth { ok: boolean; status?: string; message?: string; models?: string[]; modelCount?: number; latencyMs?: number }
+export interface AIHealth { ok: boolean; status?: string; message?: string; hint?: string; models?: string[]; modelCount?: number; latencyMs?: number }
 export interface AIChatResult { ok: boolean; model?: string; text?: string; error?: string; message?: string }
 
 /* ---- Planner brain (plain English → plan / mini app / playbook) ---- */
@@ -528,6 +532,14 @@ export const backend = {
   },
 
   /* ---- approvals (server-side records) ---- */
+  // WP-001: the server-truth feed for Messages » Approvals. Returns every approval this
+  // actor may observe (requested by them, or theirs to decide) — including one parked by
+  // a durable run that THIS session never started or polled (another device, a scheduled
+  // trigger, a prior session). This is the call that was missing; the client previously
+  // only ever learned about an approval by mirroring one it happened to be watching.
+  async listApprovals(): Promise<BackendApproval[]> {
+    try { return (await req<{ approvals: BackendApproval[] }>("/approvals")).approvals ?? []; } catch { return []; }
+  },
   async createApproval(input: { toolId: string; connectorId?: string; input: Record<string, unknown>; category?: string; preview?: string }): Promise<{ approval?: BackendApproval; error?: string }> {
     try { return await req("/approvals", { method: "POST", body: JSON.stringify(input), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },

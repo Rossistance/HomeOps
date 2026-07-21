@@ -40,6 +40,7 @@ interface LearnedItem {
 export function Dashboard() {
   const data = useStore((s) => s.data);
   const me = useStore((s) => s.currentMember());
+  const serverApprovals = useStore((s) => s.serverApprovals);
   const connectors = useStore((s) => s.connectors);
   const backendOnline = useStore((s) => s.backendOnline);
   const navigate = useStore((s) => s.navigate);
@@ -75,7 +76,10 @@ export function Dashboard() {
   const suggestions = useMemo(() => suggestNextActions(data), [data]);
   // All upcoming events (from ~now), sorted — the base for the Today card's two columns.
   const upcoming = useMemo(() => inSpace([...data.events]).filter((e) => new Date(e.startAt).getTime() >= Date.now() - 3600_000).sort((a, b) => +new Date(a.startAt) - +new Date(b.startAt)), [data.events, spaceFilter]);
-  const pendingApprovals = inSpace(data.approvals.filter((a) => a.status === "Pending"));
+  // WP-001: server truth, not the local `data.approvals` mirror — see Shell's useBadges
+  // for the same fix. Server approvals have no spaceId (approvals aren't a space concept
+  // server-side), so this list intentionally isn't run through inSpace().
+  const pendingApprovals = serverApprovals.filter((a) => a.status === "pending");
   const overdue = inSpace(data.tasks.filter((t) => t.status !== "done" && isOverdue(t.dueAt)));
   const activeAgents = inSpace(data.agents.filter((a) => a.status === "Active" || a.status === "Needs Attention"));
   const recentFiles = useMemo(() => inSpace([...data.files]).sort((a, b) => +new Date(b.uploadedAt) - +new Date(a.uploadedAt)).slice(0, 4), [data.files, spaceFilter]);
@@ -243,7 +247,7 @@ export function Dashboard() {
             <ul className="space-y-2">
               {pendingApprovals.slice(0, 3).map((a) => (
                 <li key={a.id} onClick={() => navigate("messages", { tab: "approvals", approval: a.id })} className="flex cursor-pointer items-center gap-3 rounded-2xl border border-amber-200/70 bg-surface-rim px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] transition-colors hover:bg-amber-50">
-                  <Icon name="ShieldAlert" size={16} className="shrink-0 text-amber-600" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-ink-800">{a.title}</p><p className="text-xs text-amber-600">Approval · {a.riskLevel} risk</p></div>
+                  <Icon name="ShieldAlert" size={16} className="shrink-0 text-amber-600" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-ink-800">{a.preview || a.toolId}</p><p className="text-xs text-amber-600">Approval · {a.risk} risk</p></div>
                 </li>
               ))}
               {overdue.slice(0, 3).map((t) => (
