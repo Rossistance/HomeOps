@@ -71,6 +71,8 @@ test("calendar renders view tabs and month controls", async ({ page, isMobile })
   await signIn(page, OWNER);
   await openScreen(page, "Calendar", { mobile: isMobile === true });
   await expect(page.getByRole("tablist", { name: "Calendar view" })).toBeVisible();
+  // Month navigation controls live inside the month view (default view is "list").
+  await page.getByRole("tab", { name: /month/i }).click();
   await expect(page.getByLabel("Previous month")).toBeVisible();
   await expect(page.getByLabel("Next month")).toBeVisible();
 });
