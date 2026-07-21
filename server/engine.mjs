@@ -211,6 +211,20 @@ function deterministicFill(run, stepIndex, step, schema) {
         const m = JSON.stringify(s.result).match(/https?:\/\/[^"\\\s)>]+/);
         if (m) { filled[f.key] = m[0]; changed = true; break; }
       }
+    } else if (/^eventid$/i.test(f.key)) {
+      // Entity-id threading (UC-19): a multi-step family-event skill creates the event
+      // in step 1 (homeops.create_event_draft / plan_meal) and the follow-on steps
+      // (update_event_checklist, assign_driver, assign_what_to_bring) all need that
+      // fresh eventId. With no AI provider the agentic fill is unavailable, so thread
+      // it deterministically here. Deliberately NARROW: only fills a required, empty
+      // `eventId` field, and only from a prior succeeded step whose returned id is an
+      // event id (`ev_` prefix). It never touches member-reference ids like driverId.
+      for (let j = stepIndex - 1; j >= 0; j--) {
+        const s = run.steps[j];
+        if (s?.status !== "succeeded" || !s.result) continue;
+        const id = s.result.eventId ?? s.result.id;
+        if (id && String(id).startsWith("ev_")) { filled[f.key] = String(id); changed = true; break; }
+      }
     } else if (/(query|q$|search|topic|text|goal)/i.test(f.key)) {
       const q = String(step.detail || step.title || run.plan?.title || "").trim();
       if (q) { filled[f.key] = q.slice(0, 300); changed = true; }

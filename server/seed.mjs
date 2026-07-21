@@ -156,6 +156,168 @@ export function seedDefaults() {
     });
   }
 
+  /* ============================================================== *
+   * USE-CASE BUILD (run-20260720-225249) — 9 ACTIVE backing skills.
+   * Each is the runnable half of an active use-case (DEC-001): a real,
+   * deterministic Skill whose steps[].tool_id are exact catalog ids. The
+   * declarative catalog entries live in src/data (workflow/agent templates);
+   * these seeds are what the run engine actually executes and verifies.
+   * Idempotent by id. Two delivery-capable use-cases (UC-14, UC-21) own a
+   * dedicated permissive agent so homeops.notify_contact can resolve its
+   * per-agent allowlist consent (the agent-tool allowlist is left empty =
+   * deny-only/permissive; the SEND consent still lives on the contact method).
+   * ============================================================== */
+  const agentExists = (id) => listAgents().some((a) => a.id === id);
+  const baseAgent = (id, name, purpose) => ({
+    id, householdId: "local", name, icon: "Bot", purpose,
+    instructions: "Run the assigned use-case skill. Always deliver only to verified, allowlisted contact methods; pause for approval on any sign-off step.",
+    status: "Active", spaceType: "Family", system: true,
+    skillIds: [], allowedToolIds: [], allowedFunctionIds: [], deniedFunctionIds: [],
+    approvalPolicy: {}, triggers: [], version: 1, createdAt: Date.now(), updatedAt: nowISO,
+  });
+  if (!agentExists("agt_morning_status")) {
+    putAgent({ ...baseAgent("agt_morning_status", "Morning Status Helper", "Sends the 6:30 AM weather + meal-prep status text to an allowlisted contact method."), skillIds: ["skl_uc14_morning_status_text"] });
+  }
+  if (!agentExists("agt_meal_planner")) {
+    putAgent({ ...baseAgent("agt_meal_planner", "Meal Planner & Sign-Off", "Plans next week's meals, drafts the menu notification, records household sign-off, and dispatches to allowlisted contacts."), skillIds: ["skl_uc21_meal_planner_signoff"] });
+  }
+
+  const skillExists = (id) => listSkills().some((s) => s.id === id);
+  const baseSkill = (over) => ({
+    householdId: "local", domain: "Family", mode: "deterministic", defaultAgentId: null,
+    planner_guidance: "", input_schema: [], output_schema: [],
+    required_connectors: [], required_tools: [], required_functions: [],
+    optional_tools: [], optional_functions: [], approval_policy: {}, risk_level: "Low",
+    memory_policy: {}, test_cases: [], version: 1, status: "available", system: true,
+    createdAt: Date.now(), updatedAt: nowISO, ...over,
+  });
+  const seedSkill = (skill) => { if (!skillExists(skill.id)) putSkill(baseSkill(skill)); };
+
+  // UC-17 — Smart Recipe Extractor (Web Search & Reading; all Read; no approval).
+  seedSkill({
+    id: "skl_uc17_recipe_extractor", name: "Smart Recipe Extractor", type: "web",
+    description: "Search the web for a recipe, read the top result, and extract a clean structured recipe (ingredients + steps, ads stripped).",
+    required_connectors: ["Web Search & Reading"], required_tools: ["web.search", "web.read", "web.recipe"],
+    steps: [
+      { step_id: "s1", name: "Search the web", description: "Find candidate recipe pages.", tool_id: "web.search", input_mapping: { query: "quick kid-friendly weeknight dinner recipes" }, approval_required: false },
+      { step_id: "s2", name: "Read the top result", description: "Fetch the best result page (URL threads from the search result).", tool_id: "web.read", input_mapping: { url: "" }, approval_required: false },
+      { step_id: "s3", name: "Extract the recipe", description: "Isolate ingredients + instructions, strip ads (honest null if no structured recipe).", tool_id: "web.recipe", input_mapping: { url: "" }, approval_required: false },
+    ],
+  });
+
+  // UC-18 — Digital Memory Scrapbooker (FamiliOS-native; no approval; live-runnable).
+  seedSkill({
+    id: "skl_uc18_memory_scrapbooker", name: "Digital Memory Scrapbooker", type: "custom",
+    description: "Log weekend highlights to the family journal, then compile a formatted keepsake artifact.",
+    required_tools: ["homeops.write_memory", "homeops.create_artifact"],
+    required_functions: ["homeops.write_memory", "homeops.create_artifact"],
+    input_schema: [{ key: "highlights", label: "Weekend highlights", type: "textarea", required: false }],
+    memory_policy: { scope: "family" },
+    steps: [
+      { step_id: "s1", name: "Log the memory", description: "Record the weekend highlights into the family journal.", tool_id: "homeops.write_memory", input_mapping: { scope: "family", type: "Memory", text: "Weekend family outing — highlights and photos logged to the family journal." }, approval_required: false },
+      { step_id: "s2", name: "Compile keepsake", description: "Produce a formatted keepsake artifact from the highlights.", tool_id: "homeops.create_artifact", input_mapping: { kind: "keepsake", title: "Weekend Family Scrapbook", body: "A formatted keepsake compiled from this weekend's family highlights and photos." }, approval_required: false },
+    ],
+  });
+
+  // UC-19 — Event Coordinator & Logistics Assigner (native; eventId threads step 1 → 2/3/4).
+  seedSkill({
+    id: "skl_uc19_event_coordinator", name: "Event Coordinator & Logistics Assigner", type: "custom",
+    description: "Draft a family event, build its prep checklist, assign a driver, and assign what-to-bring — all on one threaded eventId.",
+    required_tools: ["homeops.create_event_draft", "homeops.update_event_checklist", "homeops.assign_driver", "homeops.assign_what_to_bring"],
+    required_functions: ["homeops.create_event_draft", "homeops.update_event_checklist", "homeops.assign_driver", "homeops.assign_what_to_bring"],
+    steps: [
+      { step_id: "s1", name: "Draft the event", description: "Create the Family Reunion Picnic event draft.", tool_id: "homeops.create_event_draft", input_mapping: { title: "Family Reunion Picnic", startAt: "2026-08-15T12:00:00", location: "Riverside Park", participantIds: [] }, approval_required: false },
+      { step_id: "s2", name: "Build the checklist", description: "Add prep items including 'Pick up ice' (eventId threads from step 1).", tool_id: "homeops.update_event_checklist", input_mapping: { eventId: "", items: ["Pick up ice", "Set up tables", "Bring sunscreen"] }, approval_required: false },
+      { step_id: "s3", name: "Assign a driver", description: "Assign the designated driver for logistics.", tool_id: "homeops.assign_driver", input_mapping: { eventId: "", driverId: "m-morgan" }, approval_required: false },
+      { step_id: "s4", name: "Assign what-to-bring", description: "Assign who brings the side dishes.", tool_id: "homeops.assign_what_to_bring", input_mapping: { eventId: "", items: [{ item: "Potato salad", memberId: "m-morgan" }, { item: "Watermelon", memberId: "m-alex" }] }, approval_required: false },
+    ],
+  });
+
+  // UC-20 — Chore Manager & Document Linker (native; doc ref in task.notes — NOT attach_note, which targets events).
+  seedSkill({
+    id: "skl_uc20_chore_doc_linker", name: "Chore Manager & Document Linker", type: "custom",
+    description: "Create a chore task with the home-insurance policy reference in its notes, then add a weekend list item. Uses task.notes for the reference because attach_note_or_file_reference targets events, not tasks.",
+    required_tools: ["homeops.create_task", "homeops.create_list_item"],
+    required_functions: ["homeops.create_task", "homeops.create_list_item"],
+    steps: [
+      { step_id: "s1", name: "Create the chore task", description: "Create 'Fix Backyard Fence' with the insurance policy reference in notes.", tool_id: "homeops.create_task", input_mapping: { title: "Fix Backyard Fence", priority: "medium", notes: "Reference: Home insurance policy guide (policy #HO-2026) in Files & Knowledge. Linked via task notes — FamiliOS task attachments are held on the task's notes field." }, approval_required: false },
+      { step_id: "s2", name: "Add weekend list item", description: "Append 'Buy wood screws' to the Weekend list.", tool_id: "homeops.create_list_item", input_mapping: { text: "Buy wood screws", listName: "Weekend" }, approval_required: false },
+    ],
+  });
+
+  // UC-22 — Internal System Sync (native core; gmail.search is the optional live-enrichment step, contract-only).
+  seedSkill({
+    id: "skl_uc22_internal_system_sync", name: "Internal System Sync", type: "custom",
+    description: "Parse a family-meeting transcript into memory, then compose a 'today's alerts' digest artifact from recent activity. The digest is COMPOSED from write_memory + create_artifact (no built-in 'inbox digest' tool exists); gmail.search enriches it when Google is connected.",
+    required_tools: ["homeops.write_memory", "homeops.create_artifact"],
+    required_functions: ["homeops.write_memory", "homeops.create_artifact"],
+    optional_tools: ["gmail.search"],
+    memory_policy: { scope: "family" },
+    steps: [
+      { step_id: "s1", name: "Parse transcript to memory", description: "Log the meeting transcript into internal memory.", tool_id: "homeops.write_memory", input_mapping: { scope: "family", type: "Transcript", text: "Family meeting transcript: agreed chore rotation (Dad handles trash Tuesdays); finish summer-camp signups by August; schedule dentist for the kids." }, approval_required: false },
+      { step_id: "s2", name: "Compose alerts digest", description: "Build today's alerts digest artifact from recent activity and the transcript.", tool_id: "homeops.create_artifact", input_mapping: { kind: "digest", title: "Today's Alerts Digest", body: "Today's alerts, composed from recent family activity and the meeting transcript: chore rotation agreed; summer-camp signups due by August; dentist to be scheduled. When Google is connected, gmail.search (newer_than:1d) adds live email alerts to this digest." }, approval_required: false },
+    ],
+  });
+
+  // UC-01 — School Correspondence Organizer (Gmail; label/move is approval-gated). Contract-verified (no live Gmail in harness).
+  seedSkill({
+    id: "skl_uc01_school_correspondence", name: "School Correspondence Organizer", type: "email",
+    description: "Weekday-morning: find school-district mail, read the label set, and move it out of the primary inbox under an approval gate.",
+    defaultAgentId: "agt_household", required_connectors: ["Gmail"],
+    required_tools: ["gmail.search", "gmail.listLabels", "gmail.modifyLabels"], risk_level: "High",
+    steps: [
+      { step_id: "s1", name: "Search school mail", description: "Find recent school-district messages.", tool_id: "gmail.search", input_mapping: { query: "from:(school OR district OR pta OR daycare) newer_than:1d", maxResults: "50" }, approval_required: false },
+      { step_id: "s2", name: "List labels", description: "Read the current Gmail label set.", tool_id: "gmail.listLabels", input_mapping: {}, approval_required: false },
+      { step_id: "s3", name: "Label and move", description: "Add 'School' and remove from INBOX — approval-gated write.", tool_id: "gmail.modifyLabels", input_mapping: { messageIds: "", addLabels: "School", removeLabels: "INBOX" }, approval_required: true },
+    ],
+    approval_policy: { gates: ["s3"] },
+  });
+
+  // UC-12 — Smart Climate Night-Mode (Google Home; setThermostat approval-gated). Contract/device-runtime-unverified.
+  seedSkill({
+    id: "skl_uc12_climate_nightmode", name: "Smart Climate Night-Mode", type: "smarthome",
+    description: "10 PM nightly: verify devices online, then set the living-room thermostat to 68°F (20°C) under an approval gate. Runtime-device-unverified (no physical Nest + HOMEOPS_SDM_PROJECT_ID).",
+    required_connectors: ["Google Home"],
+    required_tools: ["smarthome.listDevices", "smarthome.setThermostat"], risk_level: "Medium",
+    steps: [
+      { step_id: "s1", name: "List devices", description: "Confirm connected smart devices are online.", tool_id: "smarthome.listDevices", input_mapping: {}, approval_required: false },
+      { step_id: "s2", name: "Set thermostat", description: "Set the living-room thermostat to 20°C (68°F) — approval-gated.", tool_id: "smarthome.setThermostat", input_mapping: { deviceId: "", celsius: "20" }, approval_required: true },
+    ],
+    approval_policy: { gates: ["s2"] },
+  });
+
+  // UC-14 — Morning Status Text (Weather + Text via notify_contact, NOT sms.send; RSS stubbed/optional).
+  seedSkill({
+    id: "skl_uc14_morning_status_text", name: "Morning Status Text", type: "briefing",
+    description: "6:30 AM: fetch current weather (+ optional meal-prep RSS when configured), compose, and text it via the contact-method registry (homeops.notify_contact — NOT sms.send, so an unattended schedule can actually deliver). RSS is stubbed until the RSS/Feed connector is configured.",
+    defaultAgentId: "agt_morning_status", required_connectors: ["Weather", "Text Messaging"],
+    required_tools: ["weather.current", "homeops.notify_contact"], optional_tools: ["rss.latest"], risk_level: "High",
+    input_schema: [{ key: "methodId", label: "Text contact method id", type: "text", required: false }],
+    steps: [
+      { step_id: "s1", name: "Fetch weather", description: "Get current local conditions (soft-fails gracefully if the Weather connector is offline).", tool_id: "weather.current", input_mapping: {}, approval_required: false },
+      { step_id: "s2", name: "Text the status", description: "Deliver the morning status to the allowlisted text method via the registry (never sms.send on the unattended path).", tool_id: "homeops.notify_contact", input_mapping: { methodId: "{{methodId}}", subject: "Morning status", body: "Good morning! Here's your daily status — current local weather and today's meal-prep notes. Have a great day." }, approval_required: false },
+    ],
+  });
+
+  // UC-21 — Multi-Channel Meal Planner & Sign-Off. Order: plan → draft → SIGN-OFF (gated) → dispatch,
+  // so the household sign-off is recorded before any external dispatch (recorded design choice).
+  seedSkill({
+    id: "skl_uc21_meal_planner_signoff", name: "Multi-Channel Meal Planner & Sign-Off", type: "meal",
+    description: "Plan next week's meals (planner + groceries + calendar), draft the menu notification, record household sign-off (approval-gated), then dispatch to allowlisted contact methods.",
+    defaultAgentId: "agt_meal_planner",
+    required_tools: ["homeops.plan_meal", "homeops.send_notification_draft", "homeops.create_approval", "homeops.notify_contact"],
+    required_functions: ["homeops.plan_meal", "homeops.send_notification_draft", "homeops.create_approval", "homeops.notify_contact"],
+    risk_level: "High",
+    input_schema: [{ key: "methodId", label: "Contact method id for menu dispatch", type: "text", required: false }],
+    steps: [
+      { step_id: "s1", name: "Plan the meal", description: "Add next week's dinner to the planner (auto-adds groceries + calendar event).", tool_id: "homeops.plan_meal", input_mapping: { title: "Sheet-Pan Chicken Fajitas", date: "2026-07-27", slot: "dinner", ingredients: ["chicken breast", "bell peppers", "onion", "tortillas", "fajita seasoning"], instructions: ["Slice chicken and veggies", "Toss with seasoning", "Roast 25 min at 425F", "Warm tortillas and serve"], servings: 4 }, approval_required: false },
+      { step_id: "s2", name: "Draft the menu notification", description: "Draft the menu overview notification for review.", tool_id: "homeops.send_notification_draft", input_mapping: { subject: "Next week's dinner menu", body: "Here's the proposed dinner menu for next week — please review and sign off.", channel: "email" }, approval_required: false },
+      { step_id: "s3", name: "Request household sign-off", description: "Record the household sign-off (approval-gated) BEFORE dispatch.", tool_id: "homeops.create_approval", input_mapping: { subject: "Approve next week's menu", detail: "Please sign off on next week's dinner menu before it is dispatched to the family." }, approval_required: true },
+      { step_id: "s4", name: "Dispatch the menu", description: "Send the approved menu to an allowlisted contact method (honest transport outcome if none configured).", tool_id: "homeops.notify_contact", input_mapping: { methodId: "{{methodId}}", subject: "Next week's dinner menu", body: "The family dinner menu for next week is approved — here it is for your reference." }, approval_required: false },
+    ],
+    approval_policy: { gates: ["s3"] },
+  });
+
   // Starter playbooks (Phase 6 + web-catalog parity) — server-owned so every client
   // (web/mobile) reads the same library. Additive-idempotent: runs on EVERY boot and
   // upserts any missing system playbook by id or name, so households seeded before a

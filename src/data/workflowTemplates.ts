@@ -14,6 +14,81 @@ import { WORKFLOW_TEMPLATE_IDS, AGENT_TEMPLATE_IDS } from "./catalogIds";
 
 export const workflowTemplates: WorkflowTemplate[] = [
  {
+ // UC-01 — active. Backing skill: skl_uc01_school_correspondence.
+ id: WORKFLOW_TEMPLATE_IDS.schoolCorrespondence,
+ name: "School Correspondence Organizer",
+ category: "Communication and Coordination",
+ prompt:
+ "Every weekday morning, look through my personal inbox for updates from the school district, see how my sorting tags are set up, and automatically sort those messages out of my main feed so I can look at them later.",
+ recommendedAgent: "Household Assistant",
+ requiredConnections: ["Gmail"],
+ optionalConnections: [],
+ triggerType: "Schedule",
+ approvalRequirements: [
+ "Approval required before labeling/moving messages (the Gmail write is High-risk and never auto-runs).",
+ ],
+ fileProcessingNeeds: [],
+ browserNeeds: "None.",
+ outputFormat: ["A count of messages moved, with the label added and INBOX removed."],
+ exampleOutput: [
+ "Found 3 school-district messages from the last day.",
+ "Applied label 'School' and removed them from the primary inbox (after approval).",
+ ],
+ activityLogEvents: ["Trigger fired.", "Inbox searched.", "Labels read.", "Approval requested.", "Messages moved."],
+ failureStates: ["Gmail not connected.", "gmail.modify permission missing.", "Approval not granted."],
+ setupChecklist: ["Connect Gmail with inbox-organize permission.", "Choose the school-mail search filter.", "Confirm the approval rule."],
+ },
+ {
+ // UC-12 — active (device-runtime-unverified). Backing skill: skl_uc12_climate_nightmode.
+ id: WORKFLOW_TEMPLATE_IDS.smartClimateNightMode,
+ name: "Smart Climate Night-Mode",
+ category: "Ambient Smart Home Control",
+ prompt:
+ "Scan all connected smart hardware profiles across the house to ensure everything is online, then automatically adjust the central living room thermostat down to 68 degrees at 10:00 PM every night.",
+ recommendedAgent: "Household Assistant",
+ requiredConnections: ["Google Home"],
+ optionalConnections: [],
+ triggerType: "Schedule",
+ approvalRequirements: [
+ "Approval required before setting the thermostat (device write is approval-gated).",
+ ],
+ fileProcessingNeeds: [],
+ browserNeeds: "None.",
+ outputFormat: ["Device online-check result and the thermostat setpoint command (heatCelsius 20)."],
+ exampleOutput: [
+ "Checked connected devices are online.",
+ "Set living-room thermostat to 68°F / 20°C at 10:00 PM (after approval).",
+ ],
+ activityLogEvents: ["Trigger fired at 22:00.", "Devices listed.", "Approval requested.", "Thermostat setpoint sent."],
+ failureStates: ["Google Home not connected.", "HOMEOPS_SDM_PROJECT_ID unset (fails closed).", "No physical thermostat in the loop (runtime-device-unverified)."],
+ setupChecklist: ["Connect Google Home / Nest.", "Set HOMEOPS_SDM_PROJECT_ID.", "Confirm the 22:00 schedule and approval rule."],
+ },
+ {
+ // UC-14 — active-partial (weather+text verified; RSS stubbed). Backing skill: skl_uc14_morning_status_text.
+ id: WORKFLOW_TEMPLATE_IDS.morningStatusText,
+ name: "Morning Status Text",
+ category: "Weather, Feeds and Web",
+ prompt:
+ "Every morning at 6:30 AM, fetch the current local outdoor weather conditions alongside the newest articles published to our family meal-prep RSS feed, compile the summary, and send it as a text message directly to my phone.",
+ recommendedAgent: "Morning Status Helper",
+ requiredConnections: ["Weather", "Text Messaging"],
+ optionalConnections: ["RSS / Feed"],
+ triggerType: "Schedule",
+ approvalRequirements: [
+ "No per-run approval: delivery is via the contact-method registry (verified + opted-in + per-agent allowlist is the standing consent).",
+ ],
+ fileProcessingNeeds: [],
+ browserNeeds: "None.",
+ outputFormat: ["A text message with current weather; RSS meal-prep items included only when the RSS/Feed connector is configured."],
+ exampleOutput: [
+ "Good morning! Current conditions: 62°F, light rain.",
+ "(Meal-prep feed items appear here once the RSS/Feed connector is configured.)",
+ ],
+ activityLogEvents: ["Trigger fired at 06:30.", "Weather fetched.", "Message composed.", "Delivered to allowlisted text method."],
+ failureStates: ["Weather connector offline (step soft-fails).", "RSS/Feed not configured (section omitted with a note).", "Text method not verified/allowlisted (honest refusal — no send)."],
+ setupChecklist: ["Verify a Phone/Text contact method.", "Allowlist the Morning Status Helper agent on that method.", "Optionally configure the RSS/Feed connector."],
+ },
+ {
  id: WORKFLOW_TEMPLATE_IDS.dailyFamilyBriefing,
  name: "Daily Family Briefing",
  category: "Communication and Coordination",

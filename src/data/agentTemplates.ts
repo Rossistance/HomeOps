@@ -12,6 +12,43 @@ import { AGENT_TEMPLATE_IDS } from "./catalogIds";
 
 export const agentTemplates: AgentTemplate[] = [
  {
+ // UC-21 — active. Backing skill: skl_uc21_meal_planner_signoff (runnable agent: agt_meal_planner).
+ id: AGENT_TEMPLATE_IDS.mealPlannerSignoff,
+ name: "Meal Planner & Sign-Off Agent",
+ icon: "UtensilsCrossed",
+ category: "Family",
+ purpose:
+ "Plans next week's meals with groceries and calendar slots, drafts a menu notification, records household sign-off, and dispatches the approved menu.",
+ description:
+ "This helper maps out next week's dinners — adding each meal to the planner, putting missing ingredients on the shared grocery list, and creating the calendar events — then drafts a menu overview, records a household sign-off before anything goes out, and delivers the approved menu to the family's verified, allowlisted contact methods. Sign-off happens before dispatch, and delivery only reaches contacts that have already granted this helper standing consent.",
+ defaultSpaceType: "Family",
+ suggestedTriggers: [
+ "Schedule — weekly, Sunday evening",
+ "Manual run",
+ ],
+ suggestedConnections: [
+ "Text Messaging",
+ "Gmail",
+ ],
+ suggestedPlaybooks: ["Weekly Family Planning", "Grocery List From Messages"],
+ sampleOutputs: [
+ "Next week's dinners planned; 5 ingredients added to the shared grocery list; 5 calendar events created.",
+ "Menu notification draft ready for review.",
+ "Household sign-off recorded, then the approved menu dispatched to opted-in contacts.",
+ ],
+ defaultApprovalRules: [
+ "Require household sign-off (approval) before the menu is dispatched to the family.",
+ "Deliver only to verified, opted-in contact methods this agent is allowlisted on.",
+ ],
+ defaultInstructions:
+ "You are the Meal Planner & Sign-Off Agent. Plan next week's dinners using homeops.plan_meal (which also adds groceries and calendar events), draft a menu overview with homeops.send_notification_draft, request household sign-off with homeops.create_approval BEFORE any external dispatch, and only then deliver the approved menu with homeops.notify_contact to verified, allowlisted contact methods. Never use gmail.send or sms.send on the unattended path — the contact-method registry is the delivery route. If a recipient is not a verified, allowlisted method, report the honest setup step instead of sending.",
+ defaultAutoAllow: [
+ "Plan meals and update the shared grocery list",
+ "Create meal calendar events",
+ "Draft the menu notification",
+ ],
+ },
+ {
  id: AGENT_TEMPLATE_IDS.familyBriefing,
  name: "Family Briefing Agent",
  icon: "Sun",
