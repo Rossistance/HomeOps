@@ -44,7 +44,9 @@ export function AIProvidersPanel() {
     setHealth((s) => ({ ...s, [p.id]: h }));
     if (h.ok && h.models) setModels((s) => ({ ...s, [p.id]: h.models! }));
     setBusy(null);
-    toast({ kind: h.ok ? "success" : "warn", title: h.ok ? `${p.name} reachable` : `${p.name}: ${h.status ?? "unreachable"}`, message: h.ok ? `${h.modelCount ?? 0} models · ${h.latencyMs ?? 0}ms` : h.message });
+    // A keyOptional provider (LM Studio) that fails with an auth-shaped error carries a
+    // `hint` naming the token requirement — lead with that over the raw provider message.
+    toast({ kind: h.ok ? "success" : "warn", title: h.ok ? `${p.name} reachable` : `${p.name}: ${h.status ?? "unreachable"}`, message: h.ok ? `${h.modelCount ?? 0} models · ${h.latencyMs ?? 0}ms` : (h.hint || h.message) });
   };
   const discover = async (p: AIProvider) => {
     setBusy(p.id);
@@ -97,9 +99,26 @@ export function AIProvidersPanel() {
             <p className="mt-2 text-xs text-ink-500">{p.docs}</p>
 
             <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-              {p.needsKey && (
-                <Field label={`API key${p.keySet ? " (saved)" : ""}`} className="sm:col-span-2">
-                  <TextInput type="password" value={f.apiKey} disabled={!canAdmin} placeholder={p.keySet ? "•••••••• saved — leave blank to keep" : "Paste your API key"} onChange={(e) => setForms((s) => ({ ...s, [p.id]: { ...f, apiKey: e.target.value } }))} />
+              {(p.needsKey || p.keyOptional) && (
+                <Field label={p.keyOptional ? `API token (optional)${p.keySet ? " — saved" : ""}` : `API key${p.keySet ? " (saved)" : ""}`} className="sm:col-span-2">
+                  <TextInput
+                    type="password"
+                    value={f.apiKey}
+                    disabled={!canAdmin}
+                    placeholder={p.keySet ? "•••••••• saved — leave blank to keep" : p.keyOptional ? "Only needed if your local server requires one" : "Paste your API key"}
+                    onChange={(e) => setForms((s) => ({ ...s, [p.id]: { ...f, apiKey: e.target.value } }))}
+                  />
+                  {/* keyOptional providers keep needsKey:false — a bare local server with
+                      no auth must keep working with this field blank. The wording differs:
+                      LM Studio's token lives in its own Developer menu; Ollama's key only
+                      matters for ollama.com cloud or an auth-protected remote. */}
+                  {p.keyOptional && (
+                    <p className="mt-1 text-xs text-ink-400">
+                      {p.id === "ollama"
+                        ? "Only needed for ollama.com cloud or an auth-protected remote Ollama (keys: ollama.com/settings/keys). Leave blank for a plain local server."
+                        : "Newer LM Studio builds require an API token (LM Studio → Developer → API token). Leave blank if yours doesn't ask for one."}
+                    </p>
+                  )}
                 </Field>
               )}
               {(p.local || p.needsBaseUrl) && (
@@ -127,6 +146,10 @@ export function AIProvidersPanel() {
               {!p.active && usable && canAdmin && <Button size="sm" variant="ember" onClick={() => setActive(p)}><Icon name="Star" size={13} /> Set active</Button>}
               {configuredish && canAdmin && <Button size="sm" variant="ghost" onClick={() => revoke(p)}><Icon name="Ban" size={13} /> Disconnect</Button>}
             </div>
+            {/* Persists past the toast: a failed health check against a keyOptional local
+                provider (LM Studio) that looks like a missing/invalid token names the
+                fix explicitly instead of leaving "unreachable" to be guessed at. */}
+            {h && !h.ok && h.hint && <p className="mt-3 rounded-2xl bg-amber-50 px-3.5 py-2.5 text-xs text-amber-700">{h.hint}</p>}
             {out && <p className={`mt-3 rounded-2xl px-3.5 py-2.5 text-xs ${out.ok ? "bg-sage-50 text-ink-700" : "bg-coral-50 text-coral-700"}`}>{out.ok ? `“${out.text}”` : `✗ ${out.text}`}</p>}
           </div>
         );

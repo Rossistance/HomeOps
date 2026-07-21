@@ -10,8 +10,16 @@ export const AI_PROVIDERS = [
   { id: "anthropic", name: "Anthropic Claude", kind: "cloud", style: "anthropic", needsKey: true, defaultBaseUrl: "https://api.anthropic.com", defaultModel: "claude-haiku-4-5", docs: "Paste an API key from console.anthropic.com." },
   { id: "gemini", name: "Google Gemini", kind: "cloud", style: "gemini", needsKey: true, defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta", defaultModel: "gemini-2.5-flash", docs: "Paste an API key from aistudio.google.com." },
   { id: "compatible", name: "OpenAI-compatible", kind: "cloud", style: "openai", needsKey: true, needsBaseUrl: true, defaultBaseUrl: "", defaultModel: "", docs: "Any OpenAI-compatible endpoint (Together, Groq, OpenRouter, vLLM, …). Set base URL + key." },
-  { id: "ollama", name: "Ollama (local)", kind: "local", style: "ollama", needsKey: false, local: true, defaultBaseUrl: "http://localhost:11434", defaultModel: "", docs: "Runs locally. Start Ollama, then Discover models." },
-  { id: "lmstudio", name: "LM Studio (local)", kind: "local", style: "openai", needsKey: false, local: true, defaultBaseUrl: "http://localhost:1234/v1", defaultModel: "", docs: "Open LM Studio's local server, then Discover models." },
+  // needsKey stays false — a bare local Ollama has no auth and must keep working keyless.
+  // keyOptional lets Settings store a bearer for ollama.com's cloud API (Authorization:
+  // Bearer, keys at ollama.com/settings/keys) or an auth-protected remote/proxied Ollama;
+  // a plain local server ignores the header harmlessly. All three ollama-style request
+  // paths attach it when (and only when) a key is stored.
+  { id: "ollama", name: "Ollama (local)", kind: "local", style: "ollama", needsKey: false, keyOptional: true, keyHint: "This Ollama endpoint rejected the request as unauthorized. If you're using ollama.com cloud or an auth-protected remote, add an API key in Settings → AI providers (keys: ollama.com/settings/keys), then test again.", local: true, defaultBaseUrl: "http://localhost:11434", defaultModel: "", docs: "Runs locally. Start Ollama, then Discover models." },
+  // needsKey stays false — a bare LM Studio server with no auth configured must keep working.
+  // keyOptional says the Settings UI should still offer a token field: newer LM Studio
+  // builds gate their local server behind a bearer token (401 invalid_api_key otherwise).
+  { id: "lmstudio", name: "LM Studio (local)", kind: "local", style: "openai", needsKey: false, keyOptional: true, local: true, defaultBaseUrl: "http://localhost:1234/v1", defaultModel: "", docs: "Open LM Studio's local server, then Discover models." },
 ];
 
 export function aiProviderById(id) {
@@ -61,7 +69,7 @@ export function publicProvider(p, householdId) {
   const cfg = getConnectorConfig(cfgId(p.id));
   const h = getHealth(cfgId(p.id));
   return {
-    id: p.id, name: p.name, kind: p.kind, local: !!p.local, needsKey: !!p.needsKey, needsBaseUrl: !!p.needsBaseUrl,
+    id: p.id, name: p.name, kind: p.kind, local: !!p.local, needsKey: !!p.needsKey, keyOptional: !!p.keyOptional, needsBaseUrl: !!p.needsBaseUrl,
     docs: p.docs, defaultBaseUrl: p.defaultBaseUrl, defaultModel: p.defaultModel,
     baseUrl: cfg.fields?.baseUrl || p.defaultBaseUrl || "",
     model: cfg.fields?.model || p.defaultModel || "",
@@ -83,6 +91,8 @@ export function setProviderConfig(id, body, householdId) {
   const fields = {};
   if (typeof body.baseUrl === "string") fields.baseUrl = body.baseUrl.trim();
   if (typeof body.model === "string") fields.model = body.model.trim();
+  // No needsKey/keyOptional gate here by design: a keyOptional local provider (LM
+  // Studio) must be able to store a token exactly like a needsKey cloud provider does.
   const secrets = {};
   if (typeof body.apiKey === "string") secrets.apiKey = body.apiKey;
   setConnectorConfig(cfgId(id), fields, secrets);
@@ -148,9 +158,10 @@ export async function providerModels(id) {
   const key = keyOf(p);
   try {
     if (p.style === "ollama") {
-      const r = await getJSON(`${base}/api/tags`, {}, p.local);
+      const headers = key ? { authorization: `Bearer ${key}` } : {};
+      const r = await getJSON(`${base}/api/tags`, { headers }, p.local);
       if (!r.ok) return { ok: false, error: r.error, message: r.message };
-      if (!r.httpOk) return { ok: false, error: "provider_error", status: r.status };
+      if (!r.httpOk) return { ok: false, error: "provider_error", status: r.status, message: sanitizeProviderError(r.json) };
       return { ok: true, models: (r.json?.models ?? []).map((m) => m.name) };
     }
     if (p.style === "gemini") {
@@ -171,11 +182,30 @@ export async function providerModels(id) {
     const headers = key ? { authorization: `Bearer ${key}` } : {};
     const r = await getJSON(`${base}/models`, { headers }, p.local);
     if (!r.ok) return { ok: false, error: r.error, message: r.message };
-    if (!r.httpOk) return { ok: false, error: "provider_error", status: r.status };
+    // Capture the provider's message (not just the status) — a 401 body is how a local
+    // LM Studio server that now requires a token tells us that, and providerHealth needs
+    // the text to recognize it and turn it into an actionable hint.
+    if (!r.httpOk) return { ok: false, error: "provider_error", status: r.status, message: sanitizeProviderError(r.json) };
     return { ok: true, models: (r.json?.data ?? []).map((m) => m.id) };
   } catch (e) {
     return { ok: false, error: "provider_error", message: String(e?.message ?? e) };
   }
+}
+
+// A keyOptional local provider (LM Studio) answering 401/invalid_api_key needs a token
+// FamiliOS doesn't have on file — name that explicitly instead of a bare "unreachable"
+// so Settings can tell someone exactly what to go paste in. Never fires for providers
+// that aren't keyOptional (their needsKey gate already gives them a clear affordance).
+function authKeyHint(p, result) {
+  if (!p?.keyOptional) return null;
+  const msg = String(result?.message ?? "");
+  const looksLikeAuthFailure = result?.status === 401 || /invalid[_ -]?api[_ -]?key|unauthorized|api key/i.test(msg);
+  if (!looksLikeAuthFailure) return null;
+  // A provider can carry its own wording (Ollama's token comes from ollama.com, not a
+  // local Developer menu) — the generated default fits the LM-Studio-style local case.
+  if (p.keyHint) return p.keyHint;
+  const label = p.name.replace(/\s*\(local\)\s*$/i, "");
+  return `Newer ${label} builds require an API token (${label} → Developer → API token). Add it in Settings → AI providers, then test again.`;
 }
 
 export async function providerHealth(id) {
@@ -188,8 +218,9 @@ export async function providerHealth(id) {
   // default URL). This is what turns a local provider from needs_health_check → healthy.
   if (!m.ok) {
     const status = m.error === "fetch_failed" || m.error === "dns_failure" ? "unreachable" : m.error;
+    const hint = authKeyHint(p, m);
     setHealth(cfgId(id), { ok: false, status, latencyMs: Date.now() - t0 });
-    return { ok: false, status, message: m.message, latencyMs: Date.now() - t0 };
+    return { ok: false, status, message: m.message, ...(hint ? { hint } : {}), latencyMs: Date.now() - t0 };
   }
   setHealth(cfgId(id), { ok: true, status: "reachable", latencyMs: Date.now() - t0 });
   return { ok: true, status: "reachable", models: m.models, modelCount: m.models.length, latencyMs: Date.now() - t0 };
@@ -257,7 +288,7 @@ export async function providerChat(id, { messages = [], model } = {}) {
     }
     if (p.style === "ollama") {
       const r = await getJSON(`${base}/api/chat`, {
-        method: "POST", headers: { "content-type": "application/json" },
+        method: "POST", headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
         body: JSON.stringify({ model: useModel, messages, stream: false }),
       }, p.local, CHAT_TIMEOUT_MS);
       if (!r.ok) return { ok: false, error: r.error, message: r.message };
@@ -333,7 +364,7 @@ export async function providerChatStream(id, { messages = [], model } = {}, onTo
       let buf = "";
       const r = await safeFetchStream(
         `${base}/api/chat`,
-        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: useModel, messages, stream: true }) },
+        { method: "POST", headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) }, body: JSON.stringify({ model: useModel, messages, stream: true }) },
         { allowLoopback: true, timeoutMs: 90_000 },
         (chunk) => {
           buf += chunk;
