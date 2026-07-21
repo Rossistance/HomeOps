@@ -626,6 +626,10 @@ export const useStore = create<Store>((set, get) => {
           commit((d) => d.members.forEach((x) => (x.isCurrentUser = x.id === s.actorId)));
           set({ session: s });
           void get().loadBackend();
+          // Default a brand-new household to this browser's timezone so "every day at
+          // 7 AM" triggers anchor correctly from day one, instead of silently falling
+          // back to the server's clock. Adult Admin/Owner can change it in Settings.
+          void backend.setSettings({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
         } else if (claim.error === "already_claimed") {
           // The backend may already know this exact owner (e.g. re-running onboarding
           // after a claim) — a normal login settles it before we bother the user.
@@ -748,6 +752,10 @@ export const useStore = create<Store>((set, get) => {
       toast({ kind: "success", title: input.inviteToken ? "Welcome to the household!" : "Your household is ready", message: input.inviteToken ? "You've joined — everything the family shares is here." : "You're the Owner. Invite your family from Settings whenever you're ready." });
       void get().loadBackend();
       void get().hydrateFromServer();
+      // Default a brand-new household to this browser's timezone (see completeOnboarding
+      // for the same reasoning) — skip when JOINING an existing household via invite,
+      // since that household may already have one set.
+      if (!input.inviteToken) void backend.setSettings({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
       return true;
     },
     currentRole: () => get().session?.role as Role ?? get().currentMember().role,

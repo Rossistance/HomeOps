@@ -191,6 +191,15 @@ async function readBody(req) {
   try { return raw ? JSON.parse(raw) : {}; } catch { return null; }
 }
 function externalActionsEnabled(householdId) { return getSettings(householdId).externalActionsEnabled !== false; }
+// A real IANA zone the platform's ICU data recognizes — rejects junk like "PST" or
+// "America/Nowhere" before it can silently break trigger scheduling (server/triggers.mjs).
+function isValidTimezone(tz) {
+  try {
+    if (typeof Intl.supportedValuesOf === "function") return Intl.supportedValuesOf("timeZone").includes(tz);
+    new Intl.DateTimeFormat("en-US", { timeZone: tz }); // throws RangeError on an unknown zone
+    return true;
+  } catch { return false; }
+}
 // C1.5 plan gate for AI-spend routes: resident household and active trials/
 // subscriptions pass; an expired household gets an honest 402 with its plan
 // state. Family DATA routes are never gated — data is theirs regardless.
@@ -2768,7 +2777,7 @@ const handleRequest = async (req, res) => {
     if (path === "/api/settings" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const s = getSettings(g.session.householdId);
-      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false, timezone: s.timezone ?? null } }, req);
     }
     if (path === "/api/settings" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -2783,9 +2792,19 @@ const handleRequest = async (req, res) => {
       // every proposal — even low-risk — waits for a human in the evolution review queue.
       if (typeof body.autoApproveImprovements === "boolean") patch.autoApproveImprovements = body.autoApproveImprovements;
       if (typeof body.ownerPin === "string" && body.ownerPin) patch.ownerPinHash = crypto.createHash("sha256").update(body.ownerPin).digest("hex");
+      // Household timezone: an IANA zone name (e.g. "America/New_York") that anchors
+      // "every day at 7 AM" triggers to a real wall-clock time (server/triggers.mjs
+      // nextAnchorOccurrence). Without this, a scheduled trigger silently falls back to
+      // the SERVER's clock (UTC on Render) — "7 AM" then means 7 AM UTC, not 7 AM local.
+      // `timezone: null` explicitly clears it back to that disclosed fallback.
+      if (body.timezone === null) patch.timezone = null;
+      else if (typeof body.timezone === "string" && body.timezone) {
+        if (!isValidTimezone(body.timezone)) return json(res, 400, { error: "invalid_timezone" }, req);
+        patch.timezone = body.timezone;
+      }
       const next = setSettings(patch, g.session.householdId);
       audit({ type: "settings.update", ok: true, changed: Object.keys(patch), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
-      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true, autoApproveImprovements: next.autoApproveImprovements !== false } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true, autoApproveImprovements: next.autoApproveImprovements !== false, timezone: next.timezone ?? null } }, req);
     }
 
     /* ---- AI providers ---- */

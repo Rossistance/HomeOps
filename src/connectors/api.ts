@@ -578,11 +578,11 @@ export const backend = {
   async audit(limit = 50): Promise<AuditEvent[]> {
     try { return (await req<{ events: AuditEvent[] }>(`/audit?limit=${limit}`)).events ?? []; } catch { return []; }
   },
-  async getSettings(): Promise<{ externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean }> {
-    try { return (await req<{ settings: { externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean } }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
+  async getSettings(): Promise<{ externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; timezone?: string | null }> {
+    try { return (await req<{ settings: { externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; timezone?: string | null } }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
   },
-  async setSettings(patch: Record<string, unknown>): Promise<{ externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean }> {
-    try { return (await req<{ settings: { externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean } }>("/settings", { method: "POST", body: JSON.stringify(patch), mutation: true })).settings; } catch { return { externalActionsEnabled: true }; }
+  async setSettings(patch: Record<string, unknown>): Promise<{ externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; timezone?: string | null }> {
+    try { return (await req<{ settings: { externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; timezone?: string | null } }>("/settings", { method: "POST", body: JSON.stringify(patch), mutation: true })).settings; } catch { return { externalActionsEnabled: true }; }
   },
 
   /* ---- AI providers ---- */

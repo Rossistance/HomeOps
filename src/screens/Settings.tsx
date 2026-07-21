@@ -40,7 +40,24 @@ export function Settings() {
   // Auto-approve low-risk improvements (server-owned, Adult Admin): the server applies
   // low-risk evolution proposals without a human and labels each one. Default on.
   const [autoApproveImprovements, setAutoApproveImprovements] = useState(true);
-  useEffect(() => { void backend.getSettings().then((s) => { setCalendarAutoSync(s.calendarAutoSync === true); setAutoApproveImprovements(s.autoApproveImprovements !== false); }); }, []);
+  // Household timezone (server-owned, Adult Admin): anchors "every day at 7 AM" triggers
+  // to a real wall-clock time. Unset silently falls back to the SERVER's clock — a
+  // scheduled briefing can fire hours off from what the household actually meant.
+  const [timezone, setTimezoneState] = useState<string | null>(null);
+  const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const timezoneOptions: string[] = (() => {
+    // tsconfig's lib target (ES2020) predates Intl.supportedValuesOf (ES2022) — feature-detect
+    // via a safe cast rather than bumping the global lib target for one call site.
+    const supportedValuesOf = (Intl as unknown as { supportedValuesOf?: (key: "timeZone") => string[] }).supportedValuesOf;
+    try { return typeof supportedValuesOf === "function" ? supportedValuesOf("timeZone") : [browserTz]; } catch { return [browserTz]; }
+  })();
+  useEffect(() => { void backend.getSettings().then((s) => { setCalendarAutoSync(s.calendarAutoSync === true); setAutoApproveImprovements(s.autoApproveImprovements !== false); setTimezoneState(s.timezone ?? null); }); }, []);
+  const setTimezone = async (tz: string) => {
+    setTimezoneState(tz);
+    const s = await backend.setSettings({ timezone: tz });
+    setTimezoneState(s.timezone ?? null);
+    toast({ kind: "success", title: "Timezone set", message: `Scheduled automations (like a 7 AM briefing) now anchor to ${tz}.` });
+  };
   const toggleCalendarAutoSync = async (v: boolean) => {
     setCalendarAutoSync(v);
     const s = await backend.setSettings({ calendarAutoSync: v });
@@ -107,6 +124,15 @@ export function Settings() {
           </Row>
           <Row label="Auto-approve low-risk improvements" desc="Let FamiliOS apply the low-risk improvements it learns from run traces automatically. Each auto-applied change is labelled and logged; higher-risk ideas still wait for your review.">
             <Toggle checked={autoApproveImprovements} onChange={(v) => void toggleAutoApproveImprovements(v)} ariaLabel="Auto-approve low-risk improvements" />
+          </Row>
+          <Row label="Household timezone" desc={timezone ? "Scheduled automations (like a daily briefing) fire at this wall-clock time." : `Not set — scheduled automations currently anchor to the SERVER's clock, not your household's. This browser is in ${browserTz}.`}>
+            <Select value={timezone ?? ""} onChange={(e) => void setTimezone(e.target.value)} aria-label="Household timezone">
+              <option value="" disabled>{timezone ? timezone : "Choose a timezone…"}</option>
+              {!timezoneOptions.includes(browserTz) ? null : (
+                <option value={browserTz}>{browserTz} (this browser)</option>
+              )}
+              {timezoneOptions.filter((tz) => tz !== browserTz).map((tz) => <option key={tz} value={tz}>{tz}</option>)}
+            </Select>
           </Row>
         </Card>
 
