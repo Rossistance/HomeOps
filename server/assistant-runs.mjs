@@ -160,6 +160,34 @@ export function runOutcomeText(run) {
   return `"${run.title}" failed at step ${bad ? bad.index + 1 : "?"}${bad ? ` (${bad.title})` : ""}: ${run.error ?? "unknown error"}.${caveat}`;
 }
 
+/* ---- WP-004 (ISS-008, FEAT-019/005): "Done" always links to the thing ----
+ * Every succeeded step that created something with a stable id gets a link on the
+ * run_result message, so a task, list item, or artifact a run produced is reachable
+ * straight from the chat that started it — not just from Activity/Files & Knowledge
+ * after hunting. Derived strictly from each step's OWN recorded result shape
+ * (internal-functions.mjs, read-only from here) for the exact tool that ran; never
+ * guessed from a title or the run's summary text, and never for a step that didn't
+ * succeed. Tasks and list items are the same underlying store resource
+ * (homeops.create_list_item writes a Task with type:"list" — see
+ * internal-functions.mjs), so both link with kind:"task"; only the label differs.
+ * This is additive: the WP-002 artifactId/link fields on the message are untouched. */
+const TASK_LINK_LABEL = { "homeops.create_task": "View task", "homeops.create_list_item": "View list item" };
+const ARTIFACT_LINK_LABEL = { "homeops.send_notification_draft": "Review draft", "homeops.create_artifact": "View artifact" };
+export function buildResultLinks(run) {
+  const links = [];
+  for (const s of run.steps ?? []) {
+    if (!SUCCESS_STATUSES.includes(s.status)) continue;
+    const id = s.result?.id;
+    if (!id || typeof id !== "string") continue;
+    if (Object.prototype.hasOwnProperty.call(TASK_LINK_LABEL, s.toolId)) {
+      links.push({ kind: "task", id, label: TASK_LINK_LABEL[s.toolId] });
+    } else if (Object.prototype.hasOwnProperty.call(ARTIFACT_LINK_LABEL, s.toolId)) {
+      links.push({ kind: "artifact", id, label: ARTIFACT_LINK_LABEL[s.toolId] });
+    }
+  }
+  return links;
+}
+
 function appendToConversation(run, message) {
   const conv = getConversation(run.sourceRef.conversationId);
   if (!conv || conv.householdId !== run.householdId) return false;
@@ -291,9 +319,13 @@ export function registerAssistantRunHooks() {
     // through Activity/Artifacts for what was drafted. Only the first draft is linked;
     // that matches today's plans, which draft at most one notification per run.
     const draftArtifactId = summarizeOutcome(run).drafted[0]?.result?.id ?? null;
+    // WP-004 — every created task/list item/artifact across the whole run, not just
+    // the first draft (see buildResultLinks above). Additive alongside artifactId/link.
+    const links = buildResultLinks(run);
     appendToConversation(run, {
       kind: "run_result", runId: run.id, status: run.status, text: runOutcomeText(run),
       ...(draftArtifactId ? { artifactId: draftArtifactId, link: `/api/artifacts?runId=${run.id}` } : {}),
+      ...(links.length ? { links } : {}),
     });
     // 2. Self-healing, once.
     if (run.status === "failed" && !run.sourceRef.isRepair) {

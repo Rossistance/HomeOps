@@ -13,6 +13,7 @@ import { HelpComposer } from "@/components/HelpComposer";
 import { KidView } from "@/screens/scoped/KidView";
 import { GrandparentView } from "@/screens/scoped/GrandparentView";
 import { SitterView } from "@/screens/scoped/SitterView";
+import { BOARD_TASK_TYPES } from "@/miniapps";
 
 // "What I learned" feed accents — includes the signature ember for improvement ideas,
 // which isn't in the shared ACCENT_BG map (that one has no ember entry).
@@ -81,6 +82,40 @@ export function Dashboard() {
   // server-side), so this list intentionally isn't run through inSpace().
   const pendingApprovals = serverApprovals.filter((a) => a.status === "pending");
   const overdue = inSpace(data.tasks.filter((t) => t.status !== "done" && isOverdue(t.dueAt)));
+  // WP-004 (ISS-008, FEAT-019/005): "Open tasks" — the household's undated open tasks
+  // plus upcoming (not-yet-due) dated ones, on the SAME board-eligible types the Chore
+  // Board renders (BOARD_TASK_TYPES, shared with src/miniapps/index.tsx so the two
+  // never drift). Overdue tasks stay exactly where they already were, above — this list
+  // deliberately excludes them so nothing is double-counted. Dated tasks (soonest due
+  // first) sort ahead of undated ones.
+  const openTasks = useMemo(
+    () =>
+      inSpace(data.tasks.filter((t) => BOARD_TASK_TYPES.has(t.type) && t.status !== "done" && !isOverdue(t.dueAt))).sort((a, b) => {
+        if (a.dueAt && b.dueAt) return +new Date(a.dueAt) - +new Date(b.dueAt);
+        if (a.dueAt) return -1;
+        if (b.dueAt) return 1;
+        return 0;
+      }),
+    [data.tasks, spaceFilter],
+  );
+  // The Chore Board is the household's general task surface (binding design decision —
+  // see the BOARD_TASK_TYPES comment in src/miniapps/index.tsx), so an Open-tasks row
+  // always lands there. New households get the board seeded server-side (seed.mjs);
+  // EXISTING households lazily receive it on first use — clicking an Open-tasks row
+  // creates the default board right then (idempotent by type), so "task visible ≤2
+  // clicks from Home" holds for every family, not just fresh signups.
+  const choreBoardApp = data.miniApps.find((m) => m.type === "Chore Board");
+  const createMiniApp = useStore((s) => s.createMiniApp);
+  const openChoreBoard = () => {
+    if (choreBoardApp) return navigate("miniapps", { id: choreBoardApp.id });
+    const id = createMiniApp({
+      name: "Family Chore Board",
+      type: "Chore Board",
+      description: "Kanban of who's doing what — To Do → In Progress → Done.",
+      data: { columns: [{ key: "todo", title: "To Do" }, { key: "in-progress", title: "In Progress" }, { key: "done", title: "Done" }, { key: "needs-help", title: "Needs Help" }] },
+    });
+    navigate("miniapps", { id });
+  };
   const activeAgents = inSpace(data.agents.filter((a) => a.status === "Active" || a.status === "Needs Attention"));
   const recentFiles = useMemo(() => inSpace([...data.files]).sort((a, b) => +new Date(b.uploadedAt) - +new Date(a.uploadedAt)).slice(0, 4), [data.files, spaceFilter]);
   const recentThreads = useMemo(() => inSpace([...data.threads]).sort((a, b) => +new Date(b.updatedAt) - +new Date(a.updatedAt)).slice(0, 4), [data.threads, spaceFilter]);
@@ -243,19 +278,43 @@ export function Dashboard() {
         {/* Needs you — approvals + overdue, unified and high on the page */}
         <Card className={`card-pad lg:col-span-2 ${attentionCount > 0 ? "border-amber-200 bg-gradient-to-b from-amber-50/70 to-surface-raised" : ""}`}>
           <Header icon="AlertCircle" title="Needs you" action={attentionCount > 0 ? <Badge color="amber">{attentionCount}</Badge> : undefined} />
-          {attentionCount === 0 ? <EmptyState icon="CheckCircle2" title="All caught up" message="Nothing needs you right now." /> : (
-            <ul className="space-y-2">
-              {pendingApprovals.slice(0, 3).map((a) => (
-                <li key={a.id} onClick={() => navigate("messages", { tab: "approvals", approval: a.id })} className="flex cursor-pointer items-center gap-3 rounded-2xl border border-amber-200/70 bg-surface-rim px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] transition-colors hover:bg-amber-50">
-                  <Icon name="ShieldAlert" size={16} className="shrink-0 text-amber-600" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-ink-800">{a.preview || a.toolId}</p><p className="text-xs text-amber-600">Approval · {a.risk} risk</p></div>
-                </li>
-              ))}
-              {overdue.slice(0, 3).map((t) => (
-                <li key={t.id} className="flex items-center gap-3 rounded-2xl border border-coral-200/70 bg-surface-rim px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
-                  <Icon name="Clock" size={16} className="shrink-0 text-coral-600" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-ink-800">{t.title}</p><p className="text-xs text-coral-600">Overdue{t.dueAt ? ` · ${relativeTime(t.dueAt)}` : ""}</p></div>
-                </li>
-              ))}
-            </ul>
+          {attentionCount === 0 && openTasks.length === 0 ? <EmptyState icon="CheckCircle2" title="All caught up" message="Nothing needs you right now." /> : (
+            <div className="space-y-3">
+              {attentionCount > 0 && (
+                <ul className="space-y-2">
+                  {pendingApprovals.slice(0, 3).map((a) => (
+                    <li key={a.id} onClick={() => navigate("messages", { tab: "approvals", approval: a.id })} className="flex cursor-pointer items-center gap-3 rounded-2xl border border-amber-200/70 bg-surface-rim px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] transition-colors hover:bg-amber-50">
+                      <Icon name="ShieldAlert" size={16} className="shrink-0 text-amber-600" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-ink-800">{a.preview || a.toolId}</p><p className="text-xs text-amber-600">Approval · {a.risk} risk</p></div>
+                    </li>
+                  ))}
+                  {overdue.slice(0, 3).map((t) => (
+                    <li key={t.id} className="flex items-center gap-3 rounded-2xl border border-coral-200/70 bg-surface-rim px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
+                      <Icon name="Clock" size={16} className="shrink-0 text-coral-600" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-ink-800">{t.title}</p><p className="text-xs text-coral-600">Overdue{t.dueAt ? ` · ${relativeTime(t.dueAt)}` : ""}</p></div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {openTasks.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-400">Open tasks</p>
+                  <ul className="space-y-2">
+                    {openTasks.slice(0, 4).map((t) => (
+                      <li key={t.id}>
+                        <button
+                          type="button"
+                          onClick={openChoreBoard}
+                          aria-label={`Open task "${t.title}"${t.dueAt ? `, due ${relativeTime(t.dueAt)}` : ", no due date"} — go to the Chore Board`}
+                          className="data-row w-full cursor-pointer text-left"
+                        >
+                          <span className="flex min-w-0 items-center gap-2"><Icon name="CircleDashed" size={14} className="shrink-0 text-sky-500" /><span className="truncate text-sm font-medium text-ink-800">{t.title}</span></span>
+                          <span className="shrink-0 text-[11px] text-ink-400">{t.dueAt ? relativeTime(t.dueAt) : "No due date"}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
           )}
         </Card>
       </div>

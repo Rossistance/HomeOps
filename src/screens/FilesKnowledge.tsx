@@ -16,11 +16,15 @@ export function FilesKnowledge() {
   useEffect(() => { if (params?.tab) setTab(params.tab); if (params?.item) setTab("knowledge"); if (params?.file || params?.new) setTab("files"); }, [params?.tab, params?.item, params?.file, params?.new]);
   const files = useStore((s) => s.data.files);
   const knowledge = useStore((s) => s.data.knowledge);
+  // WP-004 (ISS-008, FEAT-019/005): lifted here (not inside the Knowledge tab body) so
+  // the Knowledge Library tab's count badge reflects real generated artifacts, not just
+  // the local `data.knowledge` array — see ArtifactsLibrary below. One fetch, shared.
+  const artifactsState = useArtifactsLibrary();
   return (
     <div className="animate-fade-in">
       <PageHeader title="Files & Knowledge" subtitle="Documents your helpers process, plus everything they know about your household." icon="FolderOpen" />
-      <Tabs tabs={[{ id: "files", label: "Files", icon: "FileText", count: files.length }, { id: "knowledge", label: "Knowledge Library", icon: "BookOpen", count: knowledge.length }]} active={tab} onChange={setTab} />
-      <div className="pt-5">{tab === "files" ? <Files /> : <Knowledge />}</div>
+      <Tabs tabs={[{ id: "files", label: "Files", icon: "FileText", count: files.length }, { id: "knowledge", label: "Knowledge Library", icon: "BookOpen", count: knowledge.length + artifactsState.artifacts.length }]} active={tab} onChange={setTab} />
+      <div className="pt-5">{tab === "files" ? <Files /> : <Knowledge artifactsState={artifactsState} />}</div>
     </div>
   );
 }
@@ -320,33 +324,108 @@ function MemoryGroup() {
   );
 }
 
-function GeneratedArtifacts() {
+/** Fetches the household's server-owned generated artifacts once, shared by the tab
+ *  count badge (FilesKnowledge) and the library itself (ArtifactsLibrary) — a single
+ *  network round-trip instead of two independent ones. `backend.artifacts()` already
+ *  swallows fetch failures and resolves to `[]` (src/connectors/api.ts), so "error" is
+ *  distinguished the same way every other Dashboard/screen card does: via the shared
+ *  `backendOnline` flag, not a thrown exception. */
+function useArtifactsLibrary() {
   const [artifacts, setArtifacts] = useState<ServerArtifact[]>([]);
-  const [openId, setOpenId] = useState<string | null>(null);
-  useEffect(() => { void backend.artifacts().then(setArtifacts); }, []);
-  if (!artifacts.length) return null;
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    void backend.artifacts().then((a) => { if (alive) { setArtifacts(a); setLoading(false); } });
+    return () => { alive = false; };
+  }, []);
+  return { artifacts, loading };
+}
+
+const kindLabel = (k: string) => k.replace(/[-_]/g, " ");
+
+/** Real generated artifacts (briefings/reports/drafts/decisions) written by runs —
+ *  server-owned, read-only here. Kind chips are derived from whatever kinds are
+ *  ACTUALLY present in the household's data (create_artifact's `kind` input is
+ *  free-form — see server/internal-functions.mjs — so there is no fixed enum to hardcode
+ *  against; today's known values include "report", "briefing", "keepsake", "digest",
+ *  "approved-decision", and "notification-draft", but any string a skill passes is a
+ *  valid kind and must show up as its own filterable chip). */
+function ArtifactsLibrary({ state }: { state: { artifacts: ServerArtifact[]; loading: boolean } }) {
+  const backendOnline = useStore((s) => s.backendOnline);
+  const { artifacts, loading } = state;
+  const [kindFilter, setKindFilter] = useState<string | null>(null);
+  const [openArtifact, setOpenArtifact] = useState<ServerArtifact | null>(null);
+
+  const kinds = useMemo(() => Array.from(new Set(artifacts.map((a) => a.kind))).sort(), [artifacts]);
+  // Newest first — the server already sorts this way (store.mjs listArtifacts), but
+  // sorting again here is cheap and keeps the ordering correct even if that changes.
+  const sorted = useMemo(() => [...artifacts].sort((a, b) => b.createdAt - a.createdAt), [artifacts]);
+  const filtered = kindFilter ? sorted.filter((a) => a.kind === kindFilter) : sorted;
+
   return (
     <CollapsibleGroup title="Generated reports & briefings" count={artifacts.length}>
-      <div className="stagger grid grid-cols-1 gap-3 md:grid-cols-2">
-        {artifacts.map((a) => (
-          <Card key={a.id} className="card-pad">
-            <div className="flex items-start justify-between gap-2">
-              <p className="font-semibold text-ink-900">{a.title}</p>
-              <Badge color="sky">{a.kind.replace(/_/g, " ")}</Badge>
+      {loading ? (
+        <p className="text-sm text-ink-400">Loading generated artifacts…</p>
+      ) : !backendOnline ? (
+        <div className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-600">Backend runtime offline — can't load generated artifacts right now.</div>
+      ) : artifacts.length === 0 ? (
+        <EmptyState icon="BookOpen" title="Nothing generated yet" message="Briefings, drafts, and reports your helpers create will show up here." />
+      ) : (
+        <>
+          {kinds.length > 1 && (
+            <div className="mb-3 flex flex-wrap gap-1.5" role="group" aria-label="Filter artifacts by kind">
+              <button type="button" aria-pressed={kindFilter === null} onClick={() => setKindFilter(null)}
+                className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors ${kindFilter === null ? "border-ember-400 bg-ember-50 text-ember-700" : "border-ink-900/[0.08] bg-surface-sunken/60 text-ink-600 hover:text-ink-800"}`}>
+                All
+              </button>
+              {kinds.map((k) => (
+                <button key={k} type="button" aria-pressed={kindFilter === k} onClick={() => setKindFilter(kindFilter === k ? null : k)}
+                  className={`rounded-full border px-2.5 py-1 text-xs font-semibold capitalize transition-colors ${kindFilter === k ? "border-ember-400 bg-ember-50 text-ember-700" : "border-ink-900/[0.08] bg-surface-sunken/60 text-ink-600 hover:text-ink-800"}`}>
+                  {kindLabel(k)}
+                </button>
+              ))}
             </div>
-            <p className={`mt-1 whitespace-pre-wrap text-sm text-ink-600 ${openId === a.id ? "" : "line-clamp-3"}`}>{a.body || "(no content)"}</p>
-            <div className="mt-2 flex items-center justify-between text-xs text-ink-400">
-              <span>{new Date(a.createdAt).toLocaleString()}{a.runId ? " · from a run" : ""}</span>
-              {(a.body?.length ?? 0) > 200 && <button className="font-medium text-ink-600 underline" onClick={() => setOpenId(openId === a.id ? null : a.id)}>{openId === a.id ? "Collapse" : "Read all"}</button>}
-            </div>
-          </Card>
-        ))}
-      </div>
+          )}
+          <div className="stagger grid grid-cols-1 gap-3 md:grid-cols-2">
+            {filtered.map((a) => (
+              <Card key={a.id} className="card-pad" hover onClick={() => setOpenArtifact(a)}>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="font-semibold text-ink-900">{a.title}</p>
+                  <Badge color="sky">{kindLabel(a.kind)}</Badge>
+                </div>
+                <p className="mt-1 line-clamp-3 text-sm text-ink-600">{a.body || "(no content)"}</p>
+                <div className="mt-2 flex items-center gap-2 text-xs text-ink-400">
+                  <span>{new Date(a.createdAt).toLocaleString()}</span>
+                  {a.runId && <span className="chip bg-surface-sunken text-ink-500">From run</span>}
+                </div>
+              </Card>
+            ))}
+            {filtered.length === 0 && <p className="text-sm text-ink-400">No artifacts match this filter.</p>}
+          </div>
+        </>
+      )}
+      {openArtifact && <ArtifactDrawer artifact={openArtifact} onClose={() => setOpenArtifact(null)} />}
     </CollapsibleGroup>
   );
 }
 
-function Knowledge() {
+function ArtifactDrawer({ artifact, onClose }: { artifact: ServerArtifact; onClose: () => void }) {
+  return (
+    <Drawer open onClose={onClose} width="max-w-2xl" title={artifact.title} icon="BookOpen">
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge color="sky">{kindLabel(artifact.kind)}</Badge>
+          {artifact.runId && <span className="chip bg-surface-sunken text-ink-500">From run</span>}
+          <span className="text-xs text-ink-400">{new Date(artifact.createdAt).toLocaleString()}</span>
+        </div>
+        <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-2xl bg-ink-900 p-3 text-xs text-sage-100 shadow-e1">{artifact.body || "(no content)"}</pre>
+      </div>
+    </Drawer>
+  );
+}
+
+function Knowledge({ artifactsState }: { artifactsState: { artifacts: ServerArtifact[]; loading: boolean } }) {
   const data = useStore((s) => s.data);
   const params = useStore((s) => s.route.params);
   const del = useStore((s) => s.deleteKnowledgeItem);
@@ -362,7 +441,7 @@ function Knowledge() {
       </div>
       <div className="space-y-6">
         <MemoryGroup />
-        <GeneratedArtifacts />
+        <ArtifactsLibrary state={artifactsState} />
         {KTYPES.map((type) => {
           const items = data.knowledge.filter((k) => k.type === type);
           if (!items.length) return null;

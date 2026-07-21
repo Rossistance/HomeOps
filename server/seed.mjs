@@ -3,7 +3,49 @@
 // to select and execute out of the box. The seeded skill uses only internal
 // functions (+ a gated sign-off step), so it runs end-to-end with no external
 // account — demonstrating the full approval→resume→execute→audit→memory loop.
-import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction, listMembers, putMember, listPlaybooks, putPlaybook, listContactMethods, putContactMethod } from "./store.mjs";
+import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction, listMembers, putMember, listPlaybooks, putPlaybook, listContactMethods, putContactMethod, getSettings, setSettings } from "./store.mjs";
+
+/* ============================================================== *
+ * WP-004 (ISS-008, FEAT-019/005) — default "Family Chore Board" mini app for NEW
+ * households, idempotent, never backfilled onto a household that already exists.
+ *
+ * Mini apps today are entirely CLIENT-owned (src/store/useStore.ts + the local
+ * AppData in src/data/seed.ts) — there is no server-side mini-app collection, so
+ * there is no row for this function to write. What IS server-owned and per-household
+ * is `settings.json` (store.mjs getSettings/setSettings), so that is where the
+ * decision "has this household already been given (or denied) its starter mini app"
+ * is durably recorded — mirroring the existing SEED_MEMBERS/contact-methods pattern
+ * of a canonical server-side definition kept in step with the client's copy
+ * (MiniApps.tsx STARTER_TEMPLATES' "Family Chore Board" entry — same name/type/seed
+ * columns) rather than a live round-trip API.
+ *
+ * DEFAULT_MINI_APP is the single source of truth for that starter definition.
+ * seedDefaultMiniAppFlag(householdId) is idempotent per household: it returns true
+ * (and stamps the marker) ONLY the first time it is asked about a given household,
+ * and false forever after — so calling it twice, or calling it for a household that
+ * pre-dates this feature, never re-decides or backfills anything.
+ *
+ * WIRING NOTE: nothing in this wave's granted surface calls this function for a real
+ * signup. The one call site that should — POST /api/signup's NEW-household branch in
+ * server/index.mjs, inside `await runWithTenant(householdId, () => { putMember(...);
+ * setSettings(...); })` (around index.mjs:659-663) — lives outside this wave's
+ * surface (server/seed.mjs "default mini-app provisioning only"; index.mjs itself is
+ * not a granted surface this wave). See the WP-004 implementer report for the exact
+ * one-line hookup: `seedDefaultMiniAppFlag(householdId);` right after that block.
+ * ============================================================== */
+export const DEFAULT_MINI_APP = {
+  type: "Chore Board",
+  name: "Family Chore Board",
+  description: "Kanban of who's doing what — To Do → In Progress → Done.",
+  data: { columns: [{ key: "todo", title: "To Do" }, { key: "in-progress", title: "In Progress" }, { key: "done", title: "Done" }, { key: "needs-help", title: "Needs Help" }] },
+};
+
+export function seedDefaultMiniAppFlag(householdId) {
+  const s = getSettings(householdId);
+  if (s.defaultMiniAppDecidedAt) return false; // already decided for this household — never re-touch
+  setSettings({ defaultMiniAppDecidedAt: Date.now(), defaultMiniApp: DEFAULT_MINI_APP.type }, householdId);
+  return true;
+}
 
 // Canonical household roster — the server-owned source of truth for each actor's
 // role. Mirrors the frontend demo family (src/data/seed.ts) so the dev profile

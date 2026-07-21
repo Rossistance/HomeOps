@@ -30,8 +30,15 @@ const CHORE_COLS: { key: TaskStatus; title: string; accent: string }[] = [
   { key: "needs-help", title: "Needs Help", accent: "coral" },
 ];
 
+// WP-004 (ISS-008, FEAT-019/005): the Chore Board is the household's general task
+// surface, not just chores — a task an agent run creates (homeops.create_task
+// defaults to type:"task") must be reachable here too, or it has no home anywhere.
+// Bills keep their own Budget Snapshot view and list items (type:"list") keep their
+// own grocery/packing views, so both are excluded here to avoid duplicate homes.
+export const BOARD_TASK_TYPES = new Set(["chore", "task", "reminder", "errand"]);
+
 function ChoreBoard({ app }: { app: MiniApp }) {
-  const tasks = useStore((s) => s.data.tasks).filter((t) => t.type === "chore");
+  const tasks = useStore((s) => s.data.tasks).filter((t) => BOARD_TASK_TYPES.has(t.type));
   const members = useStore((s) => s.data.members);
   const setTaskStatus = useStore((s) => s.setTaskStatus);
   const createTask = useStore((s) => s.createTask);
@@ -83,6 +90,11 @@ function ChoreCard({ task, member, onMove }: { task: Task; member?: { initials: 
   return (
     <div className="card rounded-2xl px-3 py-2.5">
       <p className="text-sm font-medium text-ink-800">{task.title}</p>
+      {task.dueAt && (
+        <p className="mt-1 flex items-center gap-1 text-[11px] text-ink-400">
+          <Icon name="Clock" size={11} /> Due {relativeTime(task.dueAt)}
+        </p>
+      )}
       <div className="mt-2 flex items-center justify-between">
         {member ? (
           <span className="flex items-center gap-1.5 text-xs text-ink-500">
