@@ -92,6 +92,34 @@ export type RunStatus =
   | "Failed"
   | "Cancelled";
 
+/* ----------------------------------------------------------------------- */
+/* One run world (WP-003 / ISS-005/009/011/016)                            */
+/* Every run — from every source — is shown with ONE status vocabulary,     */
+/* derived by a single total mapper (runStatusView, src/store/useStore.ts)  */
+/* over the FULL server run-status enum. Chips render label + CTA from this  */
+/* view, never a raw status string.                                         */
+/* ----------------------------------------------------------------------- */
+export type RunStatusTone = AccentColor | "gray";
+/** A one-tap next step for a parked run — deep-links to where the human acts. */
+export interface RunStatusCta {
+  label: string;
+  screen: ScreenId;
+  params?: Record<string, string>;
+}
+export interface RunStatusView {
+  /** Cause-specific human label, e.g. "Needs approval", "Needs a connection". */
+  label: string;
+  tone: RunStatusTone;
+  /** Parked = actionable pause (approval / connector / provider). */
+  parked: boolean;
+  /** Terminal = the run will not change again on its own. */
+  terminal: boolean;
+  /** Active = queued / running / retrying. */
+  active: boolean;
+  /** Where the human goes to unblock or review the run. */
+  cta?: RunStatusCta;
+}
+
 export type MessageChannel = "In-App" | "Email Placeholder" | "Text Placeholder" | "Family Dashboard";
 export type SenderType = "agent" | "user" | "member" | "system";
 export type DeliveryStatus = "Draft" | "Sent" | "Delivered" | "Awaiting Approval" | "Failed";
@@ -376,6 +404,10 @@ export interface AutomationRun {
   agentId: string;
   triggerLabel: string;
   status: RunStatus;
+  /** Raw server run status (the FULL enum) carried through so chips can render a
+   *  cause-specific label + CTA via runStatusView. Absent on purely-local/seed runs
+   *  (the mapper falls back to the collapsed `status`). */
+  serverStatus?: string;
   startedAt: string;
   completedAt?: string;
   inputSummary: string;
@@ -829,6 +861,20 @@ export interface AssistantMessage {
   status?: AssistantMessageStatus;
   error?: string;
   model?: string;
+  /** Server message kind carried through hydration: "status" | "run_result" | "error" | … */
+  kind?: string;
+  /** WP-002: a run_result that drafted an artifact carries its id + link so the thread
+   *  can render a real "Review draft" action instead of sending the family to Activity. */
+  artifactId?: string;
+  artifactLink?: string;
+  /** Set on a run_result whose outcome created/updated a task (→ "View task"). */
+  taskId?: string;
+  /** Set on a parked "status" message so the thread can deep-link to the approval. */
+  approvalId?: string;
+  /** WP-004/WP-003 bonus: every created task/list-item/artifact a run_result produced,
+   *  each a one-tap deep link (kind:"task" → mini-apps/tasks, kind:"artifact" →
+   *  Files & Knowledge). Additive alongside the legacy artifactId/artifactLink above. */
+  links?: { kind: "task" | "artifact"; id: string; label: string }[];
 }
 
 export interface AssistantConversation {

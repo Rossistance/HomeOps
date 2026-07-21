@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useStore } from "@/store/useStore";
+import { useStore, runStatusView, useServerRuns } from "@/store/useStore";
 import { agentTemplates } from "@/data/agentTemplates";
 import {
   PageHeader, Card, Button, IconButton, Badge, StatusDot, Drawer, Modal, Tabs, Field, TextInput, TextArea, Select, EmptyState, RiskBadge, ReadinessBadge, Checkbox,
@@ -313,7 +313,11 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
   const files = data.files.filter((f) => f.linkedAgentIds.includes(agent.id));
   const playbooks = data.playbooks.filter((p) => agent.playbookIds.includes(p.id));
   const knowledge = data.knowledge.filter((k) => agent.knowledgeItemIds.includes(k.id));
-  const runs = data.runs.filter((r) => r.agentId === agent.id).sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt));
+  // WP-003 slice 2 (ONE HISTORY) — server truth (GET /api/runs), the SAME hook +
+  // mapper Automations » Run History uses, so a run shows identical status text in
+  // both places. `data.runs` (the local write-mirror) is no longer read as a listing
+  // source here.
+  const { runs, loading: runsLoading, stale: runsStale, fetchedAt: runsFetchedAt, refresh: refreshRuns } = useServerRuns({ agentId: agent.id });
   const enabledTools = attached.flatMap((c) => c.tools.filter((t) => agent.allowedToolIds.includes(t.id)).map((t) => ({ conn: c.name, tool: t })));
   const pendingEvos = (data.evolutions ?? []).filter((e) => e.agentId === agent.id && e.status === "pending");
 
@@ -325,7 +329,9 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
     const has = agent.allowedToolIds.includes(id);
     updateAgent(agent.id, { allowedToolIds: has ? agent.allowedToolIds.filter((x) => x !== id) : [...agent.allowedToolIds, id] });
   };
-  const runNow = async () => { setRunning(true); await runAgentLive(agent.id); setRunning(false); setTab("runs"); };
+  // runAgentLive resolves only once the run reaches a terminal/parked state (it awaits
+  // runPlan → syncServerRun) — by then GET /api/runs already reflects it, so refetch.
+  const runNow = async () => { setRunning(true); await runAgentLive(agent.id); setRunning(false); setTab("runs"); refreshRuns(); };
 
   return (
     <Drawer
@@ -433,11 +439,19 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
         )}
         {tab === "runs" && (
           <div className="space-y-2">
-            {runs.length === 0 ? <EmptyState icon="History" title="No runs yet" message="Run the agent to see its history." action={<Button size="sm" variant="primary" disabled={running} onClick={runNow}>Run now</Button>} /> : runs.map((r) => (
+            {runsStale && (
+              <div className="flex items-center justify-between gap-2 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-600">
+                <span>Backend runtime offline — showing the last run history fetched{runsFetchedAt ? ` at ${fmtDateTime(new Date(runsFetchedAt).toISOString())}` : ""}.</span>
+                <button onClick={refreshRuns} className="shrink-0 font-semibold underline">Retry</button>
+              </div>
+            )}
+            {runs.length === 0 && !runsLoading ? <EmptyState icon="History" title="No runs yet" message="Run the agent to see its history." action={<Button size="sm" variant="primary" disabled={running} onClick={runNow}>Run now</Button>} /> : runs.map((r) => {
+              const view = runStatusView(r.serverStatus ?? r.status);
+              return (
               <div key={r.id} className="rounded-2xl border border-ink-900/[0.06] p-3">
                 <button className="flex w-full items-center justify-between" onClick={() => setExpandedRun(expandedRun === r.id ? null : r.id)}>
                   <div className="text-left"><p className="font-medium text-ink-800">{r.triggerLabel}</p><p className="text-xs text-ink-400">{fmtDateTime(r.startedAt)}</p></div>
-                  <Badge color={r.status === "Completed" ? "sage" : r.status === "Failed" ? "coral" : r.status === "Waiting for Approval" ? "amber" : "sky"}>{r.status}</Badge>
+                  <Badge color={view.tone}>{view.active && <Icon name="Loader2" size={11} className="animate-spin" />} {view.label}</Badge>
                 </button>
                 <p className="mt-1 text-sm text-ink-600">{r.outputSummary}</p>
                 {expandedRun === r.id && (
@@ -448,11 +462,15 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
                         <span className="flex-1"><span className={st.status === "done" ? "text-ink-500" : "text-ink-700"}>{st.label}</span>{st.detail && <span className="block text-xs text-ink-400">{st.detail}</span>}</span>
                       </div>
                     ))}
-                    {r.approvalRequestIds.map((aid) => <Button key={aid} size="sm" variant="secondary" onClick={() => navigate("messages", { tab: "approvals", approval: aid })}>View approval</Button>)}
+                    {/* Cause-specific parked CTA — never the collapsed "Waiting for
+                        Approval" label for a connector/provider wait, which has
+                        nothing to approve. */}
+                    {view.parked && view.cta && <Button size="sm" variant="secondary" onClick={() => navigate(view.cta!.screen, view.cta!.params)}><Icon name="ArrowRight" size={13} /> {view.cta.label}</Button>}
                   </div>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
         {tab === "permissions" && (

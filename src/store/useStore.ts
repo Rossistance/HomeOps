@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useEffect, useState } from "react";
 import type {
   AppData,
   Agent,
@@ -28,6 +29,7 @@ import type {
   AutomationRun,
   RunStep,
   RunStatus,
+  RunStatusView,
   SearchResult,
   Role,
   EvolutionProposal,
@@ -44,7 +46,7 @@ import { pushActivity, executeAgentRun, subagentDefsFor, processFile } from "@/l
 import { parseAgentPrompt, buildWorkflowPlan, routeToAgent, detectApprovalGates } from "@/lib/ai";
 import { buildSearchIndex, search } from "@/lib/search";
 import { getAdvancedMode, setAdvancedMode } from "@/lib/prefs";
-import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge, type BackendApproval, type ServerNotification } from "@/connectors/api";
+import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerConversationMessage, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge, type BackendApproval, type ServerNotification } from "@/connectors/api";
 
 /** A plan shape the live runner can execute (AgentPlan satisfies this). */
 export interface RunnableStep { toolId: string | null; title: string; detail: string; input: Record<string, unknown>; requiresApproval: boolean }
@@ -63,6 +65,51 @@ function mapRunStatus(s: string): RunStatus {
   if (s === "failed" || s === "cancelled" || s === "expired") return "Failed";
   if (s === "waiting_for_approval" || s === "waiting_for_connector" || s === "waiting_for_provider") return "Waiting for Approval";
   return "Running";
+}
+
+/**
+ * WP-003 slice 1 — the ONE status vocabulary. A pure, TOTAL mapper over the full
+ * server run-status enum (server/engine.mjs: pending | queued | running | retrying |
+ * waiting_for_approval | waiting_for_connector | waiting_for_provider | completed |
+ * failed | cancelled | expired). Every run chip in the app renders label + CTA from
+ * this — never a raw status and never the old collapsed bucket that made a connector
+ * wait read "Waiting for Approval" (EV-009). Parked causes are distinguished:
+ *   waiting_for_approval  → "Needs approval"     → Messages ▸ Approvals
+ *   waiting_for_connector → "Needs a connection" → Connections
+ *   waiting_for_provider  → "Needs an AI provider" → Settings ▸ AI providers
+ * The collapsed UI RunStatus values ("Completed"/"Failed"/…) are accepted too, so
+ * purely-local/seed runs (which carry no serverStatus) still map cleanly.
+ */
+export function runStatusView(status: string | undefined | null): RunStatusView {
+  const s = String(status ?? "").toLowerCase();
+  switch (s) {
+    case "waiting_for_approval":
+    case "waiting for approval":
+      return { label: "Needs approval", tone: "amber", parked: true, terminal: false, active: false, cta: { label: "Review approval", screen: "messages", params: { tab: "approvals" } } };
+    case "waiting_for_connector":
+      return { label: "Needs a connection", tone: "amber", parked: true, terminal: false, active: false, cta: { label: "Open Connections", screen: "connections" } };
+    case "waiting_for_provider":
+      return { label: "Needs an AI provider", tone: "amber", parked: true, terminal: false, active: false, cta: { label: "Connect a provider", screen: "settings" } };
+    case "completed":
+      return { label: "Completed", tone: "sage", parked: false, terminal: true, active: false };
+    case "failed":
+      return { label: "Failed", tone: "coral", parked: false, terminal: true, active: false };
+    case "expired":
+      return { label: "Expired", tone: "coral", parked: false, terminal: true, active: false };
+    case "cancelled":
+      return { label: "Cancelled", tone: "gray", parked: false, terminal: true, active: false };
+    case "running":
+      return { label: "Running", tone: "sky", parked: false, terminal: false, active: true };
+    case "retrying":
+      return { label: "Retrying", tone: "sky", parked: false, terminal: false, active: true };
+    case "queued":
+    case "pending":
+      return { label: "Queued", tone: "sky", parked: false, terminal: false, active: true };
+    default:
+      // Total: anything the engine emits that we don't recognise gets an honest,
+      // title-cased label rather than silently collapsing to "Running".
+      return { label: s ? s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()) : "Unknown", tone: "gray", parked: false, terminal: false, active: false };
+  }
 }
 function mapStepStatus(s: string): RunStep["status"] {
   if (s === "succeeded") return "done";
@@ -104,7 +151,7 @@ export function formatApprovalInput(input: Record<string, unknown> | undefined |
   }
   return lines.join("\n");
 }
-function runFromServer(sr: ServerRun, ctx: { agentId: string; automationId?: string; label?: string; startedAt: string }): AutomationRun {
+export function runFromServer(sr: ServerRun, ctx: { agentId: string; automationId?: string; label?: string; startedAt: string }): AutomationRun {
   const status = mapRunStatus(sr.status);
   const ran = sr.steps.filter((s) => s.status === "succeeded").length;
   // A connector/provider wait has no approval to act on — say so plainly rather than
@@ -131,6 +178,9 @@ function runFromServer(sr: ServerRun, ctx: { agentId: string; automationId?: str
     agentId: ctx.agentId,
     triggerLabel: ctx.label ?? "Live run",
     status,
+    // WP-003 slice 1 — the FULL server enum rides along so every chip can render a
+    // cause-specific label + CTA via runStatusView, never the collapsed `status` above.
+    serverStatus: sr.status,
     startedAt: sr.startedAt ? new Date(sr.startedAt).toISOString() : ctx.startedAt,
     completedAt: sr.finishedAt ? new Date(sr.finishedAt).toISOString() : undefined,
     inputSummary: sr.summary || sr.title || "Plan",
@@ -147,6 +197,72 @@ function runFromServer(sr: ServerRun, ctx: { agentId: string; automationId?: str
     activityEntryIds: [],
     error: sr.error ?? undefined,
   };
+}
+
+/**
+ * WP-003 slice 2 — ONE HISTORY. Render a server run directly for LISTING surfaces
+ * (Automations » Run History, Agent-detail » Run History) without going through the
+ * local `data.runs` write-mirror — that mirror only ever contains runs THIS session
+ * started/synced (runPlan/syncServerRun), never every run in the household, so it was
+ * never a truthful listing source. Both screens call this over GET /api/runs, so the
+ * SAME run renders IDENTICAL status text everywhere it appears.
+ */
+export function runViewFromServer(sr: ServerRun): AutomationRun {
+  const ref = sr.sourceRef ?? {};
+  const agentId = typeof ref.agentId === "string" ? ref.agentId : "";
+  const automationId = typeof ref.automationId === "string" ? ref.automationId : undefined;
+  const startedAtMs = sr.startedAt ?? sr.createdAt;
+  return runFromServer(sr, {
+    agentId,
+    automationId,
+    label: sr.title || sr.summary || undefined,
+    startedAt: startedAtMs ? new Date(startedAtMs).toISOString() : new Date().toISOString(),
+  });
+}
+
+/**
+ * WP-003 slice 2 — shared server-truth run listing for Automations » Run History and
+ * Agent-detail » Run History. Fetches GET /api/runs (optionally scoped to one agent),
+ * maps every row through runViewFromServer, and — matching the existing degraded-mode
+ * pattern used elsewhere (Dashboard "backend offline" banners) — keeps the last
+ * successful fetch on screen with `stale` set true rather than flashing an empty list
+ * the moment the backend blips. `backend.runs()` itself swallows network errors into an
+ * empty array, so an empty result is only trusted once the backend is confirmed online.
+ */
+export function useServerRuns(filter?: { agentId?: string }): { runs: AutomationRun[]; loading: boolean; stale: boolean; fetchedAt: number | null; refresh: () => void } {
+  const backendOnline = useStore((s) => s.backendOnline);
+  const [runs, setRuns] = useState<AutomationRun[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [fetchedAt, setFetchedAt] = useState<number | null>(null);
+  const [nonce, setNonce] = useState(0);
+  const agentId = filter?.agentId;
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    const q = agentId ? `?agentId=${encodeURIComponent(agentId)}&limit=100` : `?limit=100`;
+    void backend.runs(q).then((list) => {
+      if (!alive) return;
+      if (list.length > 0 || useStore.getState().backendOnline) {
+        setRuns(list.map(runViewFromServer));
+        setFetchedAt(Date.now());
+      }
+      setLoading(false);
+    });
+    return () => { alive = false; };
+  }, [agentId, nonce]);
+  return { runs, loading, stale: !backendOnline, fetchedAt, refresh: () => setNonce((n) => n + 1) };
+}
+
+/**
+ * WP-003 slice 5 — recents hygiene. True when every assistant reply this conversation
+ * ever got was an honest error (no AI provider, unreachable, etc.) — nothing was ever
+ * answered, planned, or built. Recents (AssistantHome) labels these distinctly and
+ * collapses repeats down to the single most recent one instead of piling up a fresh
+ * "New chat" row per failed attempt.
+ */
+export function isErrorOnlyThread(c: AssistantConversation): boolean {
+  const assistantMsgs = c.messages.filter((m) => m.role === "assistant");
+  return assistantMsgs.length > 0 && assistantMsgs.every((m) => m.status === "error");
 }
 
 /** Convert a planner AgentPlan into the legacy WorkflowPlan shape stored on automations. */
@@ -1167,6 +1283,18 @@ export const useStore = create<Store>((set, get) => {
     /* -------- assistant: the conversational NL → plan → approval loop ------- */
     startConversation: async (text, opts) => {
       const t = (text ?? "").trim();
+      // WP-003 slice 5 (recents hygiene) — a retry from Ask FamiliOS's home composer
+      // reuses the most recent thread instead of minting another one, IF that thread
+      // never got a real answer (every reply so far was an honest error). Without
+      // this, each "no AI provider" / "backend unreachable" attempt piled up its own
+      // near-empty "New chat" row in Recents — noise that only ever repeats the same
+      // failure. A thread that got even one real answer/plan/build is never reused.
+      const mostRecent = get().data.conversations?.[0];
+      if (mostRecent && isErrorOnlyThread(mostRecent)) {
+        get().navigate("assistant", { id: mostRecent.id });
+        if (t) await get().sendToAssistant(mostRecent.id, t);
+        return mostRecent.id;
+      }
       let id = uid("conv");
       const now = nowISO();
       // Server-owned thread when online — history is then durable + actor-scoped. Falls
@@ -1595,15 +1723,42 @@ export const useStore = create<Store>((set, get) => {
         confidence: 1, userApproved: true, sensitive: m.scope === "personal",
         createdAt: new Date(m.createdAt).toISOString(), updatedAt: new Date(m.createdAt).toISOString(),
       });
+      // WP-003 slice 3 (double-run guard) — this used to drop runId/kind/error/
+      // artifactId/link/taskId/approvalId on every hydrate, because
+      // ServerConversationMessage (connectors/api.ts, owned by another WP) was never
+      // widened to declare fields the server has sent all along (server/index.mjs
+      // turn-persistence, server/assistant-runs.mjs onRunFinished/onRunParked). That
+      // was the double-run bug's real root cause: a plan message's runId vanished on
+      // the very next poll/refresh, so PlanCard saw "no run" and showed the Run
+      // button again for a plan that had already been dispatched. Read the extra
+      // fields via a local cast instead of editing that (additive-only, out-of-scope)
+      // file — the runtime object has always carried them; only the type didn't.
+      type RawConvMsg = ServerConversationMessage & {
+        runId?: string | null; error?: string | null; kind?: string;
+        artifactId?: string | null; link?: string | null; taskId?: string | null; approvalId?: string | null;
+        links?: { kind: "task" | "artifact"; id: string; label: string }[];
+      };
       const mapConv = (c: ServerConversation): AssistantConversation => ({
         id: c.id, title: c.title, createdAt: c.createdAt, updatedAt: c.updatedAt,
-        messages: (c.messages ?? []).map((m, i) => ({
-          id: `${c.id}-m${i}`, role: m.role, text: m.text, createdAt: m.at,
-          plan: m.plan ?? undefined, build: m.build ?? undefined, builtIds: m.builtIds ?? undefined, model: m.model ?? undefined,
-          // Build proposals keep their card state across refreshes: the server marks the
-          // originating message `built` when the build materializes.
-          status: m.role === "assistant" ? (m.build ? (m.built ? "built" : "planned") : m.plan ? "planned" : "answered") : undefined,
-        })),
+        messages: (c.messages ?? []).map((m0, i) => {
+          const m = m0 as RawConvMsg;
+          return {
+            id: `${c.id}-m${i}`, role: m.role, text: m.text, createdAt: m.at,
+            plan: m.plan ?? undefined, build: m.build ?? undefined, builtIds: m.builtIds ?? undefined, model: m.model ?? undefined,
+            runId: m.runId ?? undefined, kind: m.kind, error: m.error ?? undefined,
+            artifactId: m.artifactId ?? undefined, artifactLink: m.link ?? undefined,
+            taskId: m.taskId ?? undefined, approvalId: m.approvalId ?? undefined,
+            links: m.links ?? undefined,
+            // Build proposals keep their card state across refreshes: the server marks
+            // the originating message `built` when the build materializes. An honest
+            // server-side error (kind:"error") must keep reading as an error after
+            // hydrate too — it used to fall through to "answered", which silently
+            // dropped the coral error styling and the no-provider fallback card.
+            status: m.role === "assistant"
+              ? (m.kind === "error" ? "error" : m.build ? (m.built ? "built" : "planned") : m.plan ? "planned" : "answered")
+              : undefined,
+          };
+        }),
       });
       const mapContact = (c: ServerContactMethod): ContactMethod => ({
         id: c.id, memberId: c.memberId, label: c.label, type: c.type, value: c.value,

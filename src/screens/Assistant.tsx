@@ -1,12 +1,47 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useStore } from "@/store/useStore";
+import { useStore, runStatusView, runViewFromServer, isErrorOnlyThread } from "@/store/useStore";
 import { Card, Button, Badge, RiskBadge, IconButton } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { InlineApprovals } from "@/components/InlineApprovals";
 import { MarkdownContent } from "@/lib/markdown";
 import { suggestAskPrompts, answerLocally } from "@/lib/ai";
-import type { AssistantConversation, AssistantMessage, AutomationRun } from "@/types";
+import type { AssistantConversation, AssistantMessage, AutomationRun, RunStatusView } from "@/types";
 import { backend, type AgentPlan, type ChatBuild, type EmailReviewMessage, type EmailReviewLabel } from "@/connectors/api";
+
+/**
+ * WP-003 slice 3 (double-run guard) — a plan's runId is durable (persisted server-side
+ * the moment the run starts; see mapConv in useStore.ts), but the local `data.runs`
+ * write-mirror only ever has an entry for a run THIS browser tab started/synced. On a
+ * fresh load, another device, or simply after the mirror was never populated, `runId`
+ * is present but `run` would be missing — the exact gap that used to let the "Run
+ * plan" button reappear for a plan that had already been dispatched. This hook always
+ * prefers the local mirror (instant, no flicker) and falls back to fetching + polling
+ * the server run directly so the caller NEVER has to fall back to "no runId → show Run
+ * button" reasoning.
+ */
+function useAttachedRun(runId?: string): { run?: AutomationRun; loading: boolean } {
+  const localRun = useStore((s) => (runId ? s.data.runs.find((r) => r.id === runId) : undefined));
+  const [fetched, setFetched] = useState<AutomationRun | undefined>(undefined);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (!runId || localRun) { setFetched(undefined); return; }
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      setLoading(true);
+      const sr = await backend.getRun(runId);
+      if (!alive) return;
+      setLoading(false);
+      if (sr) {
+        setFetched(runViewFromServer(sr));
+        if (!runStatusView(sr.status).terminal) timer = setTimeout(poll, 3000);
+      }
+    };
+    void poll();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [runId, localRun]);
+  return { run: localRun ?? fetched, loading };
+}
 
 type ChatScope = "household" | "personal";
 
@@ -49,6 +84,23 @@ function AssistantHome({ conversations, scope, onScope, onStart, onOpen, onDismi
   const first = (me?.displayName ?? "there").split(" ")[0];
   const suggestions = useMemo(() => suggestAskPrompts(data, me), [data, me]);
   const submit = () => { const t = text.trim(); if (t) { onStart(t); setText(""); } };
+  // WP-003 slice 5 (recents hygiene) — collapse repeated error-only threads (no AI
+  // provider, backend unreachable, …) down to the single most recent one instead of
+  // piling up a "New chat" row per failed attempt; label the one that remains so it
+  // reads as "this failed" rather than a normal answered conversation.
+  const recents = useMemo(() => {
+    let seenErrorOnly = false;
+    const out: AssistantConversation[] = [];
+    for (const c of conversations) {
+      if (isErrorOnlyThread(c)) {
+        if (seenErrorOnly) continue;
+        seenErrorOnly = true;
+      }
+      out.push(c);
+      if (out.length >= 6) break;
+    }
+    return out;
+  }, [conversations]);
   return (
     <div className="animate-fade-in mx-auto flex min-h-[60vh] max-w-2xl flex-col justify-center py-6">
       <div className="mb-6 text-center">
@@ -83,14 +135,18 @@ function AssistantHome({ conversations, scope, onScope, onStart, onOpen, onDismi
         ))}
       </div>
 
-      {conversations.length > 0 && (
+      {recents.length > 0 && (
         <div className="mt-8">
           <p className="section-title mb-2">Recent</p>
           <div className="flex flex-col gap-1.5">
-            {conversations.slice(0, 6).map((c) => (
+            {recents.map((c) => {
+              const failed = isErrorOnlyThread(c);
+              return (
               <div key={c.id} className="group data-row flex items-center">
                 <button onClick={() => onOpen(c.id)} className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left">
-                  <Icon name="MessageSquare" size={14} className="shrink-0 text-ink-400" /><span className="truncate text-sm text-ink-700">{c.title}</span>
+                  <Icon name={failed ? "TriangleAlert" : "MessageSquare"} size={14} className={`shrink-0 ${failed ? "text-amber-500" : "text-ink-400"}`} />
+                  <span className="truncate text-sm text-ink-700">{c.title}</span>
+                  {failed && <span className="chip shrink-0 bg-amber-100 text-[10px] text-amber-700">Couldn't answer — retry</span>}
                 </button>
                 <IconButton
                   icon="X" label={`Remove "${c.title}" from recent chats`}
@@ -99,7 +155,8 @@ function AssistantHome({ conversations, scope, onScope, onStart, onOpen, onDismi
                 />
                 <Icon name="ChevronRight" size={15} className="ml-1 shrink-0 text-ink-300" />
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -226,12 +283,16 @@ function Conversation({ conv, conversations, scope, onScope, onOpen, onSend }: {
 }
 
 /** Phase strip shown while the AI is generating or a dispatched run is active. */
-function PhaseStrip({ status, runStatus }: { status?: string; runStatus?: string }) {
+function PhaseStrip({ status, runView }: { status?: string; runView?: RunStatusView }) {
   const phase =
     status === "thinking" ? { icon: "Loader2" as const, label: "Routing…", spin: true } :
     status === "streaming" ? { icon: "Loader2" as const, label: "Generating…", spin: true } :
-    runStatus === "Running" || runStatus === "Queued" ? { icon: "Play" as const, label: "Executing…", spin: false } :
-    runStatus === "Waiting for Approval" ? { icon: "ShieldAlert" as const, label: "Awaiting your approval", spin: false } :
+    // WP-003 slice 1 — the cause-specific label from runStatusView, never a raw or
+    // collapsed status string: "Needs a connection" / "Needs an AI provider" read very
+    // differently from "Needs approval", even though all three used to say the same
+    // generic "Awaiting your approval".
+    runView && runView.active ? { icon: "Play" as const, label: runView.label, spin: false } :
+    runView && runView.parked ? { icon: "ShieldAlert" as const, label: runView.label, spin: false } :
     null;
   if (!phase) return null;
   return (
@@ -242,8 +303,28 @@ function PhaseStrip({ status, runStatus }: { status?: string; runStatus?: string
   );
 }
 
+/** WP-004/WP-003 bonus — a run_result's created-entity links, as small buttons in the
+ * thread ("View task" → mini-apps, "Review draft" → Files & Knowledge), via the
+ * existing navigate(screen, params) pattern. Additive alongside the legacy single
+ * artifactId/artifactLink handling elsewhere in this file. */
+function RunResultLinks({ links }: { links: AssistantMessage["links"] }) {
+  const navigate = useStore((s) => s.navigate);
+  if (!links?.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {links.map((l, i) => (
+        <Button key={`${l.kind}-${l.id}-${i}`} size="sm" variant="secondary"
+          onClick={() => navigate(l.kind === "task" ? "miniapps" : "files", l.kind === "task" ? { id: l.id } : { file: l.id })}>
+          <Icon name={l.kind === "task" ? "ListChecks" : "FileText"} size={13} /> {l.label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
 function MessageRow({ conversationId, m, precedingUserText }: { conversationId: string; m: AssistantMessage; precedingUserText?: string }) {
-  const run = useStore((s) => m.runId ? s.data.runs?.find((r) => r.id === m.runId) : undefined);
+  const { run } = useAttachedRun(m.runId);
+  const runView = run ? runStatusView(run.serverStatus ?? run.status) : undefined;
   if (m.role === "user") {
     return (
       <div className="flex justify-end">
@@ -273,12 +354,12 @@ function MessageRow({ conversationId, m, precedingUserText }: { conversationId: 
               : <>
                   <MarkdownContent text={m.text} />
                   {m.model && <p className="flex items-center gap-1 text-[11px] text-ink-400"><Icon name="Sparkles" size={11} /> Answered by {m.model}.</p>}
+                  {/* Bonus: a run_result's created-entity links as one-tap buttons. */}
+                  {m.kind === "run_result" && <RunResultLinks links={m.links} />}
                 </>}
-        {/* Phase strip for an active dispatched run */}
-        {run && (run.status === "Running" || run.status === "Queued" || run.status === "Waiting for Approval") && (
-          <PhaseStrip runStatus={run.status} />
-        )}
-        {m.plan && <PlanCard conversationId={conversationId} messageId={m.id} plan={m.plan} runId={m.runId} />}
+        {/* Phase strip for an active/parked dispatched run */}
+        {runView && !runView.terminal && <PhaseStrip runView={runView} />}
+        {m.plan && <PlanCard conversationId={conversationId} messageId={m.id} plan={m.plan} runId={m.runId} run={run} />}
         {m.build && <BuildCard conversationId={conversationId} messageId={m.id} build={m.build} status={m.status} progress={m.buildProgress} builtIds={m.builtIds} />}
         {/* Item 3: after a completed run that touched Gmail labels, an inline review card. */}
         {m.runId && run && run.status === "Completed" && <EmailReviewCard runId={m.runId} />}
@@ -557,9 +638,8 @@ function BuildCard({ conversationId, messageId, build, status, progress, builtId
 }
 
 /* -------------------------------- Plan card ----------------------------- */
-function PlanCard({ conversationId, messageId, plan, runId }: { conversationId: string; messageId: string; plan: AgentPlan; runId?: string }) {
+function PlanCard({ conversationId, messageId, plan, runId, run }: { conversationId: string; messageId: string; plan: AgentPlan; runId?: string; run?: AutomationRun }) {
   const runConversationPlan = useStore((s) => s.runConversationPlan);
-  const run = useStore((s) => (runId ? s.data.runs.find((r) => r.id === runId) : undefined));
   const [busy, setBusy] = useState(false);
   const dispatch = async () => { setBusy(true); try { await runConversationPlan(conversationId, messageId); } finally { setBusy(false); } };
 
@@ -597,7 +677,17 @@ function PlanCard({ conversationId, messageId, plan, runId }: { conversationId: 
         <p className="mt-2 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700"><Icon name="TriangleAlert" size={12} className="mr-1 inline" /> Connect {plan.missing.join(", ")} for every step to run.</p>
       )}
 
-      {run ? <RunStatus run={run} /> : (
+      {/* WP-003 slice 3 (double-run guard) — gate on runId, NEVER on whether `run` has
+          loaded yet. A plan this thread already dispatched must never show "Run plan"
+          again just because the local mirror hasn't hydrated (fresh load, another
+          device, a hydrate that raced the run) — see useAttachedRun above. */}
+      {runId ? (
+        run ? <RunStatus run={run} /> : (
+          <div className="mt-3 flex items-center gap-2 text-xs text-ink-400">
+            <Icon name="Loader2" size={13} className="animate-spin" /> Checking on this run…
+          </div>
+        )
+      ) : (
         <div className="mt-3 flex items-center gap-2">
           <Button variant={plan.approvalRequired ? "primary" : "ember"} disabled={busy} onClick={dispatch}>
             {busy ? <><Icon name="Loader2" size={15} className="animate-spin" /> Starting…</> : <><Icon name={plan.approvalRequired ? "ShieldCheck" : "Play"} size={15} /> {plan.approvalRequired ? "Run (with approvals)" : "Run plan"}</>}
@@ -611,13 +701,16 @@ function PlanCard({ conversationId, messageId, plan, runId }: { conversationId: 
 
 function RunStatus({ run }: { run: AutomationRun }) {
   const navigate = useStore((s) => s.navigate);
-  const color = run.status === "Completed" ? "sage" : run.status === "Failed" ? "coral" : run.status === "Waiting for Approval" ? "amber" : "sky";
+  // WP-003 slice 1 — the ONE status vocabulary: cause-specific label + CTA from
+  // runStatusView, never the collapsed `status` alone (a connector/provider wait used
+  // to read identically to an approval wait, even though there's nothing to approve).
+  const view = runStatusView(run.serverStatus ?? run.status);
   return (
     <div className="mt-3 rounded-xl border border-ink-900/[0.06] bg-surface-rim p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
       <div className="mb-2 flex items-center justify-between">
-        <Badge color={color}>
-          {run.status === "Running" && <Icon name="Loader2" size={11} className="animate-spin" />}
-          {run.status}
+        <Badge color={view.tone}>
+          {view.active && <Icon name="Loader2" size={11} className="animate-spin" />}
+          {view.label}
         </Badge>
         <span className="text-xs text-ink-500">{run.outputSummary}</span>
       </div>
@@ -639,13 +732,22 @@ function RunStatus({ run }: { run: AutomationRun }) {
           </li>
         ))}
       </ul>
-      {run.status === "Waiting for Approval" && (
+      {/* Cause-specific parked UI: an approval wait gets the inline approve/deny
+          loop; a connector/provider wait gets its own CTA (there's nothing to
+          approve there — the old collapsed "Waiting for Approval" label used to
+          show the approve/deny loop even when there was none). */}
+      {view.parked && run.serverStatus === "waiting_for_approval" && (
         <>
           <InlineApprovals runId={run.id} />
           <button onClick={() => navigate("messages", { tab: "approvals" })} className="mt-2 text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">Open full approvals console →</button>
         </>
       )}
-      {(run.status === "Completed" || run.status === "Failed") && (
+      {view.parked && run.serverStatus !== "waiting_for_approval" && view.cta && (
+        <Button size="sm" variant="secondary" className="mt-2" onClick={() => navigate(view.cta!.screen, view.cta!.params)}>
+          <Icon name="ArrowRight" size={13} /> {view.cta.label}
+        </Button>
+      )}
+      {view.terminal && (
         <Button size="sm" variant="ghost" className="mt-2.5" onClick={() => navigate("activity")}><Icon name="History" size={13} /> View in history</Button>
       )}
     </div>

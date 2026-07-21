@@ -13,7 +13,7 @@ import {
   listTriggers, getTrigger, putTrigger, patchTrigger, deleteTriggerRec,
   setConnectorConfig, getSecret, revokeConnector, appendAudit, getAgent, getMember, getSettings,
 } from "./store.mjs";
-import { runAgent, runSkill } from "./orchestrator.mjs";
+import { orchestrate } from "./orchestrator.mjs";
 import { onRunFinished, onRunParked } from "./engine.mjs";
 import { runWithTenant } from "./tenant-context.mjs";
 
@@ -297,19 +297,23 @@ async function fireTriggerInner(trigger, { triggerType = trigger.type, payload, 
   // re-validates every step against the agent's policy). Only a target with neither a
   // skill nor a goal has nothing to execute — and that now says so instead of quietly
   // degrading into a read-only status pass.
+  // WP-006 slice 1 — every trigger fire creates its run through the single orchestrate()
+  // entry (which derives sourceRef.via = schedule|webhook|connector_event from triggerType
+  // and delegates to the same runSkill/runAgent machinery). Target-shape decisions (prefer
+  // skill; an agent target needs a skill or a goal to be runnable) stay here.
   const ref = { triggerId: trigger.id, triggerType };
   let out;
   try {
     if (tgt.skillId && tgt.kind === "skill") {
-      out = await runSkill({ skillId: tgt.skillId, params, session, source: "trigger", sourceRef: ref });
+      out = await orchestrate({ source: "trigger", triggerType, skillId: tgt.skillId, params, session, sourceRef: ref });
     } else if (tgt.kind === "agent" && tgt.agentId) {
       if (!tgt.skillId && !String(tgt.goal ?? "").trim()) {
         out = { error: "unrunnable_target", message: "This automation has no skill to run and no instructions to work from, so firing it would do nothing. Edit it to say what each run should do." };
       } else {
-        out = await runAgent({ agentId: tgt.agentId, goal: tgt.goal ?? undefined, skillId: tgt.skillId ?? undefined, params, session, source: "trigger", sourceRef: ref });
+        out = await orchestrate({ source: "trigger", triggerType, agentId: tgt.agentId, goal: tgt.goal ?? undefined, skillId: tgt.skillId ?? undefined, params, session, sourceRef: ref });
       }
     } else if (tgt.skillId) {
-      out = await runSkill({ skillId: tgt.skillId, params, session, source: "trigger", sourceRef: ref });
+      out = await orchestrate({ source: "trigger", triggerType, skillId: tgt.skillId, params, session, sourceRef: ref });
     } else {
       out = { error: "invalid_target" };
     }

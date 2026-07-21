@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useStore } from "@/store/useStore";
+import { useStore, runStatusView, useServerRuns } from "@/store/useStore";
 import { workflowTemplates } from "@/data/workflowTemplates";
 import { BrowserWorkflowsPanel, SandboxRunsPanel } from "@/components/BrowserSandbox";
 import {
@@ -368,26 +368,43 @@ function EditAutomationModal({ id, onClose }: { id: string; onClose: () => void 
   );
 }
 
+// WP-003 slice 2 (ONE HISTORY) — reads GET /api/runs (server truth) via useServerRuns,
+// the SAME hook + mapper Agent-detail » Run History uses, so a run started here shows
+// up there with identical status text and vice versa. The local `data.runs` mirror
+// (subagentRuns included) stays a WRITE path only — this screen no longer reads it as
+// a listing source, so a run this browser tab never started/synced still appears.
 function RunHistory() {
-  const runs = useStore((s) => s.data.runs);
-  const subagentRuns = useStore((s) => s.data.subagentRuns);
+  const { runs, loading, stale, fetchedAt, refresh } = useServerRuns();
   const agents = useStore((s) => s.data.agents);
   const proposeFix = useStore((s) => s.maybeProposeEvolution);
+  const syncServerRun = useStore((s) => s.syncServerRun);
+  const navigate = useStore((s) => s.navigate);
   const [open, setOpen] = useState<string | null>(null);
+  const [fixing, setFixing] = useState<string | null>(null);
   const sorted = [...runs].sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt));
-  if (!sorted.length) return <EmptyState icon="History" title="No runs yet" message="Test an automation to see run history." />;
+  const suggestFix = async (runId: string) => {
+    setFixing(runId);
+    try { await syncServerRun(runId); proposeFix(runId); } finally { setFixing(null); }
+  };
+  if (!loading && !sorted.length && !stale) return <EmptyState icon="History" title="No runs yet" message="Test an automation to see run history." />;
   return (
     <div className="space-y-2">
+      {stale && (
+        <div className="flex items-center justify-between gap-2 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-600">
+          <span>Backend runtime offline — showing the last run history fetched{fetchedAt ? ` at ${fmtDateTime(new Date(fetchedAt).toISOString())}` : ""}.</span>
+          <button onClick={refresh} className="shrink-0 font-semibold underline">Retry</button>
+        </div>
+      )}
       {sorted.map((r) => {
-        const subs = subagentRuns.filter((s) => r.subagentRunIds.includes(s.id));
+        const view = runStatusView(r.serverStatus ?? r.status);
         return (
           <Card key={r.id} className="card-pad">
             <button className="flex w-full items-center justify-between gap-2" onClick={() => setOpen(open === r.id ? null : r.id)}>
               <div className="min-w-0 text-left">
-                <p className="font-display truncate text-base font-semibold text-ink-900">{agents.find((a) => a.id === r.agentId)?.name} · {r.triggerLabel}</p>
+                <p className="font-display truncate text-base font-semibold text-ink-900">{agents.find((a) => a.id === r.agentId)?.name ?? "Manual run"} · {r.triggerLabel}</p>
                 <p className="text-xs text-ink-400">{fmtDateTime(r.startedAt)} · {r.outputSummary}</p>
               </div>
-              <Badge color={r.status === "Completed" ? "sage" : r.status === "Failed" ? "coral" : r.status === "Waiting for Approval" ? "amber" : "sky"}>{r.status}</Badge>
+              <Badge color={view.tone}>{view.active && <Icon name="Loader2" size={11} className="animate-spin" />} {view.label}</Badge>
             </button>
             {open === r.id && (
               <div className="mt-3 space-y-1 border-t border-ink-900/[0.06] pt-3">
@@ -408,11 +425,21 @@ function RunHistory() {
                     {st.status === "skipped" && st.detail && <p className="ml-5 mt-0.5 text-xs text-amber-700">{st.detail}</p>}
                   </div>
                 ))}
-                {subs.length > 0 && <div className="well mt-2 p-2.5"><p className="mb-1 text-xs font-semibold uppercase text-ink-400">Subagents (multi-agent)</p>{subs.map((s) => <div key={s.id} className="flex items-center gap-2 text-sm text-ink-600"><Icon name={s.icon} size={13} /> {s.name} — {s.outputSummary}</div>)}</div>}
                 {r.error && <p className="text-sm text-coral-600">{r.error}</p>}
-                {r.status === "Waiting for Approval" && <InlineApprovals runId={r.id} />}
+                {/* Cause-specific parked UI — never the collapsed "Waiting for Approval"
+                    label for a connector/provider wait, which has nothing to approve. */}
+                {view.parked && r.serverStatus === "waiting_for_approval" && <InlineApprovals runId={r.id} />}
+                {view.parked && r.serverStatus !== "waiting_for_approval" && view.cta && (
+                  <Button size="sm" variant="secondary" onClick={() => navigate(view.cta!.screen, view.cta!.params)}>
+                    <Icon name="ArrowRight" size={13} /> {view.cta.label}
+                  </Button>
+                )}
                 <div className="flex flex-wrap items-center gap-2">
-                  {r.status === "Failed" && <Button size="sm" variant="ember" onClick={() => proposeFix(r.id)}><Icon name="Sparkles" size={13} /> Suggest improvement</Button>}
+                  {r.serverStatus === "failed" && (
+                    <Button size="sm" variant="ember" disabled={fixing === r.id} onClick={() => void suggestFix(r.id)}>
+                      <Icon name={fixing === r.id ? "Loader2" : "Sparkles"} size={13} className={fixing === r.id ? "animate-spin" : ""} /> Suggest improvement
+                    </Button>
+                  )}
                 </div>
               </div>
             )}

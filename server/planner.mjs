@@ -7,7 +7,7 @@
 import { PROVIDERS } from "./providers.mjs";
 import { CONNECTORS, readinessOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
-import { providerChat, providerChatStream, providerChatWithFallback } from "./ai.mjs";
+import { providerChat, providerChatStream, providerChatWithFallback, aiProviderById } from "./ai.mjs";
 import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride, recordAiUsage, aiBudgetExhausted } from "./store.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
 import { searchWeb, readPage } from "./web.mjs";
@@ -94,6 +94,106 @@ export function toolCatalog(session) {
     }
   }
   return out;
+}
+
+/* ===================== WP-006 slice 2 — PLANNER CATALOG COMPACTION =====================
+ * The full live catalog is dozens of tools. Handed whole to a small LOCAL model (LM Studio
+ * / Ollama) it (a) eats context the model needs for the actual reasoning and (b) buries the
+ * two or three tools a given goal really needs. This stage prunes the catalog the MODEL
+ * SEES (never the catalog used to RESOLVE its answer — normalizePlan still gets the full
+ * catalog, and the engine still re-validates every step), in two independent steps:
+ *   (a) restrict to the acting agent's PERMITTED tools (allow/deny), always keeping the
+ *       always-available internal homeops.* tools — for EVERY provider. An agent can only
+ *       run its permitted set, so nothing else belongs on its menu.
+ *   (b) for a LOCAL provider only, additionally rank by relevance to the goal text and cap
+ *       the serialized catalog under a char budget (HOMEOPS_PLANNER_CATALOG_BUDGET). Cloud
+ *       providers keep the full permitted catalog — unchanged behavior.
+ * The scorer is deterministic (keyword/token overlap, stable tiebreak) — no AI call. */
+
+// HYP-005: LM Studio is DOWN on this host, so the budget cannot be latency-tuned against
+// Qwen live (DEFERRED-ON-GATE). The default is a generous char budget chosen so a typical
+// permitted catalog is NOT pruned in practice; a smaller value (~2500) is the journal-ready
+// starting point to profile once the token gate is user-owned. ~4 chars ≈ 1 token.
+export function plannerCatalogBudget() {
+  const n = Number(process.env.HOMEOPS_PLANNER_CATALOG_BUDGET);
+  return Number.isFinite(n) && n > 0 ? n : 8000;
+}
+
+// A LOCAL AI provider (LM Studio / Ollama) — read from ai.mjs' provider metadata, never
+// hard-coded, so a future local provider inherits the compaction automatically.
+export function isLocalProvider(providerId) {
+  if (!providerId) return false;
+  const p = aiProviderById(providerId);
+  return !!p && (p.local === true || p.kind === "local");
+}
+
+// Always-on internal tools: the homeops.* family-data functions need no external account,
+// so they belong on every agent's menu regardless of allow-list or budget pressure.
+function isAlwaysAvailableTool(t) {
+  return t?.source === "internal" || String(t?.toolId ?? "").startsWith("homeops.");
+}
+
+// Pure allow/deny check, mirroring agents.mjs isToolStepAllowed — replicated (not imported)
+// to avoid a planner↔agents import cycle. Empty allow-list = permissive (deny-only).
+function agentPermitsTool(agent, toolId) {
+  if (!agent || !toolId) return true;
+  if ((agent.deniedToolIds ?? []).includes(toolId) || (agent.deniedFunctionIds ?? []).includes(toolId)) return false;
+  const allow = [...(agent.allowedToolIds ?? []), ...(agent.allowedFunctionIds ?? [])];
+  return allow.length === 0 || allow.includes(toolId);
+}
+
+const CATALOG_STOPWORDS = new Set(["the", "and", "for", "with", "that", "this", "you", "your", "our", "was", "are", "get", "got", "let", "them", "then", "into", "from", "have", "has", "will", "would", "can", "want", "need", "please", "a", "an", "to", "of", "on", "in", "is", "it", "at", "by", "my", "me", "we", "us", "do", "add", "new"]);
+function tokenizeForCatalog(s) {
+  return new Set(String(s ?? "").toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !CATALOG_STOPWORDS.has(w)));
+}
+// Deterministic relevance: how many goal tokens appear in the tool's name/action/connector/id.
+function relevanceScore(t, goalTokens) {
+  if (!goalTokens.size) return 0;
+  const hay = tokenizeForCatalog(`${t.name ?? ""} ${t.action ?? ""} ${t.connectorName ?? ""} ${String(t.toolId ?? "").replace(/[._]/g, " ")}`);
+  let score = 0;
+  for (const w of goalTokens) if (hay.has(w)) score++;
+  return score;
+}
+
+const projectCatalogTool = (t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: (t.inputs ?? []).map((i) => (typeof i === "string" ? i : i.key)) });
+
+/**
+ * Build the COMPACT catalog the model sees, from a full toolCatalog() array.
+ * @param {Array} catalog full toolCatalog(session) output
+ * @param {object} opts
+ * @param {object|null} opts.agent    acting agent (permitted-tools restriction); null = no restriction
+ * @param {string}      opts.goal     goal/message text (relevance ranking for local providers)
+ * @param {string|null} opts.providerId RESOLVED active provider id (local → budget+rank)
+ * @param {number}      [opts.budget] char budget override (defaults to plannerCatalogBudget())
+ */
+export function pruneCatalogForPrompt(catalog, { agent = null, goal = "", providerId = null, budget } = {}) {
+  const permitted = agent
+    ? catalog.filter((t) => isAlwaysAvailableTool(t) || agentPermitsTool(agent, t.toolId))
+    : catalog.slice();
+
+  // Cloud (or unknown) provider: full permitted catalog, unchanged behavior.
+  if (!isLocalProvider(providerId)) return permitted.map(projectCatalogTool);
+
+  // Local provider: rank by relevance, then greedily fill a char budget. Always-available
+  // homeops.* tools are retained first and never dropped (they are the family-data spine).
+  const cap = budget ?? plannerCatalogBudget();
+  const goalTokens = tokenizeForCatalog(goal);
+  const ranked = permitted
+    .map((t, i) => ({ t, i, score: relevanceScore(t, goalTokens) }))
+    .sort((a, b) => (b.score - a.score) || (a.i - b.i))
+    .map((x) => x.t);
+
+  const essential = ranked.filter(isAlwaysAvailableTool);
+  const optional = ranked.filter((t) => !isAlwaysAvailableTool(t));
+  const kept = new Set(essential);
+  let size = JSON.stringify(essential.map(projectCatalogTool)).length;
+  for (const t of optional) {
+    const add = JSON.stringify(projectCatalogTool(t)).length + 1;
+    if (size + add > cap) break;
+    kept.add(t); size += add;
+  }
+  // Emit in relevance order (most-relevant first), keeping only the chosen tools.
+  return ranked.filter((t) => kept.has(t)).map(projectCatalogTool);
 }
 
 // Escape raw control chars (newlines/tabs) that appear INSIDE JSON string literals —
@@ -239,13 +339,13 @@ JSON shape:
   "risk": "Low"|"Medium"|"High"|"Sensitive"
 }`;
 
-export async function planFromGoal({ goal, session, providerId } = {}) {
+export async function planFromGoal({ goal, session, providerId, agent = null } = {}) {
   if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe what you want first." };
   const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then try plain-English generation." };
   const gated = budgetGate(session); if (gated) return gated;
-  const catalog = toolCatalog(session);
-  const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
+  const catalog = toolCatalog(session); // full catalog resolves the model's answer + engine re-validates
+  const compact = pruneCatalogForPrompt(catalog, { agent, goal: String(goal), providerId: id });
   const user = `Available tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nGoal: ${String(goal).trim()}`;
   const out = await providerChatWithFallback(id, { messages: [{ role: "system", content: PLAN_SYS }, { role: "user", content: user }] });
   if (!out.ok) return { ok: false, error: out.error ?? "provider_error", message: out.message ?? "The AI provider did not respond." };
@@ -418,13 +518,13 @@ async function performLookup({ id, session, message, parsed }) {
   return { ok: true, kind: "answer", answer: String(compose.text ?? "").trim(), model: compose.model, lookedUp: true };
 }
 
-export async function assistantRespond({ message, context, session, providerId, history } = {}) {
+export async function assistantRespond({ message, context, session, providerId, history, agent = null } = {}) {
   if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
   const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
   const gated = budgetGate(session); if (gated) return gated;
-  const catalog = toolCatalog(session);
-  const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
+  const catalog = toolCatalog(session); // full catalog resolves the model's answer + engine re-validates
+  const compact = pruneCatalogForPrompt(catalog, { agent, goal: String(message), providerId: id });
   const serverCtx = buildServerContext(session, context);
   const ctxStr = JSON.stringify(serverCtx).slice(0, 4000);
   const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nUser message: ${String(message).trim()}`;
@@ -514,13 +614,13 @@ function normalizeBuild(b) {
  * liveness signals; the JSON tokens are not meaningful mid-stream). Returns the
  * same {ok, kind, answer, plan, model} shape when the full response is assembled.
  */
-export async function assistantStream({ message, context, session, providerId, history } = {}, onToken) {
+export async function assistantStream({ message, context, session, providerId, history, agent = null } = {}, onToken) {
   if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
   const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
   const gated = budgetGate(session); if (gated) return gated;
-  const catalog = toolCatalog(session);
-  const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, risk: t.risk, approval: t.requiresApproval, connector: t.connectorId, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
+  const catalog = toolCatalog(session); // full catalog resolves the model's answer + engine re-validates
+  const compact = pruneCatalogForPrompt(catalog, { agent, goal: String(message), providerId: id });
   const serverCtx = buildServerContext(session, context);
   const ctxStr = JSON.stringify(serverCtx).slice(0, 4000);
   const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nUser message: ${String(message).trim()}`;

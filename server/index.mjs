@@ -40,7 +40,8 @@ import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEm
 import { createBackup, listBackups, readBackup, restoreBackup, backupTick } from "./backup.mjs";
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { closeBrowser } from "./browser.mjs";
-import { runSkill, runAgent, runAssistantPlan } from "./orchestrator.mjs";
+import { orchestrate, ensureOpenDefaultAgent } from "./orchestrator.mjs";
+import { sandboxEnabled, seedSandboxAccounts } from "./sandbox-connectors.mjs";
 import { seedDefaults } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
 import { twilioAuthToken, twilioSignatureValid, handleInboundSms, twiml } from "./sms.mjs";
@@ -80,6 +81,20 @@ import { planFromGoal, generateMiniApp, generatePlaybook, assistantRespond, assi
 
 const PORT = Number(process.env.PORT || 8787);
 const VERSION = "1.2.0";
+
+// WP-006 s3 (connector sandbox): when HOMEOPS_CONNECTOR_SANDBOX=1, an OWNER
+// session seeds deterministic sandbox connector accounts for its household, so
+// OAuth-gated tools run against in-process mocks (transport only — consent gates,
+// approvals, and policy clamps still run for real; see server/sandbox-connectors.mjs).
+// Owner-only on purpose: connections are per-actor in this app, and sandbox mode
+// must not conjure accounts for actors who never connected anything (the
+// sandbox-e2e "no conjure" invariant) — other actors stay truthfully
+// not_connected until seeded explicitly. Idempotent; a no-op in real mode.
+function maybeSeedSandbox(s) {
+  if (!sandboxEnabled() || !s?.actorId || s.role !== "Owner") return;
+  try { seedSandboxAccounts({ householdId: s.householdId, actorId: s.actorId }); }
+  catch (e) { console.warn("[sandbox] account seed failed:", e?.message ?? e); }
+}
 // Per-member accent color: one of the app accent names, or a hex string. Optional and
 // back-compat — an unrecognized value is ignored (never stored) rather than erroring.
 const MEMBER_COLORS = ["ink", "sage", "coral", "amber", "sky", "lavender"];
@@ -548,6 +563,7 @@ const handleRequest = async (req, res) => {
           }
         }
         const s = createSession({ actorId, actorName, role, householdId: member.householdId ?? "local" });
+        maybeSeedSandbox(s);
         audit({ type: "session.login", ok: true, actorId }, req, s);
         const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
         // Native/mobile clients can't use the httpOnly cookie — they ask for the bearer
@@ -620,6 +636,7 @@ const handleRequest = async (req, res) => {
       const claimedName = String(body.householdName ?? "").trim();
       if (claimedName) setSettings({ householdName: claimedName.slice(0, 60) }, CURRENT_TENANT);
       const s = createSession({ actorId, actorName: ownerName, role: "Owner", householdId: "local" });
+      maybeSeedSandbox(s);
       audit({ type: "household.claim", ok: true, actorId, archivedDemo: live.length }, req, s);
       const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
       const wantToken = req.headers["x-homeops-bearer"] === "1";
@@ -662,6 +679,7 @@ const handleRequest = async (req, res) => {
         appendAudit({ type: invite ? "household.join" : "household.signup", email, actorId, role });
       });
       const s = createSession({ actorId, actorName: ownerName, role, householdId });
+      maybeSeedSandbox(s);
       const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
       const wantToken = req.headers["x-homeops-bearer"] === "1";
       // Honest verification status: sending needs an email channel this fresh
@@ -680,6 +698,7 @@ const handleRequest = async (req, res) => {
       const member = await runWithTenant(idn.householdId, () => getMember(idn.actorId));
       if (!member || member.archived) return json(res, 403, { error: "member_archived", message: "This account's household profile was removed." }, req);
       const s = createSession({ actorId: idn.actorId, actorName: member.displayName ?? idn.displayName, role: member.role, householdId: idn.householdId });
+      maybeSeedSandbox(s);
       await runWithTenant(idn.householdId, () => appendAudit({ type: "identity.login", ok: true, actorId: idn.actorId }));
       const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
       const wantToken = req.headers["x-homeops-bearer"] === "1";
@@ -1122,16 +1141,22 @@ const handleRequest = async (req, res) => {
       // Children/guests cannot initiate automation runs (which may reach external tools).
       if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      let run;
-      if (body.skillId) {
-        const out = await runSkill({ skillId: body.skillId, params: body.params ?? {}, session: g.session, source: body.source ?? "skill" });
-        if (out.error) return json(res, out.error === "unknown_skill" ? 404 : 422, { error: out.error }, req);
-        run = out.run;
-      } else if (body.plan && typeof body.plan === "object") {
-        run = await startRun({ source: body.source ?? "manual", sourceRef: clientSourceRef(body.sourceRef), plan: body.plan, params: body.params ?? {}, session: g.session });
-      } else {
-        return json(res, 400, { error: "plan_or_skill_required" }, req);
+      // WP-006 slice 1 — through the single orchestrate() entry (skillId → runSkill; raw
+      // plan → startRun-as-is). No route creates a run directly anymore.
+      const out = await orchestrate({
+        source: body.skillId ? (body.source ?? "skill") : (body.source ?? "manual"),
+        via: "manual",
+        skillId: body.skillId ?? null,
+        plan: (body.plan && typeof body.plan === "object") ? body.plan : null,
+        params: body.params ?? {},
+        session: g.session,
+        sourceRef: clientSourceRef(body.sourceRef),
+      });
+      if (out.error) {
+        const code = out.error === "unknown_skill" ? 404 : out.error === "nothing_to_run" ? 400 : 422;
+        return json(res, code, { error: out.error === "nothing_to_run" ? "plan_or_skill_required" : out.error }, req);
       }
+      const run = out.run;
       audit({ type: "run.start", runId: run.id, source: run.source, ok: true }, req, g.session);
       return json(res, 200, { run: publicRun(run) }, req);
     }
@@ -2654,7 +2679,7 @@ const handleRequest = async (req, res) => {
       if (method !== "POST") return json(res, 405, { error: "method_not_allowed" }, req);
       if (action === "run") {
         const body = await readBody(req);
-        const out = await runAgent({ agentId: id, goal: body?.goal, skillId: body?.skillId, params: body?.params ?? {}, session: g.session, source: body?.source ?? "agent" });
+        const out = await orchestrate({ source: body?.source ?? "agent", via: "agent", agentId: id, goal: body?.goal, skillId: body?.skillId, params: body?.params ?? {}, session: g.session });
         if (out.error) return json(res, out.error === "unknown_agent" ? 404 : 422, { error: out.error, message: out.message }, req);
         audit({ type: "agent.run", agentId: id, runId: out.run?.id, droppedSteps: out.droppedSteps, ok: true }, req, g.session);
         return json(res, 200, { run: out.run, droppedSteps: out.droppedSteps }, req);
@@ -2877,7 +2902,13 @@ const handleRequest = async (req, res) => {
       // otherwise the assistant forgets facts stated one message earlier.
       const histConv = body.conversationId ? getConversation(body.conversationId) : null;
       const history = histConv && canSeeConversation(histConv, g.session) ? histConv.messages : [];
-      const out = await assistantRespond({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history });
+      // WP-006 slice 2 — plan chat against the acting agent's (agt_household, effective)
+      // PERMITTED catalog. ensureOpenDefaultAgent neutralizes the seeded-narrow allow-list
+      // (the same widening the chat run itself applies), so ordinary chat capability is
+      // never shrunk — only a household's explicit DENY reaches the model's menu, and a
+      // local provider additionally gets the relevance-ranked, budget-capped catalog.
+      const actingAgent = ensureOpenDefaultAgent("agt_household");
+      const out = await assistantRespond({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent });
       demoteBuildForRole(out, g.session);
       // Do-requests EXECUTE immediately (C-intel): a plan from chat auto-starts as a
       // durable server run — no "Run plan" click. Approval-gated steps still pause
@@ -2885,13 +2916,12 @@ const handleRequest = async (req, res) => {
       // Only BUILD proposals (agent creation) wait for explicit confirmation.
       if (out.ok && out.kind === "plan" && out.plan && roleAtLeast(g.session.role, "Limited Member")) {
         try {
-          // WP-002 slice 2 — routed through the orchestrator's single choke point
-          // (runAssistantPlan) instead of calling startRun directly, so the run
-          // carries an attributed agent identity: per-agent-gated tools (notably
-          // homeops.notify_contact) can now run from a plain chat ask, with the same
-          // visible-skip policy clamp an agent/skill run already gets. Rollback: env
-          // HOMEOPS_CHAT_AGENT_ATTRIBUTION=off.
-          const { run } = await runAssistantPlan({ plan: out.plan, session: g.session, conversationId: body.conversationId ?? null });
+          // WP-006 slice 1 — routed through the single orchestrate() choke point (which
+          // delegates to runAssistantPlan). The chat run still carries the attributed
+          // agent identity so per-agent-gated tools (notably homeops.notify_contact) run
+          // from a plain ask with the WP-003 visible-skip clamp. Rollbacks: env
+          // HOMEOPS_CHAT_AGENT_ATTRIBUTION=off (attribution) / HOMEOPS_ORCHESTRATE_ENTRY=off.
+          const { run } = await orchestrate({ source: "assistant", via: "chat", plan: out.plan, session: g.session, conversationId: body.conversationId ?? null });
           out.run = publicRun(run);
           audit({ type: "run.start", runId: run.id, source: "assistant", ok: true }, req, g.session);
         } catch (e) {
@@ -2930,19 +2960,46 @@ const handleRequest = async (req, res) => {
       try {
         const histConv = body.conversationId ? getConversation(body.conversationId) : null;
         const history = histConv && canSeeConversation(histConv, g.session) ? histConv.messages : [];
+        // WP-006 slice 2 — same acting-agent catalog pruning as POST /api/assistant.
+        const actingAgent = ensureOpenDefaultAgent("agt_household");
         const out = await assistantStream(
-          { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history },
+          { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent },
           (_tok) => { tokenCount++; if (tokenCount % 4 === 0) res.write(`data: ${JSON.stringify({ type: "progress", tokens: tokenCount })}\n\n`); },
         );
         demoteBuildForRole(out, g.session); // ISS-011 — the streaming path gates identically
 
+        // WP-003 slice 4 (thread order, ISS-005/009/011/016) — persist the user's OWN
+        // turn BEFORE the run below is ever started. startRun (engine.mjs) does not
+        // await execution — driveRun runs in the background — so a fast, real,
+        // no-approval step can finish and have onRunFinished (assistant-runs.mjs)
+        // append a run_result to this SAME conversation before this handler got
+        // around to recording what the user actually asked. That produced threads
+        // where the run's own reaction to a message appeared ABOVE the message
+        // itself. Moving this append here guarantees the user's turn's position in
+        // the durable array can never be at the mercy of how fast the run resolves.
+        //
+        // Rejected alternative: sort by the `at` timestamp at render time instead.
+        // Rejected because the race is a WRITE-time problem, not a display one — the
+        // user-turn message used to be timestamped only AFTER the run had already
+        // returned, so its `at` was genuinely later in wall-clock terms than the
+        // run_result's; no render-side sort can un-invert a timestamp captured too
+        // late, and every other reader of this durable array (another device, a
+        // future admin tool) would still see the wrong order in the stored data.
+        let conv = null;
+        if (body.conversationId) {
+          const c = getConversation(body.conversationId);
+          if (c && canSeeConversation(c, g.session)) {
+            conv = c;
+            appendConversationMessage(conv.id, { role: "user", text: String(body.message), at: new Date().toISOString() });
+          }
+        }
         // Do-requests auto-execute here too (see POST /api/assistant): the run starts
         // before the "done" event so the client can attach to it immediately.
         if (out.ok && out.kind === "plan" && out.plan && roleAtLeast(g.session.role, "Limited Member")) {
           try {
-            // WP-002 slice 2 — same orchestrator choke point as POST /api/assistant
+            // WP-006 slice 1 — same single orchestrate() choke point as POST /api/assistant
             // (see the comment there); the streaming route must attribute identically.
-            const { run } = await runAssistantPlan({ plan: out.plan, session: g.session, conversationId: body.conversationId ?? null });
+            const { run } = await orchestrate({ source: "assistant", via: "chat", plan: out.plan, session: g.session, conversationId: body.conversationId ?? null });
             out.run = publicRun(run);
             audit({ type: "run.start", runId: run.id, source: "assistant", ok: true }, req, g.session);
           } catch (e) {
@@ -2954,15 +3011,10 @@ const handleRequest = async (req, res) => {
         // (which always streams) stayed empty (messages: []) server-side forever: history
         // never survived a refresh because it was never written past the client's memory.
         // Failed turns persist as well (see POST /api/assistant).
-        if (body.conversationId) {
-          const conv = getConversation(body.conversationId);
-          if (conv && canSeeConversation(conv, g.session)) {
-            const at = new Date().toISOString();
-            appendConversationMessage(conv.id, { role: "user", text: String(body.message), at });
-            appendConversationMessage(conv.id, out.ok
-              ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, runId: out.run?.id ?? null, model: out.model ?? null, at }
-              : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at });
-          }
+        if (conv) {
+          appendConversationMessage(conv.id, out.ok
+            ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, runId: out.run?.id ?? null, model: out.model ?? null, at: new Date().toISOString() }
+            : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at: new Date().toISOString() });
         }
         audit({ type: "assistant.stream", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
         res.write(`data: ${JSON.stringify({ type: "done", result: out })}\n\n`);
