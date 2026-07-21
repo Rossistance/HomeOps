@@ -4,6 +4,7 @@
 // Client secrets are used only here (server-side) and never returned to clients.
 import { clientCreds, providerById } from "./providers.mjs";
 import { getAccountTokens, setAccountTokens, getAccountRaw, putAccount } from "./store.mjs";
+import { sandboxEnabled, sandboxApiFor } from "./sandbox-connectors.mjs";
 
 async function rawFetch(url, opts = {}) {
   let res;
@@ -77,6 +78,12 @@ async function refreshAccountTokens(provider, accountId) {
  * the account is flipped to needs_reconnect and the 401 response is returned.
  */
 export function apiForAccount(account) {
+  // WP-006 SANDBOX TRANSPORT SEAM. In sandbox mode the account's REAL provider token
+  // and network call are replaced by an in-process deterministic mock (identical
+  // { ok, status, json, text } contract). This is the ONLY transport swap for every
+  // PROVIDERS tool and notify.mjs's email path; consent gates upstream are untouched,
+  // and no socket is ever opened. Byte-for-byte unchanged when the flag is unset.
+  if (sandboxEnabled()) return sandboxApiFor(account);
   const provider = providerById(account.provider);
   return async function api(url, opts = {}) {
     let tokens = getAccountTokens(account.id);

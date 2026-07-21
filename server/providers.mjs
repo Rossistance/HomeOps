@@ -7,6 +7,10 @@
 // Health/identity are real network calls — nothing here is seeded or simulated.
 
 const env = (name) => (name ? process.env[name] : undefined);
+// WP-006: local env check (NOT an import of sandbox-connectors.mjs, which would pull
+// in store.mjs and break the pure-registry tests that import providers.mjs with no
+// data dir). Kept in lockstep with sandbox-connectors.mjs sandboxEnabled().
+const sandboxOn = () => process.env.HOMEOPS_CONNECTOR_SANDBOX === "1";
 
 /**
  * Each ProviderDef:
@@ -441,6 +445,10 @@ export function publicProvider(p) {
     clientIdEnv: p.clientIdEnv, clientSecretEnv: p.clientSecretEnv, // names only, not values
     scopes: p.scopes.map((s) => ({ key: s.key, label: s.label, risk: s.risk })),
     tools: p.tools.map((t) => ({ id: t.id, name: t.name, action: t.action, risk: t.risk, requiresApproval: t.requiresApproval, scopes: t.scopes, inputs: t.inputs ?? [] })),
+    // WP-006: annotate ONLY when the flag is set (real mode = byte-for-byte today's
+    // shape). A truthful signal that provider calls are being served by the sandbox
+    // twin — it does NOT claim deployment credentials are configured.
+    ...(sandboxOn() ? { sandbox: true } : {}),
   };
 }
 export function listProviders() {

@@ -2,6 +2,12 @@
 // primitive: blocks private/loopback/link-local/metadata targets, validates every
 // redirect hop, and caps timeout + response size. Loopback is permitted ONLY for
 // connectors that are explicitly local by design (Ollama / LM Studio).
+//
+// WP-006: the connector SANDBOX (HOMEOPS_CONNECTOR_SANDBOX=1) does NOT touch this
+// module. Sandbox mocks are pure in-process fixtures that never call safeFetch /
+// assertSafeUrl, so the allowlist is unconditional and identical in both modes — a
+// non-allowlisted host is refused whether or not the sandbox flag is set. There is no
+// sandbox branch here by design: sandbox replaces transport upstream, never egress.
 import dns from "node:dns/promises";
 import net from "node:net";
 

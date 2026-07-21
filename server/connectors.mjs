@@ -6,6 +6,7 @@ import { getConnectorConfig, setConnectorConfig, getSecret, getSettings, appendA
 import { safeFetch, assertSafeUrl } from "./net.mjs";
 import { browserAvailable, probeBrowser, renderPage } from "./browser.mjs";
 import { searchWeb, readPage, extractRecipe } from "./web.mjs";
+import { sandboxEnabled, SANDBOX_CONNECTOR_IDS, isSandboxConnectorTool, sandboxConnectorExecute } from "./sandbox-connectors.mjs";
 
 /**
  * Readiness levels (per the no-mocks mandate):
@@ -168,6 +169,11 @@ function hasTokens(c) {
 }
 
 export function readinessOf(c) {
+  // WP-006 SANDBOX. A credentialed connector (e.g. sms/Twilio) reports "connected"
+  // with its deterministic fake identity so runs don't park on not_configured — the
+  // outbound call is later replaced by an in-process mock in executeTool. Gated on the
+  // flag: real mode falls straight through to the identical logic below.
+  if (sandboxEnabled() && SANDBOX_CONNECTOR_IDS.has(c.id)) return "connected";
   const cfg = getConnectorConfig(c.id);
   if (c.runtime === "client") return "local_only";
   if (c.id === "webhook") return "connected"; // receiver is always live
@@ -392,6 +398,16 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
   if ((tool.action === "Send" || tool.action === "Write" || tool.action === "Download") && getSettings(ctx.householdId).externalActionsEnabled === false) {
     appendAudit({ type: "tool.execute", ...base, ok: false, error: "external_actions_disabled" });
     return { ok: false, error: "external_actions_disabled", message: "External actions are turned off by the household kill switch." };
+  }
+
+  // WP-006 SANDBOX TRANSPORT SEAM. Every gate above (readiness/approval/kill switch)
+  // has already run for real; only the OUTBOUND provider call is replaced by an
+  // in-process deterministic mock that records the would-be effect. In real mode the
+  // flag is unset and this is skipped entirely — behavior is byte-for-byte today's.
+  if (sandboxEnabled() && isSandboxConnectorTool(toolId)) {
+    const out = await sandboxConnectorExecute(toolId, input, { actorId: ctx.actorId, householdId: ctx.householdId, requestId: ctx.requestId });
+    appendAudit({ type: "tool.execute", ...base, ok: out.ok, action: tool.action, sandbox: true, error: out.ok ? undefined : out.error });
+    return out;
   }
 
   try {
