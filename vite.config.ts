@@ -71,6 +71,16 @@ export default defineConfig({
   server: {
     port: 5173,
     open: false,
+    // Keep the dev watcher OUT of runtime data and test artifacts. On Windows,
+    // chokidar holding handles on the backend's live SQLite WAL files
+    // (server/.data/tenants/*/household.db-{wal,shm}) intermittently starves the
+    // backend's writes into SQLITE_IOERR ("disk I/O error") during heavy churn —
+    // e.g. Playwright runs writing traces — and watching tests/topgun/.artifacts
+    // triggers full page reloads MID-SUITE when traces/screenshots land. Neither
+    // tree is frontend source; the watcher has no business there.
+    watch: {
+      ignored: ["**/server/.data/**", "**/tests/topgun/.artifacts/**", "**/.top-gun/**"],
+    },
     proxy: {
       "/api": { target: BACKEND, changeOrigin: true },
     },

@@ -30,6 +30,40 @@ export async function seedReturningUserState(page: Page) {
     try { window.localStorage.setItem("homeops-ai:appdata", json); } catch { /* storage unavailable → app shows its own banner */ }
   }, JSON.stringify(data));
 }
+/**
+ * Create and sign into a DISPOSABLE household via the real /api/signup flow —
+ * a physically separate tenant DB (hh_*), so specs that create/mutate records
+ * never touch the resident family's data. Preferred over signIn() for every
+ * spec that WRITES anything. The signup happens from inside the page so the
+ * browser owns the session cookie; the app then boots straight into the shell.
+ * Server-side: new households also receive the seeded default mini apps
+ * (server/seed.mjs), so this exercises the real new-family path.
+ */
+export async function signUpDisposableHousehold(page: Page): Promise<{ email: string; householdName: string; ownerName: string }> {
+  await seedReturningUserState(page);
+  await page.goto("/");
+  const stamp = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+  const email = `tg-${stamp}@example.invalid`;
+  const householdName = `TG Disposable ${stamp}`;
+  const ownerName = "TG Owner";
+  const result = await page.evaluate(
+    async ({ email, householdName, ownerName }) => {
+      const r = await fetch("/api/signup", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: "tg-disposable-pass-1", ownerName, householdName }),
+      });
+      return { status: r.status, body: await r.json().catch(() => null) };
+    },
+    { email, householdName, ownerName },
+  );
+  expect(result.status, `disposable-household signup must succeed: ${JSON.stringify(result.body).slice(0, 200)}`).toBe(200);
+  await page.goto("/");
+  await expect(commandPalette(page)).toBeVisible({ timeout: 20_000 });
+  return { email, householdName, ownerName };
+}
+
 export interface LockProfile {
   actorId: string;
   displayName: string;

@@ -190,7 +190,36 @@ export function createEngine(dataDir) {
     }
   }
 
-  return {
+  // Windows/WAL resilience: a cached DatabaseSync handle can go permanently
+  // stale when something external disturbs the -wal/-shm mapping (observed
+  // repeatedly on this host as ERR_SQLITE_ERROR "disk I/O error", errcode 266,
+  // on EVERY subsequent query until process restart — while a fresh open of the
+  // same file passes integrity_check). The HANDLE, not the file, is the
+  // casualty. On the first disk-I/O error for a tenant: log loudly, close and
+  // drop the cached handle, reopen (open() re-runs integrity_check and would
+  // quarantine real corruption), and retry the operation ONCE. A second failure
+  // propagates unchanged — this never masks true disk trouble.
+  const isStaleHandleErr = (e) =>
+    e?.code === "ERR_SQLITE_ERROR" && /disk i\/o error/i.test(String(e?.message ?? e));
+  function resetHandle(t) {
+    const db = handles.get(t);
+    if (db) { try { db.close(); } catch { /* already broken */ } }
+    handles.delete(t);
+  }
+  function withStaleHandleRecovery(name, fn) {
+    return function (t, ...rest) {
+      try {
+        return fn(t, ...rest);
+      } catch (e) {
+        if (!isStaleHandleErr(e)) throw e;
+        console.error(`[tenant-db] disk I/O error in ${name}(${t}) — resetting cached handle and retrying once`, e?.stack ?? e);
+        resetHandle(t);
+        return fn(t, ...rest);
+      }
+    };
+  }
+
+  const api = {
     /* ---- documents (whole-file semantics, the readJSON/writeJSON substrate) ---- */
     getDoc(t, file, fallback) {
       const db = requireDb(t, false);
@@ -317,4 +346,11 @@ export function createEngine(dataDir) {
       handles.clear();
     },
   };
+  // Wrap every tenant-scoped operation (first arg = tenant id) with the
+  // stale-handle recovery above. closeAll takes no tenant and needs no retry.
+  for (const name of Object.keys(api)) {
+    if (name === "closeAll") continue;
+    api[name] = withStaleHandleRecovery(name, api[name]);
+  }
+  return api;
 }
