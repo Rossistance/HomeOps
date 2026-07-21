@@ -28,7 +28,7 @@ export const CONNECTORS = [
       { key: "longitude", label: "Longitude", type: "text", default: "-74.0060" },
       { key: "label", label: "Location label", type: "text", default: "Home" },
     ],
-    tools: [{ id: "weather.current", name: "Current conditions", action: "Read", risk: "Low", requiresApproval: false, description: "Fetch current temperature and conditions." }],
+    tools: [{ id: "weather.current", name: "Current conditions", action: "Read", risk: "Low", requiresApproval: false, delivers: false, description: "Fetch current temperature and conditions." }],
     triggers: [{ id: "weather.daily", name: "Daily forecast", type: "schedule", description: "Polls each morning for the day's forecast." }],
   },
   {
@@ -41,7 +41,7 @@ export const CONNECTORS = [
     risk: "Low",
     description: "Monitor blogs, school district pages, or podcast feeds. Reads a real feed URL you provide.",
     configSchema: [{ key: "feedUrl", label: "Feed URL", type: "text", required: true, placeholder: "https://example.com/feed.xml" }],
-    tools: [{ id: "rss.latest", name: "Latest items", action: "Read", risk: "Low", requiresApproval: false, description: "Fetch the most recent feed items." }],
+    tools: [{ id: "rss.latest", name: "Latest items", action: "Read", risk: "Low", requiresApproval: false, delivers: false, description: "Fetch the most recent feed items." }],
     triggers: [{ id: "rss.new", name: "New item published", type: "poll", description: "Polls the feed and fires on new items." }],
   },
   {
@@ -59,8 +59,10 @@ export const CONNECTORS = [
       { key: "apiKey", label: "API key", type: "secret", placeholder: "Bearer …" },
     ],
     tools: [
-      { id: "http.get", name: "GET request", action: "Read", risk: "Medium", requiresApproval: false, description: "Perform a GET request to a path on the base URL.", inputs: [{ key: "path", label: "Path", type: "text", placeholder: "/v1/status", default: "/" }] },
-      { id: "http.post", name: "POST request", action: "Write", risk: "High", requiresApproval: true, description: "Perform a POST request (requires approval).", inputs: [{ key: "path", label: "Path", type: "text", placeholder: "/v1/items", default: "/" }, { key: "body", label: "JSON body", type: "json", placeholder: "{ \"name\": \"value\" }" }] },
+      { id: "http.get", name: "GET request", action: "Read", risk: "Medium", requiresApproval: false, delivers: false, description: "Perform a GET request to a path on the base URL.", inputs: [{ key: "path", label: "Path", type: "text", placeholder: "/v1/status", default: "/" }] },
+      // A generic API write isn't "delivered" in the notify/email/SMS sense — it has no
+      // named human recipient, just an arbitrary endpoint. Never counted as delivered.
+      { id: "http.post", name: "POST request", action: "Write", risk: "High", requiresApproval: true, delivers: false, description: "Perform a POST request (requires approval).", inputs: [{ key: "path", label: "Path", type: "text", placeholder: "/v1/items", default: "/" }, { key: "body", label: "JSON body", type: "json", placeholder: "{ \"name\": \"value\" }" }] },
     ],
     triggers: [],
   },
@@ -88,7 +90,7 @@ export const CONNECTORS = [
     risk: "Low",
     description: "Import and process files from this device. Local-only — files never leave your browser.",
     configSchema: [],
-    tools: [{ id: "file.import", name: "Import file", action: "Read", risk: "Low", requiresApproval: false, runtime: "client", description: "Read a local file in the browser." }],
+    tools: [{ id: "file.import", name: "Import file", action: "Read", risk: "Low", requiresApproval: false, delivers: false, runtime: "client", description: "Read a local file in the browser." }],
     triggers: [],
   },
   {
@@ -102,8 +104,8 @@ export const CONNECTORS = [
     description: "Drive websites with a real headless browser runtime. Start the bundled runtime (server/browser-runtime: npm install && npm run setup && npm start) and set BROWSER_RUNTIME_URL. Login handoff required — we never ask for your password.",
     configSchema: [{ key: "runtimeUrl", label: "Runtime URL", type: "text", env: "BROWSER_RUNTIME_URL", placeholder: "http://localhost:9223" }],
     tools: [
-      { id: "browser.open", name: "Open & extract", action: "Browser Action", risk: "Medium", requiresApproval: false, description: "Open a page and read its content.", inputs: [{ key: "url", label: "Page URL", type: "text", required: true, placeholder: "https://example.com/orders" }, { key: "extract", label: "What to extract (optional)", type: "text", placeholder: "order totals" }] },
-      { id: "browser.download", name: "Download document", action: "Download", risk: "High", requiresApproval: true, description: "Open a page and download a file (requires approval).", inputs: [{ key: "url", label: "Page URL", type: "text", required: true }, { key: "selector", label: "Download link selector (optional)", type: "text", placeholder: "a.download-pdf" }] },
+      { id: "browser.open", name: "Open & extract", action: "Browser Action", risk: "Medium", requiresApproval: false, delivers: false, description: "Open a page and read its content.", inputs: [{ key: "url", label: "Page URL", type: "text", required: true, placeholder: "https://example.com/orders" }, { key: "extract", label: "What to extract (optional)", type: "text", placeholder: "order totals" }] },
+      { id: "browser.download", name: "Download document", action: "Download", risk: "High", requiresApproval: true, delivers: false, description: "Open a page and download a file (requires approval).", inputs: [{ key: "url", label: "Page URL", type: "text", required: true }, { key: "selector", label: "Download link selector (optional)", type: "text", placeholder: "a.download-pdf" }] },
     ],
     triggers: [],
   },
@@ -118,9 +120,9 @@ export const CONNECTORS = [
     description: "Search the web in plain English and read pages — runs on the backend so it works on any deployment (web + mobile) with no local runtime. When the headless Browser Automation runtime is connected it is used automatically for JS-heavy pages.",
     configSchema: [],
     tools: [
-      { id: "web.search", name: "Search the web", action: "Read", risk: "Low", requiresApproval: false, description: "Plain-English web search (no API key). Returns result titles, URLs, and snippets to pick pages worth reading.", inputs: [{ key: "query", label: "Search query", type: "text", required: true, placeholder: "easy weeknight dinner recipes" }] },
-      { id: "web.read", name: "Read a page", action: "Read", risk: "Medium", requiresApproval: false, description: "Fetch a page and return its readable text and links.", inputs: [{ key: "url", label: "Page URL", type: "text", required: true, placeholder: "https://example.com/article" }] },
-      { id: "web.recipe", name: "Extract recipe", action: "Read", risk: "Low", requiresApproval: false, description: "Extract a structured recipe (name, ingredients, step-by-step instructions, source URL) from a recipe page.", inputs: [{ key: "url", label: "Recipe URL", type: "text", required: true, placeholder: "https://example.com/best-chili" }] },
+      { id: "web.search", name: "Search the web", action: "Read", risk: "Low", requiresApproval: false, delivers: false, description: "Plain-English web search (no API key). Returns result titles, URLs, and snippets to pick pages worth reading.", inputs: [{ key: "query", label: "Search query", type: "text", required: true, placeholder: "easy weeknight dinner recipes" }] },
+      { id: "web.read", name: "Read a page", action: "Read", risk: "Medium", requiresApproval: false, delivers: false, description: "Fetch a page and return its readable text and links.", inputs: [{ key: "url", label: "Page URL", type: "text", required: true, placeholder: "https://example.com/article" }] },
+      { id: "web.recipe", name: "Extract recipe", action: "Read", risk: "Low", requiresApproval: false, delivers: false, description: "Extract a structured recipe (name, ingredients, step-by-step instructions, source URL) from a recipe page.", inputs: [{ key: "url", label: "Recipe URL", type: "text", required: true, placeholder: "https://example.com/best-chili" }] },
     ],
     triggers: [],
   },
@@ -139,7 +141,7 @@ export const CONNECTORS = [
       { key: "fromNumber", label: "From number", type: "text", env: "TWILIO_FROM_NUMBER", required: true },
       { key: "messagingServiceSid", label: "Messaging Service SID (A2P 10DLC)", type: "text", env: "TWILIO_MESSAGING_SERVICE_SID", required: false },
     ],
-    tools: [{ id: "sms.send", name: "Send text", action: "Send", risk: "High", requiresApproval: true, description: "Send a text message (requires approval).", inputs: [{ key: "to", label: "To number", type: "text", placeholder: "+15551234567", required: true }, { key: "body", label: "Message", type: "textarea", placeholder: "Your text…", required: true }] }],
+    tools: [{ id: "sms.send", name: "Send text", action: "Send", risk: "High", requiresApproval: true, delivers: true, description: "Send a text message (requires approval).", inputs: [{ key: "to", label: "To number", type: "text", placeholder: "+15551234567", required: true }, { key: "body", label: "Message", type: "textarea", placeholder: "Your text…", required: true }] }],
     triggers: [],
   },
 ];

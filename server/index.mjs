@@ -40,7 +40,7 @@ import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEm
 import { createBackup, listBackups, readBackup, restoreBackup, backupTick } from "./backup.mjs";
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { closeBrowser } from "./browser.mjs";
-import { runSkill, runAgent } from "./orchestrator.mjs";
+import { runSkill, runAgent, runAssistantPlan } from "./orchestrator.mjs";
 import { seedDefaults } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
 import { twilioAuthToken, twilioSignatureValid, handleInboundSms, twiml } from "./sms.mjs";
@@ -2885,11 +2885,13 @@ const handleRequest = async (req, res) => {
       // Only BUILD proposals (agent creation) wait for explicit confirmation.
       if (out.ok && out.kind === "plan" && out.plan && roleAtLeast(g.session.role, "Limited Member")) {
         try {
-          const run = await startRun({
-            source: "assistant",
-            sourceRef: { conversationId: body.conversationId ?? null, via: "chat" },
-            plan: out.plan, session: g.session, title: out.plan.title,
-          });
+          // WP-002 slice 2 — routed through the orchestrator's single choke point
+          // (runAssistantPlan) instead of calling startRun directly, so the run
+          // carries an attributed agent identity: per-agent-gated tools (notably
+          // homeops.notify_contact) can now run from a plain chat ask, with the same
+          // visible-skip policy clamp an agent/skill run already gets. Rollback: env
+          // HOMEOPS_CHAT_AGENT_ATTRIBUTION=off.
+          const { run } = await runAssistantPlan({ plan: out.plan, session: g.session, conversationId: body.conversationId ?? null });
           out.run = publicRun(run);
           audit({ type: "run.start", runId: run.id, source: "assistant", ok: true }, req, g.session);
         } catch (e) {
@@ -2938,11 +2940,9 @@ const handleRequest = async (req, res) => {
         // before the "done" event so the client can attach to it immediately.
         if (out.ok && out.kind === "plan" && out.plan && roleAtLeast(g.session.role, "Limited Member")) {
           try {
-            const run = await startRun({
-              source: "assistant",
-              sourceRef: { conversationId: body.conversationId ?? null, via: "chat" },
-              plan: out.plan, session: g.session, title: out.plan.title,
-            });
+            // WP-002 slice 2 — same orchestrator choke point as POST /api/assistant
+            // (see the comment there); the streaming route must attribute identically.
+            const { run } = await runAssistantPlan({ plan: out.plan, session: g.session, conversationId: body.conversationId ?? null });
             out.run = publicRun(run);
             audit({ type: "run.start", runId: run.id, source: "assistant", ok: true }, req, g.session);
           } catch (e) {

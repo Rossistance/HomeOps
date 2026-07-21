@@ -4,7 +4,7 @@
 // tools. Every handler does real work and returns a real result — no simulation.
 import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods } from "./store.mjs";
 import { mealEventNotes, pushEventToGoogle } from "./calendar.mjs";
-import { deliverNotification } from "./notify.mjs";
+import { deliverNotification, deliverInAppFallback } from "./notify.mjs";
 import crypto from "node:crypto";
 
 const eid = (p) => p + "_" + crypto.randomBytes(8).toString("hex");
@@ -17,6 +17,11 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    // WP-002 slice 1 — explicit, single source of truth for whether a SUCCEEDED step
+    // reaches outside the run (an inbox, a phone, a person). summarizeOutcome
+    // (assistant-runs.mjs) reads ONLY this flag to decide what counts as "delivered" —
+    // never the tool's id/name. A memory write never leaves the household.
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     // Persist a household/personal memory entry the assistant can recall later.
@@ -40,6 +45,7 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     // Produce a durable artifact (briefing / report / checklist) tied to the run.
@@ -63,6 +69,10 @@ export const INTERNAL_FUNCTIONS = {
     action: "Send",
     risk: "High",
     requiresApproval: true,
+    // "Send"-shaped for approval-gating purposes only — it records a decision, it does
+    // not reach anyone outside the household. This is exactly the distinction the old
+    // regex/requiresApproval heuristic missed (see summarizeOutcome).
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     // Gated on a real human approval. The handler runs ONLY after the household
@@ -93,6 +103,7 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
@@ -122,6 +133,7 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
@@ -140,6 +152,7 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
@@ -156,6 +169,7 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
@@ -174,6 +188,7 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
@@ -198,6 +213,7 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     // One approved meal → everything wired in a single real action:
@@ -343,6 +359,7 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     // List items (groceries, packing) are modeled as lightweight tasks of type "list".
@@ -366,6 +383,7 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    delivers: false,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
@@ -383,6 +401,13 @@ export const INTERNAL_FUNCTIONS = {
     action: "Write",
     risk: "Low",
     requiresApproval: false,
+    // This is the exact tool the false-success bug was about: its id CONTAINS
+    // "send_notification", but it never sends anything — the old summary regex
+    // matched the name and reported a draft as delivered. `draft: true` lets the
+    // summary give it its own honest "drafted — review" wording instead of lumping
+    // it in with ordinary non-delivering writes.
+    delivers: false,
+    draft: true,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     // Review-first: produces a DRAFT artifact for a human to review, never sends.
@@ -442,6 +467,9 @@ export const INTERNAL_FUNCTIONS = {
     // here would recreate the 30-minute expiry race this work package exists to end.
     // Safety lives in the three fail-closed gates below, not in a daily interruption.
     requiresApproval: false,
+    // The one internal tool that actually reaches a person off-device (or, via the
+    // WP-002 slice 3 in-app fallback below, at least reaches them in the app).
+    delivers: true,
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
@@ -461,6 +489,28 @@ export const INTERNAL_FUNCTIONS = {
         if (!wanted) return { ok: false, error: "no_recipient", message: "No recipient — give me a contact method to send to." };
         const match = listContactMethods((m) => m.householdId === ctx.householdId && String(m.value ?? "").trim().toLowerCase() === wanted);
         if (!match.length) {
+          // WP-002 slice 3 — HONEST IN-APP FALLBACK. There is nowhere off-device to
+          // reach this recipient yet, but refusing outright means a plain chat ask
+          // ("let mom know...") does NOTHING — not even the honesty of a visible
+          // result. Deliver a real, durable in-app notification to the REQUESTER (the
+          // one person guaranteed reachable right now, since they're mid-conversation)
+          // instead, and say plainly what happened and what unlocks off-device reach.
+          // This can NEVER reach email/SMS — deliverInAppFallback only ever writes the
+          // in_app channel, so the verified+opt-in+allowlist gates below are untouched.
+          const fallback = await deliverInAppFallback({
+            session: { householdId: ctx.householdId, actorId: ctx.actorId },
+            title: subject,
+            body: `${body}\n\n(Couldn't reach "${input.to}" — no verified contact method for it yet.)`,
+          });
+          if (fallback.ok && fallback.delivered) {
+            return {
+              ok: true,
+              result: {
+                delivered: true, channel: "in_app", inAppFallback: true, notificationId: fallback.notificationId,
+                message: `Delivered in-app — add a verified contact method for email/SMS to reach you off-device.`,
+              },
+            };
+          }
           return {
             ok: false, error: "method_not_registered", needsSetup: "contact_method",
             message: `I can't send to ${input.to} yet — it isn't a verified contact method for this household. Add and verify it in Contact Methods, then allow this helper to message it, and I'll deliver it automatically from then on.`,

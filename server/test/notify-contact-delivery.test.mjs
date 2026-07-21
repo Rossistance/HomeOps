@@ -11,9 +11,14 @@
 //
 // Gates under test (all must fail CLOSED):
 //   1. no acting agent            → refuses (the allowlist is per-agent; no agent, no gate)
-//   2. unregistered recipient     → refuses, never invents a contact method
-//   3. unverified method          → refuses
-//   4. not opted in               → refuses
+//   2. unregistered recipient     → WP-002 slice 3: falls back to an honest, real
+//                                    in-app notification to the REQUESTER instead of a
+//                                    hard refusal — but STILL never invents a contact
+//                                    method for the unregistered recipient, and can
+//                                    NEVER reach email/SMS this way (see GATE 1 below).
+//   3. unverified method          → refuses (fallback does NOT apply — the method
+//                                    exists, the household just hasn't verified it)
+//   4. not opted in               → refuses (fallback does NOT apply, same reason)
 //   5. agent not on the allowlist → refuses (agent_not_allowed)
 //   6. household kill switch on   → refuses, nothing sent
 //   7. all gates satisfied        → proceeds to the channel, and reports the REAL
@@ -95,14 +100,29 @@ describe("WP-005 — homeops.notify_contact fails closed at every gate", () => {
     assert.match(ids, /homeops\.notify_contact/, "the delivery tool must be in the live catalog");
   });
 
-  test("GATE 1 — an unregistered recipient is refused, never invented", async () => {
+  // WP-002 slice 3 — CHANGED FROM A HARD REFUSAL. Before this WP, an unregistered
+  // recipient made notify_contact fail outright: a plain, un-set-up chat ask ("let
+  // them know...") did NOTHING — not even the honesty of a visible result. This test
+  // used to assert `step.status === "failed"`; that assertion embodied exactly the
+  // "refuse instead of deliver anything at all" behavior WP-002 was scoped to fix (see
+  // the mission's acceptance criterion: "notify_contact with no method delivers
+  // in-app"). The recipient is still never invented — no contact method is created —
+  // and this path can never reach email/SMS (deliverInAppFallback only ever writes the
+  // in_app channel), so gates 2 (verified) through 6 (kill switch) below are untouched.
+  test("GATE 1 — an unregistered recipient falls back to an honest in-app notification, and still never invents a contact method", async () => {
     const { step } = await notifyStep({
       agentId: agent.id,
       input: { to: "tg-nobody@example.invalid", subject: "TG", body: "TG test body long enough to pass the empty check." },
     });
-    assert.equal(step.status, "failed", "an unknown recipient must not be delivered to");
-    assert.match(String(step.detail), /isn't a verified contact method|not a verified/i,
-      "and the refusal must name what to do about it");
+    assert.equal(step.status, "succeeded", "an unregistered recipient now falls back to an honest in-app delivery instead of a hard refusal");
+    assert.equal(step.result?.delivered, true);
+    assert.equal(step.result?.channel, "in_app");
+    assert.equal(step.result?.inAppFallback, true, "must be distinguishable from a real off-device delivery");
+    assert.match(String(step.result?.message), /in-app/i);
+    assert.match(String(step.result?.message), /verified contact method/i, "must say what unlocks off-device reach");
+    const methods = await owner.req("/api/contact-methods");
+    assert.ok(!(methods.data?.contactMethods ?? []).some((m) => String(m.value ?? "").toLowerCase() === "tg-nobody@example.invalid"),
+      "no contact method may be invented for the unregistered recipient");
   });
 
   test("GATE 2 — an UNVERIFIED method is refused", async () => {

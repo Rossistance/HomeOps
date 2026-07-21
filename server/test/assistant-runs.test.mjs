@@ -68,6 +68,25 @@ test("a successful REPAIR run offers to save the working plan as a helper, inlin
   assert.ok(msgs.findIndex((m) => m.kind === "run_result") < msgs.findIndex((m) => m.kind === "build"));
 });
 
+test("WP-002 slice 1+4: a run that only drafted a notification says so honestly and carries the draft's artifactId/link", async () => {
+  const conv = await newConversation("draft thread");
+  const plan = { title: "Draft a reminder", summary: "", steps: [{ toolId: "homeops.send_notification_draft", title: "Draft a notification", input: { to: "coach@example.com", body: "Noah will miss practice." } }] };
+  const started = await owner.req("/api/runs/start", { method: "POST", body: JSON.stringify({ source: "assistant", sourceRef: { conversationId: conv.id, via: "chat" }, plan }) });
+  assert.equal(started.status, 200);
+  const result = await waitFor(async () => (await messagesOf(conv.id)).find((m) => m.kind === "run_result"));
+  assert.equal(result.status, "completed");
+  // Honest wording: a draft is never reported as delivered (the exact false-success
+  // bug this WP fixes — send_notification_draft's id alone used to trip the old regex).
+  assert.doesNotMatch(result.text, /delivered \d/i, "a draft must never claim delivery");
+  assert.match(result.text, /drafted/i);
+  assert.match(result.text, /review/i);
+  assert.match(result.text, /nothing was sent externally/i);
+  // The draft's artifact id/link travel on the message so a later WP can render a
+  // real "Review draft" action instead of sending the family hunting through Activity.
+  assert.ok(result.artifactId, "the draft artifact id must be carried on the run_result message");
+  assert.match(result.link, /runId=/);
+});
+
 test("runs WITHOUT a conversation stay out of chat threads entirely", async () => {
   const conv = await newConversation("unrelated thread");
   const plan = { title: "Background thing", summary: "", steps: [{ toolId: "homeops.write_memory", title: "note", input: { text: "background note", scope: "household" } }] };

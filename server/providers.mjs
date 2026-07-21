@@ -62,7 +62,7 @@ export const PROVIDERS = [
     },
     health: async (api) => { const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/profile"); return { ok: r.ok, status: r.ok ? "healthy" : "error", detail: r.json?.emailAddress }; },
     tools: [
-      { id: "gmail.search", name: "Search inbox", action: "Read", risk: "Sensitive", requiresApproval: false, scopes: ["gmail.read"], inputs: [{ key: "query", label: "Search query", type: "text", default: "newer_than:7d" }, { key: "maxResults", label: "Max results (≤250, paginates automatically)", type: "text", default: "50" }],
+      { id: "gmail.search", name: "Search inbox", action: "Read", risk: "Sensitive", requiresApproval: false, delivers: false, scopes: ["gmail.read"], inputs: [{ key: "query", label: "Search query", type: "text", default: "newer_than:7d" }, { key: "maxResults", label: "Max results (≤250, paginates automatically)", type: "text", default: "50" }],
         run: async (api, input) => {
           const query = input.query || "newer_than:7d";
           const q = encodeURIComponent(query);
@@ -99,13 +99,13 @@ export const PROVIDERS = [
           }
           return { query, count: messages.length, totalMatched, complete: !pageToken, messages };
         } },
-      { id: "gmail.listLabels", name: "List Gmail labels", action: "Read", risk: "Low", requiresApproval: false, scopes: ["gmail.modify"], inputs: [],
+      { id: "gmail.listLabels", name: "List Gmail labels", action: "Read", risk: "Low", requiresApproval: false, delivers: false, scopes: ["gmail.modify"], inputs: [],
         run: async (api) => {
           const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/labels");
           if (!r.ok) throw new Error(r.json?.error?.message ?? "Couldn't list labels — reconnect Google with the new inbox-organize permission.");
           return { count: (r.json.labels ?? []).length, labels: (r.json.labels ?? []).map((l) => ({ id: l.id, name: l.name, type: l.type })) };
         } },
-      { id: "gmail.modifyLabels", name: "Label / move messages", action: "Write", risk: "High", requiresApproval: true, scopes: ["gmail.modify"],
+      { id: "gmail.modifyLabels", name: "Label / move messages", action: "Write", risk: "High", requiresApproval: true, delivers: false, scopes: ["gmail.modify"],
         inputs: [
           { key: "messageIds", label: "Message IDs (comma-separated, from Search inbox)", type: "text", required: true },
           { key: "addLabels", label: "Add labels (names or IDs, comma-separated — e.g. Social or CATEGORY_SOCIAL)", type: "text" },
@@ -155,7 +155,7 @@ export const PROVIDERS = [
           const removedApplied = wantRemove.filter((w) => !skippedRemove.includes(w));
           return { modified: ids.length, added: wantAdd, removed: removedApplied, createdLabels, ...(skippedRemove.length ? { skippedRemove, note: `Skipped non-existent label(s) on remove: ${skippedRemove.join(", ")} (no-op).` } : {}) };
         } },
-      { id: "gmail.send", name: "Send email", action: "Send", risk: "High", requiresApproval: true, scopes: ["gmail.send"], inputs: [{ key: "to", label: "To", type: "text", required: true }, { key: "subject", label: "Subject", type: "text", required: true }, { key: "body", label: "Message", type: "textarea" }],
+      { id: "gmail.send", name: "Send email", action: "Send", risk: "High", requiresApproval: true, delivers: true, scopes: ["gmail.send"], inputs: [{ key: "to", label: "To", type: "text", required: true }, { key: "subject", label: "Subject", type: "text", required: true }, { key: "body", label: "Message", type: "textarea" }],
         run: async (api, input) => {
           // Validation fires BEFORE any Google call (e.code lets callers report the
           // honest `invalid_input` instead of a generic provider_error).
@@ -166,9 +166,9 @@ export const PROVIDERS = [
           if (!r.ok) throw new Error(r.json?.error?.message ?? "Gmail send failed");
           return { sent: true, id: r.json.id, to: input.to };
         } },
-      { id: "calendar.list", name: "List events", action: "Read", risk: "Low", requiresApproval: false, scopes: ["calendar"], inputs: [],
+      { id: "calendar.list", name: "List events", action: "Read", risk: "Low", requiresApproval: false, delivers: false, scopes: ["calendar"], inputs: [],
         run: async (api) => { const r = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=10&singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(new Date().toISOString())}`); return { count: (r.json.items ?? []).length, events: (r.json.items ?? []).map((e) => ({ summary: e.summary, start: e.start?.dateTime ?? e.start?.date, location: e.location })) }; } },
-      { id: "calendar.create", name: "Create event", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["calendar"], inputs: [{ key: "summary", label: "Title", type: "text", required: true }, { key: "start", label: "Start (ISO)", type: "text", required: true }, { key: "location", label: "Location", type: "text" }],
+      { id: "calendar.create", name: "Create event", action: "Write", risk: "Medium", requiresApproval: true, delivers: false, scopes: ["calendar"], inputs: [{ key: "summary", label: "Title", type: "text", required: true }, { key: "start", label: "Start (ISO)", type: "text", required: true }, { key: "location", label: "Location", type: "text" }],
         run: async (api, input) => {
           if (!input.summary || !input.start) throw new Error("Provide `summary` and `start`.");
           const end = new Date(new Date(input.start).getTime() + 3600000).toISOString();
@@ -176,11 +176,11 @@ export const PROVIDERS = [
           if (!r.ok) throw new Error(r.json?.error?.message ?? "Calendar create failed");
           return { created: true, id: r.json.id, htmlLink: r.json.htmlLink };
         } },
-      { id: "drive.list", name: "List recent files", action: "Read", risk: "Medium", requiresApproval: false, scopes: ["drive"], inputs: [],
+      { id: "drive.list", name: "List recent files", action: "Read", risk: "Medium", requiresApproval: false, delivers: false, scopes: ["drive"], inputs: [],
         run: async (api) => { const r = await api("https://www.googleapis.com/drive/v3/files?pageSize=10&orderBy=modifiedTime desc&fields=files(id,name,mimeType,modifiedTime)"); return { count: (r.json.files ?? []).length, files: (r.json.files ?? []).map((f) => ({ id: f.id, name: f.name, type: f.mimeType, modified: f.modifiedTime })) }; } },
       // Google Home / Nest (SDM). Needs a Device Access project id (HOMEOPS_SDM_PROJECT_ID);
       // fails closed with a setup hint until it's set — never fakes success.
-      { id: "smarthome.listDevices", name: "List Google Home devices", action: "Read", risk: "Low", requiresApproval: false, scopes: ["smarthome"], inputs: [],
+      { id: "smarthome.listDevices", name: "List Google Home devices", action: "Read", risk: "Low", requiresApproval: false, delivers: false, scopes: ["smarthome"], inputs: [],
         run: async (api) => {
           const projectId = env("HOMEOPS_SDM_PROJECT_ID");
           if (!projectId) throw new Error("Google Home isn't set up yet — set HOMEOPS_SDM_PROJECT_ID to your Device Access project id (from the SDM Device Access console).");
@@ -188,7 +188,7 @@ export const PROVIDERS = [
           if (!r.ok) throw new Error(r.json?.error?.message ?? "Couldn't list Google Home devices.");
           return { count: (r.json?.devices ?? []).length, devices: (r.json?.devices ?? []).map((d) => ({ name: d.name, type: d.type, room: d.parentRelations?.[0]?.displayName ?? null })) };
         } },
-      { id: "smarthome.setThermostat", name: "Set thermostat", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["smarthome"],
+      { id: "smarthome.setThermostat", name: "Set thermostat", action: "Write", risk: "Medium", requiresApproval: true, delivers: false, scopes: ["smarthome"],
         inputs: [{ key: "deviceId", label: "Device id (from List devices)", type: "text", required: true }, { key: "celsius", label: "Heat setpoint °C", type: "text", required: true }],
         run: async (api, input) => {
           const projectId = env("HOMEOPS_SDM_PROJECT_ID");
@@ -225,15 +225,15 @@ export const PROVIDERS = [
     identity: async (api) => { const r = await api("https://graph.microsoft.com/v1.0/me"); return { externalAccountId: r.json?.id, displayName: r.json?.userPrincipalName ?? r.json?.mail ?? "Microsoft account" }; },
     health: async (api) => { const r = await api("https://graph.microsoft.com/v1.0/me"); return { ok: r.ok, status: r.ok ? "healthy" : "error" }; },
     tools: [
-      { id: "outlook.search", name: "Search mail", action: "Read", risk: "Sensitive", requiresApproval: false, scopes: ["mail.read"], inputs: [],
+      { id: "outlook.search", name: "Search mail", action: "Read", risk: "Sensitive", requiresApproval: false, delivers: false, scopes: ["mail.read"], inputs: [],
         run: async (api) => { const r = await api("https://graph.microsoft.com/v1.0/me/messages?$top=5&$select=subject,from,bodyPreview"); return { count: (r.json.value ?? []).length, messages: (r.json.value ?? []).map((m) => ({ subject: m.subject, from: m.from?.emailAddress?.address, snippet: m.bodyPreview })) }; } },
-      { id: "outlook.send", name: "Send mail", action: "Send", risk: "High", requiresApproval: true, scopes: ["mail.send"], inputs: [{ key: "to", label: "To", type: "text", required: true }, { key: "subject", label: "Subject", type: "text", required: true }, { key: "body", label: "Message", type: "textarea" }],
+      { id: "outlook.send", name: "Send mail", action: "Send", risk: "High", requiresApproval: true, delivers: true, scopes: ["mail.send"], inputs: [{ key: "to", label: "To", type: "text", required: true }, { key: "subject", label: "Subject", type: "text", required: true }, { key: "body", label: "Message", type: "textarea" }],
         run: async (api, input) => { if (!input.to || !input.subject) throw new Error("Provide `to` and `subject`."); const r = await api("https://graph.microsoft.com/v1.0/me/sendMail", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: { subject: input.subject, body: { contentType: "Text", content: input.body ?? "" }, toRecipients: [{ emailAddress: { address: input.to } }] } }) }); if (!r.ok) throw new Error(r.json?.error?.message ?? "Send failed"); return { sent: true, to: input.to }; } },
-      { id: "mscal.list", name: "List events", action: "Read", risk: "Low", requiresApproval: false, scopes: ["calendar"], inputs: [],
+      { id: "mscal.list", name: "List events", action: "Read", risk: "Low", requiresApproval: false, delivers: false, scopes: ["calendar"], inputs: [],
         run: async (api) => { const r = await api("https://graph.microsoft.com/v1.0/me/events?$top=10&$select=subject,start,location"); return { count: (r.json.value ?? []).length, events: (r.json.value ?? []).map((e) => ({ summary: e.subject, start: e.start?.dateTime, location: e.location?.displayName })) }; } },
-      { id: "mscal.create", name: "Create event", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["calendar"], inputs: [{ key: "summary", label: "Title", type: "text", required: true }, { key: "start", label: "Start (ISO)", type: "text", required: true }],
+      { id: "mscal.create", name: "Create event", action: "Write", risk: "Medium", requiresApproval: true, delivers: false, scopes: ["calendar"], inputs: [{ key: "summary", label: "Title", type: "text", required: true }, { key: "start", label: "Start (ISO)", type: "text", required: true }],
         run: async (api, input) => { if (!input.summary || !input.start) throw new Error("Provide `summary` and `start`."); const end = new Date(new Date(input.start).getTime() + 3600000).toISOString(); const r = await api("https://graph.microsoft.com/v1.0/me/events", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ subject: input.summary, start: { dateTime: input.start, timeZone: "UTC" }, end: { dateTime: end, timeZone: "UTC" } }) }); if (!r.ok) throw new Error(r.json?.error?.message ?? "Create failed"); return { created: true, id: r.json.id }; } },
-      { id: "onedrive.list", name: "List OneDrive files", action: "Read", risk: "Medium", requiresApproval: false, scopes: ["files"], inputs: [],
+      { id: "onedrive.list", name: "List OneDrive files", action: "Read", risk: "Medium", requiresApproval: false, delivers: false, scopes: ["files"], inputs: [],
         run: async (api) => { const r = await api("https://graph.microsoft.com/v1.0/me/drive/root/children?$top=10&$select=name,size,lastModifiedDateTime"); return { count: (r.json.value ?? []).length, files: (r.json.value ?? []).map((f) => ({ name: f.name, size: f.size, modified: f.lastModifiedDateTime })) }; } },
     ],
   },
@@ -257,9 +257,9 @@ export const PROVIDERS = [
     identityFromToken: (raw) => ({ externalAccountId: raw.team?.id ?? raw.bot_user_id, displayName: raw.team?.name ? `${raw.team.name} (Slack)` : "Slack workspace" }),
     health: async (api) => { const r = await api("https://slack.com/api/auth.test", { method: "POST" }); return { ok: !!r.json?.ok, status: r.json?.ok ? "healthy" : "error", detail: r.json?.team }; },
     tools: [
-      { id: "slack.listChannels", name: "List channels", action: "Read", risk: "Low", requiresApproval: false, scopes: ["channels"], inputs: [],
+      { id: "slack.listChannels", name: "List channels", action: "Read", risk: "Low", requiresApproval: false, delivers: false, scopes: ["channels"], inputs: [],
         run: async (api) => { const r = await api("https://slack.com/api/conversations.list?limit=20&types=public_channel"); if (!r.json?.ok) throw new Error(r.json?.error ?? "Slack error"); return { count: (r.json.channels ?? []).length, channels: (r.json.channels ?? []).map((c) => ({ id: c.id, name: c.name })) }; } },
-      { id: "slack.postMessage", name: "Post message", action: "Send", risk: "High", requiresApproval: true, scopes: ["chat"], inputs: [{ key: "channel", label: "Channel ID", type: "text", required: true }, { key: "text", label: "Message", type: "textarea", required: true }],
+      { id: "slack.postMessage", name: "Post message", action: "Send", risk: "High", requiresApproval: true, delivers: true, scopes: ["chat"], inputs: [{ key: "channel", label: "Channel ID", type: "text", required: true }, { key: "text", label: "Message", type: "textarea", required: true }],
         run: async (api, input) => { if (!input.channel || !input.text) throw new Error("Provide `channel` and `text`."); const r = await api("https://slack.com/api/chat.postMessage", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: input.channel, text: input.text }) }); if (!r.json?.ok) throw new Error(r.json?.error ?? "Slack post failed"); return { sent: true, ts: r.json.ts, channel: input.channel }; } },
     ],
   },
@@ -283,9 +283,9 @@ export const PROVIDERS = [
     identity: async (api) => { const r = await api("https://api.dropboxapi.com/2/users/get_current_account", { method: "POST", headers: { "content-type": "application/json" }, body: "null" }); return { externalAccountId: r.json?.account_id, displayName: r.json?.email ?? r.json?.name?.display_name ?? "Dropbox account" }; },
     health: async (api) => { const r = await api("https://api.dropboxapi.com/2/users/get_current_account", { method: "POST", headers: { "content-type": "application/json" }, body: "null" }); return { ok: r.ok, status: r.ok ? "healthy" : "error" }; },
     tools: [
-      { id: "dropbox.list", name: "List files", action: "Read", risk: "Medium", requiresApproval: false, scopes: ["read"], inputs: [{ key: "path", label: "Folder path", type: "text", default: "" }],
+      { id: "dropbox.list", name: "List files", action: "Read", risk: "Medium", requiresApproval: false, delivers: false, scopes: ["read"], inputs: [{ key: "path", label: "Folder path", type: "text", default: "" }],
         run: async (api, input) => { const r = await api("https://api.dropboxapi.com/2/files/list_folder", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: input.path || "" }) }); if (!r.ok) throw new Error(r.json?.error_summary ?? "Dropbox error"); return { count: (r.json.entries ?? []).length, entries: (r.json.entries ?? []).map((e) => ({ name: e.name, type: e[".tag"] })) }; } },
-      { id: "dropbox.createFolder", name: "Create folder", action: "Write", risk: "High", requiresApproval: true, scopes: ["write"], inputs: [{ key: "path", label: "Folder path", type: "text", required: true, placeholder: "/FamiliOS/Receipts" }],
+      { id: "dropbox.createFolder", name: "Create folder", action: "Write", risk: "High", requiresApproval: true, delivers: false, scopes: ["write"], inputs: [{ key: "path", label: "Folder path", type: "text", required: true, placeholder: "/FamiliOS/Receipts" }],
         run: async (api, input) => { if (!input.path) throw new Error("Provide a folder `path`."); const r = await api("https://api.dropboxapi.com/2/files/create_folder_v2", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: input.path }) }); if (!r.ok) throw new Error(r.json?.error_summary ?? "Create failed"); return { created: true, path: r.json.metadata?.path_display }; } },
     ],
   },
@@ -309,9 +309,9 @@ export const PROVIDERS = [
     identityFromToken: (raw) => ({ externalAccountId: raw.workspace_id ?? raw.bot_id, displayName: raw.workspace_name ? `${raw.workspace_name} (Notion)` : "Notion workspace" }),
     health: async (api) => { const r = await api("https://api.notion.com/v1/users/me"); return { ok: r.ok, status: r.ok ? "healthy" : "error" }; },
     tools: [
-      { id: "notion.search", name: "Search pages", action: "Read", risk: "Medium", requiresApproval: false, scopes: ["content"], inputs: [{ key: "query", label: "Query", type: "text" }],
+      { id: "notion.search", name: "Search pages", action: "Read", risk: "Medium", requiresApproval: false, delivers: false, scopes: ["content"], inputs: [{ key: "query", label: "Query", type: "text" }],
         run: async (api, input) => { const r = await api("https://api.notion.com/v1/search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query: input.query || "", page_size: 10 }) }); if (!r.ok) throw new Error(r.json?.message ?? "Notion error"); return { count: (r.json.results ?? []).length, results: (r.json.results ?? []).map((p) => ({ id: p.id, type: p.object, title: p.properties ? Object.values(p.properties).map((v) => v.title?.[0]?.plain_text).find(Boolean) : undefined })) }; } },
-      { id: "notion.createPage", name: "Create page", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["content"], inputs: [{ key: "parentPageId", label: "Parent page ID", type: "text", required: true }, { key: "title", label: "Title", type: "text", required: true }],
+      { id: "notion.createPage", name: "Create page", action: "Write", risk: "Medium", requiresApproval: true, delivers: false, scopes: ["content"], inputs: [{ key: "parentPageId", label: "Parent page ID", type: "text", required: true }, { key: "title", label: "Title", type: "text", required: true }],
         run: async (api, input) => { if (!input.parentPageId || !input.title) throw new Error("Provide `parentPageId` and `title`."); const r = await api("https://api.notion.com/v1/pages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ parent: { page_id: input.parentPageId }, properties: { title: { title: [{ text: { content: input.title } }] } } }) }); if (!r.ok) throw new Error(r.json?.message ?? "Create failed"); return { created: true, id: r.json.id, url: r.json.url }; } },
     ],
   },
@@ -333,9 +333,9 @@ export const PROVIDERS = [
     identity: async (api) => { const r = await api("https://api.todoist.com/rest/v2/projects"); return { externalAccountId: "todoist", displayName: r.ok ? "Todoist account" : "Todoist" }; },
     health: async (api) => { const r = await api("https://api.todoist.com/rest/v2/projects"); return { ok: r.ok, status: r.ok ? "healthy" : "error" }; },
     tools: [
-      { id: "todoist.listTasks", name: "List tasks", action: "Read", risk: "Low", requiresApproval: false, scopes: ["rw"], inputs: [],
+      { id: "todoist.listTasks", name: "List tasks", action: "Read", risk: "Low", requiresApproval: false, delivers: false, scopes: ["rw"], inputs: [],
         run: async (api) => { const r = await api("https://api.todoist.com/rest/v2/tasks"); if (!r.ok) throw new Error("Todoist error"); return { count: (r.json ?? []).length, tasks: (r.json ?? []).slice(0, 15).map((t) => ({ id: t.id, content: t.content, due: t.due?.date })) }; } },
-      { id: "todoist.createTask", name: "Create task", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["rw"], inputs: [{ key: "content", label: "Task", type: "text", required: true }, { key: "due_string", label: "Due (natural language)", type: "text" }],
+      { id: "todoist.createTask", name: "Create task", action: "Write", risk: "Medium", requiresApproval: true, delivers: false, scopes: ["rw"], inputs: [{ key: "content", label: "Task", type: "text", required: true }, { key: "due_string", label: "Due (natural language)", type: "text" }],
         run: async (api, input) => { if (!input.content) throw new Error("Provide task `content`."); const r = await api("https://api.todoist.com/rest/v2/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: input.content, due_string: input.due_string || undefined }) }); if (!r.ok) throw new Error("Create failed"); return { created: true, id: r.json.id, content: r.json.content }; } },
     ],
   },
@@ -358,9 +358,9 @@ export const PROVIDERS = [
     identity: async (api) => { const r = await api("https://api.ticktick.com/open/v1/project"); return { externalAccountId: "ticktick", displayName: r.ok ? "TickTick account" : "TickTick" }; },
     health: async (api) => { const r = await api("https://api.ticktick.com/open/v1/project"); return { ok: r.ok, status: r.ok ? "healthy" : "error" }; },
     tools: [
-      { id: "ticktick.listProjects", name: "List projects", action: "Read", risk: "Low", requiresApproval: false, scopes: ["read"], inputs: [],
+      { id: "ticktick.listProjects", name: "List projects", action: "Read", risk: "Low", requiresApproval: false, delivers: false, scopes: ["read"], inputs: [],
         run: async (api) => { const r = await api("https://api.ticktick.com/open/v1/project"); if (!r.ok) throw new Error("TickTick error"); return { count: (r.json ?? []).length, projects: (r.json ?? []).map((p) => ({ id: p.id, name: p.name })) }; } },
-      { id: "ticktick.createTask", name: "Create task", action: "Write", risk: "Medium", requiresApproval: true, scopes: ["write"], inputs: [{ key: "title", label: "Task", type: "text", required: true }, { key: "projectId", label: "Project ID", type: "text" }],
+      { id: "ticktick.createTask", name: "Create task", action: "Write", risk: "Medium", requiresApproval: true, delivers: false, scopes: ["write"], inputs: [{ key: "title", label: "Task", type: "text", required: true }, { key: "projectId", label: "Project ID", type: "text" }],
         run: async (api, input) => { if (!input.title) throw new Error("Provide task `title`."); const r = await api("https://api.ticktick.com/open/v1/task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: input.title, projectId: input.projectId || undefined }) }); if (!r.ok) throw new Error("Create failed"); return { created: true, id: r.json.id, title: r.json.title }; } },
     ],
   },
@@ -391,7 +391,7 @@ export const PROVIDERS = [
     identity: async (api) => { const r = await api("https://api.amazon.com/user/profile"); return { externalAccountId: r.json?.user_id, displayName: r.json?.name ?? r.json?.email ?? "Amazon account" }; },
     health: async (api) => { const r = await api("https://api.amazon.com/user/profile"); return { ok: r.ok, status: r.ok ? "healthy" : "error", detail: r.json?.email }; },
     tools: [
-      { id: "alexa.listDevices", name: "List Alexa devices", action: "Read", risk: "Low", requiresApproval: false, scopes: ["alexa"], inputs: [],
+      { id: "alexa.listDevices", name: "List Alexa devices", action: "Read", risk: "Low", requiresApproval: false, delivers: false, scopes: ["alexa"], inputs: [],
         run: async (api) => {
           const base = env("HOMEOPS_ALEXA_ENDPOINT");
           if (!base) throw new Error("Alexa isn't set up yet — set HOMEOPS_ALEXA_ENDPOINT to your Alexa Skill-Messaging / event-gateway base URL to reach devices.");
@@ -399,7 +399,7 @@ export const PROVIDERS = [
           if (!r.ok) throw new Error(r.json?.error?.message ?? r.text ?? "Couldn't list Alexa devices.");
           return { count: (r.json?.devices ?? []).length, devices: (r.json?.devices ?? []).map((d) => ({ id: d.deviceSerialNumber ?? d.id, name: d.accountName ?? d.name, type: d.deviceType ?? d.type })) };
         } },
-      { id: "alexa.announce", name: "Announce on Alexa", action: "Send", risk: "Medium", requiresApproval: true, scopes: ["alexa"],
+      { id: "alexa.announce", name: "Announce on Alexa", action: "Send", risk: "Medium", requiresApproval: true, delivers: true, scopes: ["alexa"],
         inputs: [{ key: "message", label: "Announcement", type: "textarea", required: true }, { key: "device", label: "Target device id (blank = all)", type: "text" }],
         run: async (api, input) => {
           const base = env("HOMEOPS_ALEXA_ENDPOINT");

@@ -155,6 +155,28 @@ export async function sendVerificationCode({ session, method, code }) {
   });
 }
 
+/* ---- WP-002 slice 3 — in-app delivery fallback (item 16b follow-up) ----
+ * homeops.notify_contact (internal-functions.mjs) used to hard-refuse whenever the
+ * requested recipient had no REGISTERED contact method — there is nowhere off-device
+ * to reach them. That refusal meant a plain, unsetup chat ask ("let mom know I'll be
+ * late") did NOTHING at all; the requester didn't even get the honesty of a result.
+ *
+ * This reuses deliverViaChannel's existing in_app write path (the exact one a
+ * registered "In-App" contact method already resolves to) to show the message to the
+ * REQUESTER — the one person guaranteed reachable right now, since they're
+ * mid-conversation — instead of to the unregistered target. It is a fallback, not a
+ * bypass: it can ONLY ever write the in_app channel (never email/sms), so it can never
+ * touch the verified/opted-in/allowlist gates that guard real external sends, and it
+ * is not reachable from any other path. Every use is audited distinctly
+ * (notify.delivered_inapp) so it's never confused with a real off-device delivery. */
+export async function deliverInAppFallback({ session, title, body }) {
+  const out = await deliverViaChannel({ session, channel: "in_app", to: null, subject: title, body, recipientActorId: session.actorId });
+  if (out.ok && out.delivered) {
+    appendAudit({ type: "notify.delivered_inapp", householdId: session.householdId, actorId: session.actorId });
+  }
+  return out;
+}
+
 async function deliverViaChannel({ session, channel, to, subject: rawSubject, body, recipientActorId, senderActorIds }) {
   const text = String(body ?? "").slice(0, 2000);
   const subject = String(rawSubject ?? "FamiliOS").slice(0, 140);

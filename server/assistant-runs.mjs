@@ -20,6 +20,9 @@ import {
 import { onRunFinished, onRunParked, startRun } from "./engine.mjs";
 import { toolCatalog, normalizePlan } from "./planner.mjs";
 import { providerChatWithFallback } from "./ai.mjs";
+import { getInternalFunction } from "./internal-functions.mjs";
+import { findToolGlobal } from "./providers.mjs";
+import { CONNECTORS } from "./connectors.mjs";
 
 const REPAIR_SYS = `You repair a failed household-automation plan using its actual run trace. You get the original plan, each step's status/detail/error, and the tool catalog. Produce a CORRECTED plan that avoids the specific failure:
 - Ground every change in the trace — swap a failing tool for a working alternative from the catalog, fix bad inputs, drop or reorder steps that can't succeed, add a reasoning step where data was missing.
@@ -34,22 +37,71 @@ Respond with ONLY JSON (no prose, no fences):
  * It could not distinguish a briefing that was EMAILED from one that was merely
  * COMPOSED, so the family read success either way (EV-012). The rewrite separates what
  * was delivered from what was only prepared, and names — in plain words — every step
- * that did not happen and why. The warm voice stays; the certainty is now earned. */
+ * that did not happen and why. The warm voice stays; the certainty is now earned.
+ *
+ * WP-002 (Honest delivery) — the ABOVE fix still had a hole: "delivered" was inferred
+ * from `requiresApproval` OR a name-sniffing regex (/send|notify|email|sms|post|deliver/i)
+ * against the toolId. `homeops.send_notification_draft` is a review-only DRAFT tool by
+ * design (internal-functions.mjs) — it never sends anything — but its id literally
+ * CONTAINS "send_notification", so the regex matched and a run that only ever drafted a
+ * message was reported as having "delivered". The regex is gone. "Delivered" is now
+ * decided by ONE explicit `delivers` flag on the tool's own definition (internal-
+ * functions.mjs / providers.mjs / connectors.mjs) — the single source of truth for
+ * whether that tool reaches outside the run — never the tool's id, name, or approval
+ * gate (an approval gate is about RISK, not about whether the step reaches anyone). */
 const SUCCESS_STATUSES = ["succeeded", "done", "completed"];
+
+// Static, synchronous lookup across all three tool catalogs — deliberately NOT the
+// tenant-aware listConnectors()/toolCatalog() (this runs from a run-finished hook and
+// must also work as a pure function in unit tests with no server/tenant booted). An
+// unknown toolId honestly returns false: never claim a delivery for a tool this layer
+// can't identify.
+function toolDelivers(toolId) {
+  if (!toolId) return false;
+  const internal = getInternalFunction(toolId);
+  if (internal) return !!internal.delivers;
+  const platform = findToolGlobal(toolId);
+  if (platform) return !!platform.tool.delivers;
+  for (const c of CONNECTORS) {
+    const t = (c.tools ?? []).find((x) => x.id === toolId);
+    if (t) return !!t.delivers;
+  }
+  return false;
+}
+function toolIsDraft(toolId) {
+  if (!toolId) return false;
+  return !!getInternalFunction(toolId)?.draft;
+}
+
+// Best-effort human label for WHERE a delivered step reached — read from the step's
+// own result first (e.g. homeops.notify_contact reports the real channel it resolved
+// to), falling back to a static per-tool hint. Used only for wording; never changes
+// what counts as delivered.
+const CHANNEL_WORD = { email: "email", sms: "text", in_app: "in-app", dashboard: "in-app" };
+const TOOL_CHANNEL_HINT = { "gmail.send": "email", "outlook.send": "email", "sms.send": "text", "slack.postMessage": "Slack", "alexa.announce": "Alexa" };
+function channelLabel(step) {
+  const ch = step.result?.channel;
+  if (ch) return CHANNEL_WORD[ch] ?? String(ch);
+  return TOOL_CHANNEL_HINT[step.toolId] ?? null;
+}
 
 export function summarizeOutcome(run) {
   const steps = run.steps ?? [];
   const succeeded = steps.filter((s) => SUCCESS_STATUSES.includes(s.status));
-  // "Delivered" = a real tool ran and it was the kind of step that reaches the outside
-  // world (approval-gated sends/writes are exactly those the family cares about).
-  const delivered = succeeded.filter((s) => s.toolId && (s.requiresApproval || /send|notify|email|sms|post|deliver/i.test(String(s.toolId))));
+  // "Delivered" = a real tool ran, succeeded, AND that tool's own definition says it
+  // reaches outside the run. Nothing else — see the flag rationale above.
+  const delivered = succeeded.filter((s) => toolDelivers(s.toolId));
+  // "Drafted" = a real tool ran, succeeded, produced something a human still has to
+  // review and send themselves (send_notification_draft) — distinct from both a real
+  // delivery and from ordinary internal record-keeping (create_task, write_memory, …).
+  const drafted = succeeded.filter((s) => !toolDelivers(s.toolId) && toolIsDraft(s.toolId));
   const composed = succeeded.filter((s) => !s.toolId);
   const noTool = steps.filter((s) => s.status === "skipped_no_tool");
   const skipped = steps.filter((s) => s.status === "skipped");
   const parked = steps.filter((s) => s.status === "waiting_for_approval");
   const expired = steps.filter((s) => s.status === "expired");
   const failed = steps.filter((s) => s.status === "failed");
-  return { steps, succeeded, delivered, composed, noTool, skipped, parked, expired, failed, anyEffect: delivered.length > 0 };
+  return { steps, succeeded, delivered, drafted, composed, noTool, skipped, parked, expired, failed, anyEffect: delivered.length > 0, anyDraft: drafted.length > 0 };
 }
 
 function shortfallLines(o) {
@@ -61,7 +113,27 @@ function shortfallLines(o) {
   return lines;
 }
 
-function runOutcomeText(run) {
+// Headline for a run that delivered at least one step for real. Names the channel when
+// there's exactly one delivered step (the common case) and folds in an honest mention
+// of any step that only drafted — a mixed run must never round a draft up to "sent".
+function deliveredHeadline(run, o) {
+  const n = o.delivered.length;
+  const labels = [...new Set(o.delivered.map(channelLabel).filter(Boolean))];
+  const where = labels.length === 1 ? ` (${labels[0]})` : labels.length > 1 ? ` (${labels.join(", ")})` : "";
+  const draftNote = o.drafted.length ? ` ${o.drafted.length} more step${o.drafted.length === 1 ? "" : "s"} drafted — review before sending.` : "";
+  return `Done — "${run.title}" ran and delivered ${n} step${n === 1 ? "" : "s"}${where}.${draftNote}`;
+}
+// Headline for a run that produced only draft(s) — the exact false-success repro this
+// WP fixes: "1 step drafted (review), nothing sent externally", never "delivered".
+function draftedHeadline(run, o) {
+  const n = o.drafted.length;
+  return `I finished "${run.title}" — ${n} step${n === 1 ? "" : "s"} drafted for your review. Nothing was sent externally.`;
+}
+
+// Exported for the WP-002 summarizeOutcome truth-table unit test (server/test/
+// summarize-outcome.test.mjs) — a pure function over a plain run object, no server
+// or tenant context required.
+export function runOutcomeText(run) {
   const o = summarizeOutcome(run);
   const reasoning = o.composed.filter((s) => s.result?.text).map((s) => s.result.text).join("\n\n").trim();
   const body = reasoning ? `\n\n${reasoning.slice(0, 1200)}` : "";
@@ -72,13 +144,16 @@ function runOutcomeText(run) {
     return `That approval expired — nothing was sent for "${run.title}". Ask me again when you're ready and I'll re-run it.${caveat}`;
   }
   if (run.status === "completed") {
-    // The headline must match the strongest thing that actually happened. A run with
-    // nothing but composition says so up front, rather than burying it under "Done".
+    // The headline must match the strongest thing that actually happened, in order:
+    // a real delivery beats a draft, a draft beats a silent shortfall, and only a run
+    // with nothing to disclose at all gets the plain "finished (N/N)" wording.
     const head = o.anyEffect
-      ? `Done — "${run.title}" ran and delivered ${o.delivered.length} step${o.delivered.length === 1 ? "" : "s"}.`
-      : shortfalls.length
-        ? `I finished "${run.title}", but nothing was actually sent.`
-        : `Done — "${run.title}" finished (${o.succeeded.length}/${o.steps.length} steps).`;
+      ? deliveredHeadline(run, o)
+      : o.anyDraft
+        ? draftedHeadline(run, o)
+        : shortfalls.length
+          ? `I finished "${run.title}", but nothing was actually sent.`
+          : `Done — "${run.title}" finished (${o.succeeded.length}/${o.steps.length} steps).`;
     return `${head}${caveat}${body}`;
   }
   const bad = o.failed[0];
@@ -209,7 +284,17 @@ export function registerAssistantRunHooks() {
   onRunFinished((run) => runWithTenant(run.householdId, async () => {
     if (!run.sourceRef?.conversationId) return;
     // 1. Durable inline result for every conversation-born run.
-    appendToConversation(run, { kind: "run_result", runId: run.id, status: run.status, text: runOutcomeText(run) });
+    // WP-002 slice 4 — when the run produced a draft artifact, carry its id and a real,
+    // working link on the message (runOutcomeText already names the review cue in the
+    // text itself — see draftedHeadline/deliveredHeadline) so a later WP can render an
+    // actual "Review draft" action in the thread instead of sending the family hunting
+    // through Activity/Artifacts for what was drafted. Only the first draft is linked;
+    // that matches today's plans, which draft at most one notification per run.
+    const draftArtifactId = summarizeOutcome(run).drafted[0]?.result?.id ?? null;
+    appendToConversation(run, {
+      kind: "run_result", runId: run.id, status: run.status, text: runOutcomeText(run),
+      ...(draftArtifactId ? { artifactId: draftArtifactId, link: `/api/artifacts?runId=${run.id}` } : {}),
+    });
     // 2. Self-healing, once.
     if (run.status === "failed" && !run.sourceRef.isRepair) {
       await repairFailedRun(run).catch((e) => appendAudit({ type: "run.auto_repair", ok: false, fromRunId: run.id, error: String(e?.message ?? e) }));
