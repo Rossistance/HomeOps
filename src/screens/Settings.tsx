@@ -41,6 +41,7 @@ export function Settings() {
   // Auto-approve low-risk improvements (server-owned, Adult Admin): the server applies
   // low-risk evolution proposals without a human and labels each one. Default on.
   const [autoApproveImprovements, setAutoApproveImprovements] = useState(true);
+  const [hideProfilesPreAuth, setHideProfilesPreAuth] = useState(false);
   // Household timezone (server-owned, Adult Admin): anchors "every day at 7 AM" triggers
   // to a real wall-clock time. Unset silently falls back to the SERVER's clock — a
   // scheduled briefing can fire hours off from what the household actually meant.
@@ -52,7 +53,7 @@ export function Settings() {
     const supportedValuesOf = (Intl as unknown as { supportedValuesOf?: (key: "timeZone") => string[] }).supportedValuesOf;
     try { return typeof supportedValuesOf === "function" ? supportedValuesOf("timeZone") : [browserTz]; } catch { return [browserTz]; }
   })();
-  useEffect(() => { void backend.getSettings().then((s) => { setCalendarAutoSync(s.calendarAutoSync === true); setAutoApproveImprovements(s.autoApproveImprovements !== false); setTimezoneState(s.timezone ?? null); }); }, []);
+  useEffect(() => { void backend.getSettings().then((s) => { setCalendarAutoSync(s.calendarAutoSync === true); setAutoApproveImprovements(s.autoApproveImprovements !== false); setTimezoneState(s.timezone ?? null); setHideProfilesPreAuth(s.hideProfilesPreAuth === true); }); }, []);
   const setTimezone = async (tz: string) => {
     setTimezoneState(tz);
     const s = await backend.setSettings({ timezone: tz });
@@ -64,6 +65,14 @@ export function Settings() {
     const s = await backend.setSettings({ calendarAutoSync: v });
     setCalendarAutoSync(s.calendarAutoSync === true);
     toast({ kind: v ? "success" : "info", title: v ? "Calendar auto-sync on" : "Calendar auto-sync off", message: v ? "Google pushes are pre-authorized and both calendars mirror automatically." : "Google pushes ask for approval again." });
+  };
+  // WP-010 (ISS-015): pre-auth privacy — with this on, the sign-in screen shows no
+  // family member names until someone presents this household's hint or a session.
+  const toggleHideProfilesPreAuth = async (v: boolean) => {
+    setHideProfilesPreAuth(v);
+    const s = await backend.setSettings({ hideProfilesPreAuth: v });
+    setHideProfilesPreAuth(s.hideProfilesPreAuth === true);
+    toast({ kind: v ? "success" : "info", title: v ? "Sign-in screen hides your family" : "Sign-in screen shows profiles", message: v ? "Visitors on this device see no family names before signing in." : "The profile picker lists family members again." });
   };
   const toggleAutoApproveImprovements = async (v: boolean) => {
     setAutoApproveImprovements(v);
@@ -155,6 +164,7 @@ export function Settings() {
           <SectionTitle icon="Lock">Privacy</SectionTitle>
           <Row label="Sensitive memories stay within their space"><Toggle checked={settings.privacy.sensitiveMemoryStaysInSpace} onChange={(v) => updateSettings({ privacy: { ...settings.privacy, sensitiveMemoryStaysInSpace: v } })} /></Row>
           <Row label="Require approval for actions outside the household"><Toggle checked={settings.privacy.requireApprovalForExternal} onChange={(v) => updateSettings({ privacy: { ...settings.privacy, requireApprovalForExternal: v } })} /></Row>
+          <Row label="Hide family names on the sign-in screen" desc="Until someone signs in, this device's profile picker shows no names (ISS-015 privacy flag; enforced server-side)."><Toggle checked={hideProfilesPreAuth} onChange={(v) => void toggleHideProfilesPreAuth(v)} ariaLabel="Hide family names on the sign-in screen" /></Row>
         </Card>
 
         {/* Notifications */}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore } from "@/store/useStore";
-import { backend } from "@/connectors/api";
+import { backend, getHouseholdHint, saveHouseholdHint } from "@/connectors/api";
 import { Avatar, Button, Card, Field, TextInput } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { brand } from "@/brand";
@@ -31,6 +31,11 @@ export function Lock() {
   const [serverProfiles, setServerProfiles] = useState<LockProfile[] | null>(null);
   const [householdName, setHouseholdName] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
+  // WP-010 session-scoped picker (ISS-012): a returning member's browser remembers which
+  // signed-up household it last used, so after sign-out the Lock screen offers THAT family's
+  // own members (children included) instead of the resident household's roster.
+  const [hint] = useState(() => getHouseholdHint());
+  const [needPasswordFor, setNeedPasswordFor] = useState<string | null>(null);
   // C1.4 email identity: sign in / create-or-join a household of your own.
   const [emailMode, setEmailMode] = useState<null | "signin" | "create">(null);
   const [email, setEmail] = useState("");
@@ -64,7 +69,7 @@ export function Lock() {
     // network/parse failure returns null. Track those separately: "offline" (server
     // genuinely unreachable) is a different, honest story from "reachable, but this
     // browser's household isn't the one it knows about" (handled below via the merge).
-    void backend.profiles().then((r) => {
+    void backend.profiles(hint?.id).then((r) => {
       if (!r) { setOffline(true); setServerProfiles(null); return; }
       setOffline(false);
       setServerProfiles(r.profiles.map((p) => ({
@@ -72,9 +77,9 @@ export function Lock() {
         initials: initialsOf(p.displayName), avatarColor: colorFor(p.displayName),
         pinRequired: p.pinRequired, origin: "server" as const,
       })));
-      if (r.householdName) setHouseholdName(r.householdName);
+      if (r.householdName) { setHouseholdName(r.householdName); if (hint?.id) saveHouseholdHint(hint.id, r.householdName); }
     });
-  }, []);
+  }, [hint?.id]);
 
   const localMembers: LockProfile[] = data.members.map((m) => ({
     id: m.id, displayName: m.displayName, role: m.role,
@@ -85,24 +90,36 @@ export function Lock() {
   // household. Rather than hiding the local household behind that roster (the old
   // behavior — "create/reset sample" would then dead-end here with no way back in),
   // merge it in, clearly labelled as local-only.
+  // WP-010: when a household hint drove the fetch, the returned roster IS that signed-up
+  // family's own members — authoritative, so it's shown alone (never merged with this
+  // browser's local sample/resident members).
+  const hinted = !!hint?.id && serverProfiles !== null && serverProfiles.length > 0;
   const localIds = new Set(localMembers.map((m) => m.id));
-  const foreignServer = serverProfiles !== null && serverProfiles.length > 0 && !serverProfiles.some((p) => localIds.has(p.id));
+  const foreignServer = !hinted && serverProfiles !== null && serverProfiles.length > 0 && !serverProfiles.some((p) => localIds.has(p.id));
   const members: LockProfile[] =
-    serverProfiles === null ? localMembers                                   // fully offline → local roster only
+    hinted ? serverProfiles!                                                 // remembered signed-up household → its own roster
+    : serverProfiles === null ? localMembers                                 // fully offline → local roster only
     : foreignServer ? [...serverProfiles, ...localMembers]                   // claimed by someone else → merge
     : serverProfiles.length > 0 ? serverProfiles                             // matches / includes our household
     : localMembers;                                                          // reachable but an empty roster
   const owner = members.find((m) => m.role === "Owner");
   const subtitle = householdName ?? (serverProfiles && !foreignServer ? null : data.household.name);
 
+  // WP-010: entering a member of a remembered signed-up household carries the hint so the
+  // server resolves the role from THAT household. A member who authenticates by email +
+  // password answers "password_required" → we reveal the sign-in form (no passwordless entry
+  // into a credentialed profile). Resident-household entry is unchanged (no hint).
+  const householdHint = hinted ? hint?.id : undefined;
   const choose = async (p: LockProfile) => {
     const elevated = p.role === "Owner" || p.role === "Adult Admin";
     if (elevated && pinFor !== p.id) {
-      const ok = await loginAs(p.id, undefined, p);
+      const ok = await loginAs(p.id, undefined, p, householdHint);
+      if (ok === "password_required") { setNeedPasswordFor(p.displayName); setEmailMode("signin"); return; }
       if (!ok) setPinFor(p.id);
       return;
     }
-    const ok = await loginAs(p.id, pin, p);
+    const ok = await loginAs(p.id, pin, p, householdHint);
+    if (ok === "password_required") { setNeedPasswordFor(p.displayName); setEmailMode("signin"); return; }
     if (ok) { setPinFor(null); setPin(""); }
   };
 
@@ -197,6 +214,9 @@ export function Lock() {
                   </Field>
                 )}
               </>
+            )}
+            {emailMode === "signin" && needPasswordFor && (
+              <p className="mb-2 text-xs text-sage-700">Enter {needPasswordFor}'s email and password to continue.</p>
             )}
             <Field label="Email">
               <TextInput type="email" value={email} placeholder="you@example.com" onChange={(e) => setEmail(e.target.value)} />

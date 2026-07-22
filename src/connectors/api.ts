@@ -83,6 +83,35 @@ export interface WebhookEvent { id: string; receivedAt: string; payload: Record<
 export interface BackendJob { id: string; name: string; connectorId: string; intervalMs: number; lastRun: number | null; nextRun: number | null; lastStatus: string; enabled: boolean }
 export interface AuditEvent { id: string; at: string; type: string; ok: boolean; actorId?: string; actorName?: string; connectorId?: string; toolId?: string; error?: string; origin?: string }
 export interface Session { actorId: string; actorName: string; role: string; csrf: string; householdId: string }
+
+/* ---- WP-010 session-scoped picker hint (ISS-012) ----
+ * After signing into a signed-up (hh_*) household, the browser remembers WHICH
+ * household it was — id only, never a secret — so the Lock screen can offer that
+ * family's own members after sign-out (via /api/profiles?household=…) instead of
+ * the resident household's roster. Kept across sign-out on purpose; the resident
+ * household ("local") is never stored, so a fresh browser keeps its default. */
+const HOUSEHOLD_HINT_KEY = "familios.householdHint.v1";
+export interface HouseholdHint { id: string; name?: string | null }
+export function saveHouseholdHint(id: string | null | undefined, name?: string | null): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    if (id && /^hh_[a-z0-9]+$/.test(id)) localStorage.setItem(HOUSEHOLD_HINT_KEY, JSON.stringify({ id, ...(name ? { name } : {}) }));
+  } catch { /* storage unavailable — the picker just falls back to resident behavior */ }
+}
+export function getHouseholdHint(): HouseholdHint | null {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(HOUSEHOLD_HINT_KEY);
+    if (!raw) return null;
+    const h = JSON.parse(raw) as HouseholdHint;
+    return h && typeof h.id === "string" && /^hh_[a-z0-9]+$/.test(h.id) ? h : null;
+  } catch { return null; }
+}
+export function clearHouseholdHint(): void {
+  if (typeof localStorage === "undefined") return;
+  try { localStorage.removeItem(HOUSEHOLD_HINT_KEY); } catch { /* ignore */ }
+}
+
 /* ---- Connector platform (first-party OAuth providers + per-user accounts) ---- */
 export interface ProviderScope { key: string; label: string; risk: string }
 export interface ProviderTool { id: string; name: string; action: string; risk: "Low" | "Medium" | "High" | "Sensitive"; requiresApproval: boolean; scopes: string[]; inputs: ConnectorToolInput[] }
@@ -365,7 +394,7 @@ export interface ServerEvolution {
   functionId?: string | null;
   toolId?: string | null;
   runId: string;
-  status: "pending" | "accepted" | "rejected";
+  status: "pending" | "accepted" | "rejected" | "reverted";
   source: "trace" | "ai";
   title: string;
   reason: string;
@@ -382,6 +411,22 @@ export interface ServerEvolution {
   updatedAt: string;
   reviewedAt?: number;
   reviewedBy?: string;
+  /* ---- WP-008a: revert support ---- */
+  /** The target's version NUMBER immediately before this evolution's change was
+   *  applied — set at apply time so a revert restores the exact prior text instead of
+   *  guessing from timestamps. Absent on legacy rows applied before this existed. */
+  beforeVersionId?: number | string;
+  /** Whether the change was actually written to the target (vs. accepted-but-failed). */
+  applied?: boolean;
+  /** Server's own verdict on whether the Revert action should be offered right now
+   *  (accepted + applied + target still exists + a prior version is available). */
+  revertible?: boolean;
+  revertedAt?: number;
+  revertedBy?: string;
+  revertedFromVersion?: number;
+  /** Read-only history row moved out of the active registry (e.g. a household-approved
+   *  bulk archive) — never revertible; the client renders it as past record only. */
+  archived?: boolean;
 }
 
 /* ---- server-owned family data (P1/P4) ---- */
@@ -481,10 +526,10 @@ export const backend = {
       return null;
     }
   },
-  async login(input: { actorId: string; actorName: string; role: string; pin?: string }): Promise<{ session?: Session; error?: string; message?: string }> {
+  async login(input: { actorId: string; actorName: string; role: string; pin?: string; household?: string }): Promise<{ session?: Session; error?: string; message?: string }> {
     try {
       const r = await req<{ session?: Session; error?: string; message?: string }>("/session", { method: "POST", body: JSON.stringify(input) });
-      if (r.session) setCsrf(r.session.csrf);
+      if (r.session) { setCsrf(r.session.csrf); saveHouseholdHint(r.session.householdId); }
       return r;
     } catch { return { error: "backend_unreachable" }; }
   },
@@ -496,14 +541,14 @@ export const backend = {
   async loginEmail(email: string, password: string): Promise<{ session?: Session; error?: string; message?: string }> {
     try {
       const r = await req<{ session?: Session; error?: string; message?: string }>("/login", { method: "POST", body: JSON.stringify({ email, password }) });
-      if (r.session) setCsrf(r.session.csrf);
+      if (r.session) { setCsrf(r.session.csrf); saveHouseholdHint(r.session.householdId); }
       return r;
     } catch { return { error: "backend_unreachable" }; }
   },
   async signup(input: { email: string; password: string; ownerName: string; householdName?: string; inviteToken?: string }): Promise<{ session?: Session; error?: string; message?: string }> {
     try {
       const r = await req<{ session?: Session; error?: string; message?: string }>("/signup", { method: "POST", body: JSON.stringify(input) });
-      if (r.session) setCsrf(r.session.csrf);
+      if (r.session) { setCsrf(r.session.csrf); saveHouseholdHint(r.session.householdId, input.householdName ?? null); }
       return r;
     } catch { return { error: "backend_unreachable" }; }
   },
@@ -595,11 +640,11 @@ export const backend = {
   async audit(limit = 50): Promise<AuditEvent[]> {
     try { return (await req<{ events: AuditEvent[] }>(`/audit?limit=${limit}`)).events ?? []; } catch { return []; }
   },
-  async getSettings(): Promise<{ externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; timezone?: string | null }> {
-    try { return (await req<{ settings: { externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; timezone?: string | null } }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
+  async getSettings(): Promise<{ externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; autoApproveImprovementsDefaulted?: boolean; timezone?: string | null; hideProfilesPreAuth?: boolean }> {
+    try { return (await req<{ settings: { externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; autoApproveImprovementsDefaulted?: boolean; timezone?: string | null; hideProfilesPreAuth?: boolean } }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
   },
-  async setSettings(patch: Record<string, unknown>): Promise<{ externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; timezone?: string | null }> {
-    try { return (await req<{ settings: { externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; timezone?: string | null } }>("/settings", { method: "POST", body: JSON.stringify(patch), mutation: true })).settings; } catch { return { externalActionsEnabled: true }; }
+  async setSettings(patch: Record<string, unknown>): Promise<{ externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; autoApproveImprovementsDefaulted?: boolean; timezone?: string | null; hideProfilesPreAuth?: boolean }> {
+    try { return (await req<{ settings: { externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; autoApproveImprovementsDefaulted?: boolean; timezone?: string | null; hideProfilesPreAuth?: boolean } }>("/settings", { method: "POST", body: JSON.stringify(patch), mutation: true })).settings; } catch { return { externalActionsEnabled: true }; }
   },
 
   /* ---- AI providers ---- */
@@ -687,6 +732,14 @@ export const backend = {
   },
   async reviewEvolution(id: string, accept: boolean): Promise<{ ok: boolean; applied?: boolean; applyError?: string | null; evolution?: ServerEvolution; error?: string }> {
     try { return await req(`/evolution/${id}/review`, { method: "POST", body: JSON.stringify({ accept }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  // WP-008a — undo an applied improvement (restores the agent/skill to the version it
+  // was at just before this evolution changed it). Pending the index.mjs route handoff
+  // (POST /api/evolutions/:id/revert) landing in the running server; until then this
+  // resolves "backend_unreachable" like any other unrouted call, which the Improvements
+  // tab treats as a failed revert rather than a silent no-op.
+  async revertEvolution(id: string): Promise<{ ok: boolean; evolution?: ServerEvolution; restoredToVersion?: number; error?: string; message?: string }> {
+    try { return await req(`/evolutions/${id}/revert`, { method: "POST", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
   },
 
   /* ---- family data: server-owned events & tasks (P1.2 / P4.1) ---- */
@@ -781,8 +834,9 @@ export const backend = {
     try { return (await req<{ members: ServerMember[] }>("/members")).members ?? []; } catch { return []; }
   },
   // Pre-auth profile picker + one-time household claim (demo roster → your family).
-  async profiles(): Promise<{ profiles: { actorId: string; displayName: string; role: string; pinRequired: boolean }[]; claimed: boolean; householdName?: string | null } | null> {
-    try { return await req("/profiles"); } catch { return null; }
+  async profiles(householdHint?: string | null): Promise<{ profiles: { actorId: string; displayName: string; role: string; pinRequired: boolean }[]; claimed: boolean; householdName?: string | null; hidden?: boolean } | null> {
+    const q = householdHint && /^hh_[a-z0-9]+$/.test(householdHint) ? `?household=${encodeURIComponent(householdHint)}` : "";
+    try { return await req(`/profiles${q}`); } catch { return null; }
   },
   async appendConversationMessage(id: string, body: { text: string; kind?: string; runId?: string }): Promise<{ conversation?: ServerConversation; error?: string }> {
     try { return await req(`/conversations/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }

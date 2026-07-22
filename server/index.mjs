@@ -36,7 +36,8 @@ import {
   listHelpRequests, getHelpRequest, putHelpRequest, patchHelpRequest,
   addNotification, getAccountRaw,
 } from "./store.mjs";
-import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases } from "./engine.mjs";
+import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases, applyEvolutionToTarget } from "./engine.mjs";
+import { revertEvolution, resolveEvolutionBefore, canRevertEvolution, listEvolutionArchive } from "./evolution-revert.mjs";
 import { createBackup, listBackups, readBackup, restoreBackup, backupTick } from "./backup.mjs";
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { closeBrowser } from "./browser.mjs";
@@ -539,6 +540,50 @@ const handleRequest = async (req, res) => {
         if (!body) return json(res, 400, { error: "malformed_json" }, req);
         const { actorId } = body;
         if (!actorId) return json(res, 400, { error: "actor_required" }, req);
+        // WP-010 session-scoped picker entry into a signed-up (hh_*) household. When the
+        // Lock screen remembered a household hint (client localStorage, id only — never a
+        // secret), entry resolves the member from THAT household's roster instead of the
+        // resident one. Two rules keep this from ever escalating privilege:
+        //   1. A member who has an email+password identity (Owner, invited members) MUST
+        //      authenticate via /api/login — passwordless picker entry is refused for them,
+        //      so nobody enters a credentialed member's profile without their password.
+        //   2. A member with NO identity (a child, or anyone an Owner added directly) enters
+        //      under the SAME PIN rules as the resident household: elevated roles are
+        //      PIN-gated (fail-closed in prod), low-trust roles (Child View, etc.) enter
+        //      straight in — the shared family-device model, now reachable for a real family.
+        // The hint must name a real, existing hh_* tenant; anything else falls through to the
+        // unchanged resident path below.
+        const sHintRaw = body.household;
+        const sHint = (sHintRaw && /^hh_[a-z0-9]+$/.test(String(sHintRaw)) && tenantEngine().tenantIds().includes(String(sHintRaw))) ? String(sHintRaw) : null;
+        if (sHint) {
+          const hm = runWithTenant(sHint, () => getMember(actorId));
+          if (!hm || hm.householdId !== sHint) { audit({ type: "session.login", ok: false, error: "unknown_actor", actorId, household: sHint }, req); return json(res, 403, { error: "unknown_actor", message: "This profile isn't part of that household." }, req); }
+          if (hm.archived) { audit({ type: "session.login", ok: false, error: "member_archived", actorId, household: sHint }, req); return json(res, 403, { error: "member_archived", message: "This profile was removed from the household." }, req); }
+          // Credentialed member → their password is required (via /api/login). Never enter
+          // an identity-backed profile through the passwordless picker.
+          if (listIdentitiesForHousehold(sHint).some((i) => i.actorId === actorId)) {
+            audit({ type: "session.login", ok: false, error: "password_required", actorId, household: sHint }, req);
+            return json(res, 403, { error: "password_required", message: "This member signs in with their email and password." }, req);
+          }
+          const hRole = hm.role;
+          const hName = hm.displayName ?? body.actorName ?? actorId;
+          const hPinHash = getSettings(sHint).ownerPinHash; // that household's own PIN, never the resident's
+          if (hRole === "Owner" || hRole === "Adult Admin") {
+            if (!hPinHash && IS_PROD) {
+              audit({ type: "session.login", ok: false, error: "pin_not_configured", actorId, household: sHint }, req);
+              return json(res, 403, { error: "pin_not_configured", message: "Elevated sign-in is locked until this household sets an Owner PIN." }, req);
+            }
+            if (hPinHash) {
+              const given = crypto.createHash("sha256").update(String(body.pin ?? "")).digest("hex");
+              if (given !== hPinHash) { audit({ type: "session.login", ok: false, error: "bad_pin", actorId, household: sHint }, req); return json(res, 403, { error: "pin_required" }, req); }
+            }
+          }
+          const hs = createSession({ actorId, actorName: hName, role: hRole, householdId: sHint });
+          maybeSeedSandbox(hs);
+          audit({ type: "session.login", ok: true, actorId, household: sHint }, req, hs);
+          const hView = { actorId: hs.actorId, actorName: hs.actorName, role: hs.role, csrf: hs.csrf, householdId: hs.householdId };
+          return json(res, 200, req.headers["x-homeops-bearer"] === "1" ? { session: hView, token: hs.token } : { session: hView }, req, { "set-cookie": sessionCookie(hs.token) });
+        }
         // Authority is server-owned: the effective role is resolved from the household
         // member registry by actorId, NEVER from the client. A client may still send a
         // `role` (legacy/dev seed selector), but it is ignored for authorization — a
@@ -603,20 +648,44 @@ const handleRequest = async (req, res) => {
       : true;
     if (path === "/api/profiles" && method === "GET") {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
-      const pinSet = !!(getSettings(CURRENT_TENANT).ownerPinHash || process.env.HOMEOPS_BOOTSTRAP_PIN);
-      // Pre-auth privacy (ISS-009): this endpoint answers BEFORE any session exists,
-      // so it must carry the minimum the Lock screen needs — actorId, displayName,
-      // role, pinRequired. Relationship strings (which include child ages, e.g.
-      // "Child (age 9)", and caregiver details) are deliberately excluded; they are
-      // available post-auth via /api/members.
-      const profiles = listMembers({ householdId: "local" }).filter((m) => !m.archived).map((m) => ({
+      // WP-010 session-scoped picker (ISS-012): a returning member's browser remembers
+      // the household it last signed into and asks for THAT household's roster via a
+      // `?household=hh_...` hint, so the Lock screen offers the family's own members
+      // after sign-out instead of the resident household's. The hint must name a real,
+      // existing signed-up (hh_*) tenant; anything else falls back to the resident
+      // household — the unchanged fresh-browser behavior. The hint is only an id (never
+      // a secret); it grants the picker roster, not a session (entry still needs the
+      // member's PIN/password, see /api/session).
+      const pHintRaw = url.searchParams.get("household");
+      const pHint = (pHintRaw && /^hh_[a-z0-9]+$/.test(pHintRaw) && tenantEngine().tenantIds().includes(pHintRaw)) ? pHintRaw : null;
+      const pTarget = pHint ?? CURRENT_TENANT;
+      // Pre-auth privacy (ISS-015): `hideProfilesPreAuth` hides a household's roster from
+      // anyone who lacks a session for it. It is a per-household setting, plus a deployment
+      // env override that covers the RESIDENT household on a shared/public deployment.
+      // Default OFF everywhere — the resident picker (ISS-009: names+roles+pinRequired the
+      // Lock screen needs) is preserved verbatim until an Owner opts their family out.
+      const pFlagOn = getSettings(pTarget).hideProfilesPreAuth === true
+        || (pTarget === CURRENT_TENANT && /^(1|true|yes|on)$/i.test(String(process.env.HOMEOPS_HIDE_PROFILES_PREAUTH ?? "")));
+      const pSess = sessionFromReq(req);
+      if (pFlagOn && !(pSess && pSess.householdId === pTarget)) {
+        audit({ type: "profiles.hidden", household: pTarget }, req);
+        return json(res, 200, { profiles: [], hidden: true, claimed: false, householdName: null }, req);
+      }
+      // Pre-auth exposure: this endpoint answers BEFORE any session exists, so it carries
+      // the minimum the Lock screen needs — actorId, displayName, role, pinRequired.
+      // Relationship strings (which include child ages, e.g. "Child (age 9)", and caregiver
+      // details) are deliberately excluded; they are available post-auth via /api/members.
+      const pSettings = getSettings(pTarget);
+      const pPinSet = !!(pSettings.ownerPinHash || (pTarget === CURRENT_TENANT && process.env.HOMEOPS_BOOTSTRAP_PIN));
+      const rosterOf = () => listMembers({ householdId: pTarget }).filter((m) => !m.archived).map((m) => ({
         actorId: m.actorId, displayName: m.displayName, role: m.role,
-        pinRequired: pinSet && (m.role === "Owner" || m.role === "Adult Admin"),
+        pinRequired: pPinSet && (m.role === "Owner" || m.role === "Adult Admin"),
       }));
+      const profiles = pHint ? runWithTenant(pHint, rosterOf) : rosterOf();
       return json(res, 200, {
         profiles,
         claimed: profiles.some((p) => !SEED_ACTOR_IDS.includes(p.actorId)),
-        householdName: getSettings(CURRENT_TENANT).householdName ?? null,
+        householdName: pSettings.householdName ?? null,
       }, req);
     }
     // Claim the household: replace the demo Harper roster with YOUR owner profile.
@@ -2829,7 +2898,7 @@ const handleRequest = async (req, res) => {
     if (path === "/api/settings" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const s = getSettings(g.session.householdId);
-      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false, timezone: s.timezone ?? null } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof s.autoApproveImprovements !== "boolean", timezone: s.timezone ?? null, hideProfilesPreAuth: s.hideProfilesPreAuth === true } }, req);
     }
     if (path === "/api/settings" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -2843,6 +2912,9 @@ const handleRequest = async (req, res) => {
       // AI-judged auto-approval of LOW-risk improvement proposals (default ON). When off,
       // every proposal — even low-risk — waits for a human in the evolution review queue.
       if (typeof body.autoApproveImprovements === "boolean") patch.autoApproveImprovements = body.autoApproveImprovements;
+      // WP-010 pre-auth privacy (ISS-015): when ON, this household's roster is hidden from
+      // the pre-auth profile picker to anyone without a session for it (see /api/profiles).
+      if (typeof body.hideProfilesPreAuth === "boolean") patch.hideProfilesPreAuth = body.hideProfilesPreAuth;
       if (typeof body.ownerPin === "string" && body.ownerPin) patch.ownerPinHash = crypto.createHash("sha256").update(body.ownerPin).digest("hex");
       // Household timezone: an IANA zone name (e.g. "America/New_York") that anchors
       // "every day at 7 AM" triggers to a real wall-clock time (server/triggers.mjs
@@ -2856,7 +2928,7 @@ const handleRequest = async (req, res) => {
       }
       const next = setSettings(patch, g.session.householdId);
       audit({ type: "settings.update", ok: true, changed: Object.keys(patch), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
-      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true, autoApproveImprovements: next.autoApproveImprovements !== false, timezone: next.timezone ?? null } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true, autoApproveImprovements: next.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof next.autoApproveImprovements !== "boolean", timezone: next.timezone ?? null, hideProfilesPreAuth: next.hideProfilesPreAuth === true } }, req);
     }
 
     /* ---- AI providers ---- */
@@ -3141,17 +3213,22 @@ const handleRequest = async (req, res) => {
       // Project a stable review shape so clients can show/act on proposals: always carry
       // `after` (the concrete change), the resolved `agentName`, and the auto-approval
       // verdict (`autoApproved`/`autoReason`) even for legacy rows that predate them.
-      const all = listEvolutions((e) => !e.householdId || e.householdId === g.session.householdId).map((e) => ({
+      const project = (e, archived) => ({
         ...e,
         source: e.source ?? "trace",
         after: e.after ?? null,
+        before: resolveEvolutionBefore(e),
         risk: e.risk ?? null,
         agentId: e.agentId ?? null,
         agentName: e.agentId ? (getAgent(e.agentId)?.name ?? null) : null,
         autoApproved: e.autoApproved === true,
         autoReason: e.autoReason ?? null,
-      }));
-      return json(res, 200, { evolutions: all }, req);
+        revertible: archived ? false : canRevertEvolution(e),
+        archived: !!archived,
+      });
+      const active = listEvolutions((e) => !e.householdId || e.householdId === g.session.householdId).map((e) => project(e, false));
+      const archivedRows = listEvolutionArchive(g.session.householdId).map((e) => project(e, true));
+      return json(res, 200, { evolutions: [...active, ...archivedRows] }, req);
     }
     const evoReviewMatch = path.match(/^\/api\/evolution\/([^/]+)\/review$/);
     if (evoReviewMatch && method === "POST") {
@@ -3167,19 +3244,28 @@ const handleRequest = async (req, res) => {
       const accept = !!body.accept;
       let applied = false; let applyError = null;
       if (accept && e.after) {
-        if (e.kind === "agent" && e.agentId) {
-          const r = partialUpdateAgent(e.agentId, { instructions: e.after });
-          if (r && !r.error) applied = true; else applyError = r?.error ?? "update_failed";
-        } else if (e.kind === "skill" && e.skillId) {
-          // Skill schema uses snake_case planner_guidance — the camelCase key silently
-          // no-opped, so accepting a skill evolution never actually changed the guidance.
-          const r = partialUpdateSkill(e.skillId, { planner_guidance: e.after });
-          if (r && !r.error) applied = true; else applyError = r?.error ?? "update_failed";
-        }
+        // Shared with the engine's auto-accept path — also stamps beforeVersionId on
+        // the evolution row at apply time (WP-008a), so reverts never need timestamp
+        // correlation again.
+        const r = applyEvolutionToTarget(e);
+        applied = r.applied; applyError = r.applyError;
       }
       patchEvolution(id, { status: accept ? "accepted" : "rejected", reviewedAt: Date.now(), reviewedBy: g.session.actorId });
       audit({ type: "evolution.review", id, accept, applied, applyError, kind: e.kind, agentId: e.agentId }, req, g.session);
       return json(res, 200, { ok: true, applied, applyError, evolution: getEvolution(id) }, req);
+    }
+    const evoRevertMatch = path.match(/^\/api\/evolutions\/([^/]+)\/revert$/);
+    if (evoRevertMatch && method === "POST") {
+      // WP-008a: reverting an applied improvement restores the target's prior version
+      // (self-snapshotting — the revert is itself reversible) and is audited.
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const out = revertEvolution(evoRevertMatch[1], g.session);
+      audit({ type: "evolution.revert_request", id: evoRevertMatch[1], ok: out.ok, error: out.ok ? undefined : out.error }, req, g.session);
+      if (!out.ok) {
+        const status = out.error === "not_found" ? 404 : out.error === "forbidden" ? 403 : 409;
+        return json(res, status, out, req);
+      }
+      return json(res, 200, out, req);
     }
     if (path === "/api/miniapps/generate" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);

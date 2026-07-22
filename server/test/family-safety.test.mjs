@@ -184,17 +184,21 @@ test("help request kind:'offer' — a child may offer help; kind persists and co
   assert.ok(mine.every((h) => h.kind === "ask" || h.kind === "offer"), "every row carries a direction");
 });
 
-/* ---- Settings: autoApproveImprovements (AI-judged auto-approval, default ON) ---- */
-test("autoApproveImprovements defaults true in GET and persists when toggled off", async () => {
-  assert.equal((await alex.req("/api/settings")).data.settings.autoApproveImprovements, true, "defaults ON");
+/* ---- Settings: autoApproveImprovements (AI-judged auto-approval) ----
+ * WP-008a (DEC-015): a brand-new household — this test's `local` household has never
+ * had settings.json written before this point — now defaults OFF. An EXISTING
+ * household whose settings.json predates this key still reads ON via the `!== false`
+ * fallback at every call site; that legacy path is unchanged and isn't exercised here. */
+test("autoApproveImprovements defaults OFF for a fresh household, and persists either way once toggled", async () => {
+  assert.equal((await alex.req("/api/settings")).data.settings.autoApproveImprovements, false, "fresh household defaults OFF");
 
-  const off = await morgan.req("/api/settings", { method: "POST", body: JSON.stringify({ autoApproveImprovements: false }) });
-  assert.equal(off.status, 200);
-  assert.equal(off.data.settings.autoApproveImprovements, false);
-  assert.equal((await alex.req("/api/settings")).data.settings.autoApproveImprovements, false, "persists across reads");
+  const on = await morgan.req("/api/settings", { method: "POST", body: JSON.stringify({ autoApproveImprovements: true }) });
+  assert.equal(on.status, 200);
+  assert.equal(on.data.settings.autoApproveImprovements, true);
+  assert.equal((await alex.req("/api/settings")).data.settings.autoApproveImprovements, true, "persists across reads");
 
-  // Restore the ON default so later tests aren't affected.
-  await morgan.req("/api/settings", { method: "POST", body: JSON.stringify({ autoApproveImprovements: true }) });
+  // Restore OFF so later tests aren't affected.
+  await morgan.req("/api/settings", { method: "POST", body: JSON.stringify({ autoApproveImprovements: false }) });
 });
 
 /* ---- Confidence judge: fail-closed with no AI provider (never auto-approve blindly) ---- */

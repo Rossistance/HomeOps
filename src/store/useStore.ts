@@ -467,7 +467,10 @@ export interface Store extends UIState {
   /* onboarding + session */
   completeOnboarding: (choice: "sample" | "blank" | "import", opts?: { householdName?: string; ownerName?: string; data?: AppData }) => Promise<void>;
   bootstrapSession: () => Promise<void>;
-  loginAs: (memberId: string, pin?: string, fallback?: { displayName: string; role: string }) => Promise<boolean>;
+  // WP-010: `householdHint` (an hh_* id) enters a signed-up household's own member from the
+  // session-scoped picker. Returns "password_required" when that member authenticates by
+  // email+password — the Lock screen then reveals the login form (no passwordless escalation).
+  loginAs: (memberId: string, pin?: string, fallback?: { displayName: string; role: string }, householdHint?: string) => Promise<boolean | "password_required">;
   logout: () => Promise<void>;
   loginWithEmail: (email: string, password: string) => Promise<boolean>;
   signupHousehold: (input: { email: string; password: string; ownerName: string; householdName?: string; inviteToken?: string; resetLocalData?: boolean }) => Promise<boolean>;
@@ -782,7 +785,7 @@ export const useStore = create<Store>((set, get) => {
         set({ session: null });
       }
     },
-    loginAs: async (memberId, pin, fallback) => {
+    loginAs: async (memberId, pin, fallback, householdHint) => {
       // Server-registered profiles (e.g. the claimed owner, mobile-created invites)
       // may not exist in the local store yet — the Lock screen passes their server
       // profile so sign-in works before the first hydrate.
@@ -790,7 +793,11 @@ export const useStore = create<Store>((set, get) => {
         ?? (fallback ? { id: memberId, displayName: fallback.displayName, role: fallback.role as Role } : undefined);
       if (!m) return false;
       set({ authBusy: true });
-      const r = await backend.login({ actorId: m.id, actorName: m.displayName, role: m.role, pin });
+      const r = await backend.login({ actorId: m.id, actorName: m.displayName, role: m.role, pin, ...(householdHint ? { household: householdHint } : {}) });
+      // WP-010: this member of a signed-up household signs in with their own email +
+      // password — the picker can't enter their profile passwordlessly. Signal the Lock
+      // screen to reveal the login form; never a fake local session.
+      if (r.error === "password_required") { set({ authBusy: false, session: null }); return "password_required"; }
       // Explicit server rejections are surfaced, never papered over with a fake
       // local session (that's how "signed in but every page is broken" happens).
       if (r.error === "pin_required") { set({ authBusy: false, session: null }); toast({ kind: "error", title: "PIN required", message: "Enter the owner PIN to sign in as an admin." }); return false; }
