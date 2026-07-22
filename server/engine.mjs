@@ -900,10 +900,12 @@ function connectorParkTtlMs() {
   const days = Number(process.env.HOMEOPS_CONNECTOR_PARK_TTL_DAYS);
   return (Number.isFinite(days) && days > 0 ? days : 7) * 24 * 60 * 60_000;
 }
-// Feature epoch: the moment this sweep shipped. A run's `updatedAt` at/after this
-// stamp was parked (or last touched) under a codebase that HAS this TTL, so the TTL
-// applies to it by default — that's the honest, opt-out-by-nature default for new
-// parks. A run last touched BEFORE this stamp is a pre-existing ("legacy") park —
+// Feature epoch: the moment this sweep shipped. A run PARKED (see
+// connectorParkMoment in expireStaleRuns — the blocked cursor step's startedAt,
+// never the generic `updatedAt` write stamp) at/after this stamp parked under a
+// codebase that HAS this TTL, so the TTL applies to it by default — that's the
+// honest, opt-out-by-nature default for new parks. A run parked BEFORE this stamp
+// is a pre-existing ("legacy") park —
 // e.g. the resident household's long-stuck connector-parked runs — and is
 // grandfathered: this code landing must never silently vanish months-old runs on the
 // next boot/interval sweep. Sweeping those too is a real decision for a household (or
@@ -971,15 +973,38 @@ export async function expireStaleRuns() {
     }).catch(() => {}));
   }
   // ISS-017 — connector-parked runs (waiting_for_connector) past the TTL.
+  //
+  // The park CLOCK is the moment the run actually parked — NOT `updatedAt`.
+  // `updatedAt` is a generic write stamp: boot reconciliation, lease churn, and
+  // unrelated patches all refresh it, which silently restarted the TTL. Observed
+  // in the resident household (2026-07-22): a restart mass-touched every legacy
+  // park's updatedAt to 2026-07-21T18:28:47Z, so the operator's explicit
+  // HOMEOPS_SWEEP_LEGACY_PARKED=1 sweep expired nothing — months-old runs looked
+  // hours old, and the epoch check even misclassified them as post-epoch parks.
+  // The cursor step's `startedAt` is written when the step attempt begins — the
+  // attempt whose refusal parked the run — so it IS the park moment, refreshed
+  // only by a genuine re-drive (connector connected → resume → re-park).
   const parkTtlMs = connectorParkTtlMs();
   const sweepLegacy = sweepLegacyParkedEnabled();
+  const connectorParkMoment = (r) => {
+    const stepStarted = Number(r.steps?.[r.cursor]?.startedAt);
+    if (Number.isFinite(stepStarted) && stepStarted > 0) return stepStarted;
+    const updated = Date.parse(r.updatedAt ?? "");
+    if (Number.isFinite(updated) && updated > 0) return updated;
+    return Number(r.createdAt) || 0;
+  };
   for (const r of listRuns({ limit: 1000 })) {
     if (r.status !== "waiting_for_connector") continue;
-    const touched = Date.parse(r.updatedAt ?? "") || r.createdAt || 0;
-    if (!touched) continue;
-    const isLegacyPark = touched < CONNECTOR_PARK_FEATURE_EPOCH_MS;
+    const parkedAt = connectorParkMoment(r);
+    if (!parkedAt) continue;
+    const isLegacyPark = parkedAt < CONNECTOR_PARK_FEATURE_EPOCH_MS;
     if (isLegacyPark && !sweepLegacy) continue; // grandfathered until explicitly opted in
-    if (Date.now() - touched < parkTtlMs) continue;
+    // A legacy park under the flag expires NOW: the flag is the operator's
+    // one-shot decision to clear the pre-epoch backlog — making that decision
+    // then waiting a further TTL from some later incidental touch is exactly
+    // the gap that stranded the resident stragglers. Post-epoch parks get the
+    // normal TTL, measured from the park moment so touches never restart it.
+    if (!isLegacyPark && Date.now() - parkedAt < parkTtlMs) continue;
     jobs.push(withRunLock(r.id, async () => {
       const run = getRun(r.id);
       if (!run || run.status !== "waiting_for_connector") return; // a concurrent resume won
@@ -987,7 +1012,7 @@ export async function expireStaleRuns() {
       const reason = `expired — needed the ${parkConnectorLabel(cur?.toolId)} connection`;
       if (cur) patchRunStep(r.id, run.cursor, { status: "expired", detail: reason, finishedAt: Date.now() });
       patchRun(r.id, { status: "expired", error: "connector_park_expired", finishedAt: Date.now(), lease: null });
-      appendAudit({ type: "run.connector_park_expired", runId: r.id, householdId: run.householdId, toolId: cur?.toolId, legacy: isLegacyPark });
+      appendAudit({ type: "run.connector_park_expired", runId: r.id, householdId: run.householdId, toolId: cur?.toolId, legacy: isLegacyPark, parkedAt });
       emit(r.id, "run.expired");
       // A parked run can sit for days with no browser ever open to see it die — the
       // in-app notification is how the household actually learns about it (Inbox).

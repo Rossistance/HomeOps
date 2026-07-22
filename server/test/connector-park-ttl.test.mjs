@@ -97,6 +97,52 @@ test("a LEGACY connector-park (parked before the feature epoch) is grandfathered
   assert.match(String(after2.steps[0].detail ?? ""), /expired — needed the Google connection/);
 });
 
+test("a LEGACY park whose updatedAt was refreshed by an unrelated touch is still legacy — and swept under the flag", async () => {
+  // The exact resident-household gap (2026-07-22): a restart mass-touched every
+  // legacy park's `updatedAt`, so the updatedAt-keyed sweep (a) misclassified them
+  // as post-epoch and (b) restarted their TTL — the operator's explicit
+  // HOMEOPS_SWEEP_LEGACY_PARKED=1 sweep expired nothing. The park CLOCK must be
+  // the blocked cursor step's startedAt (the park moment), not the write stamp.
+  process.env.HOMEOPS_CONNECTOR_PARK_TTL_DAYS = "7";
+  delete process.env.HOMEOPS_SWEEP_LEGACY_PARKED;
+  store.createRun({
+    id: "run_park_legacy_touched", householdId: "local", actorId: "m-alex", source: "manual", sourceRef: {},
+    title: "Legacy park, freshly touched", status: "waiting_for_connector", cursor: 0,
+    steps: [{ index: 0, toolId: "gmail.search", title: "check gmail", detail: "Gmail isn't connected yet.", status: "blocked", input: {}, startedAt: Date.parse("2026-06-27T12:00:00Z") }],
+  });
+  const run = store.getRun("run_park_legacy_touched");
+  run.updatedAt = new Date().toISOString(); // the unrelated touch — minutes old
+  store.createRun(run);
+
+  await engine.expireStaleRuns();
+  const after1 = store.getRun("run_park_legacy_touched");
+  assert.equal(after1.status, "waiting_for_connector", "still grandfathered without the flag, touch or no touch");
+
+  process.env.HOMEOPS_SWEEP_LEGACY_PARKED = "1";
+  await engine.expireStaleRuns();
+  const after2 = store.getRun("run_park_legacy_touched");
+  assert.equal(after2.status, "expired", "the flag is a one-shot operator decision — a refreshed updatedAt must not hide a pre-epoch park from it");
+  assert.equal(after2.error, "connector_park_expired");
+});
+
+test("a POST-epoch park's TTL is measured from the park moment — an unrelated touch never restarts it", async () => {
+  process.env.HOMEOPS_CONNECTOR_PARK_TTL_DAYS = "0.0001"; // ~9s TTL
+  delete process.env.HOMEOPS_SWEEP_LEGACY_PARKED;
+  store.createRun({
+    id: "run_park_new_touched", householdId: "local", actorId: "m-alex", source: "manual", sourceRef: {},
+    title: "New park, freshly touched", status: "waiting_for_connector", cursor: 0,
+    // Parked 5 minutes ago (post-epoch, way past the ~9s TTL)…
+    steps: [{ index: 0, toolId: "gmail.search", title: "check gmail", detail: "Gmail isn't connected yet.", status: "blocked", input: {}, startedAt: Date.now() - 5 * 60_000 }],
+  });
+  const run = store.getRun("run_park_new_touched");
+  run.updatedAt = new Date().toISOString(); // …but touched just now.
+  store.createRun(run);
+
+  await engine.expireStaleRuns();
+  const after1 = store.getRun("run_park_new_touched");
+  assert.equal(after1.status, "expired", "TTL must run from the park moment (step startedAt), not the last write — otherwise every restart postpones expiry forever");
+});
+
 test("approval-parked (waiting_for_approval) sweep behavior is unchanged by the connector-park TTL", async () => {
   delete process.env.HOMEOPS_SWEEP_LEGACY_PARKED;
   const created = await owner.req("/api/approvals", {
