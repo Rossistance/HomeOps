@@ -212,3 +212,35 @@ describe("chat-run agent attribution rollback (HOMEOPS_CHAT_AGENT_ATTRIBUTION=of
     assert.match(String(step.detail), /needs to run as a specific helper/i);
   });
 });
+
+describe("NEW-HOUSEHOLD self-heal (lead-2 finale): agt_household is created on first chat attribution", () => {
+  // seedDefaults() only seeds the RESIDENT tenant at boot — a /api/signup household
+  // never had agt_household, so chat attribution silently no-oped and notify_contact
+  // hard-refused every plain chat ask for every new family. ensureOpenDefaultAgent
+  // now self-creates the default agent in the CURRENT tenant with the documented
+  // open (empty = permissive, deny-only) allow-list. Pinned here at the module level
+  // in a non-resident tenant context.
+  test("ensureOpenDefaultAgent creates the missing default agent in a non-resident tenant, idempotently", async () => {
+    const ctx2 = await (await import("./harness.mjs")).startServer();
+    try {
+      process.env.HOMEOPS_DATA_DIR = ctx2.dataDir;
+      const { runWithTenant } = await import("../tenant-context.mjs");
+      const store = await import("../store.mjs");
+      const orch = await import("../orchestrator.mjs");
+      await runWithTenant("hh_wp002selfheal", async () => {
+        assert.equal(store.getAgent("agt_household") ?? null, null, "fresh tenant must start without the default agent");
+        const created = orch.ensureOpenDefaultAgent("agt_household");
+        assert.ok(created, "the default agent must be self-created");
+        assert.equal(created.id, "agt_household");
+        assert.equal(created.householdId, "hh_wp002selfheal", "must belong to the CURRENT tenant, never 'local'");
+        assert.equal(created.system, true);
+        assert.deepEqual(created.allowedToolIds, [], "open (deny-only) allow-list");
+        assert.deepEqual(created.allowedFunctionIds, []);
+        const again = orch.ensureOpenDefaultAgent("agt_household");
+        assert.equal(again.version, created.version, "second call must be a no-op, not a re-seed");
+      });
+    } finally {
+      await (await import("./harness.mjs")).stopServer(ctx2);
+    }
+  });
+});

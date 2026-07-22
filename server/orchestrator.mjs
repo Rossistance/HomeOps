@@ -2,7 +2,8 @@
 // into a concrete plan, records the routing decision, and starts a durable run.
 // Slice 1 implements deterministic skill→plan expansion + routing; agent/skill
 // SELECTION from a free-text goal is fleshed out in later slices.
-import { getSkill, getAgent, patchAgent, addRouting } from "./store.mjs";
+import { getSkill, getAgent, putAgent, patchAgent, addRouting, appendAudit } from "./store.mjs";
+import { currentTenant } from "./tenant-context.mjs";
 import { startRun } from "./engine.mjs";
 import { selectAgent, agentContext, isToolStepAllowed } from "./agents.mjs";
 import { planFromGoal } from "./planner.mjs";
@@ -54,7 +55,40 @@ const sameIdSet = (a, b) => Array.isArray(a) && a.length === b.length && b.every
 export function ensureOpenDefaultAgent(agentId) {
   if (agentId !== "agt_household") return getAgent(agentId);
   const agent = getAgent(agentId);
-  if (!agent) return null;
+  if (!agent) {
+    // WP-002 gap, found by the 22-UC benchmark on a disposable household:
+    // seedDefaults() only ever seeds the RESIDENT tenant at boot, so a household
+    // created via /api/signup never had an agt_household at all. Chat attribution
+    // then silently no-oped (runAssistantPlan: getAgent → null → sourceRef.agentId
+    // null) and every per-agent-gated delivery (homeops.notify_contact) hard-refused
+    // a plain chat ask — for EVERY new family, forever. Create the default agent
+    // here, at the one choke point that needs it: self-healing covers existing
+    // signed-up households too, not just future signups. Allow-lists start at the
+    // documented open default (empty = permissive, deny-only) — the same effective
+    // state the pristine-seed widening below produces for the resident tenant.
+    putAgent({
+      id: agentId,
+      householdId: currentTenant(),
+      name: "Household Assistant",
+      icon: "Bot",
+      purpose: "General family operations helper.",
+      instructions: "Help with daily household coordination. Always pause for approval before sending or sharing anything sensitive.",
+      status: "Active",
+      spaceType: "Family",
+      system: true,
+      skillIds: [],
+      allowedToolIds: [],
+      allowedFunctionIds: [],
+      deniedFunctionIds: [],
+      approvalPolicy: {},
+      triggers: [],
+      version: 1,
+      createdAt: Date.now(),
+      updatedAt: new Date().toISOString(),
+    });
+    appendAudit({ type: "agent.default_seeded", agentId, reason: "chat_attribution_missing_default_agent" });
+    return getAgent(agentId);
+  }
   const stillPristine = sameIdSet(agent.allowedToolIds ?? [], SEEDED_DEFAULT_ALLOWED_TOOL_IDS) && sameIdSet(agent.allowedFunctionIds ?? [], SEEDED_DEFAULT_ALLOWED_FUNCTION_IDS);
   if (stillPristine) { patchAgent(agentId, { allowedToolIds: [], allowedFunctionIds: [] }); return getAgent(agentId); }
   return agent;
