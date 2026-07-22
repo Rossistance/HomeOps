@@ -4,7 +4,7 @@ import { brand } from "@/brand";
 import { Icon } from "./Icon";
 import { cn } from "@/lib/cn";
 import { Avatar } from "./ui";
-import { useCalmMode, useAdvancedMode } from "@/lib/prefs";
+import { useCalmMode, useAdvancedMode, useUnifiedNav } from "@/lib/prefs";
 import type { ScreenId } from "@/types";
 
 /** Calm Mode — stills motion, flattens depth, softens color for lower sensory load. */
@@ -86,7 +86,14 @@ function NavList({ onNavigate, grouped = true }: { onNavigate?: () => void; grou
   const canAccess = useStore((s) => s.canAccess);
   const badges = useBadges();
   const [advanced] = useAdvancedMode();
-  const visible = (it: NavItem) => canAccess(it.id) && (!it.advanced || advanced);
+  const [unified] = useUnifiedNav();
+  // WP-005: with the unified flag ON, "Automations" stops being a top-level entry
+  // (its screens stay routable and reappear only under Advanced Mode) — the same
+  // "advanced tool" treatment Skills/Functions already get. Flag OFF ⇒ unchanged.
+  const visible = (it: NavItem) =>
+    canAccess(it.id) &&
+    (!it.advanced || advanced) &&
+    !(unified && it.id === "automations" && !advanced);
   const item = (it: NavItem) => {
     const active = route.screen === it.id;
     return (
@@ -244,7 +251,12 @@ function MobileBottomNav() {
   const navigate = useStore((s) => s.navigate);
   const canAccess = useStore((s) => s.canAccess);
   const badges = useBadges();
-  const primary = [...MOBILE_PRIMARY.filter((id) => canAccess(id)), ...NAV.map((n) => n.id).filter((id) => canAccess(id) && !MOBILE_PRIMARY.includes(id))].slice(0, 4);
+  const [advanced] = useAdvancedMode();
+  const [unified] = useUnifiedNav();
+  // WP-005: keep the folded-away "Automations" out of the mobile bottom nav too,
+  // so the collapsed IA is consistent across desktop and mobile.
+  const bottomVisible = (id: ScreenId) => canAccess(id) && !(unified && id === "automations" && !advanced);
+  const primary = [...MOBILE_PRIMARY.filter(bottomVisible), ...NAV.map((n) => n.id).filter((id) => bottomVisible(id) && !MOBILE_PRIMARY.includes(id))].slice(0, 4);
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around border-t border-ink-900/[0.06] bg-surface-base/90 px-1 py-1.5 shadow-[0_-1px_0_rgba(255,255,255,0.5)] backdrop-blur-xl lg:hidden">
       {primary.map((id) => {

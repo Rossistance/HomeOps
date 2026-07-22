@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore, runStatusView, useServerRuns } from "@/store/useStore";
 import { agentTemplates } from "@/data/agentTemplates";
+import { packagedTemplates, packagedCategories } from "@/data/packagedTemplates";
 import {
   PageHeader, Card, Button, IconButton, Badge, StatusDot, Drawer, Modal, Tabs, Field, TextInput, TextArea, Select, EmptyState, RiskBadge, ReadinessBadge, Checkbox,
 } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { relativeTime, fmtDateTime } from "@/lib/dates";
-import type { Agent, AgentStatus, SpaceType } from "@/types";
+import { useUnifiedNav } from "@/lib/prefs";
+import type { Agent, AgentStatus, Automation, PackagedTemplate, SpaceType, TriggerType, WorkflowPlan } from "@/types";
 import { backend, type AgentPlan, type ServerAgent, type AgentContext, type AgentVersion } from "@/connectors/api";
 
 /** ONE run world (WP-003 + ISS-018): every agent run goes through the SERVER's
@@ -178,14 +180,33 @@ function CreateAgentModal({ open, onClose, onCreate, templates }: {
   const createAgentFromPlan = useStore((s) => s.createAgentFromPlan);
   const createAgentFromTemplate = useStore((s) => s.createAgentFromTemplate);
   const createAgentFromPrompt = useStore((s) => s.createAgentFromPrompt);
+  const createAgent = useStore((s) => s.createAgent);
   const runPlan = useStore((s) => s.runPlan);
   const connectables = useConnectables();
+  const [unified] = useUnifiedNav();
 
   const [mode, setMode] = useState<"template" | "prompt">("template");
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [plan, setPlan] = useState<AgentPlan | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [pkgCat, setPkgCat] = useState("All");
+
+  // WP-005: a packaged template = one agent package. When it wraps a legacy agent
+  // template we build through the full-fidelity template path; a package distilled
+  // purely from a workflow is built directly from its own fields.
+  const createFromPackaged = (pkg: PackagedTemplate): string =>
+    pkg.agentTemplateId
+      ? createAgentFromTemplate(pkg.agentTemplateId)
+      : createAgent({
+          name: pkg.name,
+          icon: pkg.icon,
+          purpose: pkg.summary,
+          instructions: pkg.instructions,
+          status: "Active",
+          approvalPolicy: { autoAllow: pkg.autoAllow, alwaysApprove: pkg.approvalRules },
+          safetyLimits: pkg.approvalRules.length ? pkg.approvalRules : ["Asks before acting outside the household."],
+        });
 
   const reset = () => { setPrompt(""); setPlan(null); setBusy(false); setPicked(new Set()); };
   const close = () => { reset(); onClose(); };
@@ -219,8 +240,35 @@ function CreateAgentModal({ open, onClose, onCreate, templates }: {
 
   return (
     <Modal open={open} onClose={close} title="Create a helper agent" icon="Bot" size="lg" footer={footer}>
-      <Tabs tabs={[{ id: "template", label: "From a template", icon: "LayoutGrid" }, { id: "prompt", label: "From plain English", icon: "Sparkles" }]} active={mode} onChange={(m) => { setMode(m as "template" | "prompt"); setPlan(null); }} />
-      {mode === "template" ? (
+      <Tabs tabs={[{ id: "template", label: unified ? "Packaged agents" : "From a template", icon: "LayoutGrid" }, { id: "prompt", label: "From plain English", icon: "Sparkles" }]} active={mode} onChange={(m) => { setMode(m as "template" | "prompt"); setPlan(null); }} />
+      {mode === "template" && unified ? (
+        <div className="mt-3" data-testid="packaged-catalog">
+          <p className="mb-2 text-xs text-ink-500">Each package bundles instructions, suggested skills, a trigger, and the tools it needs — pick one and it's ready to schedule and run.</p>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {["All", ...packagedCategories].map((c) => (
+              <button key={c} onClick={() => setPkgCat(c)} className={`chip ${pkgCat === c ? "bg-ink-800 text-white shadow-e1" : "bg-surface-raised text-ink-600 border border-ink-900/10 hover:border-ink-900/20"}`}>{c}</button>
+            ))}
+          </div>
+          <div className="grid max-h-[50vh] grid-cols-1 gap-2.5 overflow-y-auto sm:grid-cols-2">
+            {packagedTemplates.filter((p) => pkgCat === "All" || p.category === pkgCat).map((p) => (
+              <button key={p.id} onClick={() => { onCreate(createFromPackaged(p)); }} className="card lift pressable flex flex-col items-start gap-2 p-3 text-left">
+                <div className="flex items-start gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-ink-100 text-ink-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]"><Icon name={p.icon} size={18} /></span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-ink-800">{p.name}</p>
+                    <p className="line-clamp-2 text-xs text-ink-500">{p.summary}</p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  <Badge color="sky">{p.trigger.type}</Badge>
+                  {p.suggestedSkills.length > 0 && <Badge color="lavender">{p.suggestedSkills.length} skill{p.suggestedSkills.length === 1 ? "" : "s"}</Badge>}
+                  {p.suggestedConnections.length > 0 && <Badge color="gray">{p.suggestedConnections.length} tool{p.suggestedConnections.length === 1 ? "" : "s"}</Badge>}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : mode === "template" ? (
         <div className="mt-4 grid max-h-[55vh] grid-cols-1 gap-2.5 overflow-y-auto sm:grid-cols-2">
           {templates.map((t) => (
             <button key={t.id} onClick={() => { onCreate(createAgentFromTemplate(t.id)); }} className="card lift pressable flex items-start gap-3 p-3 text-left">
@@ -327,7 +375,9 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
   const setAgentStatus = useStore((s) => s.setAgentStatus);
   const duplicateAgent = useStore((s) => s.duplicateAgent);
   const updateAgent = useStore((s) => s.updateAgent);
+  const createAutomation = useStore((s) => s.createAutomation);
   const connectables = useConnectables();
+  const [unified] = useUnifiedNav();
   const [tab, setTab] = useState("overview");
   const [instr, setInstr] = useState(agent.instructions);
   const [running, setRunning] = useState(false);
@@ -442,15 +492,22 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
           </div>
         )}
         {tab === "triggers" && (
-          <div className="space-y-2">
-            {triggers.length === 0 ? <EmptyState icon="Zap" title="No triggers" message="Add a trigger so this agent runs automatically." action={<Button size="sm" variant="primary" onClick={() => navigate("automations", { tab: "builder" })}>Add trigger</Button>} /> : triggers.map((t) => (
-              <button key={t.id} onClick={() => navigate("automations", { id: t.id })} className="flex w-full items-center justify-between rounded-2xl border border-ink-900/[0.06] bg-surface-raised p-3 text-left shadow-e1 lift pressable">
-                <div><p className="font-medium text-ink-800">{t.name}</p><p className="text-xs text-ink-500">{t.triggerType}{t.triggerConfig.schedule ? ` · ${t.triggerConfig.schedule}` : ""}</p></div>
-                <StatusDot color={t.enabled ? "sage" : "gray"} label={t.enabled ? "On" : "Off"} />
-              </button>
-            ))}
-            <Button size="sm" variant="secondary" onClick={() => navigate("automations", { tab: "builder" })}><Icon name="Plus" size={14} /> Add trigger</Button>
-          </div>
+          unified ? (
+            // WP-005: schedule the agent WITHOUT leaving Helper Agents. The composer
+            // creates a real automation attached to this agent (same store action the
+            // Automations screen uses) so the "Automations" concept lives here now.
+            <AgentTriggerComposer agent={agent} triggers={triggers} onSchedule={createAutomation} />
+          ) : (
+            <div className="space-y-2">
+              {triggers.length === 0 ? <EmptyState icon="Zap" title="No triggers" message="Add a trigger so this agent runs automatically." action={<Button size="sm" variant="primary" onClick={() => navigate("automations", { tab: "builder" })}>Add trigger</Button>} /> : triggers.map((t) => (
+                <button key={t.id} onClick={() => navigate("automations", { id: t.id })} className="flex w-full items-center justify-between rounded-2xl border border-ink-900/[0.06] bg-surface-raised p-3 text-left shadow-e1 lift pressable">
+                  <div><p className="font-medium text-ink-800">{t.name}</p><p className="text-xs text-ink-500">{t.triggerType}{t.triggerConfig.schedule ? ` · ${t.triggerConfig.schedule}` : ""}</p></div>
+                  <StatusDot color={t.enabled ? "sage" : "gray"} label={t.enabled ? "On" : "Off"} />
+                </button>
+              ))}
+              <Button size="sm" variant="secondary" onClick={() => navigate("automations", { tab: "builder" })}><Icon name="Plus" size={14} /> Add trigger</Button>
+            </div>
+          )
         )}
         {tab === "memory" && (
           <div className="space-y-2">
@@ -706,6 +763,74 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div>
       <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-500">{title}</p>
       {children}
+    </div>
+  );
+}
+
+/* --- WP-005: in-drawer scheduler (unified nav) — the "Automations" concept, folded
+   into Helper Agents. Creates a real automation attached to this agent via the same
+   store action the Automations screen uses, so nothing leaves Helper Agents. --- */
+const SCHEDULE_TRIGGER_TYPES: TriggerType[] = ["Schedule", "Manual", "Email Received", "Calendar Event Created", "File Changed", "Text Message Received"];
+
+function AgentTriggerComposer({ agent, triggers, onSchedule }: {
+  agent: Agent;
+  triggers: Automation[];
+  onSchedule: (input: Partial<Automation> & { name: string; agentId: string; plan: WorkflowPlan }) => string;
+}) {
+  const [triggerType, setTriggerType] = useState<TriggerType>("Schedule");
+  const [schedule, setSchedule] = useState("");
+  const [justAdded, setJustAdded] = useState<string | null>(null);
+
+  const add = () => {
+    const detail = schedule.trim() || (triggerType === "Schedule" ? "every morning at 7am" : triggerType);
+    const plan: WorkflowPlan = {
+      trigger: detail,
+      inputSources: [],
+      agentId: agent.id,
+      agentName: agent.name,
+      steps: [],
+      toolsActions: [],
+      approvalGates: [],
+      output: `${agent.name} runs on ${detail}.`,
+      notifications: [],
+      errorHandling: "Pause and notify on failure.",
+      activityLogging: "Log each run to Activity & Memory.",
+    };
+    onSchedule({
+      name: `${agent.name} — ${triggerType}`,
+      description: `Runs ${agent.name} on ${detail}.`,
+      category: "Schedule",
+      agentId: agent.id,
+      triggerType,
+      triggerConfig: triggerType === "Schedule" ? { schedule: detail } : {},
+      approvalRequired: false,
+      enabled: true,
+      status: "active",
+      plan,
+    });
+    setJustAdded(`${triggerType} · ${detail}`);
+    setSchedule("");
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="well p-3.5">
+        <p className="mb-2 text-sm font-semibold text-ink-800">Schedule this agent</p>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <Field label="Trigger"><Select value={triggerType} onChange={(e) => setTriggerType(e.target.value as TriggerType)} aria-label="Trigger type">{SCHEDULE_TRIGGER_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</Select></Field>
+          <Field label="Schedule / cadence" hint="e.g. every morning at 7am"><TextInput value={schedule} onChange={(e) => setSchedule(e.target.value)} placeholder="every morning at 7am" aria-label="Schedule cadence" /></Field>
+        </div>
+        <div className="mt-2 flex justify-end"><Button size="sm" variant="primary" onClick={add}><Icon name="Plus" size={14} /> Schedule agent</Button></div>
+        {justAdded && <p className="mt-2 flex items-center gap-1.5 text-xs text-sage-600"><Icon name="CheckCircle2" size={13} /> Scheduled: {justAdded}</p>}
+      </div>
+      <div className="space-y-2">
+        {triggers.length === 0 ? <p className="text-sm text-ink-400">No triggers yet — schedule one above and this agent runs on its own.</p> : triggers.map((t) => (
+          <div key={t.id} className="flex w-full items-center justify-between rounded-2xl border border-ink-900/[0.06] bg-surface-raised p-3 shadow-e1">
+            <div><p className="font-medium text-ink-800">{t.name}</p><p className="text-xs text-ink-500">{t.triggerType}{t.triggerConfig.schedule ? ` · ${t.triggerConfig.schedule}` : ""}</p></div>
+            <StatusDot color={t.enabled ? "sage" : "gray"} label={t.enabled ? "On" : "Off"} />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

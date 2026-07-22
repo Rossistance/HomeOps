@@ -803,6 +803,48 @@ export interface AgentTemplate {
   defaultAutoAllow: string[];
 }
 
+/**
+ * WP-005 — a packaged Helper Agent template.
+ *
+ * The unified surface treats an agent as ONE package: instructions + suggested
+ * skills + a trigger/schedule + tools + approval gates. This is the merged shape
+ * of the three legacy catalogs (agentTemplates + workflowTemplates + playbooks),
+ * built in src/data/packagedTemplates.ts. Additive — the legacy AgentTemplate /
+ * WorkflowTemplate types are unchanged and still power the flag-off flows.
+ */
+export interface PackagedTemplate {
+  id: string;
+  name: string;
+  icon: string;
+  category: string;
+  /** One-line purpose shown on the catalog card. */
+  summary: string;
+  description: string;
+  /** Agent instructions the package seeds. */
+  instructions: string;
+  defaultSpaceType: SpaceType;
+  /** Primary trigger/schedule the package suggests. */
+  trigger: { type: TriggerType; detail: string };
+  /** Bundled skills/playbooks/workflows, by display name. */
+  suggestedSkills: string[];
+  /** Connectors / tools the package wants attached. */
+  suggestedConnections: string[];
+  approvalRules: string[];
+  autoAllow: string[];
+  /**
+   * When set, "New agent" builds from this legacy AgentTemplate id (full-fidelity
+   * path). Absent for packages distilled purely from a workflow template — those
+   * are built directly from the fields above.
+   */
+  agentTemplateId?: string;
+  /** Provenance — which legacy catalog entries this package folds in (dedupe map). */
+  sources: {
+    agentTemplateIds: string[];
+    workflowTemplateIds: string[];
+    playbookIds: string[];
+  };
+}
+
 /* ----------------------------------------------------------------------- */
 /* Settings & meta                                                         */
 /* ----------------------------------------------------------------------- */

@@ -6,7 +6,7 @@ import { PageHeader, Card, SectionTitle, Button, Toggle, Select, Badge, Modal, H
 import { Icon } from "@/components/Icon";
 import { AIProvidersPanel } from "@/screens/AIProviders";
 import { backend, type CatalogTool, type RiskOverride } from "@/connectors/api";
-import { useCalmMode, useAdvancedMode } from "@/lib/prefs";
+import { useCalmMode, useAdvancedMode, useUnifiedNav } from "@/lib/prefs";
 
 export function Settings() {
   const data = useStore((s) => s.data);
@@ -34,6 +34,7 @@ export function Settings() {
   const me = data.members.find((m) => m.id === session?.actorId) ?? data.members.find((m) => m.isCurrentUser);
   const [calm, setCalm] = useCalmMode();
   const [advanced, setAdvanced] = useAdvancedMode();
+  const [unifiedNav, setUnifiedNav] = useUnifiedNav();
   const setOwnerPin = async () => { if (!pin) return; await backend.setSettings({ ownerPin: pin }); setPin(""); toast({ kind: "success", title: "Owner PIN set", message: "Elevated profiles now require this PIN to sign in." }); };
   // Calendar auto-sync (server-owned, Adult Admin): pre-authorized Google pushes + two-way sweep.
   const [calendarAutoSync, setCalendarAutoSync] = useState(false);
@@ -186,6 +187,9 @@ export function Settings() {
         {/* Advanced */}
         <Card className="card-pad">
           <SectionTitle icon="FlaskConical">Advanced</SectionTitle>
+          <Row label="Unified Helper Agents (preview)" desc="Make Helper Agents the one place to build, schedule, and run household helpers. Automations folds in as a scheduling view, and the low-level Skills, Functions, and Workflow builders move behind Advanced Mode. Your existing automations and screens are untouched — only where they live in the menu changes.">
+            <Toggle checked={unifiedNav} onChange={(v) => setUnifiedNav(v)} ariaLabel="Unified Helper Agents navigation" />
+          </Row>
           <Row label="Advanced Mode" desc="Show the Skills and Functions builders — the low-level building blocks agents and automations run on. Most households never need to open these directly.">
             <Toggle checked={advanced} onChange={(v) => setAdvanced(v)} ariaLabel="Advanced Mode" />
           </Row>
