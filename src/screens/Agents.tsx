@@ -9,6 +9,30 @@ import { relativeTime, fmtDateTime } from "@/lib/dates";
 import type { Agent, AgentStatus, SpaceType } from "@/types";
 import { backend, type AgentPlan, type ServerAgent, type AgentContext, type AgentVersion } from "@/connectors/api";
 
+/** ONE run world (WP-003 + ISS-018): every agent run goes through the SERVER's
+ *  agent-run endpoint so it is attributed with server-verified identity and lands in
+ *  the agent's own Run History. UI-created agents are local-first and may not exist in
+ *  the durable server registry yet (the one-time migration only covers agents that
+ *  existed when it ran) — so on an unknown-agent style failure, register the agent
+ *  idempotently on its own id (same contract as migrateAgentsToServer) and retry once. */
+async function runAgentOnServer(agent: Agent): Promise<{ run?: unknown; error?: string; message?: string }> {
+  const sid = agent.serverId ?? agent.id;
+  let r = await backend.runAgentServer(sid);
+  if (r.error && r.error !== "backend_unreachable") {
+    const spaces = useStore.getState().data.spaces;
+    await backend.createAgent({
+      id: agent.id, name: agent.name, icon: agent.icon, purpose: agent.purpose, instructions: agent.instructions,
+      status: agent.status, spaceType: (spaces.find((s) => s.id === agent.spaceId)?.type as string) ?? "Family",
+      skillIds: [], allowedToolIds: agent.allowedToolIds ?? [], allowedFunctionIds: [],
+      deniedToolIds: [], deniedFunctionIds: [],
+      approvalPolicy: agent.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] },
+    });
+    r = await backend.runAgentServer(agent.id);
+  }
+  if (r.error) console.warn(`[agents] server run failed: ${r.error}${r.message ? ` — ${r.message}` : ""}`);
+  return r;
+}
+
 const STATUS_COLOR: Record<AgentStatus, "sage" | "amber" | "coral" | "sky" | "gray"> = {
   Active: "sage",
   Paused: "amber",
@@ -36,12 +60,17 @@ export function Agents() {
   const data = useStore((s) => s.data);
   const params = useStore((s) => s.route.params);
   const navigate = useStore((s) => s.navigate);
-  const runAgentLive = useStore((s) => s.runAgentLive);
   const setAgentStatus = useStore((s) => s.setAgentStatus);
   const duplicateAgent = useStore((s) => s.duplicateAgent);
   const deleteAgent = useStore((s) => s.deleteAgent);
   const [runningId, setRunningId] = useState<string | null>(null);
-  const runAgent = async (id: string) => { setRunningId(id); await runAgentLive(id); setRunningId(null); };
+  // One run world: list-row runs go through the server agent-run endpoint too (ISS-018).
+  const runAgent = async (id: string) => {
+    setRunningId(id);
+    const a = data.agents.find((x) => x.id === id);
+    if (a) await runAgentOnServer(a);
+    setRunningId(null);
+  };
 
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("All");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -295,7 +324,6 @@ const TABS = [
 function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () => void; onDelete: () => void }) {
   const data = useStore((s) => s.data);
   const navigate = useStore((s) => s.navigate);
-  const runAgentLive = useStore((s) => s.runAgentLive);
   const setAgentStatus = useStore((s) => s.setAgentStatus);
   const duplicateAgent = useStore((s) => s.duplicateAgent);
   const updateAgent = useStore((s) => s.updateAgent);
@@ -317,7 +345,7 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
   // mapper Automations » Run History uses, so a run shows identical status text in
   // both places. `data.runs` (the local write-mirror) is no longer read as a listing
   // source here.
-  const { runs, loading: runsLoading, stale: runsStale, fetchedAt: runsFetchedAt, refresh: refreshRuns } = useServerRuns({ agentId: agent.id });
+  const { runs, loading: runsLoading, stale: runsStale, fetchedAt: runsFetchedAt, refresh: refreshRuns } = useServerRuns({ agentId: agent.serverId ?? agent.id });
   const enabledTools = attached.flatMap((c) => c.tools.filter((t) => agent.allowedToolIds.includes(t.id)).map((t) => ({ conn: c.name, tool: t })));
   const pendingEvos = (data.evolutions ?? []).filter((e) => e.agentId === agent.id && e.status === "pending");
 
@@ -329,9 +357,16 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
     const has = agent.allowedToolIds.includes(id);
     updateAgent(agent.id, { allowedToolIds: has ? agent.allowedToolIds.filter((x) => x !== id) : [...agent.allowedToolIds, id] });
   };
-  // runAgentLive resolves only once the run reaches a terminal/parked state (it awaits
-  // runPlan → syncServerRun) — by then GET /api/runs already reflects it, so refetch.
-  const runNow = async () => { setRunning(true); await runAgentLive(agent.id); setRunning(false); setTab("runs"); refreshRuns(); };
+  // ONE run world (WP-003 + ISS-018): "Run now" goes through the SERVER'S agent-run
+  // endpoint, so the run is attributed to this agent with server-verified identity and
+  // shows up in the agent's own Run History. The old client-plan path (runAgentLive →
+  // /api/runs/start) deliberately strips agentId — runs started that way could never
+  // appear in agent history.
+  const runNow = async () => {
+    setRunning(true);
+    await runAgentOnServer(agent);
+    setRunning(false); setTab("runs"); refreshRuns();
+  };
 
   return (
     <Drawer
@@ -525,12 +560,8 @@ function AgentCapabilities({ agentId, agentName }: { agentId: string; agentName:
     setSaving(false);
   };
 
-  const runViaServer = async () => {
-    setRunning(true);
-    const r = await backend.runAgentServer(agentId);
-    setRunning(false);
-    if (r.run) navigate("automations", { tab: "monitor" });
-  };
+  // "Run via server" collapsed into the drawer's single "Run now" (one run world —
+  // both did the same thing once Run now went through the server endpoint).
 
   if (loading) return <div className="flex items-center gap-2 text-sm text-ink-400"><Icon name="Loader2" size={14} className="animate-spin" /> Loading server policy…</div>;
   if (notFound) return (
@@ -565,7 +596,6 @@ function AgentCapabilities({ agentId, agentName }: { agentId: string; agentName:
             {ctx?.openAllowList ? " · open allow-list (any available tool, except denied)" : ""}
           </p>
         </div>
-        <Button size="sm" variant="primary" disabled={running} onClick={runViaServer}>{running ? <><Icon name="Loader2" size={13} className="animate-spin" /> Running…</> : <><Icon name="Play" size={13} /> Run via server</>}</Button>
       </div>
       <p className="text-xs text-ink-400"><Icon name="ShieldCheck" size={12} className="mr-1 inline text-sage-500" />The durable executor re-validates every step against this policy — a <strong>Denied</strong> or unpermitted tool can never run, even if a plan proposes it. <strong>—</strong> inherits the open default. Unavailable items can be permitted but won't run until connected.</p>
 

@@ -78,8 +78,14 @@ export default defineConfig({
     // e.g. Playwright runs writing traces — and watching tests/topgun/.artifacts
     // triggers full page reloads MID-SUITE when traces/screenshots land. Neither
     // tree is frontend source; the watcher has no business there.
+    // NOTE: function form, not glob strings — Vite 8 ships chokidar v4, which
+    // dropped glob support; glob strings here silently killed the whole watcher
+    // (zero HMR until restart). A plain substring matcher is separator-agnostic.
     watch: {
-      ignored: ["**/server/.data/**", "**/tests/topgun/.artifacts/**", "**/.top-gun/**"],
+      ignored: (p: string) => {
+        const n = p.replace(/\\/g, "/");
+        return n.includes("/server/.data/") || n.includes("/tests/topgun/.artifacts/") || n.includes("/.top-gun/");
+      },
     },
     proxy: {
       "/api": { target: BACKEND, changeOrigin: true },

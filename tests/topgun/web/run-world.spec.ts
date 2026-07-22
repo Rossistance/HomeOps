@@ -83,6 +83,15 @@ test.beforeEach(async ({ page }) => {
   await signUpDisposableHousehold(page);
 });
 
+test.afterEach(async ({ page }) => {
+  // Best-effort teardown: physically remove the disposable tenant DB this test just
+  // created (server/index.mjs DELETE /api/account, the Owner-deletes-the-whole-
+  // household path) so hh_* directories don't pile up across repeated local runs.
+  // Never touches the resident family household — signUpDisposableHousehold always
+  // signs in as a freshly created Owner on its own throwaway tenant.
+  await apiFetch(page, "/api/account", { method: "DELETE", body: { password: "tg-disposable-pass-1" } }).catch(() => {});
+});
+
 test("(a) a manual API-started run renders in Automations » Run History with a real status label", async ({ page }) => {
   const errors = watchPageErrors(page);
   const started = await apiFetch(page, "/api/runs/start", {
@@ -134,6 +143,27 @@ test("(b) a real 'Run now' UI click shows IDENTICAL status text in Agent history
   // The load-bearing check below is the history rendering, not this transient
   // "Running…" state — a fast tool can resolve before this assertion even runs.
   await expect(page.getByRole("tab", { name: /run history/i }).or(page.getByText(/no runs yet|manual run/i))).toBeVisible({ timeout: 25_000 }).catch(() => {});
+
+  // Settle the run to a TERMINAL state before comparing the two listings.
+  // Comparing while the run is live is a race, not a truth check: both surfaces
+  // render the same server status, but it can legitimately advance between the
+  // two reads ("Running" → "Completed"), which fails the equality without any
+  // one-history violation. Server truth first, then both UIs read the same fact.
+  const agentId = agent.body.agent.id;
+  let settledRunId = "";
+  await expect(async () => {
+    const list = await apiFetch(page, `/api/runs?agentId=${agentId}&limit=10`);
+    const newest = (list.body?.runs ?? [])[0];
+    expect(newest, "the Run now click must have produced a run attributed to this agent").toBeTruthy();
+    expect(["completed", "failed", "expired", "cancelled"]).toContain(newest.status);
+    settledRunId = newest.id;
+  }).toPass({ timeout: 30_000 });
+  void settledRunId; // cleanup is whole-tenant: each test deletes its throwaway account
+  // Refresh the drawer's already-fetched history so it re-reads the settled truth
+  // (reopen → Run History tab; the drawer reopens on Overview).
+  await page.keyboard.press("Escape");
+  await page.getByText("TG-WP003 Read Agent", { exact: true }).first().click();
+  await page.getByRole("dialog").getByRole("button", { name: /run history/i }).click();
 
   // The agent-detail run row's status chip — scoped to the run row itself, NOT a
   // bare `.chip` page-wide search (the drawer header renders its OWN `.chip` for
