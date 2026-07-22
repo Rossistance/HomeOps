@@ -5,6 +5,7 @@
 import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods } from "./store.mjs";
 import { mealEventNotes, pushEventToGoogle } from "./calendar.mjs";
 import { deliverNotification, deliverInAppFallback } from "./notify.mjs";
+import { memoryProvider } from "./memory-provider.mjs";
 import crypto from "node:crypto";
 
 const eid = (p) => p + "_" + crypto.randomBytes(8).toString("hex");
@@ -28,14 +29,22 @@ export const INTERNAL_FUNCTIONS = {
     async run(ctx, input) {
       const text = String(input?.text ?? "").trim();
       if (!text) return { ok: false, error: "empty_text", message: "Nothing to remember." };
+      const scope = input?.scope ?? "family";
+      const type = input?.type ?? "Fact";
       const rec = addMemory({
         householdId: ctx.householdId,
-        scope: input?.scope ?? "family",
-        type: input?.type ?? "Fact",
+        scope,
+        type,
         text,
         source: { runId: ctx.runId, actorId: ctx.actorId },
       });
-      return { ok: true, result: { id: rec.id, text: rec.text, scope: rec.scope } };
+      // WP-007 (DEC-014) dual-write: the tenant memory.json row above stays the source of
+      // truth (KEPT, never removed — no data loss either direction); the provider write
+      // below feeds retrieval-quality search/profile (planner.mjs's read path, the Memory
+      // tab's search box). Fail-soft by construction (memory-provider.mjs never throws) —
+      // a degraded/offline provider must never fail this tool or lose the tenant write.
+      const providerWrite = await memoryProvider.add(text, { containerTag: ctx.householdId, scope, type, sourceActorId: ctx.actorId, id: `sm_mem_${rec.id}` });
+      return { ok: true, result: { id: rec.id, text: rec.text, scope: rec.scope, providerWrite: { ok: providerWrite.ok, degraded: !!providerWrite.degraded } } };
     },
   },
 

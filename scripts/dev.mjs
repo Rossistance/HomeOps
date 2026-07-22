@@ -42,6 +42,29 @@ if (fs.existsSync(join(rtDir, "node_modules", "playwright"))) {
   browserRt.on("exit", (code) => console.log(`[browser-runtime] exited with ${code}`));
 }
 
-const shutdown = () => { try { backend.kill(); } catch {} try { web.kill(); } catch {} try { browserRt?.kill(); } catch {} };
+// Memory sidecar (WP-007, DEC-014): opt-in, mirroring the browser-runtime pattern above.
+// On THIS host `npx supermemory local install` requires WSL (none installed here — see
+// server/memory-provider.mjs's header for the exact transcript), so nothing spawns by
+// default; the server already falls back to its in-process sqlite-FTS5 backend with zero
+// configuration. If a real sidecar IS installed (its launcher reports a real binary path)
+// AND the operator explicitly opts in via HOMEOPS_MEMORY_SIDECAR=1, start it alongside dev
+// so /api/health's memoryProvider field reflects an actually-connected sidecar.
+let memorySidecar = null;
+if (process.env.HOMEOPS_MEMORY_SIDECAR === "1") {
+  const home = process.env.USERPROFILE || process.env.HOME || "";
+  const candidates = [join(home, ".local", "bin", "supermemory-server"), join(home, ".local", "bin", "supermemory-server.exe")];
+  if (home && candidates.some((p) => fs.existsSync(p))) {
+    const sidecarPort = process.env.HOMEOPS_MEMORY_SIDECAR_PORT || "6767";
+    memorySidecar = spawn(isWin ? "npx.cmd" : "npx", ["--yes", "supermemory", "local", "start", "--port", sidecarPort], {
+      cwd: root, stdio: "inherit", shell: isWin,
+      env: { ...process.env, ...(extraCa ? { NODE_EXTRA_CA_CERTS: extraCa } : {}) },
+    });
+    memorySidecar.on("exit", (code) => console.log(`[memory-sidecar] exited with ${code}`));
+  } else {
+    console.log("[memory-sidecar] HOMEOPS_MEMORY_SIDECAR=1 but no installed binary found (run `npx supermemory local install`, needs WSL on Windows) — using the sqlite-FTS5 fallback instead.");
+  }
+}
+
+const shutdown = () => { try { backend.kill(); } catch {} try { web.kill(); } catch {} try { browserRt?.kill(); } catch {} try { memorySidecar?.kill(); } catch {} };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

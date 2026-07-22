@@ -427,6 +427,11 @@ export interface Meal { id: string; householdId: string; date: string | null; ti
 export interface ServerConversationMessage { role: "user" | "assistant"; text: string; kind?: string; plan?: AgentPlan | null; build?: ChatBuild | null; built?: boolean; builtIds?: { skillId?: string; agentId?: string; triggerId?: string }; model?: string | null; at: string }
 export interface ServerConversation { id: string; householdId: string; actorId: string; title: string; messages: ServerConversationMessage[]; createdAt: string; updatedAt: string }
 export interface ServerMemory { id: string; householdId: string; scope: string; type: string; text: string; createdAt: number; source?: { runId?: string; actorId?: string } }
+/* ---- WP-007 retrieval-quality memory (DEC-014: sqlite-FTS5 fallback, or a real
+ * Supermemory sidecar when configured — see server/memory-provider.mjs) ---- */
+export interface MemorySearchResult { id?: string; text: string; scope?: string; type?: string; createdAt?: number }
+export interface MemoryProfileSummary { totalMemories: number; byType: Record<string, number>; byScope: Record<string, number>; highlights: MemorySearchResult[] }
+export interface MemorySearchResponse { ok: boolean; degraded: boolean; results: MemorySearchResult[]; profile: MemoryProfileSummary | null }
 /* ---- Risk-class overrides (item 9): household-set, server-enforced ---- */
 export interface RiskOverride { id: string; householdId: string; toolId: string; riskClass: string | null; skipApproval: boolean; setBy: string; setAt: string }
 export interface CatalogTool {
@@ -910,6 +915,13 @@ export const backend = {
   },
   async deleteMemoryRemote(id: string): Promise<{ ok: boolean; error?: string }> {
     try { return await req(`/memory/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  // WP-007 s5 — retrieval-quality search + profile for the Memory tab's search box.
+  // Scoped server-side to the session's own household; `degraded:true` means the
+  // provider (sidecar or its sqlite-FTS5 fallback) couldn't answer — the caller shows
+  // honest fallback copy rather than pretending the empty result set is complete.
+  async memorySearch(q: string): Promise<MemorySearchResponse> {
+    try { return await req<MemorySearchResponse>(`/memory/search?q=${encodeURIComponent(q)}`); } catch { return { ok: false, degraded: true, results: [], profile: null }; }
   },
   async artifacts(query = ""): Promise<ServerArtifact[]> {
     try { return (await req<{ artifacts: ServerArtifact[] }>(`/artifacts${query}`)).artifacts ?? []; } catch { return []; }

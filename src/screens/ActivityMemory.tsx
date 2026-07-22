@@ -3,7 +3,7 @@ import { useStore } from "@/store/useStore";
 import { PageHeader, Card, Button, IconButton, Badge, Tabs, Modal, Field, TextInput, TextArea, Select, Toggle, EmptyState, StatusDot } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { relativeTime, fmtDateTime } from "@/lib/dates";
-import { backend, type ServerEvolution, type AuditEvent } from "@/connectors/api";
+import { backend, type ServerEvolution, type AuditEvent, type MemorySearchResponse } from "@/connectors/api";
 import type { ActivityLogEntry, MemoryEntry, MemoryType, ScreenId, Route, EvolutionProposal } from "@/types";
 
 export function ActivityMemory() {
@@ -133,6 +133,89 @@ function ActivityLog() {
 
 const MEM_TYPES: MemoryType[] = ["Fact", "Preference", "Routine", "Rule", "Contact", "Insight"];
 
+/** WP-007 s5 — retrieval-quality memory search + profile, backed by
+ *  GET /api/memory/search (server/memory-provider.mjs; DEC-014: sqlite-FTS5 fallback, or
+ *  a real Supermemory sidecar when configured). Additive to the existing local Memory
+ *  list below — this searches the household's whole recall history via the provider,
+ *  not just the client-cached `data.memories` array. */
+function ProviderMemorySearch() {
+  const [q, setQ] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<MemorySearchResponse | null>(null);
+
+  const runSearch = useCallback(async (query: string) => {
+    setLoading(true);
+    const r = await backend.memorySearch(query);
+    setResult(r);
+    setLoading(false);
+  }, []);
+  // Load the profile (and any top highlights) once on mount, even with no query typed yet.
+  useEffect(() => { void runSearch(""); }, [runSearch]);
+
+  const profile = result?.profile ?? null;
+  const degraded = result?.degraded ?? false;
+
+  return (
+    <Card className="card-pad mb-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Icon name="Sparkles" size={15} className="text-ember-500" />
+        <p className="font-display text-sm font-semibold text-ink-900">Search memory</p>
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1 min-w-[160px]">
+          <Icon name="Search" size={15} className="pointer-events-none absolute left-2.5 top-2.5 text-ink-400" />
+          <TextInput
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") void runSearch(q); }}
+            placeholder="Ask what your helpers remember…"
+            aria-label="Search memory across your household's full recall history"
+            className="pl-8"
+          />
+        </div>
+        <Button variant="secondary" onClick={() => void runSearch(q)} disabled={loading}>
+          {loading ? <Icon name="Loader2" size={14} className="animate-spin" /> : <Icon name="Search" size={14} />}
+          Search
+        </Button>
+      </div>
+
+      {degraded && (
+        <div className="mt-3 flex items-center gap-2 rounded-2xl border border-amber-200/70 bg-amber-50 px-4 py-2.5 text-sm text-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]" role="status">
+          <Icon name="AlertTriangle" size={15} />
+          Enhanced memory recall is offline right now — showing best-effort local results, not the full household history.
+        </div>
+      )}
+
+      {profile && profile.totalMemories > 0 && (
+        <div className="mt-3 rounded-2xl border border-ink-900/[0.06] bg-surface-sunken/60 p-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Household memory profile</p>
+          <p className="mt-1 text-sm text-ink-700">{profile.totalMemories} memories remembered across this household.</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {Object.entries(profile.byType).map(([type, count]) => (
+              <Badge key={type} color="gray">{type} · {count}</Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {result && q && (
+        result.results.length === 0 ? (
+          <p className="mt-3 text-sm text-ink-400">No memories match "{q}" yet.</p>
+        ) : (
+          <ul className="mt-3 space-y-1.5">
+            {result.results.map((m, i) => (
+              <li key={m.id ?? i} className="rounded-xl border border-ink-900/[0.06] bg-surface-rim px-3 py-2 text-sm text-ink-700">
+                {m.text}
+                <span className="ml-2 text-xs text-ink-400">{m.scope ?? "household"}{m.type ? ` · ${m.type}` : ""}</span>
+              </li>
+            ))}
+          </ul>
+        )
+      )}
+    </Card>
+  );
+}
+
 function Memory() {
   const data = useStore((s) => s.data);
   const params = useStore((s) => s.route.params);
@@ -161,6 +244,7 @@ function Memory() {
         <Select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="!w-auto"><option value="all">All types</option>{MEM_TYPES.map((t) => <option key={t}>{t}</option>)}</Select>
         <Button variant="ember" onClick={() => setCreating(true)}><Icon name="Plus" size={16} /> New memory</Button>
       </div>
+      <ProviderMemorySearch />
       <div className="mb-4 flex items-center gap-2 rounded-2xl border border-lavender-200/70 bg-lavender-50 px-4 py-2.5 text-sm text-lavender-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]"><Icon name="Lock" size={15} /> Sensitive memories stay within their space and aren't used by agents elsewhere.</div>
       {list.length === 0 ? <EmptyState icon="Brain" title="No memories" message="Add a fact your helpers should remember." /> : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">

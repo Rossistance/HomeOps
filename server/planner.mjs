@@ -11,6 +11,7 @@ import { providerChat, providerChatStream, providerChatWithFallback, aiProviderB
 import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride, recordAiUsage, aiBudgetExhausted } from "./store.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
 import { searchWeb, readPage } from "./web.mjs";
+import { memoryProvider } from "./memory-provider.mjs";
 
 // Input hints for the internal family-data tools, so the planner knows how to fill
 // them (and the engine knows which fields require threading — see toolInputSchema).
@@ -415,7 +416,7 @@ For a plan or build, "answer" is one friendly sentence summarizing what you'll s
  * authoritative, and a child's assistant never sees adults-only items. The client
  * context (if any) is kept only as a low-priority hint.
  */
-export function buildServerContext(session, clientContext) {
+export async function buildServerContext(session, clientContext, { goal } = {}) {
   if (!session) return clientContext ?? {};
   const hh = session.householdId;
   const now = new Date().toISOString();
@@ -430,9 +431,41 @@ export function buildServerContext(session, clientContext) {
     .filter((t) => t.status !== "done")
     .slice(0, 10)
     .map((t) => ({ id: t.id, title: t.title, type: t.type, dueAt: t.dueAt, assignedMemberId: t.assignedMemberId }));
-  const memory = listMemory({ householdId: hh, limit: 6 })
-    .filter((m) => m.scope !== "personal" || m.source?.actorId === session.actorId)
-    .map((m) => ({ text: m.text, scope: m.scope }));
+  // WP-007 (DEC-014) — retrieval-quality memory read path. When the provider (real
+  // sidecar, or its always-available sqlite-FTS5 fallback — see memory-provider.mjs) is
+  // healthy, ground the assistant on profile() + search(goal) instead of a flat recency
+  // slice. When it's degraded/offline, fall back to the legacy listMemory() behavior with
+  // an EXPLICIT disclosure marker in the context — never a silent, unannounced downgrade.
+  const visibleToActor = (m) => m.scope !== "personal" || (m.sourceActorId ?? m.source?.actorId) === session.actorId;
+  let memory; let memoryDisclosure;
+  const memHealth = await memoryProvider.health();
+  if (memHealth.ok) {
+    const [profileRes, searchRes] = await Promise.all([
+      memoryProvider.profile({ containerTag: hh }),
+      goal ? memoryProvider.search(String(goal), { containerTag: hh, limit: 8 }) : Promise.resolve({ ok: true, degraded: false, results: [] }),
+    ]);
+    if (profileRes.ok && searchRes.ok) {
+      const seen = new Set();
+      const rows = [];
+      for (const r of [...(searchRes.results ?? []), ...(profileRes.highlights ?? [])]) {
+        if (!r?.text || seen.has(r.text)) continue;
+        if (!visibleToActor(r)) continue;
+        seen.add(r.text);
+        rows.push({ text: r.text, scope: r.scope });
+        if (rows.length >= 6) break;
+      }
+      memory = rows;
+    } else {
+      memoryDisclosure = "memory recall degraded — provider returned an error, showing recent entries only";
+    }
+  } else {
+    memoryDisclosure = "memory recall degraded — sidecar offline, showing recent entries only";
+  }
+  if (memoryDisclosure) {
+    memory = listMemory({ householdId: hh, limit: 6 })
+      .filter((m) => m.scope !== "personal" || m.source?.actorId === session.actorId)
+      .map((m) => ({ text: m.text, scope: m.scope }));
+  }
   // Active roster only — archived members (removed invites, demo seeds) were
   // leaking in and made the assistant size meals for a phantom family of 10.
   const activeMembers = listMembers({ householdId: hh }).filter((m) => !m.archived);
@@ -459,6 +492,7 @@ export function buildServerContext(session, clientContext) {
   return {
     now, asActor: { id: session.actorId, role: session.role },
     householdSize, members, upcomingEvents: events, openTasks: tasks, upcomingMeals, recentMemory: memory,
+    ...(memoryDisclosure ? { memoryDisclosure } : {}),
     existingAgents, existingSkills, existingAutomations,
     ...(location ? { location } : {}),
     clientHints: clientContext ?? undefined,
@@ -525,7 +559,7 @@ export async function assistantRespond({ message, context, session, providerId, 
   const gated = budgetGate(session); if (gated) return gated;
   const catalog = toolCatalog(session); // full catalog resolves the model's answer + engine re-validates
   const compact = pruneCatalogForPrompt(catalog, { agent, goal: String(message), providerId: id });
-  const serverCtx = buildServerContext(session, context);
+  const serverCtx = await buildServerContext(session, context, { goal: message });
   const ctxStr = JSON.stringify(serverCtx).slice(0, 4000);
   const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nUser message: ${String(message).trim()}`;
   // Conversation memory: without prior turns the assistant is amnesiac — a fact
@@ -621,7 +655,7 @@ export async function assistantStream({ message, context, session, providerId, h
   const gated = budgetGate(session); if (gated) return gated;
   const catalog = toolCatalog(session); // full catalog resolves the model's answer + engine re-validates
   const compact = pruneCatalogForPrompt(catalog, { agent, goal: String(message), providerId: id });
-  const serverCtx = buildServerContext(session, context);
+  const serverCtx = await buildServerContext(session, context, { goal: message });
   const ctxStr = JSON.stringify(serverCtx).slice(0, 4000);
   const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nUser message: ${String(message).trim()}`;
   // Same conversation memory as assistantRespond (the chat UIs always stream).

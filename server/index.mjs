@@ -69,6 +69,7 @@ import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, pushToMember } from "./notify.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
 import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast, sessionFromReq } from "./auth.mjs";
+import { memoryProvider } from "./memory-provider.mjs";
 
 // Sliding-window rate-limit buckets (in-process; per-IP pre-auth, per-actor assistant).
 const _rateBuckets = new Map();
@@ -346,9 +347,14 @@ const handleRequest = async (req, res) => {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
       const browserCfg = getConnectorConfig("browser");
       const browserHealth = getHealth("browser");
+      // WP-007 (DEC-014): surfaces which memory backend is actually answering (real
+      // sidecar vs the local sqlite-FTS5 fallback) so Settings' runtime card can show
+      // honest status instead of assuming the sidecar is up.
+      const memHealth = await memoryProvider.health();
       return json(res, 200, {
         ok: true, version: VERSION, time: new Date().toISOString(), runtime: "node-http", node: process.version, env: IS_PROD ? "production" : "development",
         browserRuntime: !!(browserHealth && browserHealth.ok),
+        memoryProvider: { ok: !!memHealth?.ok, degraded: !!memHealth?.degraded, backend: memHealth?.backend ?? memoryProvider.backend },
         externalActionsEnabled: externalActionsEnabled(CURRENT_TENANT),
         webhookBaseUrl: (process.env.HOMEOPS_PUBLIC_URL || `http://localhost:${PORT}`).split(",")[0].trim().replace(/\/$/, ""),
         authRequired: true,
@@ -1998,6 +2004,27 @@ const handleRequest = async (req, res) => {
       deleteMemoryEntry(m.id);
       audit({ type: "memory.delete", memoryId: m.id, ok: true }, req, g.session);
       return json(res, 200, { ok: true }, req);
+    }
+    // WP-007 s5 — retrieval-quality memory search + profile for the Activity & Memory
+    // tab's search box. Scoped to the session's own household (containerTag), same
+    // visibility boundary as GET /api/memory. Honest degraded flag when the provider
+    // (sidecar or its sqlite-FTS5 fallback — see memory-provider.mjs/DEC-014) can't answer,
+    // so the client can show real fallback copy instead of silently returning nothing.
+    if (path === "/api/memory/search" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const q = String(url.searchParams.get("q") ?? "").trim();
+      const containerTag = g.session.householdId;
+      const [searchRes, profileRes] = await Promise.all([
+        q ? memoryProvider.search(q, { containerTag, limit: 20 }) : Promise.resolve({ ok: true, degraded: false, results: [] }),
+        memoryProvider.profile({ containerTag }),
+      ]);
+      const degraded = !!(searchRes?.degraded || profileRes?.degraded);
+      return json(res, 200, {
+        ok: true,
+        degraded,
+        results: Array.isArray(searchRes?.results) ? searchRes.results : [],
+        profile: profileRes?.ok ? { totalMemories: profileRes.totalMemories, byType: profileRes.byType, byScope: profileRes.byScope, highlights: profileRes.highlights } : null,
+      }, req);
     }
     if (path === "/api/artifacts" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
