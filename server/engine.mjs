@@ -21,7 +21,7 @@ import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
 import { resolveRegisteredFunction, runFunctionHandler, computeFunctionState } from "./functions.mjs";
-import { getAgent } from "./store.mjs";
+import { getAgent, getSkill } from "./store.mjs";
 import { isToolStepAllowed, partialUpdateAgent } from "./agents.mjs";
 import { partialUpdateSkill } from "./skills.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
@@ -756,6 +756,36 @@ function notifyRepeatedNonDelivery(run, failureClass) {
   } catch { /* alerting must never mask the original outcome */ }
 }
 
+// WP-008a (ISS-007/DEC-015/HYP-002): the ONE place that actually mutates an agent's
+// instructions or a skill's planner_guidance FROM an evolution record — shared by both
+// the auto-accept path just below and the human /api/evolution/:id/review route in
+// index.mjs (handoff: index.mjs calls this instead of duplicating the two branches).
+// Recording `beforeVersionId` here (the target's version NUMBER immediately before the
+// patch — i.e. exactly what partialUpdateAgent/partialUpdateSkill just snapshotted) is
+// what a later revert (server/evolution-revert.mjs) needs to restore the exact prior
+// text without falling back to timestamp correlation. Never touches evolution.status —
+// callers own accept/reject/pending transitions themselves.
+export function applyEvolutionToTarget(e) {
+  if (!e?.after) return { applied: false, applyError: null };
+  if (e.kind === "agent" && e.agentId) {
+    const before = getAgent(e.agentId);
+    if (!before) return { applied: false, applyError: "not_found" };
+    const r = partialUpdateAgent(e.agentId, { instructions: e.after });
+    if (!r || r.error) return { applied: false, applyError: r?.error ?? "update_failed" };
+    patchEvolution(e.id, { beforeVersionId: before.version ?? 1, applied: true });
+    return { applied: true, applyError: null };
+  }
+  if (e.kind === "skill" && e.skillId) {
+    const before = getSkill(e.skillId);
+    if (!before) return { applied: false, applyError: "not_found" };
+    const r = partialUpdateSkill(e.skillId, { planner_guidance: e.after });
+    if (!r || r.error) return { applied: false, applyError: r?.error ?? "update_failed" };
+    patchEvolution(e.id, { beforeVersionId: before.version ?? 1, applied: true });
+    return { applied: true, applyError: null };
+  }
+  return { applied: false, applyError: null };
+}
+
 // Evidence-backed improvement proposal from a real failed run. Writes a
 // deterministic trace-based baseline immediately, then fires an async AI
 // enrichment pass (proposeEvolution) to upgrade it with better wording +
@@ -809,14 +839,10 @@ function recordFailureEvolution(run) {
       if (settings.autoApproveImprovements !== false && r.proposal.risk === "Low" && r.proposal.after) {
         const judged = await judgeEvolutionConfidence({ trace, proposal: r.proposal, session: { householdId: run.householdId } });
         if (judged.confident) {
-          let applied = false;
-          if (kind === "agent" && run.sourceRef?.agentId) {
-            const u = partialUpdateAgent(run.sourceRef.agentId, { instructions: r.proposal.after });
-            applied = !!(u && !u.error);
-          } else if (kind === "skill" && run.sourceRef?.skillId) {
-            const u = partialUpdateSkill(run.sourceRef.skillId, { planner_guidance: r.proposal.after });
-            applied = !!(u && !u.error);
-          }
+          // Shared with the human accept route (WP-008a) — also stamps beforeVersionId.
+          const { applied } = applyEvolutionToTarget({
+            id: evoId, kind, agentId: run.sourceRef?.agentId ?? null, skillId: run.sourceRef?.skillId ?? null, after: r.proposal.after,
+          });
           if (applied) {
             patchEvolution(evoId, { status: "accepted", reviewedAt: Date.now(), reviewedBy: "ai", autoApproved: true, autoReason: judged.reason });
             appendAudit({ type: "evolution.auto_accept", id: evoId, kind, agentId: run.sourceRef?.agentId ?? null, householdId: run.householdId, reason: judged.reason });

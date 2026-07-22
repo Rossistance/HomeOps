@@ -298,10 +298,20 @@ function Improvements() {
   const navigate = useStore((s) => s.navigate);
   const [serverEvolutions, setServerEvolutions] = useState<ServerEvolution[]>([]);
   const [loading, setLoading] = useState(true);
+  // WP-008a (DEC-015): a one-time nudge when self-changes are ON only because the
+  // household never explicitly decided — not because anyone chose it. Once the setting
+  // is explicitly set (either way), the server stops reporting `Defaulted` and this
+  // banner stops appearing on its own — "one-time" in the sense of "until decided,"
+  // not a dismiss-and-forget toast, so it can't be missed by a household that never opens it.
+  const [autoApproveDefaulted, setAutoApproveDefaulted] = useState(false);
+  const [revertTarget, setRevertTarget] = useState<ServerEvolution | null>(null);
+  const [reverting, setReverting] = useState(false);
+  const [revertError, setRevertError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const evos = await backend.evolutions();
+    const [evos, settings] = await Promise.all([backend.evolutions(), backend.getSettings()]);
     setServerEvolutions(evos);
+    setAutoApproveDefaulted(settings.autoApproveImprovementsDefaulted === true && settings.autoApproveImprovements !== false);
     setLoading(false);
   }, []);
   useEffect(() => { void load(); }, [load]);
@@ -312,40 +322,95 @@ function Improvements() {
     return +new Date(b.createdAt) - +new Date(a.createdAt);
   });
 
+  const confirmRevert = async () => {
+    if (!revertTarget) return;
+    setReverting(true);
+    setRevertError(null);
+    const r = await backend.revertEvolution(revertTarget.id);
+    setReverting(false);
+    if (!r.ok) { setRevertError(r.message ?? r.error ?? "The revert failed."); return; }
+    setRevertTarget(null);
+    void load();
+  };
+
   if (loading) return <div className="flex items-center gap-2 text-sm text-ink-400 py-6"><Icon name="Loader2" size={14} className="animate-spin" /> Loading improvements…</div>;
-  if (sorted.length === 0)
-    return <EmptyState icon="Sparkles" title="No improvement suggestions yet" message="When a run fails, FamiliOS studies the trace and proposes a concrete, low-risk fix here — automatically." />;
+
   return (
     <div>
-      <div className="mb-4 flex items-center gap-2 rounded-2xl border border-ember-200/70 bg-ember-50 px-4 py-2.5 text-sm text-ember-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
-        <Icon name="Sparkles" size={15} /> FamiliOS learns from real run traces. Accepting a suggestion versions the target entity server-side.
-      </div>
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-        {sorted.map((e) => (
-          <ProposalCard key={e.id} e={e}
-            onReview={async (id, accept) => { await review(id, accept); void load(); }}
-            onView={() => {
-              if (e.kind === "agent" && (e as any).agentId) navigate("agents", { id: (e as any).agentId });
-              else if (e.kind === "skill" && (e as any).skillId) navigate("skills", { id: (e as any).skillId });
-              else if (e.kind === "function") navigate("functions", { create: "1", name: (e as any).toolId ?? "", description: e.summary });
-            }}
-          />
-        ))}
-      </div>
+      {autoApproveDefaulted && (
+        <div className="mb-4 flex items-center gap-2 rounded-2xl border border-amber-200/70 bg-amber-50 px-4 py-2.5 text-sm text-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]" role="status">
+          <Icon name="AlertTriangle" size={15} />
+          <span className="flex-1">Automatic self-changes are on — review or turn off in Settings.</span>
+          <button onClick={() => navigate("settings")} className="shrink-0 text-xs font-semibold text-amber-800 underline hover:no-underline">Open Settings</button>
+        </div>
+      )}
+      {sorted.length === 0 ? (
+        <EmptyState icon="Sparkles" title="No improvement suggestions yet" message="When a run fails, FamiliOS studies the trace and proposes a concrete, low-risk fix here — automatically." />
+      ) : (
+        <>
+          <div className="mb-4 flex items-center gap-2 rounded-2xl border border-ember-200/70 bg-ember-50 px-4 py-2.5 text-sm text-ember-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
+            <Icon name="Sparkles" size={15} /> FamiliOS learns from real run traces. Accepting a suggestion versions the target entity server-side — and, if it goes wrong, an accepted change can be reverted.
+          </div>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {sorted.map((e) => (
+              <ProposalCard key={e.id} e={e}
+                onReview={async (id, accept) => { await review(id, accept); void load(); }}
+                onRevert={() => { setRevertError(null); setRevertTarget(e as ServerEvolution); }}
+                onView={() => {
+                  if (e.kind === "agent" && (e as any).agentId) navigate("agents", { id: (e as any).agentId });
+                  else if (e.kind === "skill" && (e as any).skillId) navigate("skills", { id: (e as any).skillId });
+                  else if (e.kind === "function") navigate("functions", { create: "1", name: (e as any).toolId ?? "", description: e.summary });
+                }}
+              />
+            ))}
+          </div>
+        </>
+      )}
+      <Modal open={!!revertTarget} onClose={() => { if (!reverting) setRevertTarget(null); }} title="Revert this improvement?" icon="Undo2"
+        footer={<>
+          <Button variant="ghost" disabled={reverting} onClick={() => setRevertTarget(null)}>Cancel</Button>
+          <Button variant="danger" disabled={reverting} onClick={() => void confirmRevert()}>
+            {reverting ? <><Icon name="Loader2" size={14} className="animate-spin" /> Reverting…</> : <><Icon name="Undo2" size={14} /> Revert</>}
+          </Button>
+        </>}>
+        <p className="text-sm text-ink-600">
+          This restores <strong>{(revertTarget as any)?.agentName ?? (revertTarget as any)?.skillName ?? (revertTarget?.kind === "agent" ? "the agent" : "the skill")}</strong> to what it was
+          just before "{revertTarget?.title}" was applied. The current version stays in its history — this adds a new version rather than erasing anything.
+        </p>
+        {revertError && <p className="mt-2 rounded-xl bg-coral-50 px-3 py-2 text-sm text-coral-600">{revertError}</p>}
+      </Modal>
     </div>
   );
 }
 
-function ProposalCard({ e, onReview, onView }: { e: EvolutionProposal | ServerEvolution; onReview: (id: string, accept: boolean) => Promise<void>; onView: () => void }) {
-  const [showAfter, setShowAfter] = useState(false);
+function DiffBlock({ label, text, tone }: { label: string; text: string | null | undefined; tone: "before" | "after" }) {
+  if (!text) return null;
+  return (
+    <div className="mt-1.5">
+      <p className={`mb-1 text-[10px] font-semibold uppercase tracking-wide ${tone === "before" ? "text-coral-500" : "text-sage-600"}`}>{label}</p>
+      <div className={`whitespace-pre-wrap rounded-xl border p-3 font-mono text-xs shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] ${tone === "before" ? "border-coral-200/60 bg-coral-50/40 text-coral-700" : "border-sage-200/60 bg-sage-50/40 text-sage-700"}`}>{text}</div>
+    </div>
+  );
+}
+
+function ProposalCard({ e, onReview, onRevert, onView }: { e: EvolutionProposal | ServerEvolution; onReview: (id: string, accept: boolean) => Promise<void>; onRevert: () => void; onView: () => void }) {
+  const [showDiff, setShowDiff] = useState(false);
   const [busy, setBusy] = useState(false);
-  const statusColor: "sage" | "gray" | "amber" = e.status === "accepted" ? "sage" : e.status === "rejected" ? "gray" : "amber";
+  const isReverted = e.status === "reverted";
+  const statusColor: "sage" | "gray" | "amber" | "coral" = e.status === "accepted" ? "sage" : e.status === "rejected" ? "gray" : isReverted ? "coral" : "amber";
   const meta = KIND_META[e.kind] ?? KIND_META.tool;
   // Server-side low-risk auto-approval: applied without a human when the household opts in.
   const autoApproved = (e as any).autoApproved === true;
   const autoReason = (e as any).autoReason as string | undefined;
   const entityName = (e as any).agentName ?? (e as any).skillName ?? (e as any).functionId ?? (e as any).toolId ?? null;
   const hasView = (e as any).agentId || (e as any).skillId || e.kind === "function";
+  const archived = (e as any).archived === true;
+  // The server is the source of truth for "can this be reverted right now" (target
+  // still exists, a prior version is available) — an archived row is read-only history
+  // regardless of what the flag says.
+  const canRevert = !archived && (e as any).revertible === true;
+  const before = (e as any).before as string | undefined;
+  const after = (e as any).after as string | undefined;
   const doReview = async (accept: boolean) => { setBusy(true); await onReview(e.id, accept); setBusy(false); };
 
   return (
@@ -363,19 +428,25 @@ function ProposalCard({ e, onReview, onView }: { e: EvolutionProposal | ServerEv
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
+          {archived && <Badge color="gray"><Icon name="Archive" size={11} /> Archived</Badge>}
           {autoApproved && <Badge color="lavender"><Icon name="Sparkles" size={11} /> Auto-applied by AI</Badge>}
           <Badge color={statusColor}>{e.status}</Badge>
         </div>
       </div>
       <p className="rounded-xl bg-surface-sunken/60 px-3 py-2 text-xs text-ink-600"><Icon name="Search" size={11} className="mr-1 inline" /> {e.reason}</p>
       <p className="mt-2 text-sm text-ink-700">{e.summary}</p>
-      {(e as any).after && (
+      {(before || after) && (
         <div className="mt-2">
-          <button onClick={() => setShowAfter((v) => !v)} className="flex items-center gap-1 text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">
-            <Icon name={showAfter ? "ChevronDown" : "ChevronRight"} size={12} />
-            {e.kind === "agent" ? "Proposed instructions" : e.kind === "function" ? "Suggested implementation" : "Suggested guidance"}
+          <button onClick={() => setShowDiff((v) => !v)} className="flex items-center gap-1 text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">
+            <Icon name={showDiff ? "ChevronDown" : "ChevronRight"} size={12} />
+            {e.status === "pending" ? (e.kind === "agent" ? "Proposed instructions" : e.kind === "function" ? "Suggested implementation" : "Suggested guidance") : "Before / after"}
           </button>
-          {showAfter && <div className="mt-1.5 whitespace-pre-wrap rounded-xl border border-ink-900/[0.06] bg-surface-rim p-3 text-xs text-ink-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">{(e as any).after}</div>}
+          {showDiff && (
+            <>
+              {e.status !== "pending" && <DiffBlock label="Before" text={before} tone="before" />}
+              <DiffBlock label={e.status === "pending" ? "" : "After"} text={after} tone="after" />
+            </>
+          )}
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-ink-900/[0.06] pt-3">
@@ -386,9 +457,16 @@ function ProposalCard({ e, onReview, onView }: { e: EvolutionProposal | ServerEv
             </Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => doReview(false)}>Dismiss</Button>
           </>
-        ) : autoApproved ? (
+        ) : autoApproved && !isReverted ? (
           <span className="flex items-center gap-1 text-xs text-lavender-600"><Icon name="Sparkles" size={12} /> {autoReason || "Auto-applied by AI"}</span>
+        ) : isReverted ? (
+          <span className="flex items-center gap-1 text-xs text-coral-500"><Icon name="Undo2" size={12} /> Reverted{(e as any).revertedBy ? ` by ${(e as any).revertedBy}` : ""}</span>
+        ) : archived ? (
+          <span className="text-xs text-ink-400">Archived history — read-only</span>
         ) : <span className="text-xs text-ink-400">Reviewed</span>}
+        {canRevert && (
+          <Button size="sm" variant="ghost" className="text-coral-600 hover:bg-coral-50" onClick={onRevert}><Icon name="Undo2" size={13} /> Revert</Button>
+        )}
         {e.kind === "function" && (
           <Button size="sm" variant="secondary" className="ml-auto" onClick={onView}><Icon name="FunctionSquare" size={13} /> Open in Functions</Button>
         )}

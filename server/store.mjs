@@ -228,8 +228,17 @@ export function addWebhookEvent(id, event) {
  * a run's kill switch or AI provider must NEVER resolve from another family's
  * settings. Omitting householdId falls back to the resident household, which
  * is only correct for boot/bootstrap paths that predate a session. */
+// WP-008a (DEC-015): a brand-new household (no settings.json row written yet) now
+// defaults autoApproveImprovements OFF — self-changes to an agent's instructions or a
+// skill's guidance require a human's review unless a family opts in. An EXISTING
+// household's settings.json already exists (even without this key set), so getDoc
+// returns its real stored doc as-is and this fallback never applies to it — its
+// behavior is unchanged (still `!== false` → ON) until it explicitly toggles the
+// setting. The first setSettings() call for a fresh household bakes this false in
+// explicitly (see setSettings below), which is what lets the Improvements tab tell
+// "explicitly on" apart from "on only because of this fallback."
 export function getSettings(householdId) {
-  return engine.getDoc(householdId ?? T(), "settings.json", { externalActionsEnabled: true });
+  return engine.getDoc(householdId ?? T(), "settings.json", { externalActionsEnabled: true, autoApproveImprovements: false });
 }
 export function setSettings(patch, householdId) {
   const t = householdId ?? T();

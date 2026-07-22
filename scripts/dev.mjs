@@ -25,8 +25,25 @@ const backend = spawn(process.execPath, [join(root, "server", "index.mjs")], {
 backend.on("exit", (code) => console.log(`[backend] exited with ${code}`));
 
 // Web: vite via npx (needs shell on Windows for npx.cmd resolution).
-const web = spawn(isWin ? "npx.cmd" : "npx", ["vite"], { cwd: root, stdio: "inherit", shell: isWin });
-web.on("exit", (code) => console.log(`[web] exited with ${code}`));
+// Vite/Rolldown intermittently dies with a native access violation (0xC0000005 =
+// exit 3221225477) on Windows under heavy dev churn. A dead web server silently
+// breaks every browser session and test run against :5173, so crash exits are
+// respawned (bounded; a clean Ctrl-C shutdown is not).
+let web = null;
+let webRestarts = 0;
+let shuttingDown = false;
+function spawnWeb() {
+  web = spawn(isWin ? "npx.cmd" : "npx", ["vite"], { cwd: root, stdio: "inherit", shell: isWin });
+  web.on("exit", (code) => {
+    console.log(`[web] exited with ${code}`);
+    if (shuttingDown || code === 0) return;
+    if (webRestarts >= 5) { console.error("[web] crashed too many times — giving up (restart dev manually)"); return; }
+    webRestarts += 1;
+    console.log(`[web] respawning after crash (attempt ${webRestarts}/5)…`);
+    setTimeout(spawnWeb, 1000);
+  });
+}
+spawnWeb();
 
 // Browser Automation runtime: opt-in by installation. If server/browser-runtime has its
 // deps installed (npm install + npm run setup there), spawn it alongside so the Browser
@@ -65,6 +82,6 @@ if (process.env.HOMEOPS_MEMORY_SIDECAR === "1") {
   }
 }
 
-const shutdown = () => { try { backend.kill(); } catch {} try { web.kill(); } catch {} try { browserRt?.kill(); } catch {} try { memorySidecar?.kill(); } catch {} };
+const shutdown = () => { shuttingDown = true; try { backend.kill(); } catch {} try { web?.kill(); } catch {} try { browserRt?.kill(); } catch {} try { memorySidecar?.kill(); } catch {} };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
