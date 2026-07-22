@@ -1,0 +1,6 @@
+# Run run-20260721-054151
+
+- Goal: Fix FamiliOS end-to-end task execution on web: root-cause why no task completes start-to-finish (agent vs automation subsystem conflict, nothing written to the inbox); consolidate to ONE user-facing 'Helper Agents' entry pre-packaged with correct tools/skills/automations; evaluate and safely retire uncertain in-flight 'improvements' that may be causing breakage; rebuild the chat+agent orchestration harness toward OpenClaw/Hermes-level reliable task execution across all agents; redesign the memory subsystem (candidate: self-hosted Supermemory, https://supermemory.ai/docs/self-hosting/overview) with local LM Studio Qwen3.6-27B-GGUF compatibility; run a full screenshot-led end-to-end discovery of every page/element/feature to ground the spec; produce spec + docs. Directive: /top-gun fable 5 high.
+- Project root: D:\FamiliOS\FamiliOS
+- Created: 2026-07-21T05:41:51Z
+- Status: active

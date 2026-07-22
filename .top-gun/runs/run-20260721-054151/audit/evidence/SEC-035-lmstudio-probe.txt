@@ -1,0 +1,21 @@
+=== LM Studio probe 2026-07-21 (audit run-20260721-054151) ===
+GET http://localhost:1234/v1/models (no auth):
+{
+    "error": {
+        "message": "An LM Studio API token is required to make requests to this server, but none was provided using the Authorization header using the 'Bearer' scheme (i.e., 'Authorization: Bearer $LM_API_TOKEN'). Learn more at: https://lmstudio.ai/docs/developer/core/authentication.",
+        "type": "invalid_request_error",
+        "param": null,
+        "code": "invalid_api_key"
+    }
+}
+HTTP status:
+401
+GET with dummy bearer:
+{
+    "error": {
+        "message": "Malformed LM Studio API token provided: test-dummy. Ensure you are using a valid token. Learn more at: https://lmstudio.ai/docs/developer/core/authentication.",
+        "type": "invalid_request_error",
+        "param": null,
+        "code": "invalid_api_key"
+    }
+}

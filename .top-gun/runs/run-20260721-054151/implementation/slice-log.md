@@ -100,6 +100,7 @@ Five-point iteration check per slice: (1) works as expected? (2) broke anything 
 - Fix: park clock = blocked cursor step startedAt (the attempt that parked the run) with updatedAt/createdAt fallback; legacy+flag expires immediately (the flag IS the operator decision); post-epoch TTL immune to unrelated touches. 2 regression tests pin both faces (548/547/1skip green).
 - One-shot flagged re-sweep executed and verified with server stopped: 9/9 legacy parks expired (run_d0f11e1f, run_a4ef73a6, run_6b7e2c33 + 6 June "Label marketing emails" runs), 9 audit events with honest parkedAt, 9 in-app Inbox notifications. Flag OFF afterwards. One NEW park (run_10407a1f, created 11:53Z by the resident's own daily trigger during the boot window) remains by design — post-epoch, TTL applies.
 - Five-point: (1) works — re-sweep proven in data; (2) approval-sweep + fresh-park tests still green, full suite green; (3) n/a server; (4) Inbox notification path intact (9 created); (5) **ship**.
+- Verdict: ship
 
 ## Lead-2 finale — residual B: Render bundle-hash verification (no code)
 
@@ -110,12 +111,14 @@ Five-point iteration check per slice: (1) works as expected? (2) broke anything 
 - tests/topgun/usecases.config.ts (json latency reporter, 120s timeout, disposable-household serialization) + `npm run topgun:usecases`; shared usecases/uc.ts (fake deterministic AI provider, real-UI approval loop, gated-lane requireSandbox that annotates the named blocker and skips honestly); sandbox-only GET /api/sandbox/effects (404 in real mode) so UI specs assert would-be effects without second-process tenant reads.
 - Pilots green: UC-20 active lane (chat→4-step run incl. deterministic eventId threading; task on Dashboard, event+attachment on Calendar, run_result links in chat) `1 passed (2.4s)`; UC-1 gated lane (gmail.search→modifyLabels parks→REAL Approvals UI approve→resume→sandbox effect sbx-msg-1+School asserted) `1 passed (2.7s)`.
 - Five-point: (1) works; (2) typecheck + sandbox suite 47/47 green; (3) config carries web-webkit-iphone project for the soak's mobile pass; (4) consent gates + CSRF proven in the loop; (5) **ship** (suite completes as authors return).
+- Verdict: ship
 
 ## Lead-2 finale — WP-002 gap: new households had no default agent (commits 368514d + c384a3d)
 
 - Found BY the benchmark (chat-delivery spec on a disposable household): seedDefaults() is resident-boot-only, so every /api/signup household lacked agt_household — chat attribution silently no-oped and homeops.notify_contact hard-refused every plain chat ask for every new family. Two paths compared: (a) seed at signup route (future households only, duplicates agent shape) vs (b) self-create at the attribution choke point ensureOpenDefaultAgent (heals existing households too, one knowledge site) — (b) chosen.
 - Validation: new regression test (creation + idempotency in non-resident tenant) 7/7 in file; full suite 549/548/1skip; chat-delivery E2E `1 passed (1.4s)` post-restart — in_app fallback disclosed + real Inbox row.
 - Five-point: (1) works E2E; (2) attribution/orchestrate/flag-off suites green — resident path untouched; (3) n/a server; (4) policy clamp + deny-list semantics preserved (existing tests); (5) **ship**.
+- Verdict: ship
 
 ## Lead-2 finale — WP-006 s4–s6: the 22-UC executable benchmark (commits 29f6c63, dbc077d, c384a3d, 1c7401b, 7180c65)
 
@@ -123,6 +126,7 @@ Five-point iteration check per slice: (1) works as expected? (2) broke anything 
 - Product findings logged, not fixed (out of scope): (a) no drive/onedrive WRITE tool exists — UC-7 "sync" is honestly read-bounded; (b) UC-16 PRD names files-local file.import which is runtime:"client" — fails closed for every agentic plan anywhere.
 - Harness finding fixed: 22 signups/run trips the (correct) auth rate limiter — signUpDisposableHousehold now backs off on 429 (22s/44s/66s) instead of failing the suite.
 - Five-point: (1) works — 23/23 green; (2) topgun:web 29 passed/6 skipped + npm test 549/548/1skip + typecheck clean; (3) config carries web-webkit-iphone project (chromium is the soak lane; webkit variant available); (4) consent gates, CSRF, sandbox-off pinning all proven inside the loop; (5) **ship**.
+- Verdict: ship
 
 ## Lead-2 finale — WP-006 s7 soak: 3× consecutive green + unattended scheduler (no new code)
 
@@ -130,3 +134,4 @@ Five-point iteration check per slice: (1) works as expected? (2) broke anything 
 - Unattended scenario green in all three runs: tz-anchored trigger (tzSource:household, nextRunAt = exact anchored instant) fired from the server tick with zero client involvement, parked on the approval gate, was decided through the real Approvals UI, completed with agent attribution, and rendered in the unified history.
 - Dev-stack health across the whole benchmark window: two SQLITE_IOERR blips, both recovered by the wave-2 stale-handle self-heal (retry-once), zero second failures, zero wedges.
 - Five-point: (1) works; (2) nothing regressed (final validation table in verification-matrix); (3) responsive lane available (webkit project); (4) scheduler/tick + approval push loop + SSE intact; (5) **ship** — MISSION SCOPE COMPLETE (user-owned gates remain: LM Studio token, OAuth/Twilio provisioning, real-credential smokes).
+- Verdict: ship

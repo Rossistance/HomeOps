@@ -1,0 +1,124 @@
+=== Tenant enumeration (read-only) run-20260721 ===
+=== tenant local ===
+record collections: [{"c":"runs","n":99},{"c":"approvals","n":53},{"c":"events","n":45},{"c":"tasks","n":28},{"c":"notifications","n":22},{"c":"evolution","n":21},{"c":"agents","n":18},{"c":"playbooks","n":16},{"c":"skills","n":13},{"c":"risk_overrides","n":9},{"c":"conversations","n":7},{"c":"meals","n":7},{"c":"function_definitions","n":4},{"c":"triggers","n":3},{"c":"calendar_subscriptions","n":2},{"c":"contact_methods","n":1},{"c":"help-requests","n":1}]
+kv files: [{"file":"agent_versions.json","len":55630},{"file":"idempotency.json","len":41056},{"file":"skill_versions.json","len":29865},{"file":"function_versions.json","len":9750},{"file":"artifacts.json","len":8233},{"file":"routing.json","len":4771},{"file":"memory.json","len":3349},{"file":"oauth_states.json","len":3041},{"file":"members.json","len":2988},{"file":"webhooks.json","len":1639},{"file":"connectors.json","len":1354},{"file":"health.json","len":677},{"file":"accounts.json","len":448},{"file":"jobs.json","len":305},{"file":"settings.json","len":177},{"file":"ai_usage.json","len":97},{"file":"push-tokens.json","len":45},{"file":"contact_verifications.json","len":2},{"file":"sessions.json","len":2}]
+=== tenant hh_e08db3ac81f1 ===
+record collections: [{"c":"conversations","n":1},{"c":"runs","n":1}]
+kv files: [{"file":"members.json","len":222},{"file":"settings.json","len":140}]
+=== tenant _system ===
+record collections: []
+kv files: [{"file":"sessions.json","len":55766},{"file":"identities.json","len":1011},{"file":"deleted_households.json","len":113}]
+
+=== Deep enumeration of resident tenant 'local' ===
+=== AGENTS (18) ===
+{"id":"ag-bill","name":"Bill & Receipt Agent","status":"Active","createdAt":1782768532298}
+{"id":"ag-briefing","name":"Family Briefing Agent","status":"Active","createdAt":1782768532197}
+{"id":"ag-caregiving","name":"Caregiving Coordinator","status":"Active","createdAt":1782768532515}
+{"id":"ag-document","name":"Document Organizer Agent","status":"Active","createdAt":1782768532555}
+{"id":"ag-gift","name":"Gift & Birthday Agent","status":"Draft","createdAt":1782768532635}
+{"id":"ag-home","name":"Home Maintenance Agent","status":"Active","createdAt":1782768532484}
+{"id":"ag-inbox","name":"Inbox Helper Agent","status":"Active","createdAt":1782768532662}
+{"id":"ag-meal","name":"Meal & Grocery Agent","status":"Active","createdAt":1782768532336}
+{"id":"ag-medical","name":"Medical Appointment Agent","status":"Active","createdAt":1782768532442}
+{"id":"ag-pet","name":"Pet Care Agent","status":"Paused","createdAt":1782768532594}
+{"id":"ag-school","name":"School & Daycare Agent","status":"Needs Attention","createdAt":1782768532254}
+{"id":"ag-travel","name":"Travel Planner Agent","status":"Draft","createdAt":1782768532377}
+{"id":"agt_60e014b43520495dab4e","name":"Gmail Promotional Cleanup Agent","status":"Draft","createdAt":1783084970782}
+{"id":"agt_b805192d4c2a6fd95513","name":"Gmail Promotional Cleanup Agent","status":"Draft","createdAt":1783057415035}
+{"id":"agt_dcc2d655ed11a996a7cf","name":"Gmail Marketing Triage Agent","status":"Draft","createdAt":1783053443086}
+{"id":"agt_household","name":"Household Assistant","status":"Active","createdAt":1782350277940}
+{"id":"agt_meal_planner","name":"Meal Planner & Sign-Off","status":"Active","createdAt":1784596960454}
+{"id":"agt_morning_status","name":"Morning Status Helper","status":"Active","createdAt":1784596960452}
+
+=== TRIGGERS ===
+{"id":"trg_12e57c5f669edba6c741","householdId":"local","name":"Manual Gmail Promotional Cleanup Run","type":"manual","enabled":true,"target":{"kind":"agent","agentId":"agt_b805192d4c2a6fd95513","skillId":null,"goal":null,"params":{}},"intervalMs":null,"nextRunAt":null,"connectorId":null,"event":null,"lastFiredAt":1783058938234,"lastRunId":"run_bcca5d091444283bec1d","lastStatus":"queued","lastTriggerType":"manual","fireCount":2,"system":false,"createdAt":1783057415038,"updatedAt":"2026-07-03T06:0
+{"id":"trg_ae688f96236650ed8da4","householdId":"local","name":"Manual Gmail Promotional Cleanup Run","type":"manual","enabled":true,"target":{"kind":"agent","agentId":"agt_60e014b43520495dab4e","skillId":null,"goal":null,"params":{}},"intervalMs":null,"nextRunAt":null,"connectorId":null,"event":null,"lastFiredAt":null,"lastRunId":null,"lastStatus":null,"lastTriggerType":null,"fireCount":0,"system":false,"createdAt":1783084970786,"updatedAt":"2026-07-03T13:22:50.786Z"}
+{"id":"trg_bd15dd4bfe848e6e8dcd","householdId":"local","name":"Send daily morning briefing at 7 AM","type":"recurring","enabled":true,"target":{"kind":"skill","agentId":null,"skillId":"skl_a70df415109a6d601558","goal":null,"params":{}},"intervalMs":86400000,"anchor":"07:00","tzSource":"server","nextRunAt":1784631600000,"connectorId":null,"event":null,"lastFiredAt":null,"lastRunId":null,"lastStatus":null,"lastTriggerType":null,"fireCount":0,"system":false,"createdAt":1784578455433,"updatedAt":"20
+
+=== EVOLUTION (improvements?) — first 6, structure ===
+{"id":"evo_006e21a54000d403","householdId":"local","kind":"skill","skillId":"skl_615f62a7d3ddd073a5df","agentId":null,"runId":"run_30453e5a6782a929291a","status":"rejected","source":"ai","title":"Add a graceful fallback when weather.current fetch fails","reason":"Step \"Get weather\" using toolId \"weather.current\" failed with detail \"fetch failed\", causing the run to fail with \"provider_error
+{"id":"evo_08433863499947cc","householdId":"local","kind":"skill","skillId":"skl_269f3f6369b95dcea2df","agentId":null,"runId":"run_08c3326fea580a50c834","status":"accepted","source":"ai","title":"Add a non-empty final response guard","reason":"The run status failed with error \"empty_body\" after the step \"Create HomeOps chat result with sender and subject list\" succeeded, indicating the workflo
+{"id":"evo_15020bf3a4149c48","householdId":"local","kind":"tool","skillId":null,"agentId":null,"runId":"run_2f5f863728eae0509a7e","status":"accepted","source":"ai","title":"Pass messageIds from search into gmail.modifyLabels (don’t rely on placeholders)","reason":"Step \"Apply Social label and remove from Inbox (Primary view)\" failed with: \"Provide at least one message ID (use Search inbox first
+{"id":"evo_1f64ec77d5a6dbe2","householdId":"local","kind":"tool","skillId":null,"agentId":null,"runId":"run_75e99d06874c2a14ecce","status":"accepted","source":"ai","title":"Pass message IDs from gmail.search into gmail.modifyLabels (batch) before applying labels","reason":"The step \"Apply 'Social' label and remove from Inbox (Primary view)\" failed with: \"Provide at least one message ID (use Sea
+{"id":"evo_36bab6fba5146b49","householdId":"local","kind":"agent","skillId":null,"agentId":"agent_mqpnscbo1uvg0oj","runId":"run_732177d321c8d7d36313","status":"accepted","source":"trace","title":"Improve: Create party planning task","reason":"Step \"Create party planning task\" (todoist.createTask) failed: approval_already_used","summary":"Handle \"todoist.createTask\" failures more gracefully, or
+{"id":"evo_42ff487b2911b87d","householdId":"local","kind":"skill","skillId":"skl_cf7b28f7bf4dcd8534ef","agentId":null,"runId":"run_a4070f97410d2d16c607","status":"pending","source":"ai","title":"Provide explicit notification content","reason":"The step \"Send HomeOps inbox notification with the same sender and subject list\" failed with `Nothing to draft.`, while the prior report artifact was crea
+evolution statuses: {"rejected":5,"accepted":15,"pending":1}
+
+=== RUNS by status (99 total) ===
+{"failed":23,"completed":63,"expired":6,"waiting_for_connector":7}
+recent runs:
+{"id":"run_b450d6e621d0e48643e5","status":"completed","createdAt":1784572781134,"finishedAt":1784572784695,"steps":2}
+{"id":"run_e60d6e4d8c9237a3cbf4","status":"completed","createdAt":1784572675964,"finishedAt":1784572681006,"steps":2}
+{"id":"run_1de4a301242967113d80","status":"completed","createdAt":1784572108646,"finishedAt":1784572112473,"steps":2}
+{"id":"run_7ff90900dc0a76fd4800","status":"completed","createdAt":1784572011735,"finishedAt":1784572014379,"steps":2}
+{"id":"run_50df6d7c4cd09dfc24f5","status":"completed","createdAt":1784571974829,"finishedAt":1784571979648,"steps":2}
+{"id":"run_7e6dabcee39fa1cd0b43","status":"completed","createdAt":1784571904866,"finishedAt":1784571908507,"steps":2}
+{"id":"run_b5abffb0f84a3ab694f1","status":"completed","createdAt":1784571865399,"finishedAt":1784571869442,"steps":2}
+{"id":"run_caa3ad41ef3460e72e67","status":"completed","createdAt":1784571836502,"finishedAt":1784571841349,"steps":2}
+
+=== NOTIFICATIONS (22) — most recent 8 ===
+{"id":"ntf_c41f1f0cbe5583dc","title":"Help offer accepted","createdAt":1784521723792,"read":false}
+{"id":"ntf_82e34f175a7e2c07","title":"Help offered","createdAt":1784521723786,"read":false}
+{"id":"ntf_af4bc2cd07da8c18","title":"Can you help?","createdAt":1784521723775,"read":false}
+{"id":"ntf_31250facfbfca549","title":"Request accepted","createdAt":1784521723760,"read":false}
+{"id":"ntf_6d9a81f9bf0f1202","title":"Can you help?","createdAt":1784521723752,"read":false}
+{"id":"ntf_f2cfb079fb061a55","title":"Help offer accepted","createdAt":1784504626305,"read":false}
+{"id":"ntf_ce8a7abde8a27685","title":"Help offered","createdAt":1784504626286,"read":false}
+{"id":"ntf_94516f7f486c7f5d","title":"Request accepted","createdAt":1784504626274,"read":false}
+
+=== APPROVALS by status (53) ===
+{"consumed":46,"pending":6,"denied":1}
+
+=== SETTINGS (secrets redacted) ===
+{"externalActionsEnabled":true,"aiActiveProvider":"openai","calendarAutoSync":true,"lastBackupAt":1784583550872,"lastBackupNoticeAt":1784393210747,"timezone":"America/New_York"}
+
+=== CONNECTORS (fields only, secret VALUES redacted) ===
+{"id":"browser","fields":{"runtimeUrl":"http://localhost:9223 "},"hasSecrets":[],"updatedAt":"2026-06-23T16:05:27.531Z"}
+{"id":"weather","fields":{"latitude":"40.7128","longitude":"-74.0060","label":"Home"},"hasSecrets":[],"updatedAt":"2026-07-19T22:58:19.422Z"}
+{"id":"ai.openai","fields":{"baseUrl":"https://api.openai.com/v1","model":"gpt-5.5"},"hasSecrets":["apiKey"],"updatedAt":"2026-07-03T04:58:36.582Z"}
+{"id":"acct:acct_93fd7ad39335c7b03c8a","fields":{},"hasSecrets":["tokens"],"updatedAt":"2026-07-21T06:02:14.494Z"}
+
+=== HEALTH ===
+{"http":{"ok":false,"status":"revoked","at":"2026-06-23T17:30:15.551Z"},"weather":{"ok":true,"status":"healthy","latencyMs":222,"code":200,"at":"2026-06-22T19:03:53.780Z"},"acct:acct_4b623dfd2eedc87e17ca":{"ok":false,"status":"revoked","at":"2026-07-20T20:09:46.602Z"},"browser":{"ok":true,"status":"healthy","source":"in-process","latencyMs":2241,"at":"2026-07-21T05:47:16.313Z"},"sms":{"ok":false,"status":"not_configured","latencyMs":0,"at":"2026-06-23T16:22:54.603Z"},"ai.openai":{"ok":true,"status":"reachable","latencyMs":791,"at":"2026-07-20T20:11:08.633Z"},"acct:acct_93fd7ad39335c7b03c8a":{"ok":true,"status":"healthy","latencyMs":358,"at":"2026-07-20T20:09:48.031Z"}}
+
+=== ROUTING (first 800 chars) ===
+[{"id":"rt_86b5689460a7aa04","at":1782350277990,"runId":"run_95f24913b4e873f82cf8","agentId":"agt_household","skillId":"skl_morning_brief","mode":"deterministic","reason":"explicit skill run","stepCount":3},{"id":"rt_efe2de1075863d8b","at":1782350364950,"runId":"run_bfa0f2c82872e0688cd9","agentId":"agt_household","skillId":"skl_morning_brief","mode":"deterministic","reason":"explicit skill run","stepCount":3},{"id":"rt_dff639f36ccfc06e","at":1782350593628,"runId":"run_720d6d94f9705e897c33","agentId":"agt_household","skillId":"skl_morning_brief","mode":"deterministic","reason":"explicit skill run","stepCount":3},{"id":"rt_a6e4b822536978c1","at":1782351168978,"runId":"run_25967b929bc3e6493d40","agentId":"agt_household","skillId":"skl_morning_brief","mode":"deterministic","reason":"explicit s
+
+=== PLAYBOOKS (id,name,status) ===
+{"id":"pb-birthday-party-planning","name":"Birthday Party Planning"}
+{"id":"pb-caregiver-update","name":"Caregiver Update"}
+{"id":"pb-daily-family-briefing","name":"Daily Family Briefing"}
+{"id":"pb-document-renewal-tracking","name":"Document Renewal Tracking"}
+{"id":"pb-emergency-document-packet","name":"Emergency Document Packet"}
+{"id":"pb-grocery-list-from-messages","name":"Grocery List From Messages"}
+{"id":"pb-home-repair-quote-comparison","name":"Home Repair Quote Comparison"}
+{"id":"pb-medical-appointment-prep","name":"Medical Appointment Prep"}
+{"id":"pb-monthly-budget-review","name":"Monthly Household Budget Review"}
+{"id":"pb-pet-care-routine","name":"Pet Care Routine"}
+{"id":"pb-receipt-processing","name":"Receipt Processing"}
+{"id":"pb-school-email-triage","name":"School Email Triage"}
+{"id":"pb-trip-planning","name":"Trip Planning"}
+{"id":"pb-weekly-family-planning","name":"Weekly Family Planning"}
+{"id":"pb_school_form","name":"School form turnaround"}
+{"id":"pb_weekly_reset","name":"Sunday weekly reset"}
+
+=== SKILLS (id,name,status) ===
+{"id":"skl_0aecdd6d1d1a3cdfc549","name":"Gmail Promo/SalesTriage  (copy)","status":"draft"}
+{"id":"skl_a70df415109a6d601558","name":"Daily Morning Briefing Delivery","status":"draft"}
+{"id":"skl_cf7b28f7bf4dcd8534ef","name":"Gmail Promotional Email Social Tag Cleanup","status":"draft"}
+{"id":"skl_morning_brief","name":"Morning Family Briefing","status":"available"}
+{"id":"skl_uc01_school_correspondence","name":"School Correspondence Organizer","status":"available"}
+{"id":"skl_uc12_climate_nightmode","name":"Smart Climate Night-Mode","status":"available"}
+{"id":"skl_uc14_morning_status_text","name":"Morning Status Text","status":"available"}
+{"id":"skl_uc17_recipe_extractor","name":"Smart Recipe Extractor","status":"available"}
+{"id":"skl_uc18_memory_scrapbooker","name":"Digital Memory Scrapbooker","status":"available"}
+{"id":"skl_uc19_event_coordinator","name":"Event Coordinator & Logistics Assigner","status":"available"}
+{"id":"skl_uc20_chore_doc_linker","name":"Chore Manager & Document Linker","status":"available"}
+{"id":"skl_uc21_meal_planner_signoff","name":"Multi-Channel Meal Planner & Sign-Off","status":"available"}
+{"id":"skl_uc22_internal_system_sync","name":"Internal System Sync","status":"available"}
+
+=== FUNCTION DEFS ===
+{"id":"fn_b31c6afd28ad67d38766","name":"A direct HomeOps inbox send/post capability","status":"draft"}
+{"id":"fn_fb428f44ff98924e5aeb","name":"A direct HomeOps inbox message/update creation t","status":"draft"}
+{"id":"fn_gmail_recent","name":"Recent inbox digest","status":"draft"}
+{"id":"fn_note_to_memory","name":"Note to family memory","status":"available"}
