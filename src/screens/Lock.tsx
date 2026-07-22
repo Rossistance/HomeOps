@@ -31,6 +31,12 @@ export function Lock() {
   const [serverProfiles, setServerProfiles] = useState<LockProfile[] | null>(null);
   const [householdName, setHouseholdName] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
+  // ISS-017 polish (parked from WP-010, ISS-015 hideProfilesPreAuth): the server
+  // answers { profiles: [], hidden: true } when this household has opted to hide its
+  // roster from anyone without a session for it. Rendering that as an ordinary empty
+  // roster (falling back to local sample members below) would be misleading — say
+  // plainly that the household chose to hide it, not that nobody's here.
+  const [hidden, setHidden] = useState(false);
   // WP-010 session-scoped picker (ISS-012): a returning member's browser remembers which
   // signed-up household it last used, so after sign-out the Lock screen offers THAT family's
   // own members (children included) instead of the resident household's roster.
@@ -72,6 +78,7 @@ export function Lock() {
     void backend.profiles(hint?.id).then((r) => {
       if (!r) { setOffline(true); setServerProfiles(null); return; }
       setOffline(false);
+      setHidden(r.hidden === true);
       setServerProfiles(r.profiles.map((p) => ({
         id: p.actorId, displayName: p.displayName, role: p.role,
         initials: initialsOf(p.displayName), avatarColor: colorFor(p.displayName),
@@ -97,7 +104,8 @@ export function Lock() {
   const localIds = new Set(localMembers.map((m) => m.id));
   const foreignServer = !hinted && serverProfiles !== null && serverProfiles.length > 0 && !serverProfiles.some((p) => localIds.has(p.id));
   const members: LockProfile[] =
-    hinted ? serverProfiles!                                                 // remembered signed-up household → its own roster
+    hidden ? []                                                              // roster hidden pre-auth → no picker at all (honest message instead)
+    : hinted ? serverProfiles!                                               // remembered signed-up household → its own roster
     : serverProfiles === null ? localMembers                                 // fully offline → local roster only
     : foreignServer ? [...serverProfiles, ...localMembers]                   // claimed by someone else → merge
     : serverProfiles.length > 0 ? serverProfiles                             // matches / includes our household
@@ -145,6 +153,14 @@ export function Lock() {
           <p role="status" className="mb-4 text-center text-xs text-amber-600">This server is already registered to a different household — profiles marked “On this device” exist only in this browser.</p>
         )}
 
+        {hidden && (
+          <Card className="card-pad mb-4 flex items-center gap-2 text-center justify-center">
+            <Icon name="EyeOff" size={15} className="text-lavender-600 shrink-0" />
+            <p className="text-sm text-ink-600">This device hides family profiles until sign-in. Sign in with your email below to continue.</p>
+          </Card>
+        )}
+
+        {!hidden && (
         <div className="stagger grid grid-cols-2 gap-3 sm:grid-cols-3">
           {members.map((m, i) => (
             <Card key={m.id} className="card-pad flex flex-col items-center text-center" hover onClick={() => void choose(m)}>
@@ -163,6 +179,7 @@ export function Lock() {
             </Card>
           ))}
         </div>
+        )}
 
         {pinFor && (
           <Card className="card-pad mx-auto mt-5 max-w-sm animate-slide-up">

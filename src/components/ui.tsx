@@ -1,4 +1,4 @@
-import { useEffect, useRef, useId, type ReactNode } from "react";
+import { useEffect, useRef, useId, isValidElement, cloneElement, type ReactElement, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { Icon } from "./Icon";
 import type { RiskLevel, AccentColor } from "@/types";
@@ -392,11 +392,25 @@ export function Tabs({
 
 /* ------------------------------- Inputs --------------------------------- */
 
+// A11y (parked from WP-007 s1): the <label> rendered with no htmlFor, so it was never
+// programmatically associated with its control — getByLabel and screen readers had no
+// link between the two. `useId` + the least-invasive wiring that works for the common
+// case (Field wraps exactly one input/select/textarea): when that single child has no
+// id of its own, clone it with a generated one and point the label at it via htmlFor.
+// An explicit id on the child always wins (never overwritten). Fields wrapping
+// multiple children, plain text, or other non-element content are left exactly as
+// they were — no worse than before, and every existing screen using Field keeps
+// working unchanged since children/hint/className behavior is untouched.
 export function Field({ label, children, hint, className }: { label?: string; children: ReactNode; hint?: string; className?: string }) {
+  const autoId = useId();
+  const singleChild = isValidElement(children) ? (children as ReactElement<{ id?: string }>) : null;
+  const existingId = singleChild?.props?.id;
+  const controlId = singleChild ? (existingId ?? autoId) : undefined;
+  const rendered = singleChild && !existingId ? cloneElement(singleChild, { id: autoId }) : children;
   return (
     <div className={className}>
-      {label && <label className="label">{label}</label>}
-      {children}
+      {label && <label className="label" htmlFor={controlId}>{label}</label>}
+      {rendered}
       {hint && <p className="mt-1 text-xs text-ink-400">{hint}</p>}
     </div>
   );

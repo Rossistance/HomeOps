@@ -4,6 +4,7 @@ import { PageHeader, Card, Button, IconButton, Badge, Tabs, Modal, Field, TextIn
 import { Icon } from "@/components/Icon";
 import { relativeTime, fmtDateTime } from "@/lib/dates";
 import { backend, type ServerEvolution, type AuditEvent, type MemorySearchResponse } from "@/connectors/api";
+import { useAdvancedMode } from "@/lib/prefs";
 import type { ActivityLogEntry, MemoryEntry, MemoryType, ScreenId, Route, EvolutionProposal } from "@/types";
 
 export function ActivityMemory() {
@@ -48,11 +49,95 @@ function entityRoute(e: ActivityLogEntry): Route | null {
 }
 
 /** One normalized row for the unified activity feed, whether it came from the server's
- *  real audit trail or a locally-recorded client action. */
-interface ActivityRow { id: string; timestamp: string; actorName: string; actionType: string; description: string; status: string; spaceId?: string; route: Route | null; source: "server" | "local" }
+ *  real audit trail or a locally-recorded client action. `description` is the raw
+ *  string (shown only in Advanced Mode); `plain` is the warm, honest translation every
+ *  household sees by default (ISS-014). */
+interface ActivityRow { id: string; timestamp: string; actorName: string; actionType: string; description: string; plain: string; status: string; spaceId?: string; route: Route | null; source: "server" | "local" }
 
 function localRow(e: ActivityLogEntry): ActivityRow {
-  return { id: e.id, timestamp: e.timestamp, actorName: e.actorName, actionType: e.actionType, description: e.description, status: e.status, spaceId: e.spaceId, route: entityRoute(e), source: "local" };
+  // Client-recorded entries are already household-facing copy (written by the app,
+  // not a raw audit code), so the raw and plain-language views are the same text.
+  return { id: e.id, timestamp: e.timestamp, actorName: e.actorName, actionType: e.actionType, description: e.description, plain: e.description, status: e.status, spaceId: e.spaceId, route: entityRoute(e), source: "local" };
+}
+
+// ISS-014 — the server audit trail speaks in event codes and tool ids
+// ("run.step · gmail.search — not_connected"), which is exactly right for Advanced
+// Mode but meaningless to most families. Each connector/tool id maps to what a
+// household actually calls the thing, and to what they'd need to reconnect.
+const CONNECTOR_INFO: Record<string, { label: string; connect: string }> = {
+  gmail: { label: "Gmail", connect: "Google" },
+  gcal: { label: "your Google Calendar", connect: "Google" },
+  calendar: { label: "your calendar", connect: "Google" },
+  google: { label: "Google", connect: "Google" },
+  sms: { label: "text messaging", connect: "the text messaging connector" },
+  twilio: { label: "text messaging", connect: "the text messaging connector" },
+  weather: { label: "the weather service", connect: "the weather service" },
+  rss: { label: "your feeds", connect: "the feed" },
+  http: { label: "an outside service", connect: "that connection" },
+  browser: { label: "the browser helper", connect: "the browser helper" },
+  web: { label: "the web", connect: "that connection" },
+};
+function connectorInfo(connectorId?: string, toolId?: string): { label: string; connect: string } {
+  const key = (connectorId || toolId?.split(".")[0] || "").toLowerCase();
+  return CONNECTOR_INFO[key] ?? { label: toolId ? toolId.split(".")[0] : "a connected service", connect: "it" };
+}
+const ACTION_VERBS: Record<string, string> = {
+  search: "check", get: "check", list: "check", read: "read from", fetch: "check",
+  send: "send something through", create: "add something to", write: "save something to",
+  update: "update", delete: "remove something from", post: "send something to",
+};
+function actionVerb(toolId?: string): string {
+  const verb = toolId?.split(".")[1]?.toLowerCase() ?? "";
+  return ACTION_VERBS[verb] ?? "use";
+}
+function errorLine(error: string | undefined, label: string, connect: string): string {
+  const err = error ?? "";
+  if (/not_connected|not_configured|not_authorized|connector_/.test(err)) return `but ${connect} isn't connected yet`;
+  if (/runtime_unavailable/.test(err)) return `but ${label} wasn't reachable`;
+  if (/provider_error/.test(err)) return "but it ran into a hiccup along the way";
+  if (/timeout/.test(err)) return "but it took too long to respond";
+  return "but it didn't work";
+}
+
+/** WP-011 (ISS-014) — allowlisted plain-language templates for the raw audit event
+ *  types the server writes. This is presentation-only: the RAW string above is never
+ *  altered and stays available (verbatim) behind Advanced Mode. Anything not covered
+ *  here still gets an honest, generic line rather than a leaked technical string. */
+function plainLanguageAudit(a: AuditEvent): string {
+  const { label, connect } = connectorInfo(a.connectorId, a.toolId);
+  switch (a.type) {
+    case "run.step":
+      return a.ok ? `A helper finished a step using ${label}.` : `A helper tried to ${actionVerb(a.toolId)} ${label}, ${errorLine(a.error, label, connect)}.`;
+    case "tool.execute":
+      return a.ok ? `A helper used ${label} successfully.` : `A helper tried to use ${label}, ${errorLine(a.error, label, connect)}.`;
+    case "run.start": return "A helper started working on a task.";
+    case "run.complete": return "A helper finished a task.";
+    case "run.failed": return "A task didn't finish — a helper ran into a problem it couldn't work around.";
+    case "run.step_failed_soft": return "A step of a task didn't work, but the rest kept going.";
+    case "run.step_skipped_no_tool": return "A helper skipped a step because it had no real way to send or deliver it.";
+    case "run.step_clamped": return "A helper wasn't allowed to take a step — it's outside what it's permitted to do.";
+    case "run.await_approval": return "A helper is waiting for someone to approve an action before continuing.";
+    case "run.approval_denied": return "An approval wasn't given in time, so a helper's task stopped.";
+    case "run.waiting_for_connector": return `A helper is waiting on ${connect} to be connected before it can continue.`;
+    case "run.expired": return "A task expired before anyone could act on it.";
+    case "run.stalled": return "A task stopped making progress and was stopped so it wouldn't hang forever.";
+    case "run.cancel": return "A task was cancelled.";
+    case "run.interrupted": return "A task was interrupted by a restart and is being checked on.";
+    case "evolution.auto_accept": return "FamiliOS applied a small self-improvement on its own.";
+    case "notify.deliver": return a.ok ? "A notification was delivered." : "A notification could not be delivered.";
+    case "notify.blocked_by_kill_switch": return "A message was held back because external actions are paused.";
+    case "notify.delivered_inapp": return "A message was shown in the app.";
+    case "identity.login": return "Someone signed in.";
+    case "settings.update": return "A household setting was changed.";
+    case "profiles.hidden": return "Someone tried to view profiles that are hidden until sign-in.";
+    case "oauth.callback": return a.ok ? "A connection finished linking." : "A connection attempt didn't finish.";
+    case "calendar.autopush": case "calendar.googledelete": case "calendar.auto_two_way": return "An event was synced with the calendar.";
+    case "backup.created": return "A backup of the household's data was made.";
+    case "trigger.fire": return "A scheduled automation started.";
+    case "job.run": return "A background job ran.";
+    default:
+      return a.ok === false ? "A helper did something technical that didn't succeed — details in Advanced." : "A helper did something technical — details in Advanced.";
+  }
 }
 
 // Map the server's raw audit event into the same display shape. This is the fix for the
@@ -68,6 +153,7 @@ function serverRow(a: AuditEvent): ActivityRow {
     actorName: a.actorName ?? a.actorId ?? "System",
     actionType: a.type,
     description: desc,
+    plain: plainLanguageAudit(a),
     status: a.ok ? "success" : "error",
     route: a.connectorId ? { screen: "connections", params: { id: a.connectorId } } : null,
     source: "server",
@@ -77,6 +163,10 @@ function serverRow(a: AuditEvent): ActivityRow {
 function ActivityLog() {
   const data = useStore((s) => s.data);
   const navigate = useStore((s) => s.navigate);
+  // ISS-014: Advanced Mode (src/lib/prefs.ts, surfaced in Settings) is the existing
+  // opt-in for technical detail across the app — the Activity Log reuses it rather
+  // than inventing a second raw/friendly toggle. Off by default → plain language.
+  const [advanced] = useAdvancedMode();
   const [type, setType] = useState("all");
   const [status, setStatus] = useState("all");
   const [space, setSpace] = useState("all");
@@ -118,7 +208,7 @@ function ActivityLog() {
               <li key={e.id} className="group relative flex items-start gap-3 rounded-2xl px-3 py-2.5 transition-colors hover:bg-surface-overlay">
                 <span className={`absolute -left-[27px] top-3 h-2.5 w-2.5 shrink-0 rounded-full border-2 border-surface-raised bg-${STATUS_COLOR[e.status] ?? "sky"}-500`} />
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm text-ink-800">{e.description}</p>
+                  <p className="text-sm text-ink-800">{advanced ? e.description : e.plain}</p>
                   <p className="text-xs text-ink-400">{e.actorName} · <span className="font-mono">{e.actionType}</span> · <span title={fmtDateTime(e.timestamp)}>{relativeTime(e.timestamp)}</span>{e.source === "server" && <span className="ml-1 text-sage-500" title="From the server audit trail">· synced</span>}</p>
                 </div>
                 {e.route && <button onClick={() => navigate(e.route!.screen as ScreenId, e.route!.params)} className="shrink-0 text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">View</button>}

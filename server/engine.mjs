@@ -890,7 +890,37 @@ export function findRunByApprovalId(approvalId) {
 // Runs by household; safe to call on an interval. Returns count expired.
 // Only genuine TTL lapse expires a parked run here; a `denied` approval is owned by
 // the _drive/resumeRun path (→ failed) so the terminal status stays consistent.
+//
+// ISS-017: `waiting_for_connector` runs used to have NO expiry at all — a household
+// missing a connection (e.g. Google) accumulated parked runs forever. Below adds the
+// same honest treatment approval-parks and stalls already get, PLUS a real in-app
+// notification (the Inbox otherwise never learns the run died).
 const RUN_STALL_MS = 30 * 60_000;
+function connectorParkTtlMs() {
+  const days = Number(process.env.HOMEOPS_CONNECTOR_PARK_TTL_DAYS);
+  return (Number.isFinite(days) && days > 0 ? days : 7) * 24 * 60 * 60_000;
+}
+// Feature epoch: the moment this sweep shipped. A run's `updatedAt` at/after this
+// stamp was parked (or last touched) under a codebase that HAS this TTL, so the TTL
+// applies to it by default — that's the honest, opt-out-by-nature default for new
+// parks. A run last touched BEFORE this stamp is a pre-existing ("legacy") park —
+// e.g. the resident household's long-stuck connector-parked runs — and is
+// grandfathered: this code landing must never silently vanish months-old runs on the
+// next boot/interval sweep. Sweeping those too is a real decision for a household (or
+// operator) to make, not an automatic side effect — set HOMEOPS_SWEEP_LEGACY_PARKED=1
+// to opt in once that decision is made.
+const CONNECTOR_PARK_FEATURE_EPOCH_MS = Date.parse("2026-07-22T00:00:00Z");
+function sweepLegacyParkedEnabled() {
+  return /^(1|true|yes|on)$/i.test(String(process.env.HOMEOPS_SWEEP_LEGACY_PARKED ?? ""));
+}
+// What a family would call the thing a connector-parked run is stuck waiting on —
+// mirrors the ActivityMemory.tsx plain-language mapping (ISS-014) so the reason a
+// run shows in the Inbox/Activity matches the language used everywhere else.
+const PARK_CONNECTOR_LABEL = { gmail: "Google", gcal: "Google", google: "Google", calendar: "Google", sms: "text messaging", twilio: "text messaging" };
+function parkConnectorLabel(toolId) {
+  const key = String(toolId ?? "").split(".")[0].toLowerCase();
+  return PARK_CONNECTOR_LABEL[key] ?? (key || "needed");
+}
 
 export async function expireStaleRuns() {
   let expired = 0;
@@ -938,6 +968,36 @@ export async function expireStaleRuns() {
       notifyRepeatedNonDelivery(getRun(r.id));
       fireRunFinished(r.id);
       expired++; // count only runs actually transitioned
+    }).catch(() => {}));
+  }
+  // ISS-017 — connector-parked runs (waiting_for_connector) past the TTL.
+  const parkTtlMs = connectorParkTtlMs();
+  const sweepLegacy = sweepLegacyParkedEnabled();
+  for (const r of listRuns({ limit: 1000 })) {
+    if (r.status !== "waiting_for_connector") continue;
+    const touched = Date.parse(r.updatedAt ?? "") || r.createdAt || 0;
+    if (!touched) continue;
+    const isLegacyPark = touched < CONNECTOR_PARK_FEATURE_EPOCH_MS;
+    if (isLegacyPark && !sweepLegacy) continue; // grandfathered until explicitly opted in
+    if (Date.now() - touched < parkTtlMs) continue;
+    jobs.push(withRunLock(r.id, async () => {
+      const run = getRun(r.id);
+      if (!run || run.status !== "waiting_for_connector") return; // a concurrent resume won
+      const cur = run.steps[run.cursor];
+      const reason = `expired — needed the ${parkConnectorLabel(cur?.toolId)} connection`;
+      if (cur) patchRunStep(r.id, run.cursor, { status: "expired", detail: reason, finishedAt: Date.now() });
+      patchRun(r.id, { status: "expired", error: "connector_park_expired", finishedAt: Date.now(), lease: null });
+      appendAudit({ type: "run.connector_park_expired", runId: r.id, householdId: run.householdId, toolId: cur?.toolId, legacy: isLegacyPark });
+      emit(r.id, "run.expired");
+      // A parked run can sit for days with no browser ever open to see it die — the
+      // in-app notification is how the household actually learns about it (Inbox).
+      addNotification({
+        householdId: run.householdId, actorId: run.actorId, channel: "In-App", to: null,
+        title: "A task expired waiting for a connection",
+        body: `"${run.title || "A task"}" ${reason}. Connect it in Connections, then run it again.`,
+      });
+      fireRunFinished(r.id);
+      expired++;
     }).catch(() => {}));
   }
   await Promise.all(jobs);

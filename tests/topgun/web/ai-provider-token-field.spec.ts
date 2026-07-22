@@ -25,9 +25,11 @@ test("the LM Studio provider card renders an optional API token field with hones
   // The AI providers panel lives inside Settings (AIProvidersPanel).
   await expect(page.getByText("LM Studio").first()).toBeVisible({ timeout: 15_000 });
 
-  // NOTE: the ui Field component renders its <label> without htmlFor (a11y gap,
-  // logged for a later polish pass), so getByLabel cannot associate — locate the
-  // write-only input by its keyOptional placeholder and the label by text.
+  // NOTE: WP-011 wired Field's <label> to its control via htmlFor/useId (a11y fix —
+  // getByLabel now associates correctly for single-child Fields). Kept the
+  // placeholder/text locators here anyway: this field is write-only (a saved token
+  // never round-trips to the DOM), and this spec's job is confirming the honest
+  // helper text renders, not re-proving the a11y wiring covered elsewhere.
   const labelText = page.getByText(/API token \(optional\)/).first();
   await labelText.scrollIntoViewIfNeeded();
   await expect(labelText, "the optional token label must render for the keyOptional local provider").toBeVisible();
