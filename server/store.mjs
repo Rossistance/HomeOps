@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { EventEmitter } from "node:events";
 import { createEngine } from "./tenant-db.mjs";
 import { currentTenant, runWithTenant, RESIDENT_TENANT } from "./tenant-context.mjs";
 
@@ -118,14 +119,38 @@ export function acknowledgeQuarantine(file) { return engine.acknowledge(T(), fil
 function readJSON(file, fallback) {
   return engine.getDoc(T(), file, fallback);
 }
-// Data revision — bumped on every meaningful write so clients can poll ONE tiny
+// Data revision — bumped on every meaningful write so clients can watch ONE tiny
 // number and refetch only when something actually changed (cross-device
 // freshness without websockets). Plumbing files that churn on their own are
 // excluded so the rev only moves for user-visible data.
-let _dataRev = Date.now();
+//
+// WP-009 (ISS-010/HYP-006): this used to be a single process-global counter,
+// so ANY household's write bumped rev for EVERY connected client — on a
+// shared dev/test server (multiple disposable households, concurrent
+// Playwright sessions) that made the "only refetch on real change" signal
+// almost meaningless, since rev moved constantly for reasons that had
+// nothing to do with a given household's own data. It's now tracked
+// per-tenant (keyed by the same household id every other store accessor
+// uses via T()), so a household's rev only advances on ITS OWN writes.
+// revEmitter lets /api/changes (SSE) push a bump the instant it happens
+// instead of every consumer having to poll for it.
+export const revEmitter = new EventEmitter();
+revEmitter.setMaxListeners(0);
+const _dataRevByTenant = new Map(); // tenantId -> rev
 const REV_EXCLUDE = new Set(["sessions.json", "idempotency.json", "health.json", "oauth_states.json", "contact_verifications.json"]);
-export function getDataRev() { return _dataRev; }
-function bumpRev(file) { if (!REV_EXCLUDE.has(file)) _dataRev++; }
+function ensureRev(tenant) {
+  if (!_dataRevByTenant.has(tenant)) _dataRevByTenant.set(tenant, Date.now());
+  return _dataRevByTenant.get(tenant);
+}
+export function getDataRev() { return ensureRev(T()); }
+export function getDataRevForTenant(tenant) { return ensureRev(tenant); }
+function bumpRev(file) {
+  if (REV_EXCLUDE.has(file)) return;
+  const tenant = T();
+  const next = ensureRev(tenant) + 1;
+  _dataRevByTenant.set(tenant, next);
+  revEmitter.emit("bump", { tenant, rev: next });
+}
 
 // Durability: the engine writes through SQLite WAL transactions — a crash
 // mid-write rolls back cleanly instead of leaving a half-written file.

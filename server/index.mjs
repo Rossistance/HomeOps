@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   getConnectorConfig, setConnectorConfig, revokeConnector, getSecret,
   appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings, getDataRev,
+  getDataRevForTenant, revEmitter,
   quarantinedCollections, acknowledgeQuarantine, CURRENT_TENANT, forEachTenant, runWithTenant,
   tenantEngine, sysDoc, putSysDoc, deleteSessionsForHousehold, getPlan, setPlanFromEntitlement,
   createSession, deleteSession, deleteSessionsForActor, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
@@ -905,10 +906,33 @@ const handleRequest = async (req, res) => {
 
     // Data revision — one tiny number that changes whenever household data does.
     // Clients poll this (cheap) and refetch screens only on change, which keeps
-    // web and iOS in sync within seconds without websocket plumbing.
+    // web and iOS in sync within seconds without websocket plumbing. rev is now
+    // per-household (WP-009 / HYP-006) — see the comment on _dataRevByTenant in
+    // store.mjs for why a global counter made this short-circuit ineffective.
     if (path === "/api/rev" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       return json(res, 200, { rev: getDataRev() }, req);
+    }
+
+    // WP-009 (ISS-010/HYP-006): push channel for the rev signal above. Clients
+    // that keep a fast poll of /api/rev to stay within a few seconds of fresh
+    // blow the "idle app makes almost no requests" budget (PRD §14); a long-
+    // lived SSE connection gives sub-second freshness for the cost of ONE
+    // request instead of one every few seconds. Polling /api/rev remains the
+    // documented fallback for clients that don't/can't hold an SSE connection
+    // (see src/store/useStore.ts) — this endpoint is advisory, not the only path.
+    if (path === "/api/changes" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const tenantId = g.session.householdId;
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no", ...corsHeaders(req) });
+      const send = (rev) => { try { res.write(`data: ${JSON.stringify({ rev })}\n\n`); } catch { /* client gone */ } };
+      const onBump = ({ tenant, rev }) => { if (tenant === tenantId) send(rev); };
+      revEmitter.on("bump", onBump);
+      const hb = setInterval(() => { try { res.write(":keepalive\n\n"); } catch { /* ignore */ } }, 20000);
+      const cleanup = () => { clearInterval(hb); revEmitter.off("bump", onBump); };
+      req.on("close", cleanup);
+      send(getDataRevForTenant(tenantId)); // initial snapshot so the client has a baseline immediately
+      return; // hold the connection open
     }
 
     /* ---- Household identity: the name shows on the lock screen, briefings,

@@ -1408,14 +1408,23 @@ export const useStore = create<Store>((set, get) => {
           let last: ServerRun | null = null;
           for (let i = 0; i < 60; i++) {
             await new Promise((res) => setTimeout(res, 2500));
-            await get().hydrateFromServer();
-            // d.runs isn't necessarily populated for a server-auto-started plan run —
-            // ask the server directly so the honesty check below reflects real status,
-            // not a lookup that can silently miss.
+            // WP-009 (HYP-006 root cause): this used to call hydrateFromServer()
+            // — a Promise.all across 10 collections — unconditionally every
+            // 2.5s here, completely bypassing the /api/rev short-circuit. That
+            // was the actual source of the ~1 req/sec collection-fetch storm
+            // (EV-030), not the rev poll itself: every chat-started run drove
+            // its own ungated full refetch loop for up to 2.5 minutes. The
+            // rev-gated SSE/poll loop started in loadBackend now owns
+            // refetching collections on real change; this loop only needs the
+            // single run's status (one cheap request) for terminal detection
+            // and the honesty fallback below.
             last = await backend.getRun(runId);
             if (last && TERMINAL_RAW.includes(last.status)) break;
           }
-          for (const d of [4000, 10000, 22000]) setTimeout(() => void get().hydrateFromServer(), d);
+          // One unconditional sync now that the run is terminal/exhausted — cheap
+          // (fires once, not on a timer) and a safety net in case a rev push was
+          // somehow missed while this run's steps were landing.
+          void get().hydrateFromServer();
           // WP-004: polling gives up after ~2.5 minutes. A run that's still parked
           // (waiting on approval/connector) or that expired unattended must not leave
           // the optimistic "On it —" text as the last word in the thread.
@@ -1655,18 +1664,63 @@ export const useStore = create<Store>((set, get) => {
         void get().migrateAgentsToServer();
         void get().migrateContactMethodsToServer();
         void get().hydrateFromServer();
-        // Cross-device freshness: poll the tiny /api/rev number and re-hydrate
-        // only when household data actually changed (phone edits show up here
-        // within ~15s and vice versa). Singleton — survives repeat loadBackend.
-        const w = window as unknown as { __familiosRevTimer?: number; __familiosRev?: number };
-        if (!w.__familiosRevTimer) {
-          w.__familiosRevTimer = window.setInterval(async () => {
+        // Cross-device freshness (WP-009 / ISS-010 / HYP-006): re-hydrate the 10
+        // server collections ONLY when household data actually changed, signalled
+        // by /api/rev (now per-household — see store.mjs). A fixed-interval poll
+        // alone can't satisfy both "idle app makes almost no requests" AND
+        // "a change is visible within a few seconds" (a poll fast enough for the
+        // latter blows the request budget for the former) — so the fast path is a
+        // push channel (SSE /api/changes), and a slow poll is only the fallback
+        // for when SSE can't connect, backing further off while the tab is
+        // hidden. Singleton — survives repeat loadBackend calls and any number
+        // of open tabs/components that just want "tell me when something changed."
+        type FamiliosSyncState = { es: EventSource | null; pollId: number | null; lastRev: number | null; hydrateTimer: number | null };
+        const w = window as unknown as { __familiosSync?: FamiliosSyncState };
+        if (!w.__familiosSync) {
+          const state: FamiliosSyncState = { es: null, pollId: null, lastRev: null, hydrateTimer: null };
+          w.__familiosSync = state;
+          // Coalesce a burst of rev bumps (e.g. several run steps completing back
+          // to back) into one hydrate instead of one per bump.
+          const scheduleHydrate = (rev: number) => {
+            if (state.lastRev != null && rev === state.lastRev) return;
+            state.lastRev = rev;
+            if (state.hydrateTimer != null) return;
+            state.hydrateTimer = window.setTimeout(() => {
+              state.hydrateTimer = null;
+              if (get().session) void get().hydrateFromServer();
+            }, 300);
+          };
+          const pollOnce = async () => {
             if (!get().session) return;
             const rev = await backend.rev();
-            if (rev == null) return;
-            if (w.__familiosRev != null && rev !== w.__familiosRev) void get().hydrateFromServer();
-            w.__familiosRev = rev;
-          }, 15_000);
+            if (rev != null) scheduleHydrate(rev);
+          };
+          const armPoll = (ms: number) => {
+            if (state.pollId != null) window.clearInterval(state.pollId);
+            state.pollId = window.setInterval(pollOnce, ms);
+          };
+          const startSSE = () => {
+            if (typeof EventSource === "undefined" || state.es) return;
+            try {
+              const es = new EventSource("/api/changes", { withCredentials: true });
+              es.onmessage = (e) => {
+                try { const { rev } = JSON.parse(e.data) as { rev: number }; scheduleHydrate(rev); } catch { /* not a rev payload */ }
+              };
+              // EventSource auto-reconnects on its own; the fallback poll below
+              // still catches anything missed while a reconnect is in flight.
+              es.onerror = () => {};
+              state.es = es;
+            } catch { /* SSE unsupported/blocked — the fallback poll covers it */ }
+          };
+          startSSE();
+          armPoll(document.hidden ? 30_000 : 20_000); // fallback safety net, not the primary freshness path
+          void pollOnce(); // catch anything between the initial hydrate above and SSE connecting
+          document.addEventListener("visibilitychange", () => {
+            if (document.hidden) { armPoll(30_000); return; }
+            armPoll(20_000);
+            void pollOnce(); // immediate rev check the moment the tab is foregrounded again
+            if (!state.es) startSSE();
+          });
         }
       }
     },
