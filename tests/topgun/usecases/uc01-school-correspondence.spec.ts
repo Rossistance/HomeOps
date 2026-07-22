@@ -78,6 +78,7 @@ test("UC-1: school mail is found, labeling parks for approval, a real UI approve
   await page.getByText(CONV_TITLE, { exact: true }).first().click();
   await expect(page.getByText(PLAN_TITLE).first()).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText(/finished \(2\/2\)|completed/i).first(), "the run_result must state an honest 2/2 outcome").toBeVisible({ timeout: 15_000 });
+  await page.screenshot({ path: "D:/FamiliOS/FamiliOS/.top-gun/runs/run-20260721-054151/implementation/evidence/uc01-school-correspondence.png", fullPage: true });
 
   errors.assertClean();
 });

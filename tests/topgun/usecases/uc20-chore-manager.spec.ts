@@ -86,6 +86,7 @@ test("UC-20: chat-driven chore setup — task + list item + event attachment lan
   // UI truth 3 — the event exists on the Calendar surface.
   await openScreen(page, "Calendar");
   await expect(page.getByText(EVENT_TITLE).first(), "the drafted event must be visible on Calendar").toBeVisible({ timeout: 15_000 });
+  await page.screenshot({ path: "D:/FamiliOS/FamiliOS/.top-gun/runs/run-20260721-054151/implementation/evidence/uc20-chore-manager.png", fullPage: true });
 
   errors.assertClean();
 });
