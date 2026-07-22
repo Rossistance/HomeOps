@@ -43,7 +43,7 @@ import { createBackup, listBackups, readBackup, restoreBackup, backupTick } from
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { closeBrowser } from "./browser.mjs";
 import { orchestrate, ensureOpenDefaultAgent } from "./orchestrator.mjs";
-import { sandboxEnabled, seedSandboxAccounts } from "./sandbox-connectors.mjs";
+import { sandboxEnabled, seedSandboxAccounts, listSandboxEffects } from "./sandbox-connectors.mjs";
 import { seedDefaults } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
 import { twilioAuthToken, twilioSignatureValid, handleInboundSms, twiml } from "./sms.mjs";
@@ -1007,6 +1007,16 @@ const handleRequest = async (req, res) => {
     if (path === "/api/accounts" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       return json(res, 200, { accounts: listAccountsFor(g.session.householdId, g.session.actorId) }, req);
+    }
+    // Sandbox-mode ONLY (WP-006 s4–s6): the recorded would-be effects for THIS tenant,
+    // so a UI-driven use-case spec can assert what content/recipient/channel WOULD have
+    // gone out (see server/test/README-sandbox.md). 404 in real mode — this surface
+    // does not exist outside the sandbox, and it never exposes another tenant's data
+    // (listSandboxEffects reads the session tenant's own collection).
+    if (path === "/api/sandbox/effects" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!sandboxEnabled()) return json(res, 404, { error: "not_found" }, req);
+      return json(res, 200, { sandbox: true, effects: listSandboxEffects() }, req);
     }
     // Household graph (P4.2): the server-owned member roster with roles + relationships.
     // This is the source of truth the session role is resolved from (P0.2); the client

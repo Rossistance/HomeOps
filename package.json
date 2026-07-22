@@ -20,6 +20,7 @@
     "install-browser": "playwright install chromium",
     "postinstall": "node scripts/postinstall-browser.mjs",
     "topgun:web": "playwright test -c tests/topgun/playwright.config.ts --project=web-chromium",
+    "topgun:usecases": "playwright test -c tests/topgun/usecases.config.ts --project=web-chromium",
     "topgun:web:ios": "playwright test -c tests/topgun/playwright.config.ts --project=web-webkit-iphone",
     "topgun:web:all": "playwright test -c tests/topgun/playwright.config.ts",
     "topgun:pwa": "playwright test -c tests/topgun/playwright.config.ts web/pwa.spec.ts --project=web-chromium",
