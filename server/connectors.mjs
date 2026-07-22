@@ -151,6 +151,14 @@ export function connectorById(id) {
   return CONNECTORS.find((c) => c.id === id);
 }
 
+// WP-012: which household-utility connectors have a real-credential/re-enable setup
+// checklist in src/data/providerSetup.ts CONNECTOR_SETUP_GUIDES. Only sms (Twilio,
+// deployment-credentialed) and http (household-revoked re-enable path) have one today —
+// server/test/provider-setup.test.mjs keeps this set in lockstep with that file so it
+// can't silently drift. Everything else already runs for real with no credential to
+// document (weather/rss/web/webhook/files-local) or has no gated UC riding on it.
+const CONNECTORS_WITH_SETUP_GUIDE = new Set(["sms", "http"]);
+
 // Does config (env or stored) satisfy all required fields?
 function requiredSatisfied(c) {
   const cfg = getConnectorConfig(c.id);
@@ -231,6 +239,8 @@ export function publicConnector(c) {
     tools: c.tools, triggers: c.triggers, endpoint: c.endpoint ?? null,
     readiness, health: health ? { ok: health.ok, status: health.status, error: health.error ?? null, at: health.at, code: health.code ?? null } : null,
     live, updatedAt: cfg.updatedAt,
+    // WP-012: names a real setup/re-enable checklist exists for this connector.
+    setupGuide: CONNECTORS_WITH_SETUP_GUIDE.has(c.id),
   };
 }
 

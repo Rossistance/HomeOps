@@ -3,6 +3,7 @@ import { useStore } from "@/store/useStore";
 import { PageHeader, Card, Button, Badge, Drawer, Field, TextInput, TextArea, EmptyState, RiskBadge, ReadinessBadge, HealthDot } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { backend, isExecutable, type BackendConnector, type ConnectorTool, type ConnectorProvider, type ConnectedAccount, type ProviderTool, type ExecResult, type WebhookEvent } from "@/connectors/api";
+import { PROVIDER_SETUP_GUIDES, CONNECTOR_SETUP_GUIDES, type ProviderSetupGuide, type ConnectorSetupGuide } from "@/data/providerSetup";
 import { relativeTime } from "@/lib/dates";
 
 const PROVIDER_ICON: Record<string, string> = { google: "Mail", microsoft: "Mail", slack: "MessageSquare", dropbox: "FolderOpen", notion: "FileText", todoist: "CircleCheck", ticktick: "CircleCheck" };
@@ -229,6 +230,7 @@ function ProviderDrawer({ provider: p, onClose }: { provider: ConnectorProvider;
               <li><code className="rounded bg-surface-raised px-1">{p.clientIdEnv}</code></li>
               <li><code className="rounded bg-surface-raised px-1">{p.clientSecretEnv}</code></li>
             </ul>
+            {PROVIDER_SETUP_GUIDES[p.id] && <SetupGuideToggle guide={PROVIDER_SETUP_GUIDES[p.id]} />}
           </div>
         ) : (
           <section>
@@ -268,6 +270,91 @@ function AccountRow({ account: a, onHealth, onRevoke, onReconnect }: { account: 
       <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-ink-800">{a.displayName}</p><p className="text-xs text-ink-500">{a.status}{a.lastHealthAt ? ` · checked ${relativeTime(a.lastHealthAt)}${ok === false ? " · failed" : ""}` : ""}</p></div>
       {a.status === "needs_reconnect" ? <Button size="sm" variant="primary" onClick={onReconnect}><Icon name="RefreshCw" size={13} /> Reconnect</Button> : <Button size="sm" variant="secondary" onClick={onHealth}><Icon name="Activity" size={13} /> Check</Button>}
       <Button size="sm" variant="ghost" onClick={onRevoke}><Icon name="Ban" size={13} /> Disconnect</Button>
+    </div>
+  );
+}
+
+/* -------- WP-012: real-credential setup checklist (src/data/providerSetup.ts) -------- */
+function isProviderGuide(g: ProviderSetupGuide | ConnectorSetupGuide): g is ProviderSetupGuide {
+  return "scopesNeeded" in g;
+}
+
+function SetupGuideToggle({ guide }: { guide: ProviderSetupGuide | ConnectorSetupGuide }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-3">
+      <Button size="sm" variant="secondary" onClick={() => setOpen((o) => !o)}>
+        <Icon name={open ? "ChevronUp" : "ChevronDown"} size={13} /> {open ? "Hide setup guide" : "Set up"}
+      </Button>
+      {open && <SetupGuidePanel guide={guide} />}
+    </div>
+  );
+}
+
+function SetupGuidePanel({ guide }: { guide: ProviderSetupGuide | ConnectorSetupGuide }) {
+  return (
+    <div className="well mt-2 space-y-3 p-3 text-sm" data-testid="setup-guide-panel">
+      {guide.consoleUrl ? (
+        <p className="text-xs">
+          <Icon name="ExternalLink" size={12} className="mr-1 inline text-ink-400" />
+          <a href={guide.consoleUrl} target="_blank" rel="noreferrer" className="font-medium text-ink-800 underline">{guide.consoleName}</a>
+          {guide.versionNote && <span className="ml-1 text-ink-400">— {guide.versionNote}</span>}
+        </p>
+      ) : (
+        <p className="text-xs text-ink-500">{guide.consoleName}</p>
+      )}
+
+      <div>
+        <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-500">Setup steps</p>
+        <ol className="list-decimal space-y-1 pl-4 text-xs text-ink-600">
+          {guide.steps.map((s, i) => <li key={i}>{s}</li>)}
+        </ol>
+      </div>
+
+      {isProviderGuide(guide) ? (
+        <>
+          <div>
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-500">Scopes needed</p>
+            <div className="space-y-1">
+              {guide.scopesNeeded.map((s) => (
+                <div key={s.key} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-surface-raised px-2 py-1 text-xs">
+                  <span className="text-ink-700">{s.label}</span>
+                  <code className="text-ink-400">{s.oauthScope}</code>
+                </div>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-ink-500">{guide.redirectUriNote}</p>
+          </div>
+          <div>
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-500">Env vars</p>
+            <div className="flex flex-wrap gap-1.5">
+              {guide.envVars.map((e) => <code key={e} className="rounded bg-surface-raised px-1.5 py-0.5 text-xs">{e}</code>)}
+            </div>
+          </div>
+        </>
+      ) : (
+        <div>
+          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-500">Config fields</p>
+          <div className="space-y-1">
+            {guide.configFields.map((f) => (
+              <div key={f.key} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-surface-raised px-2 py-1 text-xs">
+                <span className="text-ink-700">{f.label}{f.required ? " *" : ""}</span>
+                {f.env && <code className="text-ink-400">{f.env}</code>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-500">Unlocks</p>
+        <div className="flex flex-wrap gap-1">
+          {guide.unlocksUCs.map((u) => <Badge key={u.id} color="gray">{u.id} · {u.label}</Badge>)}
+        </div>
+      </div>
+
+      <p className="text-xs text-ink-600"><strong>Verify inside FamiliOS:</strong> {guide.verify}</p>
+      {guide.sandboxNote && <p className="text-xs italic text-ink-400">{guide.sandboxNote}</p>}
     </div>
   );
 }
@@ -424,6 +511,7 @@ function ConnectorDrawer({ connector: c, onClose }: { connector: BackendConnecto
               )}
             </div>
             {locError && <p className="mt-2 text-xs text-coral-600">{locError}</p>}
+            {!configured && CONNECTOR_SETUP_GUIDES[c.id] && <SetupGuideToggle guide={CONNECTOR_SETUP_GUIDES[c.id]} />}
           </section>
         )}
 

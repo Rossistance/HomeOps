@@ -437,6 +437,16 @@ export function clientCreds(p) {
   return { clientId: env(p.clientIdEnv), clientSecret: env(p.clientSecretEnv) };
 }
 
+// WP-012: every first-party provider now has a real-credential setup checklist
+// (src/data/providerSetup.ts PROVIDER_SETUP_GUIDES, keyed by this same id) — this is
+// the smallest honest seam so a not-configured provider's public payload can point at
+// "there IS a named unblock path" without duplicating checklist content server-side.
+// server/test/provider-setup.test.mjs asserts every PROVIDERS id has a matching guide,
+// so this stays true by construction rather than by hand-maintained parity.
+export function providerHasSetupGuide(_p) {
+  return true;
+}
+
 // Public, secret-free provider view for the frontend.
 export function publicProvider(p) {
   return {
@@ -445,6 +455,10 @@ export function publicProvider(p) {
     clientIdEnv: p.clientIdEnv, clientSecretEnv: p.clientSecretEnv, // names only, not values
     scopes: p.scopes.map((s) => ({ key: s.key, label: s.label, risk: s.risk })),
     tools: p.tools.map((t) => ({ id: t.id, name: t.name, action: t.action, risk: t.risk, requiresApproval: t.requiresApproval, scopes: t.scopes, inputs: t.inputs ?? [] })),
+    // WP-012: names a real setup checklist exists for this provider (see above) — lets
+    // the next-wave 22-UC suite print "blocker: <provider> OAuth app not provisioned;
+    // checklist available" instead of a bare not_configured with no unblock path.
+    setupGuide: providerHasSetupGuide(p),
     // WP-006: annotate ONLY when the flag is set (real mode = byte-for-byte today's
     // shape). A truthful signal that provider calls are being served by the sandbox
     // twin — it does NOT claim deployment credentials are configured.
