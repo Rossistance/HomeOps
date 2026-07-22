@@ -1,0 +1,72 @@
+{
+  "bundle": "familios-backup-local-2026-07-21T12-29-58-709Z.json.gz",
+  "bundlePath": "D:/FamiliOS/FamiliOS/.top-gun/runs/run-20260721-054151/implementation/evidence/backups/familios-backup-local-2026-07-21T12-29-58-709Z.json.gz",
+  "sizeBytesGz": 520402,
+  "meta": {
+    "at": "2026-07-21T12:29:58.710Z",
+    "app": "familios",
+    "format": 2,
+    "count": 36,
+    "tenants": [
+      "local"
+    ],
+    "generatedBy": "WP-008b dry-run analyst — read-only node:sqlite export (no mutation)",
+    "sourceDb": "D:/FamiliOS/FamiliOS/server/.data/tenants/local/household.db"
+  },
+  "verified": {
+    "reopenedAndParsed": true,
+    "fileCount": 36,
+    "auditBytes": 773376,
+    "auditLines": 3217,
+    "recordCountsPerCollectionOrFile": {
+      "agents.json": 18,
+      "approvals.json": 53,
+      "calendar_subscriptions.json": 2,
+      "contact_methods.json": 1,
+      "conversations.json": 7,
+      "events.json": 45,
+      "evolution.json": 21,
+      "function_definitions.json": 4,
+      "help-requests.json": 1,
+      "meals.json": 7,
+      "notifications.json": 22,
+      "playbooks.json": 16,
+      "risk_overrides.json": 9,
+      "runs.json": 102,
+      "skills.json": 13,
+      "tasks.json": 28,
+      "triggers.json": 3,
+      "contact_verifications.json": 0,
+      "function_versions.json": 5,
+      "memory.json": 15,
+      "push-tokens.json": 1,
+      "skill_versions.json": 10,
+      "webhooks.json": 2,
+      "sessions.json": 0,
+      "idempotency.json": 182,
+      "members.json": 13,
+      "oauth_states.json": 13,
+      "accounts.json": 1,
+      "agent_versions.json": 8,
+      "settings.json": 6,
+      "connectors.json": 4,
+      "routing.json": 24,
+      "artifacts.json": 34,
+      "ai_usage.json": 3,
+      "jobs.json": 2,
+      "health.json": 7
+    },
+    "evolutionByStatus": {
+      "rejected": 5,
+      "accepted": 15,
+      "pending": 1
+    },
+    "agentVersionsAgents": 8,
+    "agentVersionsSnapshotsTotal": 43,
+    "skillVersionsSkills": 10,
+    "skillVersionsSnapshotsTotal": 18,
+    "agentsCount": 18,
+    "skillsCount": 13,
+    "playbooksCount": 16
+  }
+}

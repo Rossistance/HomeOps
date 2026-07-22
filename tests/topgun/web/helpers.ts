@@ -46,18 +46,27 @@ export async function signUpDisposableHousehold(page: Page): Promise<{ email: st
   const email = `tg-${stamp}@example.invalid`;
   const householdName = `TG Disposable ${stamp}`;
   const ownerName = "TG Owner";
-  const result = await page.evaluate(
-    async ({ email, householdName, ownerName }) => {
-      const r = await fetch("/api/signup", {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, password: "tg-disposable-pass-1", ownerName, householdName }),
-      });
-      return { status: r.status, body: await r.json().catch(() => null) };
-    },
-    { email, householdName, ownerName },
-  );
+  // The auth rate limiter (server/index.mjs: 20 auth calls / 60s / IP) is correct
+  // product behavior — but a full 22-UC benchmark run performs a signup per spec and
+  // can legitimately trip it near the end of a fast run. Back off and retry instead
+  // of failing the suite on a limiter that is doing its job.
+  let result: { status: number; body: any } = { status: 0, body: null };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    result = await page.evaluate(
+      async ({ email, householdName, ownerName }) => {
+        const r = await fetch("/api/signup", {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ email, password: "tg-disposable-pass-1", ownerName, householdName }),
+        });
+        return { status: r.status, body: await r.json().catch(() => null) };
+      },
+      { email, householdName, ownerName },
+    );
+    if (result.status !== 429) break;
+    await page.waitForTimeout(22_000 * (attempt + 1)); // rolling 60s window — 22s/44s/66s
+  }
   expect(result.status, `disposable-household signup must succeed: ${JSON.stringify(result.body).slice(0, 200)}`).toBe(200);
   await page.goto("/");
   await expect(commandPalette(page)).toBeVisible({ timeout: 20_000 });
