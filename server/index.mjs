@@ -81,6 +81,7 @@ import { listProviders as listConnectorProviders, providerById as connectorProvi
 import { buildAuthUrl, exchangeCode, apiForAccount } from "./oauth.mjs";
 import { listAccountsFor, getOwnedAccount, upsertAccount, revokeAccount, checkAccountHealth, publicAccount } from "./accounts.mjs";
 import { planFromGoal, generateMiniApp, generatePlaybook, assistantRespond, assistantStream, proposeEvolution, toolCatalog } from "./planner.mjs";
+import { preflightAutomation } from "./automation-preflight.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const VERSION = "1.2.0";
@@ -1263,7 +1264,13 @@ const handleRequest = async (req, res) => {
       });
       if (out.error) {
         const code = out.error === "unknown_skill" ? 404 : out.error === "nothing_to_run" ? 400 : 422;
-        return json(res, code, { error: out.error === "nothing_to_run" ? "plan_or_skill_required" : out.error }, req);
+        // WP-101 slice 1: typed preflight refusals (no_acting_agent) carry a plain-language
+        // `message` naming the fix. Dropping it would leave the client with a bare error
+        // code and nothing to show the family.
+        return json(res, code, {
+          error: out.error === "nothing_to_run" ? "plan_or_skill_required" : out.error,
+          ...(out.message ? { message: out.message } : {}),
+        }, req);
       }
       const run = out.run;
       audit({ type: "run.start", runId: run.id, source: run.source, ok: true }, req, g.session);
@@ -1341,7 +1348,10 @@ const handleRequest = async (req, res) => {
       const r0 = getRun(runEvents[1]);
       if (!r0 || r0.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no", ...corsHeaders(req) });
-      const TERMINAL_RUN = ["completed", "failed", "cancelled", "expired"];
+      // WP-101 slice 3: partially_failed is terminal. Omitting it here would leave the SSE
+      // stream open forever on a finished run (the client waits on a run that will never
+      // emit again).
+      const TERMINAL_RUN = ["completed", "partially_failed", "failed", "cancelled", "expired"];
       const emitter = runEmitter(runEvents[1]);
       let hb;
       const cleanup = () => { clearInterval(hb); emitter.off("event", onEvent); };
@@ -2880,6 +2890,24 @@ const handleRequest = async (req, res) => {
       const out = await fireTrigger(t, { triggerType: "manual", payload: body?.payload });
       audit({ type: "trigger.manual_fire", triggerId: t.id, runId: out.runId, ok: out.ok, error: out.error }, req, g.session);
       return json(res, out.ok ? 200 : 422, out, req);
+    }
+
+    // WP-101 slice 4 — the "compile step" template instantiation never had: validate a
+    // candidate automation's acting agent / tool steps / integrations / multi-agent role
+    // assignments against the REAL registries before the client lets it go "Active".
+    // Read-only (see automation-preflight.mjs) — any session member may check.
+    if (path === "/api/automations/validate" && method === "POST") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      if (!body.plan || typeof body.plan !== "object") return json(res, 400, { error: "plan_required" }, req);
+      const result = preflightAutomation({
+        templateId: typeof body.templateId === "string" ? body.templateId : undefined,
+        plan: body.plan,
+        agentId: typeof body.agentId === "string" ? body.agentId : undefined,
+        multiAgentRoles: Array.isArray(body.multiAgentRoles) ? body.multiAgentRoles : undefined,
+        session: g.session,
+      });
+      return json(res, 200, result, req);
     }
 
     /* ---- OAuth start (PKCE; state bound to actor + household + provider) ---- */

@@ -156,6 +156,18 @@ export function runOutcomeText(run) {
           : `Done — "${run.title}" finished (${o.succeeded.length}/${o.steps.length} steps).`;
     return `${head}${caveat}${body}`;
   }
+  // WP-101 slice 3 (ISS-110): a partially_failed run is one where only OPTIONAL
+  // (soft-failed) work fell over — the required work landed. The hard-failure sentence
+  // below would be over-negative for it: true that a step failed, but it buries the part
+  // that actually worked. Stay honest in both directions — neither "Done" nor "failed".
+  if (run.status === "partially_failed") {
+    const head = o.anyEffect
+      ? deliveredHeadline(run, o)
+      : o.anyDraft
+        ? draftedHeadline(run, o)
+        : `I finished "${run.title}", but part of it didn't work.`;
+    return `${head}${caveat}${body}`;
+  }
   const bad = o.failed[0];
   return `"${run.title}" failed at step ${bad ? bad.index + 1 : "?"}${bad ? ` (${bad.title})` : ""}: ${run.error ?? "unknown error"}.${caveat}`;
 }

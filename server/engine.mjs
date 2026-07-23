@@ -115,7 +115,9 @@ Do NOT remember one-off task outcomes, generic summaries, or anything already ob
 Respond with ONLY JSON: {"remember": boolean, "text": string, "type": "fact"|"preference"|"routine"|"rule"|"insight"}. When remember is false, text may be empty.`;
 async function proposeRunMemory(runId) {
   const run = getRun(runId);
-  if (!run || run.status !== "completed") return;
+  // WP-101 slice 3: a partially-failed run still did real work whose succeeded steps can
+  // hold a durable household fact — the judge below only ever reads succeeded steps.
+  if (!run || !["completed", "partially_failed"].includes(run.status)) return;
   const provider = activeAiProvider(run.householdId);
   if (!provider) return;
   const material = run.steps
@@ -328,6 +330,56 @@ async function execResolved(resolved, input, ctx, approvalId) {
 
 const WAITING_CONNECTOR_RE = /not_configured|not_connected|not_authorized|connector_|runtime_unavailable/;
 
+/* ============ WP-101 slice 3 (ISS-110): HONEST TERMINAL STATUS AGGREGATION ============
+ * A parent run must never report success when a child step it depended on failed.
+ *
+ * Before this, the loop below had exactly two endings: any hard failure returned through
+ * `finishFailed` (→ "failed"), and reaching the end of the plan wrote "completed"
+ * UNCONDITIONALLY — including when a step had been SOFT-failed on the way past. The
+ * soft-fail rule (see the "SOFT failure for read-only enrichment steps" comment further
+ * down) is genuinely right: one bot-walled recipe page must not kill a ten-step plan.
+ * But it left the step honestly marked `failed` inside a run whose own status said
+ * "completed", so every consumer above it — the trigger's lastStatus, the run chip, the
+ * digest — read a run that partly failed as a run that worked.
+ *
+ * The truth table, expressed in this engine's existing vocabulary ("completed" IS the
+ * success terminal — it is what every client, route, and stored run already says):
+ *   • no failed steps                     → completed         (all required children succeeded)
+ *   • any REQUIRED child failed           → failed            (never success, never partial)
+ *   • only OPTIONAL/soft-failed children  → partially_failed  (never success)
+ *
+ * "Optional" is not guessed from a step's shape: it is recorded at the moment the engine
+ * DECIDES to continue past a failure, by stamping `softFailed: true` on that step. Any
+ * other failed step is required by definition — the engine would have stopped for it —
+ * so a future path that fails a step and keeps going without opting into soft-fail
+ * lands on `failed` here, not on a quiet "completed". Fail-closed, on purpose.
+ *
+ * Rollback: HOMEOPS_PARTIAL_FAILURE_STATUS=off restores the pre-WP-101 terminal exactly
+ * (soft failures end "completed"), for the window before every consumer of the run-status
+ * enum — server/assistant-runs.mjs, index.mjs's TERMINAL_RUN, src/store/useStore.ts's
+ * runStatusView/mapRunStatus — has learned the new state.
+ */
+export const TERMINAL_RUN_STATUSES = ["completed", "partially_failed", "failed", "cancelled", "expired"];
+function partialFailureStatusEnabled() {
+  return String(process.env.HOMEOPS_PARTIAL_FAILURE_STATUS ?? "on").trim().toLowerCase() !== "off";
+}
+
+/** Pure classifier over a run record — exported for the truth-table unit test.
+ *  Returns { status, error, required, optional }: `status` is the terminal the run has
+ *  EARNED, `required`/`optional` are the failed steps in each class. */
+export function classifyRunOutcome(run) {
+  const failed = (run?.steps ?? []).filter((s) => s?.status === "failed");
+  const optional = failed.filter((s) => s?.softFailed === true);
+  const required = failed.filter((s) => s?.softFailed !== true);
+  if (required.length) return { status: "failed", error: "required_step_failed", required, optional };
+  if (optional.length) {
+    return partialFailureStatusEnabled()
+      ? { status: "partially_failed", error: "partial_step_failure", required, optional }
+      : { status: "completed", error: null, required, optional };
+  }
+  return { status: "completed", error: null, required, optional };
+}
+
 /* ---- start a run from a concrete plan ---- */
 // Graceful-shutdown support: once draining, new runs are refused (existing runs
 // finish their current step and park via lease release — recovery re-drives them
@@ -378,6 +430,11 @@ export async function startRun({ source = "manual", sourceRef = {}, plan, params
       // choke point every run passes through, so the verdict is settled here.
       effectClaimed: s.effectClaimed ?? claimsExternalEffect({ toolId: s.toolId ?? null, title: s.title, detail: s.detail }),
       clampedOut: s.clampedOut ?? null,
+      // WP-101 slice 3: set to true ONLY by the engine, at the moment it decides to
+      // continue past this step's failure (see the soft-fail branch in _drive). It is
+      // what makes a failed step "optional" for the run's terminal status, so it can
+      // never be pre-declared by a plan — a caller cannot mark its own step optional.
+      softFailed: false,
       status: "pending",
       approvalId: null,
       idempotencyKey: null,
@@ -425,7 +482,7 @@ export function driveRun(runId) {
 async function _drive(runId) {
   let run = getRun(runId);
   if (!run) return { error: "not_found" };
-  if (["completed", "failed", "cancelled", "expired"].includes(run.status)) return { ok: true, status: run.status };
+  if (TERMINAL_RUN_STATUSES.includes(run.status)) return { ok: true, status: run.status };
   patchRun(runId, { status: "running", startedAt: run.startedAt ?? Date.now(), lease: { owner: LEASE_OWNER, at: Date.now() } });
   emit(runId, "run.running");
 
@@ -434,8 +491,23 @@ async function _drive(runId) {
     if (!run || run.status === "cancelled") return { ok: true, status: "cancelled" };
     const i = run.cursor;
     if (i >= run.steps.length) {
-      patchRun(runId, { status: "completed", finishedAt: Date.now(), lease: null });
-      appendAudit({ type: "run.complete", runId, householdId: run.householdId, steps: run.steps.length });
+      // WP-101 slice 3 (ISS-110) — the run gets the terminal it EARNED, not an
+      // unconditional "completed". See classifyRunOutcome above for the truth table.
+      const outcome = classifyRunOutcome(run);
+      if (outcome.status === "failed") {
+        // A required child failed and something let the loop walk past it. Report the
+        // failure the run actually had, through the one failure path (audit + evolution
+        // + repeated-non-delivery alert), never a green "completed".
+        appendAudit({ type: "run.required_step_failed", runId, householdId: run.householdId, steps: outcome.required.map((s) => s.index) });
+        return finishFailed(runId, outcome.error);
+      }
+      const partial = outcome.status === "partially_failed";
+      patchRun(runId, { status: outcome.status, error: outcome.error, finishedAt: Date.now(), lease: null });
+      appendAudit({
+        type: partial ? "run.partially_failed" : "run.complete",
+        runId, householdId: run.householdId, steps: run.steps.length,
+        ...(partial ? { softFailedSteps: outcome.optional.map((s) => s.index) } : {}),
+      });
       // Knowledge capture (item 15): a completed run whose reasoning produced a real
       // written result gets saved as a durable artifact — findable later in Files &
       // Knowledge instead of buried in run history. Only substantive text (>120 chars)
@@ -452,9 +524,12 @@ async function _drive(runId) {
       } catch { /* knowledge capture is best-effort — never fails the run */ }
       // Automatic memory (item 11b) — fire-and-forget so completion is never delayed.
       void proposeRunMemory(runId).catch(() => {});
-      emit(runId, "run.completed");
+      // A partially-failed run is still FINISHED: the same observers must hear about it
+      // (the conversation's result message, the trigger's lastStatus writeback, the SSE
+      // stream's close) — what changes is only that they now hear the honest outcome.
+      emit(runId, partial ? "run.partially_failed" : "run.completed");
       fireRunFinished(runId);
-      return { ok: true, status: "completed" };
+      return { ok: true, status: outcome.status };
     }
     const step = run.steps[i];
     if (["succeeded", "skipped", "skipped_no_tool"].includes(step.status)) { patchRun(runId, { cursor: i + 1 }); continue; }
@@ -692,7 +767,11 @@ async function _drive(runId) {
     const actionClass = step.toolId ? toolActionOf(step.toolId) : null;
     const hasLaterSteps = i < run.steps.length - 1;
     if (actionClass === "Read" && !resolved.requiresApproval && hasLaterSteps) {
-      patchRunStep(runId, i, { status: "failed", detail: `${out.message ?? out.error} — continued without this step's result.`, finishedAt: Date.now() });
+      // WP-101 slice 3 — `softFailed` is the durable record of THIS decision: the engine
+      // chose to treat this child as optional and carry on. It is what stops the run
+      // from ending "completed" (→ partially_failed) and what distinguishes an optional
+      // failure from a required one. Stamped here, never inferred later.
+      patchRunStep(runId, i, { status: "failed", softFailed: true, detail: `${out.message ?? out.error} — continued without this step's result.`, finishedAt: Date.now() });
       appendAudit({ type: "run.step_failed_soft", runId, toolId: step.toolId, error: out.error, householdId: run.householdId });
       patchRun(runId, { cursor: i + 1 });
       emit(runId, "run.step");
@@ -735,6 +814,10 @@ function finishFailed(runId, error) {
  * indefinitely without ever tripping the alert (EV-026). Expiry is non-delivery too,
  * and non-delivery is the thing the family actually cares about. */
 const NON_DELIVERY = ["failed", "expired"];
+// WP-101 slice 3: `partially_failed` is a TERMINAL outcome (so it breaks a non-delivery
+// streak the way "completed" does — the routine did deliver something), but it is not
+// itself non-delivery, so it never trips the alert on its own.
+const TERMINAL_FOR_STREAK = ["completed", "partially_failed", ...NON_DELIVERY];
 function notifyRepeatedNonDelivery(run, failureClass) {
   if (!run) return;
   try {
@@ -742,7 +825,7 @@ function notifyRepeatedNonDelivery(run, failureClass) {
     if (!refId) return;
     const siblings = listRuns({ householdId: run.householdId, limit: 50 })
       .filter((r) => (r.sourceRef?.agentId || r.sourceRef?.automationId || r.sourceRef?.triggerId) === refId
-        && r.id !== run.id && ["completed", ...NON_DELIVERY].includes(r.status))
+        && r.id !== run.id && TERMINAL_FOR_STREAK.includes(r.status))
       .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
     if (!NON_DELIVERY.includes(siblings[0]?.status)) return;
     const why = run.status === "expired"
@@ -870,7 +953,7 @@ export function cancelRun(runId) {
   return withRunLock(runId, async () => {
     const run = getRun(runId);
     if (!run) return { error: "not_found" };
-    if (["completed", "failed", "cancelled", "expired"].includes(run.status)) return { ok: true, run };
+    if (TERMINAL_RUN_STATUSES.includes(run.status)) return { ok: true, run };
     const step = run.steps[run.cursor];
     if (step?.approvalId) { try { decideApproval(step.approvalId, { decision: "deny", actorId: run.actorId }); } catch { /* ignore */ } }
     patchRun(runId, { status: "cancelled", finishedAt: Date.now(), lease: null });
