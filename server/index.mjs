@@ -94,6 +94,14 @@ const VERSION = "1.2.0";
 // must not conjure accounts for actors who never connected anything (the
 // sandbox-e2e "no conjure" invariant) — other actors stay truthfully
 // not_connected until seeded explicitly. Idempotent; a no-op in real mode.
+// Break-glass recovery: the sha256 of HOMEOPS_BOOTSTRAP_PIN (operator-only env), or null when
+// unset. While present it is accepted as an alternative Owner/Adult-Admin PIN on both sign-in
+// paths — seeding the gate before a first PIN exists AND recovering a forgotten one. Every
+// break-glass sign-in is audited (session.login.breakglass); the operator clears the env after.
+function pinHashOfBootstrap() {
+  const bp = process.env.HOMEOPS_BOOTSTRAP_PIN;
+  return bp ? crypto.createHash("sha256").update(String(bp)).digest("hex") : null;
+}
 function maybeSeedSandbox(s) {
   if (!sandboxEnabled() || !s?.actorId || s.role !== "Owner") return;
   try { seedSandboxAccounts({ householdId: s.householdId, actorId: s.actorId }); }
@@ -577,23 +585,24 @@ const handleRequest = async (req, res) => {
             return json(res, 403, { error: "password_required", message: "This member signs in with their email and password." }, req);
           }
           const hName = hm.displayName ?? body.actorName ?? actorId;
-          let hPinHash = getSettings(sHint).ownerPinHash; // that household's own PIN, never the resident's
-          // Recovery bootstrap: a household with NO PIN of its own honors HOMEOPS_BOOTSTRAP_PIN
-          // (operator-set env) so an Owner locked out of a signed-up household — no PIN set, and
-          // an email password they've lost — can regain elevated entry, then set a real PIN in
-          // Settings and clear the env var. Mirrors the resident path's own bootstrap fallback
-          // (below). It can NEVER override a household that already has its own ownerPinHash.
-          if (!hPinHash && process.env.HOMEOPS_BOOTSTRAP_PIN) {
-            hPinHash = crypto.createHash("sha256").update(String(process.env.HOMEOPS_BOOTSTRAP_PIN)).digest("hex");
-          }
+          const hPinHash = getSettings(sHint).ownerPinHash; // that household's own PIN, never the resident's
+          // Break-glass recovery: while HOMEOPS_BOOTSTRAP_PIN is set (operator-only env), it is
+          // accepted as an ALTERNATIVE to the household's own PIN — even when one exists — so an
+          // Owner locked out by a forgotten PIN or a lost email password can regain elevated entry,
+          // reset a real PIN in Settings, then clear the env var. It is a STANDING override only
+          // while the env is present; every break-glass use is audited. Remove after recovery.
+          const bootHash = pinHashOfBootstrap();
           if (hRole === "Owner" || hRole === "Adult Admin") {
-            if (!hPinHash && IS_PROD) {
+            if (!hPinHash && !bootHash && IS_PROD) {
               audit({ type: "session.login", ok: false, error: "pin_not_configured", actorId, household: sHint }, req);
               return json(res, 403, { error: "pin_not_configured", message: "Elevated sign-in is locked until this household sets an Owner PIN (or the deployment sets HOMEOPS_BOOTSTRAP_PIN)." }, req);
             }
-            if (hPinHash) {
+            if (hPinHash || bootHash) {
               const given = crypto.createHash("sha256").update(String(body.pin ?? "")).digest("hex");
-              if (given !== hPinHash) { audit({ type: "session.login", ok: false, error: "bad_pin", actorId, household: sHint }, req); return json(res, 403, { error: "pin_required" }, req); }
+              const ownPinOk = hPinHash && given === hPinHash;
+              const bootOk = bootHash && given === bootHash;
+              if (!ownPinOk && !bootOk) { audit({ type: "session.login", ok: false, error: "bad_pin", actorId, household: sHint }, req); return json(res, 403, { error: "pin_required" }, req); }
+              if (bootOk && !ownPinOk) audit({ type: "session.login.breakglass", actorId, household: sHint }, req);
             }
           }
           const hs = createSession({ actorId, actorName: hName, role: hRole, householdId: sHint });
@@ -617,18 +626,22 @@ const handleRequest = async (req, res) => {
         // are public knowledge, so elevated sign-in with no PIN configured would hand
         // Owner to anyone who finds the URL. HOMEOPS_BOOTSTRAP_PIN (env) seeds the gate
         // before the first login; a PIN set later in Settings takes precedence.
-        let pinHash = getSettings(CURRENT_TENANT).ownerPinHash; // login predates a session: resident household
-        if (!pinHash && process.env.HOMEOPS_BOOTSTRAP_PIN) {
-          pinHash = crypto.createHash("sha256").update(String(process.env.HOMEOPS_BOOTSTRAP_PIN)).digest("hex");
-        }
+        const pinHash = getSettings(CURRENT_TENANT).ownerPinHash; // login predates a session: resident household
+        // Same break-glass as the hint path: HOMEOPS_BOOTSTRAP_PIN is an alternative to the
+        // resident household's own PIN while set (seeds the gate before a first PIN exists AND
+        // recovers a forgotten one). Break-glass uses are audited; clear the env after recovery.
+        const bootHashR = pinHashOfBootstrap();
         if (role === "Owner" || role === "Adult Admin") {
-          if (!pinHash && IS_PROD) {
+          if (!pinHash && !bootHashR && IS_PROD) {
             audit({ type: "session.login", ok: false, error: "pin_not_configured", actorId }, req);
             return json(res, 403, { error: "pin_not_configured", message: "Elevated sign-in is locked until an Owner PIN exists. Set HOMEOPS_BOOTSTRAP_PIN in the deployment's environment, then sign in with it." }, req);
           }
-          if (pinHash) {
+          if (pinHash || bootHashR) {
             const given = crypto.createHash("sha256").update(String(body.pin ?? "")).digest("hex");
-            if (given !== pinHash) { audit({ type: "session.login", ok: false, error: "bad_pin", actorId }, req); return json(res, 403, { error: "pin_required" }, req); }
+            const ownPinOk = pinHash && given === pinHash;
+            const bootOk = bootHashR && given === bootHashR;
+            if (!ownPinOk && !bootOk) { audit({ type: "session.login", ok: false, error: "bad_pin", actorId }, req); return json(res, 403, { error: "pin_required" }, req); }
+            if (bootOk && !ownPinOk) audit({ type: "session.login.breakglass", actorId, household: CURRENT_TENANT }, req);
           }
         }
         const s = createSession({ actorId, actorName, role, householdId: member.householdId ?? "local" });
