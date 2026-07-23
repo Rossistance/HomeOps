@@ -561,13 +561,21 @@ const handleRequest = async (req, res) => {
           const hm = runWithTenant(sHint, () => getMember(actorId));
           if (!hm || hm.householdId !== sHint) { audit({ type: "session.login", ok: false, error: "unknown_actor", actorId, household: sHint }, req); return json(res, 403, { error: "unknown_actor", message: "This profile isn't part of that household." }, req); }
           if (hm.archived) { audit({ type: "session.login", ok: false, error: "member_archived", actorId, household: sHint }, req); return json(res, 403, { error: "member_archived", message: "This profile was removed from the household." }, req); }
-          // Credentialed member → their password is required (via /api/login). Never enter
-          // an identity-backed profile through the passwordless picker.
-          if (listIdentitiesForHousehold(sHint).some((i) => i.actorId === actorId)) {
+          // A credentialed member (email+password identity) signs in with their password
+          // via /api/login. For ELEVATED roles that is NOT the only authenticator: the
+          // household Owner PIN checked just below is equally valid, and the resident
+          // (non-hint) path already admits a credentialed Owner on the PIN alone. Hard-
+          // refusing them only here left an Owner who forgot their signup password locked
+          // out of their own household even while holding the PIN — an inconsistency
+          // between the two sign-in paths, not a real security boundary. So: elevated
+          // roles fall through to the Owner-PIN gate; NON-elevated credentialed members
+          // (invited adults, who have no PIN gate of their own) still need their password.
+          const hRole = hm.role;
+          const isElevated = hRole === "Owner" || hRole === "Adult Admin";
+          if (!isElevated && listIdentitiesForHousehold(sHint).some((i) => i.actorId === actorId)) {
             audit({ type: "session.login", ok: false, error: "password_required", actorId, household: sHint }, req);
             return json(res, 403, { error: "password_required", message: "This member signs in with their email and password." }, req);
           }
-          const hRole = hm.role;
           const hName = hm.displayName ?? body.actorName ?? actorId;
           const hPinHash = getSettings(sHint).ownerPinHash; // that household's own PIN, never the resident's
           if (hRole === "Owner" || hRole === "Adult Admin") {

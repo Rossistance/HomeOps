@@ -66,11 +66,36 @@ test("a bogus / non-existent hint falls back to the resident roster", async () =
   assert.ok(r.data.profiles.some((p) => p.actorId === "m-alex"), "unknown hint → resident roster");
 });
 
-test("picker entry: a credentialed member (identity) is refused passwordless — no escalation", async () => {
-  const { hh } = await makeDisposableHousehold();
-  const r = await raw("/api/session", { method: "POST", body: JSON.stringify({ actorId: "m-owner", household: hh }) });
-  assert.equal(r.status, 403);
-  assert.equal(r.data.error, "password_required", "the owner has an email+password identity and must use /api/login");
+// UPDATED 2026-07-23: a credentialed OWNER is no longer walled out of their own household's
+// picker. The old assertion (owner → password_required) encoded an inconsistency: the
+// resident sign-in path always admitted a credentialed Owner on the household PIN alone,
+// while this hint path hard-refused them before the PIN was even checked — locking out an
+// Owner who forgot their signup password even though they held the PIN. The two paths now
+// agree: an elevated role falls through to the Owner-PIN gate; the email/password stays an
+// ALTERNATIVE (via /api/login), not a wall. Non-elevated credentialed members are still
+// password-gated (the isElevated guard in server/index.mjs).
+test("picker entry: a credentialed OWNER is no longer walled — the household PIN admits them", async () => {
+  const { hh, cookie, csrf } = await makeDisposableHousehold();
+  // Owner sets a household PIN (the family-device authenticator).
+  const setPin = await ctx.fetch("/api/settings", {
+    method: "POST",
+    headers: { "content-type": "application/json", Origin: "http://localhost:5173", Cookie: cookie, "x-homeops-csrf": csrf },
+    body: JSON.stringify({ ownerPin: "2468" }),
+  });
+  assert.equal(setPin.status, 200, "owner can set a household PIN");
+
+  // Wrong/absent PIN → PIN gate refuses, but NOT with the old password_required wall.
+  const noPin = await raw("/api/session", { method: "POST", body: JSON.stringify({ actorId: "m-owner", household: hh }) });
+  assert.notEqual(noPin.data.error, "password_required", "the email+password wall is gone for the owner");
+  assert.equal(noPin.status, 403);
+  assert.equal(noPin.data.error, "pin_required", "the owner is gated by their PIN, not a forgotten password");
+
+  // Correct PIN → in, as an elevated session scoped to their own household. This is the
+  // exact scenario the owner asked for: sign in with the PIN, no email/password.
+  const ok = await raw("/api/session", { method: "POST", body: JSON.stringify({ actorId: "m-owner", household: hh, pin: "2468" }) });
+  assert.equal(ok.status, 200, "correct PIN admits the credentialed owner");
+  assert.equal(ok.data.session.role, "Owner");
+  assert.equal(ok.data.session.householdId, hh, "session scoped to the owner's own household");
 });
 
 test("picker entry: a non-credentialed child enters their household with a Child View session", async () => {
