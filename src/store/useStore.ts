@@ -33,6 +33,7 @@ import type {
   SearchResult,
   Role,
   EvolutionProposal,
+  WorkflowTemplate,
 } from "@/types";
 import { capabilitiesFor } from "@/lib/roles";
 import { buildSeedData, buildEmptyData } from "@/data/seed";
@@ -46,7 +47,7 @@ import { pushActivity, executeAgentRun, subagentDefsFor, processFile } from "@/l
 import { parseAgentPrompt, buildWorkflowPlan, routeToAgent, detectApprovalGates } from "@/lib/ai";
 import { buildSearchIndex, search } from "@/lib/search";
 import { getAdvancedMode, setAdvancedMode } from "@/lib/prefs";
-import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerConversationMessage, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge, type BackendApproval, type ServerNotification } from "@/connectors/api";
+import { backend, templateIdempotencyKey, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerConversationMessage, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge, type BackendApproval, type ServerNotification, type AutomationValidationError, type AutomationLifecycleState } from "@/connectors/api";
 
 /** A plan shape the live runner can execute (AgentPlan satisfies this). */
 export interface RunnableStep { toolId: string | null; title: string; detail: string; input: Record<string, unknown>; requiresApproval: boolean }
@@ -62,6 +63,10 @@ const knowledgeServerIdPending = new Map<string, Promise<string | undefined>>();
    client mirrors its durable runs into the existing AutomationRun shape) ---- */
 function mapRunStatus(s: string): RunStatus {
   if (s === "completed") return "Completed";
+  // WP-101 (sibling slice): partially_failed is terminal and NOT a success — it must
+  // never collapse into "Completed" (a lie) or fall through to "Running" (a hang, since
+  // nothing ever moves it past that on the client).
+  if (s === "partially_failed") return "Partly Done";
   if (s === "failed" || s === "cancelled" || s === "expired") return "Failed";
   if (s === "waiting_for_approval" || s === "waiting_for_connector" || s === "waiting_for_provider") return "Waiting for Approval";
   return "Running";
@@ -92,6 +97,14 @@ export function runStatusView(status: string | undefined | null): RunStatusView 
       return { label: "Needs an AI provider", tone: "amber", parked: true, terminal: false, active: false, cta: { label: "Connect a provider", screen: "settings" } };
     case "completed":
       return { label: "Completed", tone: "sage", parked: false, terminal: true, active: false };
+    // WP-101 (sibling slice): a run where required steps succeeded but an
+    // optional/soft-fail step didn't — terminal (it will not change again on its
+    // own), and deliberately NOT "sage" (that would read as a clean success) nor
+    // "coral" (that would read as a full failure it isn't). Per-step optionality
+    // isn't in the client payload yet, so this can't name the specific failed step —
+    // only the honest run-level outcome.
+    case "partially_failed":
+      return { label: "Partly done", tone: "amber", parked: false, terminal: true, active: false };
     case "failed":
       return { label: "Failed", tone: "coral", parked: false, terminal: true, active: false };
     case "expired":
@@ -124,7 +137,9 @@ function mapStepStatus(s: string): RunStep["status"] {
   if (s === "waiting_for_approval" || s === "blocked" || s === "failed") return "blocked";
   return "pending";
 }
-const TERMINAL_RUN = ["completed", "failed", "cancelled", "expired"];
+// WP-101 (sibling slice): partially_failed is terminal — omitting it here means the
+// poller never breaks on a run that's actually done, and it polls forever.
+const TERMINAL_RUN = ["completed", "failed", "cancelled", "expired", "partially_failed"];
 const PARKED_RUN = ["waiting_for_approval", "waiting_for_connector", "waiting_for_provider"];
 // Renders a tool's resolved input into a human-readable preview instead of the generic
 // "Draft prepared by your helper agent…" boilerplate — this is the actual, real content
@@ -167,11 +182,18 @@ export function runFromServer(sr: ServerRun, ctx: { agentId: string; automationI
     ? waitingSummary
     : sr.status === "expired"
       ? "Expired — nothing was sent. Review in Inbox."
-      : status === "Failed"
-        ? `${ran} step(s) ran; some couldn't complete — see details.`
-        : status === "Completed"
-          ? `Completed ${ran} live action(s).`
-          : "Running…";
+      // WP-101 (sibling slice): required steps succeeded, at least one optional step
+      // didn't — say so plainly rather than either "Completed" (a lie) or the full
+      // "Failed" copy (also wrong: nothing REQUIRED failed here). Per-step optionality
+      // isn't in the payload yet, so this can't name which step — just the honest
+      // run-level shape.
+      : status === "Partly Done"
+        ? `Completed ${ran} step(s); an optional step didn't finish — see details.`
+        : status === "Failed"
+          ? `${ran} step(s) ran; some couldn't complete — see details.`
+          : status === "Completed"
+            ? `Completed ${ran} live action(s).`
+            : "Running…";
   return {
     id: sr.id,
     automationId: ctx.automationId,
@@ -562,14 +584,27 @@ export interface Store extends UIState {
   setKillSwitch: (enabled: boolean) => Promise<void>;
 
   /* automations */
-  createAutomation: (input: Partial<Automation> & { name: string; agentId: string; plan: WorkflowPlan }) => string;
+  createAutomation: (input: Partial<Automation> & { name: string; agentId: string; plan: WorkflowPlan }, opts?: { silentToast?: boolean }) => string;
   createAutomationFromPlan: (plan: AgentPlan, opts?: { enabled?: boolean; connectorIds?: string[] }) => string;
   updateAutomation: (id: string, patch: Partial<Automation>) => void;
   toggleAutomation: (id: string) => void;
   runAutomation: (id: string, opts?: { forceFail?: boolean }) => string;
   testAutomation: (id: string) => Promise<string>;
   deleteAutomation: (id: string) => void;
-  createAutomationFromTemplate: (templateId: string) => string;
+  /** WP-101 s5 — resolves the template, runs the server activation preflight, and
+   *  creates the automation as "ready" or honestly "blocked_configuration" (never a
+   *  silent Active). WP-102 s1 — by default refuses to duplicate an existing
+   *  semantic match (same template + same name); pass forceDuplicate to create a
+   *  separate copy anyway (the "create separate" choice in the dedup prompt). */
+  createAutomationFromTemplate: (templateId: string, opts?: { forceDuplicate?: boolean }) => Promise<string>;
+  /** WP-102 s1 — the "update existing" choice in the dedup prompt: re-compiles the
+   *  template and applies the result to an already-existing automation instead of
+   *  creating a new row. */
+  updateAutomationFromTemplate: (automationId: string, templateId: string) => Promise<string>;
+  /** WP-102 s1 (ISS-111) — pure lookup: does an automation already exist for this
+   *  template + household + semantic key? Used by the UI to offer update-existing /
+   *  create-separate / cancel before calling createAutomationFromTemplate. */
+  findTemplateAutomationMatch: (templateId: string) => Automation | undefined;
 
   /* messages + approvals */
   sendMessage: (threadId: string, body: string) => void;
@@ -695,6 +730,71 @@ export const useStore = create<Store>((set, get) => {
   const toast = (t: Omit<Toast, "id">) => {
     const id = uid("toast");
     set((s) => ({ toasts: [...s.toasts, { ...t, id }] }));
+  };
+
+  /** WP-101 s5 (ISS-102/103/110): resolve a template into a concrete agent + plan,
+   *  then run it through the server's real compile-step preflight before it's ever
+   *  allowed to present as Active. Shared by createAutomationFromTemplate and
+   *  updateAutomationFromTemplate (WP-102 s1's "update existing" dedup choice) so
+   *  both compile identically. */
+  const compileTemplate = async (tmpl: WorkflowTemplate) => {
+    const d0 = get().data;
+    const live = (a: Agent) => a.status !== "Archived";
+    // routeToAgent() always returns SOME agent once any exist — its score floor is
+    // -1, so a zero-relevance candidate still "wins" the tie-break. That zero-signal
+    // pick is exactly how a grocery agent used to land on a daycare-research
+    // template, so it's only trusted here when the template's own prompt actually
+    // shares a real word with the candidate's name/purpose/instructions.
+    const confidentRouteMatch = (a: Agent) => {
+      const hay = `${a.name} ${a.purpose} ${a.instructions}`.toLowerCase();
+      return tmpl.prompt.toLowerCase().split(/\s+/).some((w) => w.length > 4 && hay.includes(w));
+    };
+    const routed = routeToAgent(tmpl.prompt, d0.agents.filter(live));
+    const agent =
+      (tmpl.recommendedAgentTemplateId && d0.agents.find((a) => live(a) && a.templateId === tmpl.recommendedAgentTemplateId)) ||
+      d0.agents.find((a) => live(a) && a.name === tmpl.recommendedAgent) ||
+      (routed && confidentRouteMatch(routed) ? routed : undefined);
+    // No further fallback: the old `d0.agents.find(a => a.status === "Active") ||
+    // d0.agents[0]` guess is gone on purpose (WP-101 s5) — an unresolved agent means
+    // agentId stays "" and this compiles as blocked_configuration below, not Active.
+    const agentId = agent?.id ?? "";
+
+    const plan = buildWorkflowPlan(tmpl.prompt, { agentId, agentName: agent?.name ?? tmpl.recommendedAgent });
+    plan.trigger = tmpl.triggerType;
+    plan.inputSources = [...tmpl.requiredConnections, ...tmpl.optionalConnections];
+    const realGates = tmpl.approvalRequirements.filter((a) => /approval required/i.test(a));
+    if (realGates.length) plan.approvalGates = realGates;
+    plan.output = tmpl.outputFormat.join(" · ");
+    const approvalRequired = realGates.length > 0;
+
+    // Multi-agent honesty (WP-101 s5 — option (b), see the task report): the
+    // multi-agent roster is only ever claimed — to the user, and to the validator —
+    // when EVERY named role already resolves to a real, non-archived agent by name.
+    // An unresolved roster is simply never sent: the automation still validates and
+    // runs on its one real agent, it just never gets to claim specialists that don't
+    // exist (server-side, an unresolved multiAgentRoles entry blocks the whole
+    // automation — see server/automation-preflight.mjs validateMultiAgentRoles — so
+    // sending a roster we know won't resolve would wrongly block an otherwise-fine
+    // single-agent automation).
+    const roleResolved = (name: string) => d0.agents.some((a) => live(a) && a.name.trim().toLowerCase() === name.trim().toLowerCase());
+    const multiAgentRoles =
+      tmpl.multiAgent && tmpl.multiAgent.length > 0 && tmpl.multiAgent.every((m) => roleResolved(m.name))
+        ? tmpl.multiAgent.map((m) => ({ name: m.name, role: m.role }))
+        : undefined;
+
+    const validation = await backend.validateAutomation({ templateId: tmpl.id, plan, agentId: agentId || undefined, multiAgentRoles });
+    const errors: AutomationValidationError[] = [...validation.errors];
+    if (!agentId) {
+      errors.unshift({
+        node: "agent",
+        kind: "no_confident_agent_match",
+        message: "No agent could be confidently matched to this template — choose one to activate it.",
+        repairSurface: "/agents",
+      });
+    }
+    const lifecycleState: AutomationLifecycleState = agentId && validation.lifecycleState === "ready" ? "ready" : "blocked_configuration";
+
+    return { agent, agentId, plan, approvalRequired, lifecycleState, blockedErrors: errors, compiledManifestVersion: validation.compiledManifestVersion };
   };
 
   /** Mint a client-only session (T-03) — used whenever the backend won't confirm a
@@ -2118,7 +2218,7 @@ export const useStore = create<Store>((set, get) => {
     },
 
     /* ----------------------------- automations ---------------------------- */
-    createAutomation: (input) => {
+    createAutomation: (input, opts) => {
       const id = uid("auto");
       commit((d) => {
         const agent = d.agents.find((a) => a.id === input.agentId);
@@ -2137,6 +2237,10 @@ export const useStore = create<Store>((set, get) => {
           status: input.status ?? "active",
           approvalRequired: input.approvalRequired ?? input.plan.approvalGates.some((g) => !/no external/i.test(g)),
           plan: input.plan,
+          lifecycleState: input.lifecycleState,
+          compiledManifestVersion: input.compiledManifestVersion,
+          blockedErrors: input.blockedErrors,
+          idempotencyKey: input.idempotencyKey,
           failureCount: 0,
           runIds: [],
           createdAt: nowISO(),
@@ -2145,7 +2249,11 @@ export const useStore = create<Store>((set, get) => {
         d.automations.unshift(auto);
         pushActivity(d, { actorType: "user", actorId: "user", actorName: "You", actionType: "automation.created", description: `Created automation “${auto.name}”`, entityType: "automation", entityId: id, spaceId: auto.spaceId, status: "success" });
       });
-      toast({ kind: "success", title: "Automation created", message: input.name });
+      // WP-101 s5: callers that already know this is being created blocked (e.g. a
+      // template that failed the activation preflight) pass silentToast so they can
+      // show their own honest "created — but needs setup" message instead of the
+      // generic success one.
+      if (!opts?.silentToast) toast({ kind: "success", title: "Automation created", message: input.name });
       return id;
     },
     createAutomationFromPlan: (plan, opts) => {
@@ -2231,40 +2339,92 @@ export const useStore = create<Store>((set, get) => {
       });
       toast({ kind: "info", title: "Automation deleted" });
     },
-    createAutomationFromTemplate: (templateId) => {
+    // WP-102 s1 (ISS-111): stable per template+household+name — never a random uid —
+    // so a repeat instantiation of the same template is recognizable instead of
+    // silently appending yet another near-identical automation.
+    findTemplateAutomationMatch: (templateId) => {
+      const tmpl = workflowTemplates.find((t) => t.id === templateId);
+      if (!tmpl) return undefined;
+      const semanticKey = tmpl.name.trim().toLowerCase();
+      const idempotencyKey = templateIdempotencyKey(templateId, get().session?.householdId, semanticKey);
+      return get().data.automations.find(
+        (a) => a.idempotencyKey === idempotencyKey || (a.templateId === templateId && a.name.trim().toLowerCase() === semanticKey)
+      );
+    },
+    createAutomationFromTemplate: async (templateId, opts) => {
       const tmpl = workflowTemplates.find((t) => t.id === templateId);
       if (!tmpl) return "";
-      const d0 = get().data;
-      // Prefer an existing agent created from the recommended template, else
-      // route by the prompt, else fall back to the first active agent.
-      let agent =
-        (tmpl.recommendedAgentTemplateId && d0.agents.find((a) => a.templateId === tmpl.recommendedAgentTemplateId)) ||
-        d0.agents.find((a) => a.name === tmpl.recommendedAgent) ||
-        routeToAgent(tmpl.prompt, d0.agents) ||
-        d0.agents.find((a) => a.status === "Active") ||
-        d0.agents[0];
-      const agentId = agent?.id ?? "";
-      const plan = buildWorkflowPlan(tmpl.prompt, { agentId, agentName: agent?.name ?? tmpl.recommendedAgent });
-      plan.trigger = tmpl.triggerType;
-      plan.inputSources = [...tmpl.requiredConnections, ...tmpl.optionalConnections];
-      const realGates = tmpl.approvalRequirements.filter((a) => /approval required/i.test(a));
-      if (realGates.length) plan.approvalGates = realGates;
-      plan.output = tmpl.outputFormat.join(" · ");
-      const approvalRequired = realGates.length > 0;
-      return get().createAutomation({
+      const semanticKey = tmpl.name.trim().toLowerCase();
+      const idempotencyKey = templateIdempotencyKey(templateId, get().session?.householdId, semanticKey);
+      if (!opts?.forceDuplicate) {
+        const existing = get().findTemplateAutomationMatch(templateId);
+        if (existing) {
+          toast({ kind: "info", title: "Already using this template", message: `“${existing.name}” already exists — opened it instead of creating a duplicate.` });
+          return existing.id;
+        }
+      }
+      const compiled = await compileTemplate(tmpl);
+      const blocked = compiled.lifecycleState === "blocked_configuration";
+      const id = get().createAutomation(
+        {
+          name: tmpl.name,
+          description: tmpl.prompt,
+          category: tmpl.category,
+          templateId,
+          agentId: compiled.agentId,
+          spaceId: compiled.agent?.spaceId,
+          triggerType: tmpl.triggerType,
+          triggerConfig: { filters: tmpl.requiredConnections },
+          enabled: !blocked,
+          status: blocked ? "draft" : "active",
+          approvalRequired: compiled.approvalRequired,
+          plan: compiled.plan,
+          lifecycleState: compiled.lifecycleState,
+          compiledManifestVersion: compiled.compiledManifestVersion,
+          blockedErrors: blocked ? compiled.blockedErrors : undefined,
+          idempotencyKey,
+        },
+        { silentToast: blocked }
+      );
+      if (blocked) {
+        toast({ kind: "warn", title: "Created — needs setup", message: compiled.blockedErrors[0]?.message ?? "This automation needs setup before it can run." });
+      }
+      return id;
+    },
+    // WP-102 s1: the "update existing" choice — re-runs the same compile step and
+    // applies it to the automation the user already has instead of creating another.
+    updateAutomationFromTemplate: async (automationId, templateId) => {
+      const tmpl = workflowTemplates.find((t) => t.id === templateId);
+      const existing = get().data.automations.find((a) => a.id === automationId);
+      if (!tmpl || !existing) return automationId;
+      const semanticKey = tmpl.name.trim().toLowerCase();
+      const idempotencyKey = templateIdempotencyKey(templateId, get().session?.householdId, semanticKey);
+      const compiled = await compileTemplate(tmpl);
+      const blocked = compiled.lifecycleState === "blocked_configuration";
+      get().updateAutomation(automationId, {
         name: tmpl.name,
         description: tmpl.prompt,
         category: tmpl.category,
         templateId,
-        agentId,
-        spaceId: agent?.spaceId,
+        agentId: compiled.agentId,
+        spaceId: compiled.agent?.spaceId ?? existing.spaceId,
         triggerType: tmpl.triggerType,
         triggerConfig: { filters: tmpl.requiredConnections },
-        enabled: true,
-        status: "active",
-        approvalRequired,
-        plan,
+        enabled: !blocked,
+        status: blocked ? "draft" : "active",
+        approvalRequired: compiled.approvalRequired,
+        plan: compiled.plan,
+        lifecycleState: compiled.lifecycleState,
+        compiledManifestVersion: compiled.compiledManifestVersion,
+        blockedErrors: blocked ? compiled.blockedErrors : undefined,
+        idempotencyKey,
       });
+      toast({
+        kind: blocked ? "warn" : "success",
+        title: blocked ? "Updated — needs setup" : "Automation updated",
+        message: blocked ? (compiled.blockedErrors[0]?.message ?? undefined) : tmpl.name,
+      });
+      return automationId;
     },
 
     /* -------------------------- messages + approvals ---------------------- */

@@ -90,7 +90,11 @@ export type RunStatus =
   | "Waiting for Approval"
   | "Completed"
   | "Failed"
-  | "Cancelled";
+  | "Cancelled"
+  /** WP-101 (sibling slice): a run whose required steps all succeeded but at least
+   *  one optional/soft-fail step didn't — terminal, and never presented as full
+   *  success. See runStatusView / mapRunStatus in src/store/useStore.ts. */
+  | "Partly Done";
 
 /* ----------------------------------------------------------------------- */
 /* One run world (WP-003 / ISS-005/009/011/016)                            */
@@ -388,6 +392,20 @@ export interface Automation {
   runIds: string[];
   createdAt: string;
   updatedAt: string;
+  /** WP-101 s5 (ISS-102/103/110) — result of the server-side activation preflight.
+   *  Absent means "never validated" (pre-existing automations, or a validator that
+   *  hasn't run yet). "blocked_configuration" must never render or behave as Active. */
+  lifecycleState?: "ready" | "blocked_configuration";
+  /** Opaque version tag for the compiled manifest the validator checked against. */
+  compiledManifestVersion?: string;
+  /** Present when lifecycleState is "blocked_configuration" — one entry per unresolved
+   *  dependency, in plain language, with an optional screen to fix it on. */
+  blockedErrors?: { node: string; kind: string; message: string; repairSurface?: string }[];
+  /** WP-102 s1 (ISS-111) — deterministic idempotency key for template instantiation
+   *  (templateId + household + a semantic key, never a random uid). Used to detect a
+   *  repeat instantiation instead of blindly appending a duplicate. Absent on
+   *  automations not created from a template. */
+  idempotencyKey?: string;
 }
 
 export interface RunStep {

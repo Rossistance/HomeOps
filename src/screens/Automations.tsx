@@ -13,7 +13,7 @@ import { relativeTime, fmtDateTime } from "@/lib/dates";
 import { useAdvancedMode } from "@/lib/prefs";
 import { detectTrigger, detectIntent } from "@/lib/ai";
 import { PlanPreview, useConnectables } from "@/screens/Agents";
-import type { Automation, TriggerType, WorkflowPlan, WorkflowTemplate } from "@/types";
+import type { Automation, ScreenId, TriggerType, WorkflowPlan, WorkflowTemplate } from "@/types";
 import type { AgentPlan } from "@/connectors/api";
 
 const TRIGGER_TYPES: TriggerType[] = ["Manual", "Schedule", "Webhook", "RSS Feed", "Email Received", "Email Label Applied", "Text Message Received", "Email Reply Received", "Calendar Event Created", "Calendar Event Changed", "File Changed", "Agent-to-Agent"];
@@ -75,6 +75,43 @@ export function Automations() {
 
 const STATUS: Record<Automation["status"], "sage" | "amber" | "sky" | "coral"> = { active: "sage", paused: "amber", draft: "sky", error: "coral" };
 
+// WP-101 s5: valid in-app screens a blocked-state "repairSurface" can point at
+// (the validator returns paths like "/agents"; older/synthesized entries may already
+// be bare screen ids like "agents" — both are accepted).
+const REPAIR_SCREENS = new Set(["dashboard", "assistant", "agents", "automations", "skills", "functions", "connections", "messages", "files", "miniapps", "spaces", "meals", "calendar", "playbooks", "activity", "settings"]);
+function repairScreen(repairSurface?: string): ScreenId | null {
+  if (!repairSurface) return null;
+  const s = repairSurface.replace(/^\/+/, "");
+  return REPAIR_SCREENS.has(s) ? (s as ScreenId) : null;
+}
+// Node prefixes come from server/automation-preflight.mjs ("agent", "step[i].tool",
+// "integration.<id>", "step[i].recipient", "multiAgentRoles[i]") — matched by prefix,
+// not equality, since the bracketed ones carry a per-step/per-role index. An
+// agent-shaped problem is surfaced first: without an acting agent nothing else about
+// the automation matters yet.
+function blockedErrorRank(node: string): number {
+  if (node.startsWith("agent")) return 0;
+  if (node.startsWith("integration.")) return 1;
+  if (node.startsWith("step[")) return 2;
+  if (node.startsWith("multiAgentRoles[")) return 3;
+  return 4;
+}
+
+function BlockedStateNote({ a }: { a: Automation }) {
+  const navigate = useStore((s) => s.navigate);
+  const errors = a.blockedErrors ?? [];
+  const primary = [...errors].sort((x, y) => blockedErrorRank(x.node) - blockedErrorRank(y.node))[0];
+  const screen = repairScreen(primary?.repairSurface);
+  return (
+    <div className="mt-3 rounded-2xl border border-coral-500/20 bg-coral-50 p-3 text-xs text-coral-700">
+      <p className="flex items-center gap-1.5 font-semibold"><Icon name="TriangleAlert" size={13} /> Needs setup before it can run</p>
+      <p className="mt-1 break-words">{primary?.message ?? "Something about this automation couldn't be verified yet."}</p>
+      {errors.length > 1 && <p className="mt-0.5 text-coral-600/80">+{errors.length - 1} more setup issue{errors.length - 1 > 1 ? "s" : ""}</p>}
+      {screen && <button className="mt-1.5 font-medium underline" onClick={() => navigate(screen)}>Fix now</button>}
+    </div>
+  );
+}
+
 function AutomationsList({ onEdit }: { onEdit: (id: string) => void }) {
   const automations = useStore((s) => s.data.automations);
   const agents = useStore((s) => s.data.agents);
@@ -88,14 +125,18 @@ function AutomationsList({ onEdit }: { onEdit: (id: string) => void }) {
   if (!automations.length) return <EmptyState icon="Workflow" title="No automations yet" message="Build one from plain English or start from a template." />;
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      {automations.map((a) => (
+      {automations.map((a) => {
+        const blocked = a.lifecycleState === "blocked_configuration";
+        return (
         <Card key={a.id} className="card-pad">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <p className="font-display text-base font-semibold text-ink-900">{a.name}</p>
               <p className="text-xs text-ink-500">{a.description}</p>
             </div>
-            <Badge color={STATUS[a.status]}>{a.status}</Badge>
+            {/* WP-101 s5: a blocked automation must never read as Active — the
+                lifecycle badge overrides the raw status badge. */}
+            {blocked ? <Badge color="coral">Blocked</Badge> : <Badge color={STATUS[a.status]}>{a.status}</Badge>}
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-500">
             <span className="flex items-center gap-1"><Icon name="Zap" size={12} /> {a.triggerType}</span>
@@ -108,17 +149,19 @@ function AutomationsList({ onEdit }: { onEdit: (id: string) => void }) {
           {a.secondaryTriggers && a.secondaryTriggers.length > 0 && (
             <p className="mt-1 text-xs text-sky-600">+{a.secondaryTriggers.length} more trigger: {a.secondaryTriggers.map((t) => t.type).join(", ")}</p>
           )}
+          {blocked && <BlockedStateNote a={a} />}
           <div className="mt-3 flex items-center gap-1 border-t border-ink-900/[0.06] pt-3">
-            <Toggle checked={a.enabled} onChange={() => toggle(a.id)} />
-            <span className="text-xs text-ink-500">{a.enabled ? "Enabled" : "Disabled"}</span>
+            <Toggle checked={a.enabled} onChange={() => { if (!blocked) toggle(a.id); }} />
+            <span className="text-xs text-ink-500">{blocked ? "Blocked" : a.enabled ? "Enabled" : "Disabled"}</span>
             <div className="ml-auto flex gap-1">
-              <Button size="sm" variant="secondary" disabled={runningId === a.id} onClick={async () => { setRunningId(a.id); await test(a.id); setRunningId(null); }}>{runningId === a.id ? <><Icon name="Loader2" size={13} className="animate-spin" /> Running</> : <><Icon name="Play" size={13} /> Run</>}</Button>
+              <Button size="sm" variant="secondary" disabled={runningId === a.id || blocked} onClick={async () => { setRunningId(a.id); await test(a.id); setRunningId(null); }}>{runningId === a.id ? <><Icon name="Loader2" size={13} className="animate-spin" /> Running</> : <><Icon name="Play" size={13} /> Run</>}</Button>
               <IconButton icon="Pencil" label="Edit" onClick={() => onEdit(a.id)} />
               <IconButton icon="Trash2" label="Delete" onClick={() => setConfirmDel(a)} />
             </div>
           </div>
         </Card>
-      ))}
+        );
+      })}
       <Modal open={!!confirmDel} onClose={() => setConfirmDel(null)} title="Delete this automation?" icon="Trash2"
         footer={<><Button variant="ghost" onClick={() => setConfirmDel(null)}>Cancel</Button><Button variant="danger" onClick={() => { if (confirmDel) del(confirmDel.id); setConfirmDel(null); }}><Icon name="Trash2" size={15} /> Delete</Button></>}>
         <p className="text-sm text-ink-600">Permanently delete <strong>{confirmDel?.name}</strong>? Its run history stays in the activity log.</p>
@@ -288,35 +331,84 @@ function TemplatesGrid({ onOpen }: { onOpen: (id: string) => void }) {
 
 function TemplateDetail({ id, onClose, onUse }: { id: string; onClose: () => void; onUse: () => void }) {
   const t = workflowTemplates.find((x) => x.id === id) as WorkflowTemplate;
+  const agents = useStore((s) => s.data.agents);
   const create = useStore((s) => s.createAutomationFromTemplate);
+  const updateFromTemplate = useStore((s) => s.updateAutomationFromTemplate);
+  const findMatch = useStore((s) => s.findTemplateAutomationMatch);
+  const [busy, setBusy] = useState(false);
+  const [dupe, setDupe] = useState<Automation | null>(null);
   if (!t) return null;
+
+  // WP-101 s5 — multi-agent honesty (option b, see task report): the roster of named
+  // specialists is only ever shown when EVERY one of them matches a real, non-archived
+  // agent by name. Six specialists advertised while one arbitrary agent actually runs
+  // the automation is exactly the defect this closes — so a partially-resolved roster
+  // renders nothing at all, never a partial or padded list.
+  const norm = (s: string) => s.trim().toLowerCase();
+  const roleResolved = (name: string) => agents.some((a) => a.status !== "Archived" && norm(a.name) === norm(name));
+  const multiAgentAllResolved = !!t.multiAgent?.length && t.multiAgent.every((m) => roleResolved(m.name));
+
   const List = ({ title, items, icon }: { title: string; items: string[]; icon: string }) => (
     items.length ? <div><p className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-500"><Icon name={icon} size={12} />{title}</p><ul className="ml-1 space-y-0.5">{items.map((i, k) => <li key={k} className="text-sm text-ink-600">• {i}</li>)}</ul></div> : null
   );
+
+  // WP-102 s1 (ISS-111): "Use this template" checks for a semantic match first —
+  // repeating the same instantiation must yield exactly one automation, never a blind
+  // append — and offers update-existing / create-separate / cancel instead.
+  // finally, not a plain setBusy(false) after the await: the validate round-trip must
+  // never be able to leave this stuck on "Checking…" if something throws.
+  const runCreate = async (opts?: { forceDuplicate?: boolean }) => {
+    setBusy(true);
+    try { await create(t.id, opts); setDupe(null); onUse(); } finally { setBusy(false); }
+  };
+  const runUpdate = async (existingId: string) => {
+    setBusy(true);
+    try { await updateFromTemplate(existingId, t.id); setDupe(null); onUse(); } finally { setBusy(false); }
+  };
+  const handleUse = () => {
+    const existing = findMatch(t.id);
+    if (existing) { setDupe(existing); return; }
+    void runCreate();
+  };
+
   return (
-    <Drawer open onClose={onClose} width="max-w-2xl" title={t.name} icon="Workflow" footer={<><Button variant="ghost" onClick={onClose}>Close</Button><Button variant="primary" onClick={() => { create(t.id); onUse(); }}><Icon name="Plus" size={15} /> Use this template</Button></>}>
-      <div className="space-y-4">
-        <div className="well p-3.5 text-sm text-ink-700"><span className="font-medium">Prompt:</span> “{t.prompt}”</div>
-        <div className="flex flex-wrap gap-2"><Badge color="lavender">{t.category}</Badge><Badge color="sky">{t.triggerType}</Badge><Badge color="gray">{t.recommendedAgent}</Badge></div>
-        {t.multiAgent && (
-          <div><p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-500"><Icon name="Users" size={12} /> Multi-agent workflow</p>
-            <div className="space-y-1.5">{t.multiAgent.map((m, k) => <div key={k} className="flex items-center gap-2 rounded-2xl border border-ink-900/[0.06] bg-surface-rim p-2.5 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]"><Icon name={m.icon} size={15} className="text-ink-600" /><span className="font-medium text-ink-800">{m.name}</span><span className="text-xs text-ink-500">— {m.role}</span></div>)}</div>
+    <>
+      <Drawer open onClose={onClose} width="max-w-2xl" title={t.name} icon="Workflow" footer={<><Button variant="ghost" onClick={onClose}>Close</Button><Button variant="primary" disabled={busy} onClick={handleUse}>{busy ? <><Icon name="Loader2" size={15} className="animate-spin" /> Checking…</> : <><Icon name="Plus" size={15} /> Use this template</>}</Button></>}>
+        <div className="space-y-4">
+          <div className="well p-3.5 text-sm text-ink-700"><span className="font-medium">Prompt:</span> “{t.prompt}”</div>
+          <div className="flex flex-wrap gap-2"><Badge color="lavender">{t.category}</Badge><Badge color="sky">{t.triggerType}</Badge><Badge color="gray">{t.recommendedAgent}</Badge></div>
+          {multiAgentAllResolved ? (
+            <div><p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-500"><Icon name="Users" size={12} /> Multi-agent workflow</p>
+              <div className="space-y-1.5">{t.multiAgent!.map((m, k) => <div key={k} className="flex items-center gap-2 rounded-2xl border border-ink-900/[0.06] bg-surface-rim p-2.5 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]"><Icon name={m.icon} size={15} className="text-ink-600" /><span className="font-medium text-ink-800">{m.name}</span><span className="text-xs text-ink-500">— {m.role}</span></div>)}</div>
+            </div>
+          ) : t.multiAgent?.length ? (
+            <div className="well p-3 text-xs text-ink-500">This template is designed to use multiple specialist agents, but they haven't been set up in this household yet — a single agent will run it for now.</div>
+          ) : null}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <List title="Required connections" items={t.requiredConnections} icon="Plug" />
+            <List title="Optional connections" items={t.optionalConnections} icon="Plug" />
+            <List title="Approval requirements" items={t.approvalRequirements} icon="ShieldCheck" />
+            <List title="File processing" items={t.fileProcessingNeeds} icon="FileText" />
+            <List title="Output format" items={t.outputFormat} icon="FileOutput" />
+            <List title="Example output" items={t.exampleOutput} icon="Eye" />
+            <List title="Activity log events" items={t.activityLogEvents} icon="Activity" />
+            <List title="Failure states" items={t.failureStates} icon="TriangleAlert" />
+            <List title="Setup checklist" items={t.setupChecklist} icon="ListChecks" />
           </div>
-        )}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <List title="Required connections" items={t.requiredConnections} icon="Plug" />
-          <List title="Optional connections" items={t.optionalConnections} icon="Plug" />
-          <List title="Approval requirements" items={t.approvalRequirements} icon="ShieldCheck" />
-          <List title="File processing" items={t.fileProcessingNeeds} icon="FileText" />
-          <List title="Output format" items={t.outputFormat} icon="FileOutput" />
-          <List title="Example output" items={t.exampleOutput} icon="Eye" />
-          <List title="Activity log events" items={t.activityLogEvents} icon="Activity" />
-          <List title="Failure states" items={t.failureStates} icon="TriangleAlert" />
-          <List title="Setup checklist" items={t.setupChecklist} icon="ListChecks" />
+          <div><p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-500">Browser needs</p><p className="text-sm text-ink-600">{t.browserNeeds}</p></div>
         </div>
-        <div><p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-500">Browser needs</p><p className="text-sm text-ink-600">{t.browserNeeds}</p></div>
-      </div>
-    </Drawer>
+      </Drawer>
+      <Modal open={!!dupe} onClose={() => setDupe(null)} title="Already using this template" icon="Workflow"
+        footer={<>
+          <Button variant="ghost" disabled={busy} onClick={() => setDupe(null)}>Cancel</Button>
+          <Button variant="secondary" disabled={busy} onClick={() => void runCreate({ forceDuplicate: true })}>Create separate</Button>
+          <Button variant="primary" disabled={busy} onClick={() => dupe && void runUpdate(dupe.id)}>Update existing</Button>
+        </>}>
+        <p className="text-sm text-ink-600 break-words">
+          <strong>{dupe?.name}</strong> was already created from this template. Update it with the latest setup, or create a separate copy instead?
+        </p>
+      </Modal>
+    </>
   );
 }
 

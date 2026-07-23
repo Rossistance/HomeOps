@@ -503,6 +503,43 @@ export interface ServerContactMethod {
   allowedAgentIds: string[]; createdBy?: string; createdAt?: string; updatedAt?: string;
 }
 
+/* ---- WP-101 s5 (ISS-102/103/110): template/automation activation preflight ----
+ * A compile-step check run BEFORE an automation is allowed to present as Active:
+ * does every referenced agent/skill/handler/integration actually resolve? Contract
+ * owned by the server team building this endpoint in parallel — coded against it
+ * exactly; kept loosely typed (no @/types import) to preserve this file's existing
+ * zero-domain-dependency shape. */
+export type AutomationLifecycleState = "ready" | "blocked_configuration";
+export interface AutomationValidationError {
+  node: string;
+  kind: string;
+  message: string;
+  repairSurface?: string;
+}
+export interface AutomationValidateRequest {
+  templateId?: string;
+  plan: unknown;
+  agentId?: string;
+  multiAgentRoles?: { name: string; role: string }[];
+}
+export interface AutomationValidateResponse {
+  ok: boolean;
+  lifecycleState: AutomationLifecycleState;
+  errors: AutomationValidationError[];
+  compiledManifestVersion?: string;
+}
+
+/* ---- WP-102 s1 (ISS-111): deterministic idempotency for template instantiation ----
+ * Stable from templateId + household + a semantic key — NEVER a random uid — so
+ * repeating the same instantiation is detectable instead of silently appending a
+ * duplicate. Pure/local; no network call. */
+export function templateIdempotencyKey(templateId: string, householdId: string | null | undefined, semanticKey: string): string {
+  const raw = `${templateId}::${householdId || "local"}::${semanticKey.trim().toLowerCase()}`;
+  let h = 0;
+  for (let i = 0; i < raw.length; i++) h = (Math.imul(31, h) + raw.charCodeAt(i)) | 0;
+  return `tik_${(h >>> 0).toString(36)}`;
+}
+
 // CSRF token for the current session (set on login / session bootstrap). Never persisted.
 let csrfToken: string | null = null;
 export function setCsrf(t: string | null) { csrfToken = t; }
@@ -679,6 +716,35 @@ export const backend = {
   },
   async generatePlaybook(goal: string, providerId?: string): Promise<PlaybookGenResult> {
     try { return await req("/playbooks/generate", { method: "POST", body: JSON.stringify({ goal, providerId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }; }
+  },
+  /* ---- WP-101 s5: automation activation preflight ---- */
+  async validateAutomation(input: AutomationValidateRequest): Promise<AutomationValidateResponse> {
+    const unreachable = (message: string): AutomationValidateResponse => ({
+      ok: false,
+      lifecycleState: "blocked_configuration",
+      errors: [{ node: "validator", kind: "unreachable", message }],
+    });
+    try {
+      // req() resolves on ANY response (it doesn't throw on 401/404/500 — every other
+      // call in this file treats that JSON body as the real result), so a non-2xx
+      // response — e.g. an expired session's {"error":"authentication_required"} —
+      // parses fine but isn't a validation result. Shape-check before trusting it:
+      // an unauthenticated/malformed response must fail safe exactly like a network
+      // failure, never be spread/read as if it were {ok, lifecycleState, errors}.
+      const r = await req<Partial<AutomationValidateResponse> & { error?: string }>("/automations/validate", { method: "POST", body: JSON.stringify(input), mutation: true });
+      if (r && Array.isArray(r.errors) && (r.lifecycleState === "ready" || r.lifecycleState === "blocked_configuration")) {
+        return { ok: !!r.ok, lifecycleState: r.lifecycleState, errors: r.errors as AutomationValidationError[], compiledManifestVersion: r.compiledManifestVersion };
+      }
+      return unreachable(
+        r?.error === "authentication_required"
+          ? "Sign in again to finish setting this up — it was created as blocked in the meantime."
+          : "The setup checker didn't return a usable result, so this was created as blocked instead of assumed working."
+      );
+    } catch {
+      // Fail safe: an unreachable validator must never silently fall back to
+      // "this is fine, mark it Active" — it comes back blocked with an honest reason.
+      return unreachable("Couldn't reach the setup checker, so this was created as blocked instead of assumed working.");
+    }
   },
 
   /* ---- assistant (the conversational loop; a PLAN starts a durable server run) ---- */
