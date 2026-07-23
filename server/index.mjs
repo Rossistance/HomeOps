@@ -577,11 +577,19 @@ const handleRequest = async (req, res) => {
             return json(res, 403, { error: "password_required", message: "This member signs in with their email and password." }, req);
           }
           const hName = hm.displayName ?? body.actorName ?? actorId;
-          const hPinHash = getSettings(sHint).ownerPinHash; // that household's own PIN, never the resident's
+          let hPinHash = getSettings(sHint).ownerPinHash; // that household's own PIN, never the resident's
+          // Recovery bootstrap: a household with NO PIN of its own honors HOMEOPS_BOOTSTRAP_PIN
+          // (operator-set env) so an Owner locked out of a signed-up household — no PIN set, and
+          // an email password they've lost — can regain elevated entry, then set a real PIN in
+          // Settings and clear the env var. Mirrors the resident path's own bootstrap fallback
+          // (below). It can NEVER override a household that already has its own ownerPinHash.
+          if (!hPinHash && process.env.HOMEOPS_BOOTSTRAP_PIN) {
+            hPinHash = crypto.createHash("sha256").update(String(process.env.HOMEOPS_BOOTSTRAP_PIN)).digest("hex");
+          }
           if (hRole === "Owner" || hRole === "Adult Admin") {
             if (!hPinHash && IS_PROD) {
               audit({ type: "session.login", ok: false, error: "pin_not_configured", actorId, household: sHint }, req);
-              return json(res, 403, { error: "pin_not_configured", message: "Elevated sign-in is locked until this household sets an Owner PIN." }, req);
+              return json(res, 403, { error: "pin_not_configured", message: "Elevated sign-in is locked until this household sets an Owner PIN (or the deployment sets HOMEOPS_BOOTSTRAP_PIN)." }, req);
             }
             if (hPinHash) {
               const given = crypto.createHash("sha256").update(String(body.pin ?? "")).digest("hex");

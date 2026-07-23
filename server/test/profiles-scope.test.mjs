@@ -167,3 +167,44 @@ test("regression: PROD resident elevated sign-in stays fail-closed without a PIN
     await stopServer(prodCtx);
   }
 });
+
+// Recovery: an Owner locked out of a signed-up household with NO PIN and a lost password
+// can regain elevated entry via HOMEOPS_BOOTSTRAP_PIN, then set a real PIN. Mirrors the
+// resident path's bootstrap. Runs in PROD mode (the prod fail-closed gate is what the
+// bootstrap unlocks; in dev a PIN-less household admits anyway so the behavior is moot).
+// The bootstrap must NEVER override a household that already set its own PIN.
+test("recovery: HOMEOPS_BOOTSTRAP_PIN admits an Owner of a PIN-less household (prod), never overrides a set PIN", async () => {
+  const p = await startServer({ prod: true, env: { HOMEOPS_BOOTSTRAP_PIN: "9137" } });
+  const pf = async (path, init = {}) => {
+    const r = await p.fetch(path, { ...init, headers: { "content-type": "application/json", Origin: "http://localhost:5173", ...(init.headers ?? {}) } });
+    return { status: r.status, data: await r.json().catch(() => ({})), setCookie: r.headers.get("set-cookie") };
+  };
+  try {
+    // Sign up a fresh household on the prod instance (owner identity, NO PIN configured).
+    const su = await pf("/api/signup", { method: "POST", body: JSON.stringify({ email: `boot-${newId()}@example.invalid`, password: "boot-strong-pass", ownerName: "Boot Owner", householdName: "Boot House" }) });
+    assert.equal(su.status, 200, "signup on prod instance");
+    const hh = su.data.household.id;
+    const cookie = (su.setCookie || "").split(";")[0];
+    const csrf = su.data.session.csrf;
+
+    // Prod + no household PIN: without the bootstrap this would be pin_not_configured.
+    // With HOMEOPS_BOOTSTRAP_PIN set, the correct bootstrap PIN admits the owner.
+    const boot = await pf("/api/session", { method: "POST", body: JSON.stringify({ actorId: "m-owner", household: hh, pin: "9137" }) });
+    assert.equal(boot.status, 200, "bootstrap PIN admits the PIN-less household's owner in prod");
+    assert.equal(boot.data.session.role, "Owner");
+
+    // A wrong PIN is still refused (the bootstrap is a real gate, not an open door).
+    const bad = await pf("/api/session", { method: "POST", body: JSON.stringify({ actorId: "m-owner", household: hh, pin: "0000" }) });
+    assert.equal(bad.status, 403, "wrong bootstrap PIN refused");
+
+    // Owner sets a REAL household PIN → the bootstrap can no longer override it.
+    const setPin = await pf("/api/settings", { method: "POST", headers: { Cookie: cookie, "x-homeops-csrf": csrf }, body: JSON.stringify({ ownerPin: "2468" }) });
+    assert.equal(setPin.status, 200, "owner sets a real PIN");
+    const overridden = await pf("/api/session", { method: "POST", body: JSON.stringify({ actorId: "m-owner", household: hh, pin: "9137" }) });
+    assert.equal(overridden.status, 403, "once a real PIN is set, the bootstrap PIN must NOT work");
+    const real = await pf("/api/session", { method: "POST", body: JSON.stringify({ actorId: "m-owner", household: hh, pin: "2468" }) });
+    assert.equal(real.status, 200, "the household's own PIN works");
+  } finally {
+    await stopServer(p);
+  }
+});
