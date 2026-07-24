@@ -80,7 +80,7 @@ setInterval(() => { if (_rateBuckets.size > 5000) _rateBuckets.clear(); }, 10 * 
 import { listProviders as listAIProviders, aiProviderById, setProviderConfig, revokeProvider, setActiveProvider, providerHealth, providerModels, providerChat, bootstrapAIFromEnv } from "./ai.mjs";
 import { listProviders as listConnectorProviders, providerById as connectorProviderById, providerConfigured, publicProvider as publicConnectorProvider, findToolGlobal } from "./providers.mjs";
 import { buildAuthUrl, exchangeCode, apiForAccount } from "./oauth.mjs";
-import { listAccountsFor, getOwnedAccount, upsertAccount, revokeAccount, checkAccountHealth, publicAccount } from "./accounts.mjs";
+import { listAccountsFor, getOwnedAccount, upsertAccount, revokeAccount, checkAccountHealth, publicAccount, accountStatusById } from "./accounts.mjs";
 import { planFromGoal, generateMiniApp, generatePlaybook, assistantRespond, assistantStream, proposeEvolution, toolCatalog } from "./planner.mjs";
 import { preflightAutomation } from "./automation-preflight.mjs";
 
@@ -1440,12 +1440,35 @@ const handleRequest = async (req, res) => {
       // editable by an adult or its owner; a linked Google event is editable ONLY by the
       // member who connected that Google account (edit-own-calendar-only). Everything else
       // (ICS mirrors, other members' synced events) is read-only.
-      const withEditable = visible.map((e) => ({
-        ...e,
-        editable: e.layer === "canonical"
-          ? (isAdultRole(g.session.role) || e.ownerId === g.session.actorId)
-          : isEditableLinkedGoogle(e, g.session.householdId, g.session.actorId),
-      }));
+      // ISS-121: an account that can no longer refresh must not go on contributing events
+      // that LOOK current. Resolve each synced event's source account once per request and
+      // flag the affected ones, so a disconnected calendar can never contribute SILENTLY.
+      // Marked, not hidden: quietly removing a family's events would be a worse lie than
+      // showing them with an honest "this calendar can't refresh" flag, and the clients
+      // pair the flag with a reconnect action.
+      const STALE_ACCOUNT_STATUS = new Set(["needs_reconnect", "revoked", "expired"]);
+      const acctStatus = accountStatusById(g.session.householdId);
+      const subToAccount = new Map();
+      for (const s of listSubscriptions((s) => s.householdId === g.session.householdId)) {
+        if (s.accountId) subToAccount.set(s.id, s.accountId);
+      }
+      const staleSourceOf = (e) => {
+        const accountId = e.provenance?.googleAccountId ?? subToAccount.get(e.provenance?.subscriptionId) ?? null;
+        if (!accountId) return null;
+        const a = acctStatus.get(accountId);
+        if (!a || !STALE_ACCOUNT_STATUS.has(a.status)) return null;
+        return { accountId, status: a.status, provider: a.provider, connectedByActorId: a.connectedByActorId };
+      };
+      const withEditable = visible.map((e) => {
+        const staleSource = staleSourceOf(e);
+        return {
+          ...e,
+          editable: e.layer === "canonical"
+            ? (isAdultRole(g.session.role) || e.ownerId === g.session.actorId)
+            : isEditableLinkedGoogle(e, g.session.householdId, g.session.actorId),
+          ...(staleSource ? { staleSource } : {}),
+        };
+      });
       return json(res, 200, { events: withEditable }, req);
     }
     if (path === "/api/events" && method === "POST") {

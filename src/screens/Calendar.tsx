@@ -30,6 +30,7 @@ const conflictOf = (ev: ServerEvent): SyncConflict | null => ((ev.provenance as 
  *  checklist in the drawer, and one-step inline approval for Google push. */
 export function Calendar() {
   const toast = useStore((s) => s.toast);
+  const navigate = useStore((s) => s.navigate);
   const role = useStore((s) => s.session?.role);
   const members = useStore((s) => s.data.members);
   const canManage = ["Owner", "Adult Admin", "Adult Member", "Limited Member"].includes(role ?? "");
@@ -136,9 +137,32 @@ export function Calendar() {
   };
   const refreshSelected = async (id: string) => { const list = await backend.events(); setEvents(list); setSelected(list.find((e) => e.id === id) ?? null); };
 
+  // ISS-121: a connected calendar that can no longer refresh must never contribute
+  // SILENTLY. Its events stay visible — quietly hiding a family's events would be the
+  // worse lie — but the calendar says plainly that they can't refresh, and offers the one
+  // action that fixes it. The flag is server-derived, so this clears itself on reconnect.
+  const staleEvents = useMemo(() => events.filter((e) => e.staleSource), [events]);
+  const staleOwners = useMemo(
+    () => [...new Set(staleEvents.map((e) => nameOf(e.staleSource!.connectedByActorId) ?? "another member"))].join(", "),
+    [staleEvents, members], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
   return (
     <div className="animate-fade-in">
       <PageHeader title="Calendar" subtitle="Your household's events. FamiliOS events are yours to edit and push to Google; synced feeds are read-only." icon="CalendarDays" />
+
+      {staleEvents.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-amber-200/80 bg-amber-50 px-3.5 py-2.5 text-sm text-amber-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
+          <Icon name="TriangleAlert" size={15} className="shrink-0 text-amber-600" />
+          <span className="min-w-0">
+            {staleEvents.length} event{staleEvents.length === 1 ? "" : "s"} here {staleEvents.length === 1 ? "comes" : "come"} from a calendar that can&apos;t refresh
+            {staleOwners ? ` (${staleOwners})` : ""} — {staleEvents.length === 1 ? "it" : "they"} may be out of date until it&apos;s reconnected.
+          </span>
+          <Button size="sm" variant="primary" className="ml-auto" onClick={() => navigate("connections")}>
+            <Icon name="RefreshCw" size={13} /> Reconnect
+          </Button>
+        </div>
+      )}
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="inline-flex rounded-xl border border-ink-900/[0.08] bg-surface-sunken/60 p-0.5" role="tablist" aria-label="Calendar view">

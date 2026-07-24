@@ -223,6 +223,8 @@ export default function CalendarScreen() {
       || new Date(e.startAt).getTime() >= Date.now() - 12 * 3600e3
       || (e.endAt ? new Date(e.endAt).getTime() >= Date.now() - 12 * 3600e3 : false))
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))), [events]);
+  // ISS-121: events whose source account can no longer refresh (server-derived flag).
+  const staleEvents = useMemo(() => events.filter((e) => e.staleSource), [events]);
   const byDay = useMemo(() => {
     const map: Record<string, EventRec[]> = {};
     for (const e of upcoming) {
@@ -485,6 +487,24 @@ export default function CalendarScreen() {
       ) : null}
 
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
+
+      {/* ISS-121: a connected calendar that can no longer refresh must never contribute
+          SILENTLY. Its events stay visible — hiding a family's events would be the worse
+          lie — but say plainly that they can't refresh, with the action that fixes it.
+          Server-derived, so this clears itself the moment the account reconnects. */}
+      {staleEvents.length > 0 ? (
+        <View style={{ gap: spacing.sm }}>
+          <Notice
+            text={`${staleEvents.length} event${staleEvents.length === 1 ? "" : "s"} here ${staleEvents.length === 1 ? "comes" : "come"} from a calendar that can't refresh — ${staleEvents.length === 1 ? "it" : "they"} may be out of date until it's reconnected.`}
+            ok={false}
+          />
+          <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+            <PressableScale onPress={() => router.push("/connections")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Reconnect the calendar">
+              <T kind="subMedium" color={colors.ember}>Reconnect</T>
+            </PressableScale>
+          </View>
+        </View>
+      ) : null}
 
       {view === "month" ? (
         !selectedDay ? (

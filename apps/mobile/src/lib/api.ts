@@ -109,6 +109,10 @@ export interface EventRec {
   /** Server-computed: may the current member edit this event? Canonical → adult/owner;
    *  linked Google → only the member who connected that account (edit-own-calendar-only). */
   editable?: boolean;
+  /** ISS-121: set when this event came from a connected account that can no longer refresh
+   *  (needs_reconnect / revoked / expired), so a disconnected calendar can never contribute
+   *  silently. Server-derived per request — it clears itself once the account reconnects. */
+  staleSource?: { accountId: string; status: string; provider: string; connectedByActorId: string | null };
 }
 export interface TaskRec {
   id: string; title: string; type: string; status: string; dueAt: string | null;

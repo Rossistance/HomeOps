@@ -24,6 +24,23 @@ export function listAccountsFor(householdId, actorId) {
     .filter((a) => a.householdId === (householdId ?? "local") && a.connectedByActorId === actorId)
     .map(publicAccount);
 }
+/** ISS-121: connection status by account id for a WHOLE household — deliberately not
+ * scoped to one actor, unlike listAccountsFor above. The calendar needs to know whether a
+ * synced event's source can still refresh, and the reported case is exactly cross-member:
+ * Melissa's Google account sat in `needs_reconnect` while Ross's kept syncing, and her
+ * stale events went on rendering for everyone. Status/labels only — never tokens. */
+export function accountStatusById(householdId) {
+  const out = new Map();
+  for (const a of listAccountsRaw()) {
+    if (a.householdId !== (householdId ?? "local")) continue;
+    out.set(a.id, {
+      status: a.status, provider: a.provider,
+      displayName: a.displayName ?? null, connectedByActorId: a.connectedByActorId ?? null,
+    });
+  }
+  return out;
+}
+
 export function accountsByProviderFor(householdId, actorId) {
   const out = {};
   for (const a of listAccountsFor(householdId, actorId)) (out[a.provider] ||= []).push(a);

@@ -437,6 +437,10 @@ export interface ServerEvent {
   /** May the CURRENT member edit this event? (canonical → adult/owner; linked Google →
    *  only the member who connected that account). Server-computed per session. */
   editable?: boolean;
+  /** ISS-121: set when this event came from a connected account that can no longer
+   *  refresh (needs_reconnect / revoked / expired), so a disconnected calendar can never
+   *  contribute silently. Server-derived per request — it clears itself on reconnect. */
+  staleSource?: { accountId: string; status: string; provider: string; connectedByActorId: string | null };
   whatToBring: { item: string; memberId: string | null }[]; checklist: { text: string; done: boolean }[];
   travel: unknown; reminders: unknown[]; attachments: unknown[]; comments: unknown[]; mealImpact: unknown;
   visibility: string; category: string; layer: "canonical" | "linked" | "public"; status: string;
