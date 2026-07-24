@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { backend, type ServerSkill, type SkillStep, type SkillVersion, type InferFunctionsResult } from "@/connectors/api";
+import { backend, type ServerSkill, type SkillStep, type SkillVersion, type InferFunctionsResult, type SkillReadiness } from "@/connectors/api";
 import {
   PageHeader, Card, Button, IconButton, Badge, Tabs, Modal, Drawer,
   Field, TextInput, TextArea, Select, Toggle, EmptyState,
@@ -306,6 +306,18 @@ function SkillEditor({
     setDirty(false);
   }, [skill.id]);
 
+  // ISS-117: readiness is SERVER-derived, and re-read whenever the saved skill changes
+  // (skill.version moves on every save), so the gate always reflects what was actually
+  // persisted rather than what's being typed. The server refuses an unready test too —
+  // this is the honest disabled state, not the enforcement.
+  const [readiness, setReadiness] = useState<SkillReadiness | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void backend.skillReadiness(skill.id).then((r) => { if (alive) setReadiness(r); });
+    return () => { alive = false; };
+  }, [skill.id, skill.version]);
+  const notReady = readiness ? !readiness.ready : false;
+
   const markDirty = () => setDirty(true);
 
   const save = async () => {
@@ -401,7 +413,14 @@ function SkillEditor({
           {skill.status !== "available" && !skill.system && (
             <Button size="sm" variant="secondary" onClick={promote}><Icon name="CheckCircle2" size={13} /> Promote</Button>
           )}
-          <Button size="sm" variant="secondary" disabled={testing} onClick={testRun}>
+          {/* ISS-117: Real Test is unavailable while anything is unresolved. The title
+              says which, so a disabled control never leaves you guessing why. */}
+          <Button
+            size="sm" variant="secondary"
+            disabled={testing || notReady}
+            title={notReady ? `Not runnable yet: ${readiness?.unresolved.map((u) => u.name).join(", ")}` : undefined}
+            onClick={testRun}
+          >
             {testing ? <><Icon name="Loader2" size={13} className="animate-spin" /> Testing…</> : <><Icon name="Play" size={13} /> Test run</>}
           </Button>
           <Button size="sm" variant="ember" disabled={!dirty || saving} onClick={save}>
@@ -409,6 +428,27 @@ function SkillEditor({
           </Button>
         </div>
       </div>
+
+      {/* ISS-117 — "the app should be doing this by itself". A disabled Test button only
+          says no; this says exactly what is missing, per step, so the draft is finishable
+          without running it to find out. Server-derived, so it agrees with the refusal the
+          API would give. */}
+      {notReady && readiness && (
+        <div className="rounded-2xl border border-amber-200/80 bg-amber-50 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
+          <p className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-amber-800">
+            <Icon name="TriangleAlert" size={14} className="shrink-0 text-amber-600" />
+            Not runnable yet — {readiness.unresolved.length} unresolved {readiness.unresolved.length === 1 ? "dependency" : "dependencies"}
+          </p>
+          <ul className="space-y-1">
+            {readiness.unresolved.map((u, i) => (
+              <li key={`${u.stepId ?? "skill"}-${i}`} className="text-xs text-amber-800">
+                • <strong>{u.name}</strong> — {u.detail}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[11px] text-amber-700">Bind a capability to every step (or build the missing one in the Function Builder) and Test run turns back on.</p>
+        </div>
+      )}
 
       {/* Basic info */}
       <div className="space-y-3">

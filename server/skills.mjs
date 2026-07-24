@@ -8,6 +8,7 @@ import {
   readJSON, writeJSON, appendAudit, getSettings,
 } from "./store.mjs";
 import { toolCatalog } from "./planner.mjs";
+import { listPublicFunctions } from "./functions.mjs";
 import { providerChat } from "./ai.mjs";
 import { runSkill } from "./orchestrator.mjs";
 
@@ -205,6 +206,55 @@ Return ONLY valid JSON (no markdown fences, no commentary):
 }
 
 /* ---- Test a skill as a real server run (source = "skill_test") ---- */
+/**
+ * WP-108 / ISS-117 — is this skill actually runnable, and if not, exactly what is missing?
+ *
+ * "Infer capabilities" happily produced a draft with steps that named no handler, or named
+ * one the household doesn't have, and Real Test stayed pressable the whole time — so the
+ * only way to discover a half-built skill was to run it and read the wreckage ("Finish
+ * configuring the handler before testing"; "the app should be doing this by itself").
+ *
+ * Returns the UNRESOLVED list rather than a bare boolean, because the point is to tell a
+ * family what to fix, not just that something is wrong. Server-side so the answer is the
+ * same for the button, the API, and the run path — a disabled button alone would be the
+ * same decorative control this mission already found in the approval policy.
+ */
+export function skillReadiness(skill, session) {
+  const steps = skill?.steps ?? [];
+  const unresolved = [];
+  if (steps.length === 0) {
+    unresolved.push({ stepId: null, name: skill?.name ?? "This skill", reason: "no_steps", detail: "It has no steps yet, so there is nothing to run." });
+  }
+  // A capability "resolves" if the household can name it: the live tool catalog
+  // (provider/connector/internal) plus registered user functions.
+  const known = new Set([
+    ...toolCatalog(session).map((t) => t.toolId),
+    ...listPublicFunctions(session).map((f) => f.id),
+  ]);
+  for (const s of steps) {
+    const toolId = s.tool_id ?? s.toolId ?? null;
+    if (!toolId) {
+      unresolved.push({ stepId: s.step_id ?? null, name: s.name ?? "Untitled step", reason: "no_handler", detail: "No capability is bound to this step yet." });
+      continue;
+    }
+    if (!known.has(toolId)) {
+      unresolved.push({ stepId: s.step_id ?? null, name: s.name ?? "Untitled step", toolId, reason: "unknown_capability", detail: `"${toolId}" isn't a capability this household has — build or connect it first.` });
+    }
+  }
+  return { ready: unresolved.length === 0, unresolved };
+}
+
 export async function testSkill({ skillId, params, session }) {
+  // ISS-117: refuse a real test against an incomplete handler, and say exactly what is
+  // unresolved. Enforced HERE, not only in the builder's disabled state, so the same
+  // answer holds for the API and for anything else that reaches this path.
+  const skill = getSkill(skillId);
+  if (skill) {
+    const readiness = skillReadiness(skill, session);
+    if (!readiness.ready) {
+      appendAudit({ type: "skill.test_refused", skillId, reason: "not_ready", unresolved: readiness.unresolved.length, householdId: session?.householdId ?? null, actorId: session?.actorId ?? null });
+      return { error: "skill_not_ready", message: "This skill isn't finished yet — some steps have no capability behind them.", unresolved: readiness.unresolved };
+    }
+  }
   return await runSkill({ skillId, params: params ?? {}, session, source: "skill_test" });
 }

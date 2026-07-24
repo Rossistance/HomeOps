@@ -56,7 +56,7 @@ import {
 import { getAgent } from "./store.mjs";
 import {
   createSkill, replaceSkill, partialUpdateSkill, deleteSkill, duplicateSkill,
-  promoteSkill, rollbackSkill, inferFunctions, testSkill, listSkillVersions,
+  promoteSkill, rollbackSkill, inferFunctions, testSkill, listSkillVersions, skillReadiness,
 } from "./skills.mjs";
 import {
   createFunction, replaceFunction, partialUpdateFunction, deleteFunction, duplicateFunction,
@@ -2729,20 +2729,30 @@ const handleRequest = async (req, res) => {
         return json(res, 200, { ok: true }, req);
       }
     }
-    const skillAction = path.match(/^\/api\/skills\/([^/]+)\/(run|test|duplicate|promote|rollback|versions)$/);
+    const skillAction = path.match(/^\/api\/skills\/([^/]+)\/(run|test|duplicate|promote|rollback|versions|readiness)$/);
     if (skillAction) {
       const [, id, action] = skillAction;
-      const g = gate(req, action === "versions" ? { requireSession: true } : { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      // readiness is a READ, like versions — it reports what's unfinished, it changes nothing.
+      const isRead = action === "versions" || action === "readiness";
+      const g = gate(req, isRead ? { requireSession: true } : { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const s = getSkill(id);
       if (!s || (s.householdId !== "local" && s.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
       if (action === "versions" && method === "GET") {
         return json(res, 200, { versions: listSkillVersions(id) }, req);
       }
+      // ISS-117: the builder asks for readiness BEFORE offering a real test, so the
+      // unresolved list can be shown while it's still fixable — rather than discovered
+      // by running the thing and reading the wreckage.
+      if (action === "readiness" && method === "GET") {
+        return json(res, 200, { readiness: skillReadiness(s, g.session) }, req);
+      }
       if (method !== "POST") return json(res, 405, { error: "method_not_allowed" }, req);
       if (action === "run") {
         const body = await readBody(req);
         const out = await testSkill({ skillId: id, params: body?.params ?? {}, session: g.session });
-        if (out.error) return json(res, out.error === "unknown_skill" ? 404 : 422, { error: out.error }, req);
+        // Forward message/unresolved: flattening this to a bare error code is what made a
+        // half-built skill fail with nothing a family could act on (ISS-117).
+        if (out.error) return json(res, out.error === "unknown_skill" ? 404 : 422, { error: out.error, ...(out.message ? { message: out.message } : {}), ...(out.unresolved ? { unresolved: out.unresolved } : {}) }, req);
         audit({ type: "skill.run", skillId: id, runId: out.run?.id, ok: true }, req, g.session);
         return json(res, 200, { run: out.run }, req);
       }
@@ -2750,7 +2760,7 @@ const handleRequest = async (req, res) => {
         const body = await readBody(req);
         const params = body?.params ?? (s.test_cases?.[0]?.params ?? {});
         const out = await testSkill({ skillId: id, params, session: g.session });
-        if (out.error) return json(res, out.error === "unknown_skill" ? 404 : 422, { error: out.error }, req);
+        if (out.error) return json(res, out.error === "unknown_skill" ? 404 : 422, { error: out.error, ...(out.message ? { message: out.message } : {}), ...(out.unresolved ? { unresolved: out.unresolved } : {}) }, req);
         audit({ type: "skill.test", skillId: id, runId: out.run?.id, ok: true }, req, g.session);
         return json(res, 200, { run: out.run }, req);
       }

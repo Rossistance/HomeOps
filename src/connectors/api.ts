@@ -197,6 +197,18 @@ export interface StartRunInput {
 }
 /* ---- Server-side skill registry ---- */
 export interface SkillInputField { key: string; label: string; type: string; required: boolean; default?: string }
+/** WP-108/ISS-117 — one thing standing between a draft skill and a real test. Server-
+ *  derived (server/skills.mjs skillReadiness) so the button, the API and the run path
+ *  all give the same answer; a disabled button alone would be decorative. */
+export interface SkillUnresolved {
+  stepId: string | null;
+  name: string;
+  toolId?: string;
+  reason: "no_steps" | "no_handler" | "unknown_capability";
+  detail: string;
+}
+export interface SkillReadiness { ready: boolean; unresolved: SkillUnresolved[] }
+
 export interface SkillStep {
   step_id: string;
   name: string;
@@ -1159,8 +1171,16 @@ export const backend = {
   async runSkill(id: string, params: Record<string, unknown> = {}): Promise<{ run?: ServerRun; error?: string }> {
     try { return await req(`/skills/${id}/run`, { method: "POST", body: JSON.stringify({ params }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
-  async testSkill(id: string, params: Record<string, unknown> = {}): Promise<{ run?: ServerRun; error?: string }> {
+  async testSkill(id: string, params: Record<string, unknown> = {}): Promise<{ run?: ServerRun; error?: string; message?: string; unresolved?: SkillUnresolved[] }> {
     try { return await req(`/skills/${id}/test`, { method: "POST", body: JSON.stringify({ params }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  },
+  /** ISS-117: what (if anything) still has no capability behind it. Asked BEFORE offering
+   *  a real test, so the gaps are shown while they're still fixable. */
+  async skillReadiness(id: string): Promise<SkillReadiness> {
+    try {
+      const r = await req<{ readiness?: SkillReadiness }>(`/skills/${id}/readiness`);
+      return r.readiness ?? { ready: false, unresolved: [] };
+    } catch { return { ready: false, unresolved: [] }; }
   },
   async duplicateSkill(id: string): Promise<{ skill?: ServerSkill; error?: string }> {
     try { return await req(`/skills/${id}/duplicate`, { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
