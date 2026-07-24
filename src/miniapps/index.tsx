@@ -4,6 +4,7 @@ import { useStore } from "@/store/useStore";
 import { Button, Card, Badge, Avatar, Checkbox, EmptyState, TextInput, Select, ACCENT_SOLID } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { fmtDate, relativeTime } from "@/lib/dates";
+import { isBoardTask } from "@/lib/taskSurfaces";
 import { cn } from "@/lib/cn";
 
 export function MiniAppRenderer({ app }: { app: MiniApp }) {
@@ -35,10 +36,14 @@ const CHORE_COLS: { key: TaskStatus; title: string; accent: string }[] = [
 // defaults to type:"task") must be reachable here too, or it has no home anywhere.
 // Bills keep their own Budget Snapshot view and list items (type:"list") keep their
 // own grocery/packing views, so both are excluded here to avoid duplicate homes.
-export const BOARD_TASK_TYPES = new Set(["chore", "task", "reminder", "errand"]);
+// WP-106/ISS-112: the set itself now lives in @/lib/taskSurfaces alongside the list
+// selectors and surfaceForTask, so the board's definition and every count that claims to
+// describe the board read the SAME source. Re-exported here so existing importers are
+// unchanged — the point is one definition, not one import path.
+export { BOARD_TASK_TYPES } from "@/lib/taskSurfaces";
 
 function ChoreBoard({ app }: { app: MiniApp }) {
-  const tasks = useStore((s) => s.data.tasks).filter((t) => BOARD_TASK_TYPES.has(t.type));
+  const tasks = useStore((s) => s.data.tasks).filter(isBoardTask);
   const members = useStore((s) => s.data.members);
   const setTaskStatus = useStore((s) => s.setTaskStatus);
   const createTask = useStore((s) => s.createTask);

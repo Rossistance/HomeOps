@@ -15,6 +15,7 @@ import { KidView } from "@/screens/scoped/KidView";
 import { GrandparentView } from "@/screens/scoped/GrandparentView";
 import { SitterView } from "@/screens/scoped/SitterView";
 import { BOARD_TASK_TYPES } from "@/miniapps";
+import { surfaceForTask } from "@/lib/taskSurfaces";
 
 // "What I learned" feed accents — includes the signature ember for improvement ideas,
 // which isn't in the shared ACCENT_BG map (that one has no ember entry).
@@ -294,11 +295,29 @@ export function Dashboard() {
                       <Icon name="ShieldAlert" size={16} className="shrink-0 text-amber-600" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-ink-800">{a.preview || a.toolId}</p><p className="text-xs text-amber-600">Approval · {a.risk} risk</p></div>
                     </li>
                   ))}
-                  {overdue.slice(0, 3).map((t) => (
-                    <li key={t.id} className="flex items-center gap-3 rounded-2xl border border-coral-200/70 bg-surface-rim px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
-                      <Icon name="Clock" size={16} className="shrink-0 text-coral-600" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-ink-800">{t.title}</p><p className="text-xs text-coral-600">Overdue{t.dueAt ? ` · ${relativeTime(t.dueAt)}` : ""}</p></div>
-                    </li>
-                  ))}
+                  {/* ISS-112: these rows were not clickable at all, and this count spans
+                      task TYPES that live on different surfaces — a grocery item counted
+                      here while the Chore Board structurally excludes it, so the app
+                      insisted items existed with nowhere to see them. Routing is per item
+                      (surfaceForTask), because one destination cannot be right for all of
+                      them. A type with no home stays unclickable rather than linking
+                      somewhere wrong. */}
+                  {overdue.slice(0, 3).map((t) => {
+                    const to = surfaceForTask(t);
+                    // Board-eligible tasks reuse openChoreBoard, which resolves the actual
+                    // mini-app id (and seeds it for households that never got one) — the
+                    // pure selector can't know a household's ids, only the surface.
+                    const go = !to ? null : to.screen === "miniapps" ? openChoreBoard : () => navigate(to.screen, to.params);
+                    return (
+                      <li
+                        key={t.id}
+                        {...(go ? { onClick: go } : {})}
+                        className={`flex items-center gap-3 rounded-2xl border border-coral-200/70 bg-surface-rim px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] ${go ? "cursor-pointer transition-colors hover:bg-coral-50" : ""}`}
+                      >
+                        <Icon name="Clock" size={16} className="shrink-0 text-coral-600" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-ink-800">{t.title}</p><p className="text-xs text-coral-600">Overdue{t.dueAt ? ` · ${relativeTime(t.dueAt)}` : ""}</p></div>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
               {openTasks.length > 0 && (

@@ -168,7 +168,12 @@ export type ApprovalStatus =
 
 export type ActivityStatus = "success" | "warning" | "error" | "info" | "pending";
 
-export type TaskType = "chore" | "reminder" | "task" | "errand" | "bill";
+// WP-106/ISS-112: "list" was missing here even though the store has always held such
+// tasks — useStore's mapTask CASTS the server's type through (`t.type as Task["type"]`),
+// so grocery/packing items sat in `data.tasks` as a type the model claimed impossible.
+// That is why counts and lists disagreed: a surface filtering by type couldn't reason
+// about items the type system said were not there. The model now admits what it stores.
+export type TaskType = "chore" | "reminder" | "task" | "errand" | "bill" | "list";
 export type TaskStatus = "todo" | "in-progress" | "done" | "needs-help";
 export type Priority = "low" | "medium" | "high";
 
