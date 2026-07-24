@@ -17,6 +17,15 @@ export function HScreen({ children, refreshing, onRefresh, bottomPad = 40 }: {
       style={{ flex: 1, backgroundColor: colors.bg }}
       contentContainerStyle={{ padding: spacing.lg, paddingBottom: bottomPad, gap: spacing.md }}
       keyboardShouldPersistTaps="handled"
+      // ISS-109: "None of it wraps, I can't read any of it… same for every single page."
+      // The keyboard half of that was this scroll view: RN defaults
+      // automaticallyAdjustKeyboardInsets to FALSE, so a focused input near the bottom of
+      // any screen sat behind the keyboard with no way to scroll to it. HScreen is the
+      // first child of every route, so enabling it here fixes every form at once — iOS
+      // adjusts contentInset/scrollIndicatorInsets and keeps the focused field visible.
+      automaticallyAdjustKeyboardInsets
+      // Swipe the keyboard away over the content instead of hunting for a Done button.
+      keyboardDismissMode="interactive"
       refreshControl={onRefresh ? <RefreshControl refreshing={!!refreshing} onRefresh={onRefresh} tintColor={colors.textFaint} /> : undefined}
     >
       {children}

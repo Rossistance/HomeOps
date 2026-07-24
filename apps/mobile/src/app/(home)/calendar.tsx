@@ -732,7 +732,9 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
           />
         ) : null}
         <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-          <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={2}>{e.title}</T>
+          {/* ISS-109: clamped to 2 lines while collapsed, but a long title is never left
+              unreadable — expanding the row (the affordance already here) shows all of it. */}
+          <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={expanded ? undefined : 2}>{e.title}</T>
           {conflict ? <Badge label="Sync conflict" fg={colors.coral} bg={colors.coralBg} icon="exclamationmark.triangle.fill" /> : null}
           {e.layer === "public" ? <Badge label="Public" fg={colors.textMuted} bg={colors.surfaceSunken} icon="globe" /> : null}
           {editable ? <Sym name="chevron.right" size={12} color={colors.textFaint} /> : null}
@@ -751,7 +753,8 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
         {e.location ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 5, marginTop: 4 }}>
             <Sym name="mappin.and.ellipse" size={12} color={colors.textFaint} />
-            <T kind="sub" numberOfLines={1} style={{ flex: 1 }}>{e.location}</T>
+            {/* ISS-109: addresses are long — show the whole thing once expanded. */}
+            <T kind="sub" numberOfLines={expanded ? undefined : 1} style={{ flex: 1 }}>{e.location}</T>
           </View>
         ) : null}
 

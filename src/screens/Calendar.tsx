@@ -285,7 +285,10 @@ function EventRow({ ev, driver, dots, colors, onOpen }: { ev: ServerEvent; drive
         <span aria-hidden="true" className="h-8 w-1.5 shrink-0 rounded-full" style={{ background: barBackground(colors) }} />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-ink-800">{ev.title} {conflictOf(ev) && <Badge color="coral"><Icon name="AlertTriangle" size={10} /> Sync conflict</Badge>}</p>
-          <p className="truncate text-xs text-ink-500">{time ?? "All day"}{ev.location ? ` · ${ev.location}` : ""}{driver ? ` · Driver: ${driver}` : ""}{ev.source && ev.layer === "linked" ? ` · ${ev.source}` : ""}</p>
+          {/* ISS-109: this line carries the user's own location text, so a hard `truncate`
+              cut it off with no way to read it in place. Wrap to two lines instead — still
+              a bounded row, and the full detail is one click away in the drawer. */}
+          <p className="line-clamp-2 text-xs text-ink-500">{time ?? "All day"}{ev.location ? ` · ${ev.location}` : ""}{driver ? ` · Driver: ${driver}` : ""}{ev.source && ev.layer === "linked" ? ` · ${ev.source}` : ""}</p>
         </div>
         <MemberDots members={dots} />
         <Icon name="ChevronRight" size={15} className="shrink-0 text-ink-300" />

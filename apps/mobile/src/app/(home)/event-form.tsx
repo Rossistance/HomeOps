@@ -197,6 +197,8 @@ export default function EventFormScreen() {
    * two half-finished edits never overwrite each other. Restored AFTER the server prefill
    * above, because a draft is by definition the newer, unsaved state. Cleared ONLY by a
    * successful save or an explicit discard — dismissing the sheet is not a discard. */
+  // ISS-109: Return on the title moves to Location rather than dead-ending.
+  const locationRef = useRef<TextInput>(null);
   const householdId = session?.householdId ?? null;
   const draftId = id ?? "new";
   const [draftRestored, setDraftRestored] = useState(false);
@@ -451,10 +453,18 @@ export default function EventFormScreen() {
           placeholder="Event title (e.g. Soccer practice)"
           placeholderTextColor={colors.textFaint}
           value={title}
-          onChangeText={setTitle}
+          // ISS-109: a one-line field scrolled a long title out of view as you typed it —
+          // "I can't read any of it". Multiline lets it WRAP and grow (inputStyle sets no
+          // fixed height). It stays a single-value field: newlines are stripped, and
+          // submitBehavior overrides multiline's default of inserting one, so Return moves
+          // to Location instead (the Next/Done navigation this slice calls for).
+          multiline
+          submitBehavior="blurAndSubmit"
+          onChangeText={(t) => setTitle(t.replace(/[\r\n]+/g, " "))}
+          onSubmitEditing={() => locationRef.current?.focus()}
           editable={!readOnly && canManage}
           accessibilityLabel="Event title"
-          returnKeyType="done"
+          returnKeyType="next"
         />
       </Well>
 
@@ -528,11 +538,15 @@ export default function EventFormScreen() {
       <Well style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
         <Sym name="mappin.and.ellipse" size={16} color={colors.textFaint} />
         <TextInput
+          ref={locationRef}
           style={[inputStyle, { flex: 1 }]}
           placeholder="Where is it? (optional)"
           placeholderTextColor={colors.textFaint}
           value={location}
-          onChangeText={setLocation}
+          // ISS-109: addresses are long — wrap rather than scroll them out of sight.
+          multiline
+          submitBehavior="blurAndSubmit"
+          onChangeText={(t) => setLocation(t.replace(/[\r\n]+/g, " "))}
           editable={!readOnly && canManage}
           accessibilityLabel="Event location"
           returnKeyType="done"
