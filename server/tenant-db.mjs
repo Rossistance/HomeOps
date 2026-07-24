@@ -41,6 +41,15 @@ const collectionOf = (file) => file.replace(/\.json$/, "");
 // Root files that are NOT tenant data and never migrate.
 const ROOT_KEEP = new Set(["key", "win-root-cas.pem"]);
 
+// A household.db is legitimately open in more than one process at a time — the running
+// server owns it, while the test harness seeds through readStoreDoc/writeStoreDoc from the
+// test process (see server/test/harness.mjs). node:sqlite opens with busy_timeout = 0, so
+// any overlap between those writers fails on the spot with SQLITE_BUSY "database is locked"
+// (errcode 5) rather than waiting for the lock to clear — the ~25%-failure-rate flake in
+// server/test/connector-park-ttl.test.mjs. WAL allows concurrent access; it does not make
+// waiting automatic.
+const BUSY_TIMEOUT_MS = Math.max(0, parseInt(process.env.HOMEOPS_SQLITE_BUSY_TIMEOUT_MS ?? "5000", 10) || 5000);
+
 export function createEngine(dataDir) {
   const tenantsDir = join(dataDir, "tenants");
   const handles = new Map();      // tenantId -> DatabaseSync
@@ -68,7 +77,7 @@ export function createEngine(dataDir) {
     const fresh = !fs.existsSync(dbPath);
     let db;
     try {
-      db = new DatabaseSync(dbPath);
+      db = new DatabaseSync(dbPath, { timeout: BUSY_TIMEOUT_MS });
       db.exec("PRAGMA journal_mode = WAL");
       const check = db.prepare("PRAGMA integrity_check").get();
       if (String(check?.integrity_check ?? "").toLowerCase() !== "ok") {
