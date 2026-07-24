@@ -81,7 +81,18 @@ export interface BackendHealth {
 export interface ExecResult { ok: boolean; result?: unknown; error?: string; message?: string; readiness?: Readiness }
 export interface WebhookEvent { id: string; receivedAt: string; payload: Record<string, unknown>; source: string; verified: boolean }
 export interface BackendJob { id: string; name: string; connectorId: string; intervalMs: number; lastRun: number | null; nextRun: number | null; lastStatus: string; enabled: boolean }
-export interface AuditEvent { id: string; at: string; type: string; ok: boolean; actorId?: string; actorName?: string; connectorId?: string; toolId?: string; error?: string; origin?: string }
+/** ISS-114: the entity ids below have ALWAYS been on the wire — the server stamps them
+ *  on audit payloads — but this type never declared them, so the Activity feed had
+ *  nothing to deep-link with and every entry that wasn't connector-related went nowhere.
+ *  (Same shape of omission as the conversation-message fields noted in useStore.) */
+export interface AuditEvent {
+  id: string; at: string; type: string; ok: boolean;
+  actorId?: string; actorName?: string; connectorId?: string; toolId?: string;
+  error?: string; origin?: string;
+  runId?: string; agentId?: string; skillId?: string; functionId?: string;
+  automationId?: string; triggerId?: string; approvalId?: string; eventId?: string;
+  taskId?: string; fileId?: string; memoryId?: string; memberId?: string; subscriptionId?: string;
+}
 export interface Session { actorId: string; actorName: string; role: string; csrf: string; householdId: string }
 
 /* ---- WP-010 session-scoped picker hint (ISS-012) ----

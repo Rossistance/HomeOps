@@ -5,6 +5,7 @@ import { Icon } from "@/components/Icon";
 import { relativeTime, fmtDateTime } from "@/lib/dates";
 import { backend, type ServerEvolution, type AuditEvent, type MemorySearchResponse } from "@/connectors/api";
 import { useAdvancedMode } from "@/lib/prefs";
+import { plainLanguageAudit, routeForAudit } from "@/lib/activityCopy";
 import type { ActivityLogEntry, MemoryEntry, MemoryType, ScreenId, Route, EvolutionProposal } from "@/types";
 
 export function ActivityMemory() {
@@ -70,82 +71,6 @@ function localRow(e: ActivityLogEntry): ActivityRow {
 // ("run.step · gmail.search — not_connected"), which is exactly right for Advanced
 // Mode but meaningless to most families. Each connector/tool id maps to what a
 // household actually calls the thing, and to what they'd need to reconnect.
-const CONNECTOR_INFO: Record<string, { label: string; connect: string }> = {
-  gmail: { label: "Gmail", connect: "Google" },
-  gcal: { label: "your Google Calendar", connect: "Google" },
-  calendar: { label: "your calendar", connect: "Google" },
-  google: { label: "Google", connect: "Google" },
-  sms: { label: "text messaging", connect: "the text messaging connector" },
-  twilio: { label: "text messaging", connect: "the text messaging connector" },
-  weather: { label: "the weather service", connect: "the weather service" },
-  rss: { label: "your feeds", connect: "the feed" },
-  http: { label: "an outside service", connect: "that connection" },
-  browser: { label: "the browser helper", connect: "the browser helper" },
-  web: { label: "the web", connect: "that connection" },
-};
-function connectorInfo(connectorId?: string, toolId?: string): { label: string; connect: string } {
-  const key = (connectorId || toolId?.split(".")[0] || "").toLowerCase();
-  return CONNECTOR_INFO[key] ?? { label: toolId ? toolId.split(".")[0] : "a connected service", connect: "it" };
-}
-const ACTION_VERBS: Record<string, string> = {
-  search: "check", get: "check", list: "check", read: "read from", fetch: "check",
-  send: "send something through", create: "add something to", write: "save something to",
-  update: "update", delete: "remove something from", post: "send something to",
-};
-function actionVerb(toolId?: string): string {
-  const verb = toolId?.split(".")[1]?.toLowerCase() ?? "";
-  return ACTION_VERBS[verb] ?? "use";
-}
-function errorLine(error: string | undefined, label: string, connect: string): string {
-  const err = error ?? "";
-  if (/not_connected|not_configured|not_authorized|connector_/.test(err)) return `but ${connect} isn't connected yet`;
-  if (/runtime_unavailable/.test(err)) return `but ${label} wasn't reachable`;
-  if (/provider_error/.test(err)) return "but it ran into a hiccup along the way";
-  if (/timeout/.test(err)) return "but it took too long to respond";
-  return "but it didn't work";
-}
-
-/** WP-011 (ISS-014) — allowlisted plain-language templates for the raw audit event
- *  types the server writes. This is presentation-only: the RAW string above is never
- *  altered and stays available (verbatim) behind Advanced Mode. Anything not covered
- *  here still gets an honest, generic line rather than a leaked technical string. */
-function plainLanguageAudit(a: AuditEvent): string {
-  const { label, connect } = connectorInfo(a.connectorId, a.toolId);
-  switch (a.type) {
-    case "run.step":
-      return a.ok ? `A helper finished a step using ${label}.` : `A helper tried to ${actionVerb(a.toolId)} ${label}, ${errorLine(a.error, label, connect)}.`;
-    case "tool.execute":
-      return a.ok ? `A helper used ${label} successfully.` : `A helper tried to use ${label}, ${errorLine(a.error, label, connect)}.`;
-    case "run.start": return "A helper started working on a task.";
-    case "run.complete": return "A helper finished a task.";
-    case "run.failed": return "A task didn't finish — a helper ran into a problem it couldn't work around.";
-    case "run.step_failed_soft": return "A step of a task didn't work, but the rest kept going.";
-    case "run.step_skipped_no_tool": return "A helper skipped a step because it had no real way to send or deliver it.";
-    case "run.step_clamped": return "A helper wasn't allowed to take a step — it's outside what it's permitted to do.";
-    case "run.await_approval": return "A helper is waiting for someone to approve an action before continuing.";
-    case "run.approval_denied": return "An approval wasn't given in time, so a helper's task stopped.";
-    case "run.waiting_for_connector": return `A helper is waiting on ${connect} to be connected before it can continue.`;
-    case "run.expired": return "A task expired before anyone could act on it.";
-    case "run.stalled": return "A task stopped making progress and was stopped so it wouldn't hang forever.";
-    case "run.cancel": return "A task was cancelled.";
-    case "run.interrupted": return "A task was interrupted by a restart and is being checked on.";
-    case "evolution.auto_accept": return "FamiliOS applied a small self-improvement on its own.";
-    case "notify.deliver": return a.ok ? "A notification was delivered." : "A notification could not be delivered.";
-    case "notify.blocked_by_kill_switch": return "A message was held back because external actions are paused.";
-    case "notify.delivered_inapp": return "A message was shown in the app.";
-    case "identity.login": return "Someone signed in.";
-    case "settings.update": return "A household setting was changed.";
-    case "profiles.hidden": return "Someone tried to view profiles that are hidden until sign-in.";
-    case "oauth.callback": return a.ok ? "A connection finished linking." : "A connection attempt didn't finish.";
-    case "calendar.autopush": case "calendar.googledelete": case "calendar.auto_two_way": return "An event was synced with the calendar.";
-    case "backup.created": return "A backup of the household's data was made.";
-    case "trigger.fire": return "A scheduled automation started.";
-    case "job.run": return "A background job ran.";
-    default:
-      return a.ok === false ? "A helper did something technical that didn't succeed — details in Advanced." : "A helper did something technical — details in Advanced.";
-  }
-}
-
 // Map the server's raw audit event into the same display shape. This is the fix for the
 // web/mobile divergence: web previously showed ONLY client-local `pushActivity` entries
 // (this browser tab, this session) and never pulled the server's real, cross-device audit
@@ -161,7 +86,8 @@ function serverRow(a: AuditEvent): ActivityRow {
     description: desc,
     plain: plainLanguageAudit(a),
     status: a.ok ? "success" : "error",
-    route: a.connectorId ? { screen: "connections", params: { id: a.connectorId } } : null,
+    // ISS-114: deep-link from whatever entity the event names, not just connectors.
+    route: routeForAudit(a),
     source: "server",
   };
 }
