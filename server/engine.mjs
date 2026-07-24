@@ -1041,6 +1041,48 @@ function parkConnectorLabel(toolId) {
   return PARK_CONNECTOR_LABEL[key] ?? (key || "needed");
 }
 
+// The detail written on the cursor step of a stalled run. A named constant
+// because the sweep also READS it back: a step already carrying this exact text
+// is one this sweep half-expired on an earlier tick (see the stall loop below).
+const STALL_STEP_DETAIL = "Run stalled (no progress for 30 minutes) — stopped so it doesn't hang forever. Retry when ready.";
+
+/* ---- sweep jobs: isolated, but never silent ----
+ * Each expireStaleRuns job runs per-run so one wedged run can't abort the sweep
+ * for the rest of the household. That isolation is right; throwing the error away
+ * was not. `.catch(() => {})` meant a transient write failure — SQLite SQLITE_BUSY
+ * (errcode 5) under a concurrent writer, a stale handle, a full disk — left the run
+ * exactly as it was with NO audit entry, NO log line and no trace of any kind: the
+ * run simply stayed waiting_for_connector/waiting_for_approval/running and the only
+ * symptom was that nothing ever happened. (Found from the other end: a flaky test
+ * whose sole evidence was a bare assertion failure, because the SQLITE_BUSY thrown
+ * by patchRun inside the connector-park job died here.)
+ *
+ * The handler itself must not throw. These promises are awaited via Promise.all, so
+ * a rejecting handler would re-introduce the sweep-wide abort the isolation exists
+ * to prevent — and appendAudit is file I/O, which can fail for the very reason the
+ * job did. Every step is guarded.
+ *
+ * Retry: recording is not the whole answer, but no separate retry machinery is
+ * needed. A failed job leaves the run holding the status that selected it, so the
+ * next 60s tick re-selects it — an expired approval stays expired, and the
+ * connector-park clock is the cursor step's `startedAt`, which no sweep writes. A
+ * transient error therefore costs one tick. The single exception is a PARTIAL stall
+ * write, which refreshes `updatedAt` and would hide the run behind its own time
+ * gate; the stall loop detects that state explicitly rather than waiting it out. */
+function isolateSweepJob(sweep, r, work) {
+  return withRunLock(r.id, work).catch((err) => {
+    try {
+      console.error(`[sweep] ${sweep} failed for run ${r.id} (household ${r.householdId ?? "?"}) — left as-is for the next tick:`, err?.stack ?? err);
+    } catch { /* logging must never be the thing that breaks the sweep */ }
+    try {
+      appendAudit({
+        type: "run.sweep_failed", sweep, runId: r.id, householdId: r.householdId,
+        error: String(err?.message ?? err), code: err?.code ?? null, errcode: err?.errcode ?? null,
+      });
+    } catch { /* the audit write can fail for the same reason the job did */ }
+  });
+}
+
 export async function expireStaleRuns() {
   let expired = 0;
   const jobs = [];
@@ -1051,28 +1093,39 @@ export async function expireStaleRuns() {
   for (const r of listRuns({ limit: 1000 })) {
     if (!["running", "retrying"].includes(r.status)) continue;
     const touched = Date.parse(r.updatedAt ?? "") || r.createdAt || 0;
-    if (!touched || Date.now() - touched < RUN_STALL_MS) continue;
-    jobs.push(withRunLock(r.id, async () => {
+    // A cursor step already carrying the stall detail is a run THIS sweep
+    // half-expired on an earlier tick: the step patch landed, the run patch
+    // threw. That partial write refreshed `updatedAt`, so the silence gate below
+    // would hide the run for a further 30 minutes while it kept claiming to run.
+    // Finish the job now instead — the detail is written by nothing else, so this
+    // can never grab a run that is legitimately making progress.
+    const halfSwept = r.steps?.[r.cursor]?.status === "failed" && r.steps[r.cursor]?.detail === STALL_STEP_DETAIL;
+    if (!touched || (Date.now() - touched < RUN_STALL_MS && !halfSwept)) continue;
+    jobs.push(isolateSweepJob("stall", r, async () => {
       const run = getRun(r.id);
       if (!run || !["running", "retrying"].includes(run.status)) return;
       const cur = run.steps[run.cursor];
       if (cur && ["running", "ready", "pending"].includes(cur.status)) {
-        patchRunStep(run.id, run.cursor, { status: "failed", detail: "Run stalled (no progress for 30 minutes) — stopped so it doesn't hang forever. Retry when ready.", finishedAt: Date.now() });
+        patchRunStep(run.id, run.cursor, { status: "failed", detail: STALL_STEP_DETAIL, finishedAt: Date.now() });
       }
       patchRun(run.id, { status: "failed", error: "stalled", finishedAt: Date.now(), lease: null });
       appendAudit({ type: "run.stalled", runId: run.id, householdId: run.householdId });
       emit(run.id, "run.failed");
       expired++;
-    }).catch(() => {}));
+    }));
   }
   for (const r of listRuns({ limit: 1000 })) {
     if (r.status !== "waiting_for_approval") continue;
-    const step = r.steps[r.cursor];
+    // Optional chaining, not `r.steps[r.cursor]`: a malformed record with no steps
+    // threw HERE, in the selection pass — outside every per-job guard — killing the
+    // whole household's sweep for that tick. Selection must be as unkillable as the
+    // jobs it feeds.
+    const step = r.steps?.[r.cursor];
     if (!step?.approvalId) continue;
     const appr = getApproval(step.approvalId);
     const stale = !appr || appr.status === "expired" || (appr.expiresAt && Date.now() > appr.expiresAt);
     if (!stale) continue;
-    jobs.push(withRunLock(r.id, async () => {
+    jobs.push(isolateSweepJob("approval_park", r, async () => {
       const run = getRun(r.id);
       if (!run || run.status !== "waiting_for_approval") return; // a concurrent decide won
       patchRunStep(r.id, run.cursor, { status: "expired", detail: "Approval expired before a decision.", finishedAt: Date.now() });
@@ -1087,7 +1140,7 @@ export async function expireStaleRuns() {
       notifyRepeatedNonDelivery(getRun(r.id));
       fireRunFinished(r.id);
       expired++; // count only runs actually transitioned
-    }).catch(() => {}));
+    }));
   }
   // ISS-017 — connector-parked runs (waiting_for_connector) past the TTL.
   //
@@ -1122,7 +1175,7 @@ export async function expireStaleRuns() {
     // the gap that stranded the resident stragglers. Post-epoch parks get the
     // normal TTL, measured from the park moment so touches never restart it.
     if (!isLegacyPark && Date.now() - parkedAt < parkTtlMs) continue;
-    jobs.push(withRunLock(r.id, async () => {
+    jobs.push(isolateSweepJob("connector_park", r, async () => {
       const run = getRun(r.id);
       if (!run || run.status !== "waiting_for_connector") return; // a concurrent resume won
       const cur = run.steps[run.cursor];
@@ -1140,7 +1193,7 @@ export async function expireStaleRuns() {
       });
       fireRunFinished(r.id);
       expired++;
-    }).catch(() => {}));
+    }));
   }
   await Promise.all(jobs);
   return expired;
