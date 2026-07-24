@@ -57,6 +57,21 @@ function resolveDataDir() {
 const DEFAULT_TIMEOUT_MS = 1000;
 const DEFAULT_CONTAINER = "default";
 
+// How long a write waits for another process's lock before giving up. node:sqlite opens
+// with busy_timeout = 0 (verified: `PRAGMA busy_timeout` reads 0 on a default
+// DatabaseSync), so WITHOUT this, the instant two processes' write windows overlap the
+// loser fails immediately with SQLITE_BUSY "database is locked" (errcode 5) instead of
+// waiting the moment out.
+//
+// This file IS reachable from two processes at once — not hypothetically, but in the
+// sanctioned workflow: scripts/migrate-memory-to-provider.mjs's DEFAULT mode assumes the
+// dev server is already running (that's exactly why it reads its source rows over that
+// server's HTTP API rather than opening the tenant db — see its header). In that mode it
+// sets no HOMEOPS_DATA_DIR, so its own memoryProvider.add() loop and the live server's
+// homeops.write_memory dual-writes both land in server/.data/supermemory/local-memory.sqlite
+// concurrently. Same env var as tenant-db.mjs so both stores are tuned by one knob.
+const BUSY_TIMEOUT_MS = Math.max(0, parseInt(process.env.HOMEOPS_SQLITE_BUSY_TIMEOUT_MS ?? "5000", 10) || 5000);
+
 /** Sanitize free text into a forgiving (OR-of-prefixes) FTS5 MATCH expression. */
 function ftsQuery(q) {
   const tokens = String(q ?? "").toLowerCase().match(/[a-z0-9]+/gi) ?? [];
@@ -106,7 +121,7 @@ function createSqliteBackend({ dataDir }) {
     try {
       if (!DatabaseSync) throw sqliteImportError ?? new Error("node:sqlite unavailable");
       fs.mkdirSync(dir, { recursive: true });
-      db = new DatabaseSync(dbPath);
+      db = new DatabaseSync(dbPath, { timeout: BUSY_TIMEOUT_MS });
       db.exec("PRAGMA journal_mode = WAL");
       db.exec(
         "CREATE VIRTUAL TABLE IF NOT EXISTS memories USING fts5(id UNINDEXED, container_tag UNINDEXED, text, scope UNINDEXED, type UNINDEXED, source_actor_id UNINDEXED, created_at UNINDEXED)",
