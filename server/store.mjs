@@ -162,6 +162,24 @@ function writeJSON(file, value) {
 // their own accessors on top of the same file-backed, atomic-write substrate.
 export { readJSON, writeJSON };
 
+// Bulk-clear an OPERATIONAL collection to empty — the "declutter / fresh start" primitive
+// behind the Owner-only reset-assistant flow. Deliberately allowlisted: only the assistant's
+// own operational history is clearable here (improvements, memory, chat/inbox, approvals,
+// run history). Identity/config/asset collections — members, settings, accounts, connectors,
+// calendar events, tasks/lists, files, knowledge/recipes, agents, skills, triggers — are NEVER
+// wholesale-clearable through this path; they change only through their own audited endpoints.
+const CLEARABLE_COLLECTIONS = new Set([
+  "evolution.json", "memory.json", "conversations.json", "notifications.json",
+  "help-requests.json", "approvals.json", "runs.json",
+]);
+export function clearableCollections() { return [...CLEARABLE_COLLECTIONS]; }
+export function clearCollection(file) {
+  if (!CLEARABLE_COLLECTIONS.has(file)) return { error: "not_clearable" };
+  const cleared = Object.keys(readJSON(file, {})).length;
+  writeJSON(file, {}); // putDoc + bumpRev — in-process, atomic, tenant-scoped
+  return { ok: true, cleared };
+}
+
 /* ---- In-process async mutex (serializes read-modify-write on one entity) ----
    Single-process Node: a per-key promise chain is sufficient to prevent the
    last-writer-wins races that whole-file JSON writes would otherwise have. */

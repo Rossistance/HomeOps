@@ -10,21 +10,27 @@ import type { ActivityLogEntry, MemoryEntry, MemoryType, ScreenId, Route, Evolut
 export function ActivityMemory() {
   const params = useStore((s) => s.route.params);
   const pendingEvos = useStore((s) => (s.data.evolutions ?? []).filter((e) => e.status === "pending").length);
-  const [tab, setTab] = useState("activity");
-  useEffect(() => { if (params?.tab) setTab(params.tab); if (params?.id) setTab("memory"); if (params?.entry) setTab("activity"); }, [params?.tab, params?.id, params?.entry]);
+  // The raw Activity Log is a firehose of low-level audit rows — kept for the record, but
+  // moved behind Advanced Mode so the everyday view (Memory + Improvements) stays calm.
+  const [advanced] = useAdvancedMode();
+  const [tab, setTab] = useState(advanced ? "activity" : "memory");
+  useEffect(() => {
+    if (params?.tab) setTab(params.tab);
+    else if (params?.id) setTab("memory");
+    else if (params?.entry && advanced) setTab("activity");
+  }, [params?.tab, params?.id, params?.entry, advanced]);
+  // With Advanced Mode off the Activity Log tab is hidden — resolve any activity target to Memory.
+  const effectiveTab = tab === "activity" && !advanced ? "memory" : tab;
+  const tabs = [
+    ...(advanced ? [{ id: "activity", label: "Activity Log", icon: "Activity" }] : []),
+    { id: "memory", label: "Memory", icon: "Brain" },
+    { id: "improvements", label: "Improvements", icon: "Sparkles", count: pendingEvos || undefined },
+  ];
   return (
     <div className="animate-fade-in">
-      <PageHeader title="Activity & Memory" subtitle="A full audit trail of what your helpers did — what they remember, and what they've learned." icon="Activity" />
-      <Tabs
-        tabs={[
-          { id: "activity", label: "Activity Log", icon: "Activity" },
-          { id: "memory", label: "Memory", icon: "Brain" },
-          { id: "improvements", label: "Improvements", icon: "Sparkles", count: pendingEvos || undefined },
-        ]}
-        active={tab}
-        onChange={setTab}
-      />
-      <div className="pt-5">{tab === "activity" ? <ActivityLog /> : tab === "improvements" ? <Improvements /> : <Memory />}</div>
+      <PageHeader title="Activity & Memory" subtitle={advanced ? "A full audit trail of what your helpers did — what they remember, and what they've learned." : "What your helpers remember, and what they've learned. (Turn on Advanced Mode in Settings to see the full activity log.)"} icon="Activity" />
+      <Tabs tabs={tabs} active={effectiveTab} onChange={setTab} />
+      <div className="pt-5">{effectiveTab === "activity" ? <ActivityLog /> : effectiveTab === "improvements" ? <Improvements /> : <Memory />}</div>
     </div>
   );
 }

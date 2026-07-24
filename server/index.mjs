@@ -36,6 +36,7 @@ import {
   listPlaybooks, getPlaybook, putPlaybook, deletePlaybookRec,
   listHelpRequests, getHelpRequest, putHelpRequest, patchHelpRequest,
   addNotification, getAccountRaw,
+  clearCollection,
 } from "./store.mjs";
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases, applyEvolutionToTarget } from "./engine.mjs";
 import { revertEvolution, resolveEvolutionBefore, canRevertEvolution, listEvolutionArchive } from "./evolution-revert.mjs";
@@ -925,6 +926,27 @@ const handleRequest = async (req, res) => {
       const body = await readBody(req); if (!body?.name) return json(res, 400, { error: "name_required" }, req);
       const out = restoreBackup(String(body.name));
       return json(res, out.ok ? 200 : 422, out, req);
+    }
+    /* Declutter / fresh start (Owner-only, backup-first). Bulk-clears the assistant's
+     * OPERATIONAL history — improvements, memory, chat/inbox, notifications, help
+     * requests, approvals, and run history — and removes explicitly-named duplicate
+     * agents + orphaned skills. NEVER touches identity/config/assets: members, settings,
+     * accounts, connectors, calendar, tasks/lists, files, knowledge/recipes, or any agent/
+     * skill not named in the request. A fresh backup is taken FIRST and its name returned,
+     * so the whole operation is reversible via /api/backups/restore. Requires confirm:"RESET". */
+    if (path === "/api/household/reset-assistant" && method === "POST") {
+      const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      if (body.confirm !== "RESET") return json(res, 400, { error: "confirm_required", message: "Pass confirm:\"RESET\" — this bulk-clears the assistant's operational data (a backup is taken first)." }, req);
+      const backup = createBackup(); // backup-first, ALWAYS
+      const CLEAR = ["evolution.json", "memory.json", "conversations.json", "notifications.json", "help-requests.json", "approvals.json", "runs.json"];
+      const cleared = {};
+      for (const file of CLEAR) { const r = clearCollection(file); cleared[file] = r.ok ? r.cleared : (r.error || "err"); }
+      const deletedAgents = [], deletedSkills = [], skippedAgents = [], skippedSkills = [];
+      for (const id of (Array.isArray(body.deleteAgentIds) ? body.deleteAgentIds : [])) { const r = deleteAgent(String(id)); if (r?.ok) deletedAgents.push(id); else skippedAgents.push({ id, error: r?.error || "err" }); }
+      for (const id of (Array.isArray(body.deleteSkillIds) ? body.deleteSkillIds : [])) { const r = deleteSkill(String(id)); if (r?.ok) deletedSkills.push(id); else skippedSkills.push({ id, error: r?.error || "err" }); }
+      audit({ type: "household.reset_assistant", backup, clearedCounts: cleared, deletedAgents, deletedSkills, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, backup, cleared, deletedAgents, deletedSkills, skippedAgents, skippedSkills }, req);
     }
     if (path === "/api/store/quarantine/ack" && method === "POST") {
       const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
