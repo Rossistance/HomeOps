@@ -314,8 +314,13 @@ function RiskOverridesCard() {
                         <option value="">Default</option>
                         {RISK_CLASSES.map((r) => <option key={r} value={r}>{r}</option>)}
                       </Select>
+                      {/* WP-105: "Skip approval" sits after a fixed-width Select in a
+                          flex-wrap row, so at narrow widths it was getting cut. shrink-0 +
+                          nowrap make it move to its own line as a unit rather than
+                          clipping — a half-read label on an approval control is exactly
+                          the kind of thing you must never have to guess at. */}
                       {(t.defaultRequiresApproval ?? t.requiresApproval) && (
-                        <label className="flex items-center gap-1.5 text-xs text-ink-600">
+                        <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-ink-600">
                           <Toggle checked={!!ov?.skipApproval} onChange={(v) => apply(t, { skipApproval: v })} ariaLabel={`Skip approval for ${t.name}`} />
                           Skip approval
                         </label>

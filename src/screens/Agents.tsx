@@ -648,9 +648,26 @@ function AgentCapabilities({ agentId, agentName }: { agentId: string; agentName:
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-ink-900/[0.06] bg-surface-raised p-3 shadow-e1">
         <div>
           <p className="text-sm font-semibold text-ink-800">Server-enforced capability policy</p>
+          {/* ISS-124 — "Six executed, six permitted. Okay, five permitted. That doesn't
+              make any sense." All three numbers come from ONE server computation
+              (agentContext), and each is now labelled with what it actually counts. The
+              confusing part was never the arithmetic: "permitted" means allowed BY POLICY,
+              and with an open allow-list that is everything except denied — so the number
+              legitimately drops the moment you start listing tools explicitly. Saying which
+              mode you're in makes that drop read as the explanation it is. */}
           <p className="text-xs text-ink-400">
-            {ctx?.executableCount ?? 0} executable now · {ctx?.permittedCount ?? 0} permitted
-            {ctx?.openAllowList ? " · open allow-list (any available tool, except denied)" : ""}
+            <strong className="text-ink-600">{ctx?.executableCount ?? 0}</strong> ready to run now ·{" "}
+            <strong className="text-ink-600">{ctx?.permittedCount ?? 0}</strong> allowed by policy ·{" "}
+            <strong className="text-ink-600">{ctx?.availableCount ?? 0}</strong> connected &amp; available
+          </p>
+          {/* Tools and functions have INDEPENDENT allow-lists, so one sentence about
+              "the allow-list" would be half true whenever only one of them is restricted
+              — which is precisely the kind of not-quite-right number this issue is about. */}
+          <p className="text-[11px] text-ink-400">
+            {["Tools", "Functions"].map((kind, i) => {
+              const open = i === 0 ? ctx?.openToolAllowList : ctx?.openFunctionAllowList;
+              return `${kind}: ${open ? "open list — all allowed except denied" : "explicit list — only what you allow"}`;
+            }).join(" · ")}
           </p>
         </div>
       </div>

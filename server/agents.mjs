@@ -218,9 +218,26 @@ export function agentContext(agent, session) {
   return {
     agentId: agent.id,
     openAllowList: allowTools.length === 0 && allowFns.length === 0, // permissive (deny-only) default
+    // ISS-124: tools and functions carry INDEPENDENT allow-lists, so a single
+    // "openAllowList" boolean can't describe the state honestly — restricting tools while
+    // leaving functions open reads as "explicit" overall even though every function is
+    // still permitted. Surfaced per kind so the UI can say which is which instead of
+    // making a claim that is half true.
+    openToolAllowList: allowTools.length === 0,
+    openFunctionAllowList: allowFns.length === 0,
     tools: toolView,
     functions: fnView,
     executable,
+    // ISS-124 — "Six executed, six permitted. Okay, five permitted. That doesn't make
+    // any sense." All three counts derive from the SAME toolView/fnView above, and each
+    // means one specific thing:
+    //   available  — could run right now (connected/ready), ignoring this agent's policy
+    //   permitted  — allowed by this agent's policy; with an OPEN allow-list that is
+    //                every capability except denied ones, which is why this number drops
+    //                the moment a family starts listing tools explicitly. That change is
+    //                correct, and the UI now labels it so it stops reading as a bug.
+    //   executable — permitted ∩ available, i.e. what can actually run now
+    availableCount: toolView.filter((t) => t.available).length + fnView.filter((f) => f.available).length,
     permittedCount: toolView.filter((t) => t.permitted).length + fnView.filter((f) => f.permitted).length,
     executableCount: executable.length,
   };

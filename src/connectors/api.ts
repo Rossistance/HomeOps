@@ -320,8 +320,17 @@ export interface AgentContext {
   tools: { toolId: string; name: string; connectorName: string; action: string; requiresApproval: boolean; available: boolean; permitted: boolean; denied: boolean }[];
   functions: { id: string; name: string; type: string; requiresApproval: boolean; available: boolean; state: string; permitted: boolean; denied: boolean }[];
   executable: string[];
+  /** ISS-124 — all three derive from ONE server computation (agentContext):
+   *  available = could run now (connected/ready), ignoring policy;
+   *  permitted = allowed by this agent's policy (open allow-list ⇒ everything not denied);
+   *  executable = permitted ∩ available, i.e. what can actually run right now. */
+  availableCount: number;
   permittedCount: number;
   executableCount: number;
+  /** Tools and functions have INDEPENDENT allow-lists, so `openAllowList` (both open)
+   *  can't describe a half-restricted agent honestly. These say which is which. */
+  openToolAllowList: boolean;
+  openFunctionAllowList: boolean;
 }
 
 /* ---- Server-side triggers (Slice 6) ---- */
