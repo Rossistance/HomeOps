@@ -87,13 +87,22 @@ function NavList({ onNavigate, grouped = true }: { onNavigate?: () => void; grou
   const badges = useBadges();
   const [advanced] = useAdvancedMode();
   const [unified] = useUnifiedNav();
-  // WP-005: with the unified flag ON, "Automations" stops being a top-level entry
-  // (its screens stay routable and reappear only under Advanced Mode) — the same
-  // "advanced tool" treatment Skills/Functions already get. Flag OFF ⇒ unchanged.
+  // WP-005: with the unified flag ON, "Automations" stops being a top-level entry —
+  // Helper Agents absorbs the concept (its triggers list and in-drawer scheduler), and
+  // the screen stays routable, so nothing is stranded by folding the nav entry.
+  //
+  // ISS-108: this used to end `&& !advanced`, i.e. Advanced Mode was ALSO the reveal for
+  // Automations. So with both toggles on, the entry came back and the fragmented nav
+  // returned — silently undoing the "one entry" the user explicitly asked for. Advanced
+  // Mode is no longer that reveal: unified nav wins on nav composition.
+  //
+  // Skills/Functions are deliberately untouched. They were never part of the unified-nav
+  // promise, and Advanced Mode stays their legitimate reveal — the Skills screen has no
+  // other entry point, so folding it here would remove access rather than tidy it.
   const visible = (it: NavItem) =>
     canAccess(it.id) &&
     (!it.advanced || advanced) &&
-    !(unified && it.id === "automations" && !advanced);
+    !(unified && it.id === "automations");
   const item = (it: NavItem) => {
     const active = route.screen === it.id;
     return (
@@ -255,7 +264,9 @@ function MobileBottomNav() {
   const [unified] = useUnifiedNav();
   // WP-005: keep the folded-away "Automations" out of the mobile bottom nav too,
   // so the collapsed IA is consistent across desktop and mobile.
-  const bottomVisible = (id: ScreenId) => canAccess(id) && !(unified && id === "automations" && !advanced);
+  // ISS-108: same rule as the sidebar above — Advanced Mode must not re-fragment a nav
+  // the user unified. (Kept in lockstep; the two diverging is how the bug hid.)
+  const bottomVisible = (id: ScreenId) => canAccess(id) && !(unified && id === "automations");
   const primary = [...MOBILE_PRIMARY.filter(bottomVisible), ...NAV.map((n) => n.id).filter((id) => bottomVisible(id) && !MOBILE_PRIMARY.includes(id))].slice(0, 4);
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around border-t border-ink-900/[0.06] bg-surface-base/90 px-1 py-1.5 shadow-[0_-1px_0_rgba(255,255,255,0.5)] backdrop-blur-xl lg:hidden">

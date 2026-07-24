@@ -38,15 +38,18 @@ async function apiFetch(page: Page, path: string, init: { method?: string; body?
 
 const navButton = (page: Page, label: string) => page.getByRole("button", { name: label, exact: true });
 const unifiedToggle = (page: Page) => page.getByRole("switch", { name: "Unified Helper Agents navigation" });
+const advancedToggle = (page: Page) => page.getByRole("switch", { name: "Advanced Mode" });
 
-/** Flip the unified-nav flag through the real Settings UI to a target state. */
-async function setUnifiedNav(page: Page, on: boolean) {
+/** Flip a Settings switch through the real UI to a target state. */
+async function setSwitch(page: Page, locate: (p: Page) => ReturnType<Page["getByRole"]>, on: boolean) {
   await openScreen(page, "Settings");
-  const toggle = unifiedToggle(page);
+  const toggle = locate(page);
   await expect(toggle).toBeVisible({ timeout: 15_000 });
   if ((await toggle.getAttribute("aria-checked")) !== String(on)) await toggle.click();
   await expect(toggle).toHaveAttribute("aria-checked", String(on));
 }
+const setUnifiedNav = (page: Page, on: boolean) => setSwitch(page, unifiedToggle, on);
+const setAdvancedMode = (page: Page, on: boolean) => setSwitch(page, advancedToggle, on);
 
 test.beforeEach(async ({ page }) => {
   const probe = await page.request.get("/api/health").catch(() => null);
@@ -117,5 +120,33 @@ test("(b)+(c) flag ON collapses the nav and packages an agent in-place; flag OFF
   await setUnifiedNav(page, false);
   await expect(navButton(page, "Automations").first()).toBeVisible({ timeout: 15_000 });
   await expect(navButton(page, "Helper Agents").first()).toBeVisible();
+  errors.assertClean();
+});
+
+test("ISS-108: Advanced Mode cannot silently un-fold a nav the user unified", async ({ page }) => {
+  const errors = watchPageErrors(page);
+
+  // Unified nav ON — Automations folds into Helper Agents.
+  await setUnifiedNav(page, true);
+  await expect(navButton(page, "Automations")).toHaveCount(0);
+
+  // Advanced Mode ON as well. This is the regression: the nav guards used to end
+  // `&& !advanced`, so turning this on brought the Automations entry back and the
+  // fragmented nav returned — silently undoing the one entry the user asked for.
+  // It also contradicted Settings' own copy, which describes Advanced Mode as
+  // showing "the Skills and Functions builders" and never mentions Automations.
+  await setAdvancedMode(page, true);
+
+  await expect(navButton(page, "Automations")).toHaveCount(0);
+
+  // …and Advanced Mode still does its OWN job. Skills/Functions were never part of
+  // the unified-nav promise, and the Skills screen has no other entry point, so
+  // folding them here would have removed access rather than tidied the nav.
+  await expect(navButton(page, "Skills").first()).toBeVisible();
+  await expect(navButton(page, "Functions").first()).toBeVisible();
+
+  // Turning unified nav back off restores Automations, with Advanced Mode still on.
+  await setUnifiedNav(page, false);
+  await expect(navButton(page, "Automations").first()).toBeVisible({ timeout: 15_000 });
   errors.assertClean();
 });
