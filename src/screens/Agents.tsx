@@ -583,6 +583,13 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
 }
 
 /* --------- Server-enforced capabilities (permitted ∩ available) --------- */
+
+/** ISS-107: the three states the effective-policy view can report, in plain words. */
+const POLICY_LABEL: Record<string, string> = {
+  allowed: "Runs without asking",
+  needs_approval: "Needs your approval",
+  blocked: "Blocked",
+};
 function AgentCapabilities({ agentId, agentName }: { agentId: string; agentName: string }) {
   const navigate = useStore((s) => s.navigate);
   const migrate = useStore((s) => s.migrateAgentsToServer);
@@ -680,6 +687,10 @@ function AgentCapabilities({ agentId, agentName }: { agentId: string; agentName:
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm text-ink-800">{t.name} {t.requiresApproval && <Icon name="ShieldAlert" size={11} className="inline text-coral-500" />}</p>
                 <p className="truncate text-[11px] text-ink-400">{t.connectorName} · {t.action} · {t.available ? "available" : "not connected"}</p>
+                {/* ISS-107: the effective policy, and the RULE behind it. Resolved server-
+                    side in one place, so this line can never disagree with the counts above
+                    or with what the executor actually does at run time. */}
+                {t.policy && <p className="text-[11px] text-ink-500">{POLICY_LABEL[t.policy.decision]} — {t.policy.reason}</p>}
               </div>
               <StatusDot color={t.available ? "sage" : "amber"} label={t.available ? "Available" : "Unavailable"} />
               <TriState kind="tool" id={t.toolId} allowed={t.permitted && !ctx?.openAllowList} denied={t.denied} />

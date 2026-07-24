@@ -314,11 +314,25 @@ export interface ServerAgent {
   updatedAt: string;
 }
 export interface AgentVersion extends ServerAgent { snapshotAt: string }
+
+/** WP-105/ISS-107 — the effective approval policy for one capability, resolved
+ *  server-side in a single place (server/policy.mjs) and delivered with the rule that
+ *  produced it, so the UI can state not just WHAT the policy is but WHY. */
+export interface EffectivePolicy {
+  decision: "allowed" | "needs_approval" | "blocked";
+  rule: string;
+  reason: string;
+  requiresApproval: boolean;
+  risk: string;
+  baseRequiresApproval: boolean;
+  riskOverridden: boolean;
+}
+
 export interface AgentContext {
   agentId: string;
   openAllowList: boolean;
-  tools: { toolId: string; name: string; connectorName: string; action: string; requiresApproval: boolean; available: boolean; permitted: boolean; denied: boolean }[];
-  functions: { id: string; name: string; type: string; requiresApproval: boolean; available: boolean; state: string; permitted: boolean; denied: boolean }[];
+  tools: { toolId: string; name: string; connectorName: string; action: string; requiresApproval: boolean; available: boolean; permitted: boolean; denied: boolean; policy: EffectivePolicy }[];
+  functions: { id: string; name: string; type: string; requiresApproval: boolean; available: boolean; state: string; permitted: boolean; denied: boolean; policy: EffectivePolicy }[];
   executable: string[];
   /** ISS-124 — all three derive from ONE server computation (agentContext):
    *  available = could run now (connected/ready), ignoring policy;

@@ -9,7 +9,9 @@ import crypto from "node:crypto";
 import {
   listAgents, getAgent, putAgent, patchAgent, deleteAgentRec,
   readJSON, writeJSON, listContactMethods, patchContactMethod,
+  getSettings, getRiskOverride,
 } from "./store.mjs";
+import { resolveEffectivePolicy } from "./policy.mjs";
 import { toolCatalog } from "./planner.mjs";
 import { listPublicFunctions } from "./functions.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
@@ -201,14 +203,35 @@ export function agentContext(agent, session) {
   const allowTools = agent.allowedToolIds ?? [];
   const allowFns = agent.allowedFunctionIds ?? [];
 
+  // WP-105/ISS-107 — the effective-policy view, computed HERE so the same pass that
+  // produces the counts also produces the decision and the rule behind it. One
+  // computation, so a row and a count can never tell different stories.
+  //
+  // toolCatalog has already applied any household risk override (keeping defaultRisk /
+  // defaultRequiresApproval as the pre-override values), so the resolver is fed the
+  // PRE-override capability plus the override itself — otherwise it would be applied
+  // twice and report the wrong rule for why the gate cleared.
+  const householdId = session?.householdId;
+  const settings = householdId ? getSettings(householdId) : {};
+  const policyFor = (cap) => resolveEffectivePolicy({
+    cap, agent, settings,
+    override: householdId ? getRiskOverride(householdId, cap.id) : null,
+  });
+
   const catalog = toolCatalog(session);
   const toolView = catalog.map((t) => {
     const permitted = !deniedTools.has(t.toolId) && (allowTools.length === 0 || allowTools.includes(t.toolId));
-    return { toolId: t.toolId, name: t.name, connectorName: t.connectorName, action: t.action, requiresApproval: t.requiresApproval, available: execTools.has(t.toolId), permitted, denied: deniedTools.has(t.toolId) };
+    const policy = policyFor({
+      id: t.toolId, name: t.name, action: t.action,
+      risk: t.defaultRisk ?? t.risk,
+      requiresApproval: t.defaultRequiresApproval ?? t.requiresApproval,
+    });
+    return { toolId: t.toolId, name: t.name, connectorName: t.connectorName, action: t.action, requiresApproval: t.requiresApproval, available: execTools.has(t.toolId), permitted, denied: deniedTools.has(t.toolId), policy };
   });
   const fnView = listPublicFunctions(session).map((f) => {
     const permitted = !deniedFns.has(f.id) && (allowFns.length === 0 || allowFns.includes(f.id));
-    return { id: f.id, name: f.name, type: f.type, requiresApproval: f.requiresApproval, available: f.state === "available", state: f.state, permitted, denied: deniedFns.has(f.id) };
+    const policy = policyFor({ id: f.id, name: f.name, action: f.action, risk: f.risk, requiresApproval: f.requiresApproval });
+    return { id: f.id, name: f.name, type: f.type, requiresApproval: f.requiresApproval, available: f.state === "available", state: f.state, permitted, denied: deniedFns.has(f.id), policy };
   });
 
   const executable = [

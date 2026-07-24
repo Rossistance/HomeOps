@@ -92,3 +92,47 @@ test("ISS-124: a denied capability is never counted as permitted", async () => {
   assert.equal(c.permittedCount, [...c.tools, ...c.functions].filter((x) => x.permitted).length);
   assert.ok(!c.executable.includes(victim.toolId), "and it cannot be executable");
 });
+
+/* ---- WP-105 / ISS-107: the effective-policy view ----
+ * "One effective-policy view states allowed/blocked/needs-approval and names the rule
+ * that produced it." Computed in the same agentContext pass as the counts above, so a
+ * row and a count can never tell different stories. */
+
+test("ISS-107: every capability carries a decision AND the rule that produced it", async () => {
+  const c = await context();
+  const all = [...c.tools, ...c.functions];
+  assert.ok(all.length > 0, "there are capabilities to describe");
+  for (const x of all) {
+    assert.ok(x.policy, `${x.toolId ?? x.id} has an effective policy`);
+    assert.ok(["allowed", "needs_approval", "blocked"].includes(x.policy.decision), `${x.policy.decision} is one of the three states`);
+    assert.ok(x.policy.rule && x.policy.reason, "the rule and a human reason are both named");
+  }
+});
+
+test("ISS-107: denying a capability shows as blocked, and says why", async () => {
+  const c0 = await context();
+  const victim = c0.tools.find((t) => t.policy.decision !== "blocked");
+  assert.ok(victim, "something to deny");
+  await owner.req(`/api/agents/${agentId}`, {
+    method: "PATCH", body: JSON.stringify({ allowedToolIds: [], deniedToolIds: [victim.toolId] }),
+  });
+  const c = await context();
+  const row = c.tools.find((t) => t.toolId === victim.toolId);
+  assert.equal(row.policy.decision, "blocked");
+  assert.equal(row.policy.rule, "agent.denied");
+  assert.match(row.policy.reason, /denied/i);
+});
+
+test("ISS-107: the agent's alwaysApprove list is REFLECTED in the view (it used to be inert)", async () => {
+  const c0 = await context();
+  const pick = c0.tools.find((t) => !t.denied && t.policy.decision === "allowed");
+  assert.ok(pick, "an allowed capability to tighten");
+  await owner.req(`/api/agents/${agentId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ deniedToolIds: [], approvalPolicy: { autoAllow: [], alwaysApprove: [pick.toolId] } }),
+  });
+  const c = await context();
+  const row = c.tools.find((t) => t.toolId === pick.toolId);
+  assert.equal(row.policy.decision, "needs_approval", "the toggle a family edits now actually shows up");
+  assert.equal(row.policy.rule, "agent.always_approve");
+});
