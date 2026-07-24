@@ -3308,7 +3308,24 @@ export const useStore = create<Store>((set, get) => {
       });
       if (get().backendOnline) {
         void backend.createEvent({ title: input.title, startAt: input.startAt ?? null, endAt: input.endAt ?? null, location: input.location ?? "", spaceId: input.spaceId, participantIds: input.memberIds ?? [], category: input.category, visibility: input.visibility ?? "household" })
-          .then((r) => { if (r.event) commit((d) => { const e = d.events.find((x) => x.id === id); if (e) e.serverId = r.event!.id; }); });
+          .then((r) => {
+            if (r.event) { commit((d) => { const e = d.events.find((x) => x.id === id); if (e) e.serverId = r.event!.id; }); return; }
+            // ISS-105: a create the server REFUSED must not linger as a phantom. With no
+            // serverId it survives every hydrate (mergeServerAuthoritative reads it as a
+            // never-synced offline draft), so it looks saved on this device while existing
+            // nowhere else — no other device, and no server. This branch didn't exist:
+            // the failure was swallowed entirely. Roll it back and say so.
+            commit((d) => { d.events = d.events.filter((x) => x.id !== id); });
+            toast({
+              kind: "error",
+              title: "Couldn't save that event",
+              message: r.error === "invalid_startAt" || r.error === "invalid_endAt"
+                ? "That date or time isn't valid — check it and try again."
+                : r.error === "backend_unreachable"
+                  ? "Couldn't reach the server — nothing was saved."
+                  : "The server refused it — nothing was saved.",
+            });
+          });
       }
       return id;
     },

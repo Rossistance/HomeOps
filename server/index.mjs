@@ -108,6 +108,16 @@ function maybeSeedSandbox(s) {
   try { seedSandboxAccounts({ householdId: s.householdId, actorId: s.actorId }); }
   catch (e) { console.warn("[sandbox] account seed failed:", e?.message ?? e); }
 }
+// ISS-105 ("a created event never appears"): an event whose stamp can't parse renders on
+// NO day in either client — apps/mobile event-days.ts `coversDay` and calendar.tsx
+// `dayKeys` both drop it — so storing one produced a create that returned 200, sat in the
+// GET payload, and was still absent after add, after nav, and after sync. Refuse it at the
+// boundary instead. `null` and `""` stay legal: the mobile form's "scheduled" toggle sends
+// startAt:null on purpose, and the web store represents an unscheduled event as "".
+function badTimestamp(v) {
+  return v != null && v !== "" && isNaN(+new Date(v));
+}
+
 // Per-member accent color: one of the app accent names, or a hex string. Optional and
 // back-compat — an unrecognized value is ignored (never stored) rather than erroring.
 const MEMBER_COLORS = ["ink", "sage", "coral", "amber", "sky", "lavender"];
@@ -1443,6 +1453,10 @@ const handleRequest = async (req, res) => {
       if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       if (!String(body.title ?? "").trim()) return json(res, 400, { error: "title_required" }, req);
+      // ISS-105: fail loudly rather than storing an event that can never render. The mobile
+      // form already keeps the editor open and surfaces the server message on a non-2xx.
+      if (badTimestamp(body.startAt)) return json(res, 400, { error: "invalid_startAt", message: "That start date/time isn't a valid timestamp." }, req);
+      if (badTimestamp(body.endAt)) return json(res, 400, { error: "invalid_endAt", message: "That end date/time isn't a valid timestamp." }, req);
       const ev = putEvent({
         id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         title: String(body.title).trim(), startAt: body.startAt ?? null, endAt: body.endAt ?? null,
@@ -1481,6 +1495,10 @@ const handleRequest = async (req, res) => {
       if (ev.layer && ev.layer !== "canonical" && !linkedGoogle) return json(res, 409, { error: "read_only_layer", message: "This event is synced from another calendar and can't be edited here — copy it to a FamiliOS event first." }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const { id, householdId, createdBy, createdAt, ifUpdatedAt, ...patch } = body; // never reassign identity/ownership-of-record
+      // ISS-105: the same guard on edit — a bad stamp here would make an event that
+      // renders today silently vanish from every day view.
+      if (badTimestamp(patch.startAt)) return json(res, 400, { error: "invalid_startAt", message: "That start date/time isn't a valid timestamp." }, req);
+      if (badTimestamp(patch.endAt)) return json(res, 400, { error: "invalid_endAt", message: "That end date/time isn't a valid timestamp." }, req);
       if (ifUpdatedAt && ev.updatedAt && ifUpdatedAt !== ev.updatedAt) {
         return json(res, 409, { error: "stale_write", message: "This event changed on another device — refresh and try again.", current: ev }, req);
       }
