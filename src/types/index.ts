@@ -939,6 +939,7 @@ export interface AssistantMessage {
 
 export interface AssistantConversation {
   id: string;
+  serverId?: string; // set when the thread is server-owned (durable); absent for offline-only threads
   title: string;
   createdAt: string;
   updatedAt: string;

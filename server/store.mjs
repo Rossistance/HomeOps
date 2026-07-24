@@ -165,18 +165,25 @@ export { readJSON, writeJSON };
 // Bulk-clear an OPERATIONAL collection to empty — the "declutter / fresh start" primitive
 // behind the Owner-only reset-assistant flow. Deliberately allowlisted: only the assistant's
 // own operational history is clearable here (improvements, memory, chat/inbox, approvals,
-// run history). Identity/config/asset collections — members, settings, accounts, connectors,
-// calendar events, tasks/lists, files, knowledge/recipes, agents, skills, triggers — are NEVER
-// wholesale-clearable through this path; they change only through their own audited endpoints.
+// run history, generated artifacts/reports). Identity/config/asset collections — members,
+// settings, accounts, connectors, calendar events, tasks/lists, files, knowledge/recipes,
+// agents, skills, triggers — are NEVER wholesale-clearable through this path; they change
+// only through their own audited endpoints.
 const CLEARABLE_COLLECTIONS = new Set([
   "evolution.json", "memory.json", "conversations.json", "notifications.json",
-  "help-requests.json", "approvals.json", "runs.json",
+  "help-requests.json", "approvals.json", "runs.json", "artifacts.json",
 ]);
+// Array-shaped collections store a JSON array blob — their readers call .filter()/.push()
+// on the value directly, so clearing them to {} (an object) makes those readers throw. Every
+// other clearable collection is an id-keyed object. Clearing MUST write back the same shape.
+const ARRAY_COLLECTIONS = new Set(["memory.json", "artifacts.json"]);
 export function clearableCollections() { return [...CLEARABLE_COLLECTIONS]; }
 export function clearCollection(file) {
   if (!CLEARABLE_COLLECTIONS.has(file)) return { error: "not_clearable" };
-  const cleared = Object.keys(readJSON(file, {})).length;
-  writeJSON(file, {}); // putDoc + bumpRev — in-process, atomic, tenant-scoped
+  const isArray = ARRAY_COLLECTIONS.has(file);
+  const current = readJSON(file, isArray ? [] : {});
+  const cleared = Array.isArray(current) ? current.length : Object.keys(current || {}).length;
+  writeJSON(file, isArray ? [] : {}); // shape-correct empty — putDoc + bumpRev, atomic, tenant-scoped
   return { ok: true, cleared };
 }
 

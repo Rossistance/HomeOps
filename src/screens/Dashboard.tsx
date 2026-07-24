@@ -7,6 +7,7 @@ import { fmtDateFull, fmtTime, dayName, relativeTime, isOverdue } from "@/lib/da
 import { backend, type ServerEvolution, type HelpRequest } from "@/connectors/api";
 import type { Member, CalendarEvent, Task } from "@/types";
 import { capabilitiesFor } from "@/lib/roles";
+import { useAdvancedMode } from "@/lib/prefs";
 import { MemberAvatar } from "@/components/MemberAvatar";
 import { ProfileEditor } from "@/components/ProfileEditor";
 import { HelpComposer } from "@/components/HelpComposer";
@@ -61,6 +62,7 @@ export function Dashboard() {
   // Role-scoped dashboards: children, grandparents, and sitters get a purpose-built view
   // instead of the adult Hearth. Capabilities also gate the admin quick actions below.
   const caps = capabilitiesFor(me ? { role: me.role, relationship: me.relationship, aiEnabled: me.aiEnabled } : null);
+  const [advanced] = useAdvancedMode(); // the raw activity log lives behind Advanced Mode
   // Evolution proposals are generated server-side (on run failures) and are NOT hydrated into
   // the local store — so, like the Improvements tab, pull them here and merge with any local
   // ones, or the "What I learned" card would miss the main source of improvements.
@@ -133,7 +135,7 @@ export function Dashboard() {
   // helpers just did (recent completed runs), what FamiliOS remembered (new memories),
   // and how it proposes to improve (evolution proposals) — surfaced on Home instead of
   // buried in a separate tab you have to go hunting for.
-  const learned = useMemo<LearnedItem[]>(() => {
+  const feeds = useMemo<{ did: LearnedItem[]; learned: LearnedItem[] }>(() => {
     const evoAt = (e: { createdAt: string | number }) => (typeof e.createdAt === "number" ? new Date(e.createdAt).toISOString() : e.createdAt);
     const runItems: LearnedItem[] = [...data.runs]
       .filter((r) => r.status === "Completed" && r.completedAt)
@@ -158,7 +160,12 @@ export function Dashboard() {
       .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
       .slice(0, 3)
       .map((e) => ({ id: e.id, kind: "improve", icon: "Sparkles", accent: "ember", title: `Applied: ${e.title}`, at: evoAt(e), route: { screen: "activity", params: { tab: "improvements" } }, auto: true, note: (e as ServerEvolution).autoReason }));
-    return [...impItems, ...autoItems, ...runItems, ...memItems].sort((a, b) => +new Date(b.at) - +new Date(a.at)).slice(0, 6);
+    // Two honest, separate ledgers: "What I did" (runs — activities) vs "What I learned"
+    // (memories + improvement ideas). The activity items intentionally carry no live route
+    // here; the render decides clickability by Advanced Mode (the activity log is hidden off it).
+    const did = runItems.slice(0, 5);
+    const learned = [...impItems, ...autoItems, ...memItems].sort((a, b) => +new Date(b.at) - +new Date(a.at)).slice(0, 5);
+    return { did, learned };
   }, [data.runs, data.memories, data.evolutions, serverEvos, spaceFilter]);
 
   const saveReminder = () => { if (rTitle.trim()) { createTask({ title: rTitle.trim(), type: "reminder", priority: "medium" }); setRTitle(""); setReminderOpen(false); } };
@@ -347,12 +354,36 @@ export function Dashboard() {
           </div>
         </Card>
 
-        {/* What I did & learned (narrow) — the honest ledger, surfaced on Home */}
-        <Card className="card-pad lg:col-span-2">
-          <Header icon="Sparkles" title="What I did & learned" action={<button onClick={() => navigate("activity")} className="text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">All</button>} />
-          {learned.length === 0 ? <EmptyState icon="Sparkles" title="Nothing yet" message="As your helpers run, what they do and learn shows up here." /> : (
+        {/* What I did — the activity ledger. NOT clickable unless Advanced Mode is on (the
+            raw Activity Log it links to is hidden off Advanced Mode); read-only otherwise. */}
+        <Card className="card-pad lg:col-span-1">
+          <Header icon="CircleCheck" title="What I did" action={advanced ? <button onClick={() => navigate("activity", { tab: "activity" })} className="text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">All</button> : undefined} />
+          {feeds.did.length === 0 ? <EmptyState icon="CircleCheck" title="Nothing yet" message="As your helpers run, what they do shows up here." /> : (
             <ul className="space-y-2">
-              {learned.map((it) => (
+              {feeds.did.map((it) => {
+                const clickable = advanced;
+                return (
+                  <li key={it.id}
+                    {...(clickable ? { onClick: () => navigate("activity", { tab: "activity" }) } : {})}
+                    className={`flex items-start gap-2.5 rounded-2xl border border-transparent px-2 py-1.5 ${clickable ? "group cursor-pointer transition-colors hover:border-ink-900/[0.06] hover:bg-surface-overlay" : "cursor-default"}`}>
+                    <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] ${FEED_ACCENT[it.accent]}`}><Icon name={it.icon} size={14} /></span>
+                    <div className="min-w-0 flex-1">
+                      <p className="line-clamp-2 text-sm text-ink-700">{it.title}</p>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-400"><span>Done · {relativeTime(it.at)}</span></div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </Card>
+
+        {/* What I learned — memories + improvement ideas. Clickable to Memory / Improvements. */}
+        <Card className="card-pad lg:col-span-1">
+          <Header icon="Brain" title="What I learned" action={<button onClick={() => navigate("activity", { tab: "memory" })} className="text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">All</button>} />
+          {feeds.learned.length === 0 ? <EmptyState icon="Brain" title="Nothing yet" message="What FamiliOS remembers and learns shows up here." /> : (
+            <ul className="space-y-2">
+              {feeds.learned.map((it) => (
                 <li key={it.id} onClick={() => navigate(it.route.screen as ScreenId, it.route.params)} className="group flex cursor-pointer items-start gap-2.5 rounded-2xl border border-transparent px-2 py-1.5 transition-colors hover:border-ink-900/[0.06] hover:bg-surface-overlay">
                   <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] ${FEED_ACCENT[it.accent]}`}><Icon name={it.icon} size={14} /></span>
                   <div className="min-w-0 flex-1">
@@ -361,7 +392,7 @@ export function Dashboard() {
                     <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-400">
                       {it.auto
                         ? <Badge color="lavender"><Icon name="Sparkles" size={9} /> Auto-applied by AI</Badge>
-                        : <span>{it.kind === "did" ? "Done" : it.kind === "learned" ? "Remembered" : "Suggestion"}</span>}
+                        : <span>{it.kind === "learned" ? "Remembered" : "Suggestion"}</span>}
                       <span>· {relativeTime(it.at)}</span>
                     </div>
                   </div>

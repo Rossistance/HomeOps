@@ -48,9 +48,19 @@ test("reset clears operational collections + named agents/skills, keeps tasks/se
   assert.ok(r.data.deletedAgents.includes(delId), "named agent deleted");
   assert.ok(r.data.deletedSkills.includes(skillId), "named skill deleted");
   // clearable collections report a cleared count (>=0), not an error
-  for (const f of ["evolution.json", "memory.json", "conversations.json", "notifications.json", "help-requests.json", "approvals.json", "runs.json"]) {
+  for (const f of ["evolution.json", "memory.json", "conversations.json", "notifications.json", "help-requests.json", "approvals.json", "runs.json", "artifacts.json"]) {
     assert.equal(typeof r.data.cleared[f], "number", `${f} cleared to a count`);
   }
+
+  // Shape regression: memory.json and artifacts.json are ARRAY-backed. Clearing them to {}
+  // (an object) makes listMemory()/listArtifacts() throw on .filter() → a 500 that aborts the
+  // whole client hydrate. After a reset both endpoints MUST still read cleanly (200, empty).
+  const memAfter = await owner.req("/api/memory");
+  assert.equal(memAfter.status, 200, "GET /api/memory reads cleanly after reset (not 500 from a bad empty shape)");
+  assert.equal((memAfter.data.memory || []).length, 0, "memory is empty after reset");
+  const artsAfter = await owner.req("/api/artifacts");
+  assert.equal(artsAfter.status, 200, "GET /api/artifacts reads cleanly after reset");
+  assert.equal((artsAfter.data.artifacts || []).length, 0, "artifacts are empty after reset");
 
   // KEEP invariants: the task survives, the un-named agent survives, settings intact.
   const tasks = await owner.req("/api/tasks");

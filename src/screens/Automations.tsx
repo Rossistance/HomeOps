@@ -12,6 +12,7 @@ import { ServerTriggersPanel } from "@/components/triggers/ServerTriggers";
 import { relativeTime, fmtDateTime } from "@/lib/dates";
 import { useAdvancedMode } from "@/lib/prefs";
 import { detectTrigger, detectIntent } from "@/lib/ai";
+import { multiAgentRosterResolved } from "@/lib/multiAgent";
 import { PlanPreview, useConnectables } from "@/screens/Agents";
 import type { Automation, ScreenId, TriggerType, WorkflowPlan, WorkflowTemplate } from "@/types";
 import type { AgentPlan } from "@/connectors/api";
@@ -307,6 +308,7 @@ function WorkflowBuilder({ onActivated }: { onActivated: () => void }) {
 }
 
 function TemplatesGrid({ onOpen }: { onOpen: (id: string) => void }) {
+  const agents = useStore((s) => s.data.agents);
   const [cat, setCat] = useState("All");
   const cats = useMemo(() => ["All", ...Array.from(new Set(workflowTemplates.map((t) => t.category)))], []);
   const list = cat === "All" ? workflowTemplates : workflowTemplates.filter((t) => t.category === cat);
@@ -318,7 +320,17 @@ function TemplatesGrid({ onOpen }: { onOpen: (id: string) => void }) {
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {list.map((t) => (
           <Card key={t.id} className="card-pad flex flex-col" hover onClick={() => onOpen(t.id)}>
-            <div className="mb-1 flex items-center justify-between"><Badge color="lavender">{t.category}</Badge>{t.multiAgent && <span className="chip bg-sky-100 text-sky-600"><Icon name="Users" size={11} /> Multi-agent</span>}</div>
+            {/* The card chip is gated on the same predicate as the detail roster
+                (multiAgentRosterResolved): "Multi-agent" is a claim about what will
+                actually run, so it's only made when every named specialist resolves to a
+                real agent. Otherwise the teaser says what's true — the *template* is
+                designed for several agents — in neutral styling, matching the detail
+                view's note instead of promising something it then walks back. */}
+            <div className="mb-1 flex items-center justify-between"><Badge color="lavender">{t.category}</Badge>{t.multiAgent?.length ? (
+              multiAgentRosterResolved(agents, t.multiAgent)
+                ? <span className="chip bg-sky-100 text-sky-600"><Icon name="Users" size={11} /> Multi-agent</span>
+                : <span className="chip bg-surface-sunken text-ink-500" title="Designed for multiple specialist agents — they aren't set up in this household yet, so a single agent will run it."><Icon name="Users" size={11} /> Multi-agent template</span>
+            ) : null}</div>
             <p className="font-display text-base font-semibold text-ink-900">{t.name}</p>
             <p className="mt-1 line-clamp-3 text-xs text-ink-500">{t.prompt}</p>
             <div className="mt-3 flex items-center gap-1 text-xs text-ink-400"><Icon name="Zap" size={12} /> {t.triggerType}</div>
@@ -343,10 +355,9 @@ function TemplateDetail({ id, onClose, onUse }: { id: string; onClose: () => voi
   // specialists is only ever shown when EVERY one of them matches a real, non-archived
   // agent by name. Six specialists advertised while one arbitrary agent actually runs
   // the automation is exactly the defect this closes — so a partially-resolved roster
-  // renders nothing at all, never a partial or padded list.
-  const norm = (s: string) => s.trim().toLowerCase();
-  const roleResolved = (name: string) => agents.some((a) => a.status !== "Archived" && norm(a.name) === norm(name));
-  const multiAgentAllResolved = !!t.multiAgent?.length && t.multiAgent.every((m) => roleResolved(m.name));
+  // renders nothing at all, never a partial or padded list. Same predicate as the grid
+  // chip and the compile step (see src/lib/multiAgent.ts) so the three can't disagree.
+  const multiAgentAllResolved = multiAgentRosterResolved(agents, t.multiAgent);
 
   const List = ({ title, items, icon }: { title: string; items: string[]; icon: string }) => (
     items.length ? <div><p className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-500"><Icon name={icon} size={12} />{title}</p><ul className="ml-1 space-y-0.5">{items.map((i, k) => <li key={k} className="text-sm text-ink-600">• {i}</li>)}</ul></div> : null

@@ -36,6 +36,7 @@ import type {
   WorkflowTemplate,
 } from "@/types";
 import { capabilitiesFor } from "@/lib/roles";
+import { multiAgentRosterResolved } from "@/lib/multiAgent";
 import { buildSeedData, buildEmptyData } from "@/data/seed";
 import { agentTemplates } from "@/data/agentTemplates";
 import { playbookCatalog } from "@/data/playbooksCatalog";
@@ -776,11 +777,11 @@ export const useStore = create<Store>((set, get) => {
     // automation — see server/automation-preflight.mjs validateMultiAgentRoles — so
     // sending a roster we know won't resolve would wrongly block an otherwise-fine
     // single-agent automation).
-    const roleResolved = (name: string) => d0.agents.some((a) => live(a) && a.name.trim().toLowerCase() === name.trim().toLowerCase());
-    const multiAgentRoles =
-      tmpl.multiAgent && tmpl.multiAgent.length > 0 && tmpl.multiAgent.every((m) => roleResolved(m.name))
-        ? tmpl.multiAgent.map((m) => ({ name: m.name, role: m.role }))
-        : undefined;
+    // Same predicate the Templates grid chip and the template detail roster use
+    // (src/lib/multiAgent.ts) — what the user is shown and what gets compiled must agree.
+    const multiAgentRoles = multiAgentRosterResolved(d0.agents, tmpl.multiAgent)
+      ? tmpl.multiAgent!.map((m) => ({ name: m.name, role: m.role }))
+      : undefined;
 
     const validation = await backend.validateAutomation({ templateId: tmpl.id, plan, agentId: agentId || undefined, multiAgentRoles });
     const errors: AutomationValidationError[] = [...validation.errors];
@@ -1403,14 +1404,17 @@ export const useStore = create<Store>((set, get) => {
         return mostRecent.id;
       }
       let id = uid("conv");
+      let serverId: string | undefined;
       const now = nowISO();
       // Server-owned thread when online — history is then durable + actor-scoped. Falls
-      // back to a local-only conversation when the backend is unreachable.
+      // back to a local-only conversation when the backend is unreachable. A server-created
+      // thread records its serverId so hydrate can drop it if it's cleared upstream (inbox
+      // wipe) via mergeServerAuthoritative; an offline thread has none and survives locally.
       if (get().backendOnline) {
         const r = await backend.createConversation((t || "New chat").slice(0, 48), opts?.visibility);
-        if (r.conversation) id = r.conversation.id;
+        if (r.conversation) { id = r.conversation.id; serverId = r.conversation.id; }
       }
-      commit((d) => { (d.conversations ??= []).unshift({ id, title: (t || "New chat").slice(0, 48), createdAt: now, updatedAt: now, messages: [] }); });
+      commit((d) => { (d.conversations ??= []).unshift({ id, serverId, title: (t || "New chat").slice(0, 48), createdAt: now, updatedAt: now, messages: [] }); });
       get().navigate("assistant", { id });
       if (t) await get().sendToAssistant(id, t);
       return id;
@@ -1900,7 +1904,7 @@ export const useStore = create<Store>((set, get) => {
         links?: { kind: "task" | "artifact"; id: string; label: string }[];
       };
       const mapConv = (c: ServerConversation): AssistantConversation => ({
-        id: c.id, title: c.title, createdAt: c.createdAt, updatedAt: c.updatedAt,
+        id: c.id, serverId: c.id, title: c.title, createdAt: c.createdAt, updatedAt: c.updatedAt,
         messages: (c.messages ?? []).map((m0, i) => {
           const m = m0 as RawConvMsg;
           return {
@@ -1942,8 +1946,10 @@ export const useStore = create<Store>((set, get) => {
         d.contactMethods = contactsMigrated
           ? contactMethods.map(mapContact)
           : [...contactMethods.map(mapContact), ...d.contactMethods.filter((c) => !cmIds.has(c.id))];
-        const tkIds = new Set(tasks.map((t) => t.id));
-        d.tasks = [...tasks.map(mapTask), ...d.tasks.filter((t) => !tkIds.has(t.serverId ?? t.id))];
+        // Server-authoritative (see reconcile.ts): a task that once had a serverId but is
+        // gone from the server's current set was deleted upstream and must NOT linger as a
+        // local ghost — only never-synced offline drafts (no serverId) survive.
+        d.tasks = mergeServerAuthoritative(tasks.map(mapTask), d.tasks);
         // The roster is server-authoritative: the server registry IS the member list
         // (the iOS app writes to the same registry). Presentation fields the server
         // doesn't store (avatar color, initials, email) survive by id; local-only
@@ -1975,23 +1981,23 @@ export const useStore = create<Store>((set, get) => {
         }
         // Household name is server-owned too (renameable from iOS Settings).
         if (household?.name) d.household.name = household.name;
-        const convIds = new Set(conversations.map((c) => c.id));
-        const localConvs = (d.conversations ?? []).filter((c) => !convIds.has(c.id));
-        d.conversations = [...conversations.map(mapConv), ...localConvs];
-        // Real memory, written by actual agent runs (homeops.write_memory) — previously
-        // never surfaced here at all, so "Activity & Memory" only ever showed whatever a
-        // human manually added. Server-wins by id; purely local entries are preserved.
-        const memIds = new Set(memory.map((m) => m.id));
-        d.memories = [...memory.map(mapMemory), ...d.memories.filter((m) => !memIds.has(m.serverId ?? m.id))];
-        // Durable files (server blobs). This is the fix for "uploads aren't durable": web now
-        // reads the same /api/files the iOS app writes to, so uploads survive refresh/device-
-        // switch and show up in the shared Library. Server-wins by id; purely local files
-        // (offline / mid-upload) are preserved until they get a serverId.
-        const fileIds = new Set(files.map((f) => f.id));
-        d.files = [...files.map(mapFile), ...d.files.filter((f) => !fileIds.has(f.serverId ?? f.id))];
-        // Server-owned Knowledge (user-authored, editable, durable). Server-wins by id.
-        const kIds = new Set(knowledge.map((k) => k.id));
-        d.knowledge = [...knowledge.map(mapKnowledge), ...d.knowledge.filter((k) => !kIds.has(k.serverId ?? k.id))];
+        // Server-authoritative: a thread deleted/cleared on the server (inbox cleanup) must
+        // disappear here too — only offline-created threads that never synced (no serverId)
+        // survive. Before this, cleared threads lingered in Recents as un-openable ghosts.
+        d.conversations = mergeServerAuthoritative(conversations.map(mapConv), d.conversations ?? []);
+        // Real memory, written by actual agent runs (homeops.write_memory). Server-authoritative:
+        // memories cleared on the server (reset / fresh start) must NOT survive as local ghosts —
+        // only user-added local memories (no serverId, never pushed) are kept. This was the
+        // "33 memories persist after a server wipe" bug: the old merge kept stale serverId rows.
+        d.memories = mergeServerAuthoritative(memory.map(mapMemory), d.memories);
+        // Durable files (server blobs). Web reads the same /api/files the iOS app writes to,
+        // so uploads survive refresh/device-switch and show up in the shared Library.
+        // Server-authoritative: a file deleted on the server is dropped here; only offline /
+        // mid-upload files (no serverId yet) are preserved until they push.
+        d.files = mergeServerAuthoritative(files.map(mapFile), d.files);
+        // Server-owned Knowledge (user-authored, editable, durable). Server-authoritative:
+        // knowledge deleted on the server is dropped here; only never-synced local drafts survive.
+        d.knowledge = mergeServerAuthoritative(knowledge.map(mapKnowledge), d.knowledge);
         // Server-registry agents (incl. chat-built ones that exist ONLY server-side).
         mergeServerAgents(d, serverAgents, { connectors: get().connectors, providers: get().providers, actorId: get().session?.actorId });
       });

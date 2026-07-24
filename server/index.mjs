@@ -929,8 +929,8 @@ const handleRequest = async (req, res) => {
     }
     /* Declutter / fresh start (Owner-only, backup-first). Bulk-clears the assistant's
      * OPERATIONAL history — improvements, memory, chat/inbox, notifications, help
-     * requests, approvals, and run history — and removes explicitly-named duplicate
-     * agents + orphaned skills. NEVER touches identity/config/assets: members, settings,
+     * requests, approvals, run history, and generated artifacts/reports — and removes
+     * explicitly-named duplicate agents + orphaned skills. NEVER touches identity/config/assets: members, settings,
      * accounts, connectors, calendar, tasks/lists, files, knowledge/recipes, or any agent/
      * skill not named in the request. A fresh backup is taken FIRST and its name returned,
      * so the whole operation is reversible via /api/backups/restore. Requires confirm:"RESET". */
@@ -939,7 +939,7 @@ const handleRequest = async (req, res) => {
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       if (body.confirm !== "RESET") return json(res, 400, { error: "confirm_required", message: "Pass confirm:\"RESET\" — this bulk-clears the assistant's operational data (a backup is taken first)." }, req);
       const backup = createBackup(); // backup-first, ALWAYS
-      const CLEAR = ["evolution.json", "memory.json", "conversations.json", "notifications.json", "help-requests.json", "approvals.json", "runs.json"];
+      const CLEAR = ["evolution.json", "memory.json", "conversations.json", "notifications.json", "help-requests.json", "approvals.json", "runs.json", "artifacts.json"];
       const cleared = {};
       for (const file of CLEAR) { const r = clearCollection(file); cleared[file] = r.ok ? r.cleared : (r.error || "err"); }
       const deletedAgents = [], deletedSkills = [], skippedAgents = [], skippedSkills = [];
