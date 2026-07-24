@@ -2021,7 +2021,14 @@ export const useStore = create<Store>((set, get) => {
         // so uploads survive refresh/device-switch and show up in the shared Library.
         // Server-authoritative: a file deleted on the server is dropped here; only offline /
         // mid-upload files (no serverId yet) are preserved until they push.
-        d.files = mergeServerAuthoritative(files.map(mapFile), d.files);
+        // ISS-120: `searchIndexed` is a CLIENT-side flag — the server does not model
+        // indexing — so mapFile hardcoding it false wiped it on EVERY poll. A file the
+        // user had just processed flipped back to "Not indexed" seconds after the "File
+        // processed" toast, which is the contradiction that was reported. Carry this
+        // browser's own answer forward rather than overwriting it with a guess.
+        const priorIndexed = new Set(d.files.filter((f) => f.searchIndexed).map((f) => f.serverId ?? f.id));
+        d.files = mergeServerAuthoritative(files.map(mapFile), d.files)
+          .map((f) => (priorIndexed.has(f.serverId ?? f.id) ? { ...f, searchIndexed: true } : f));
         // Server-owned Knowledge (user-authored, editable, durable). Server-authoritative:
         // knowledge deleted on the server is dropped here; only never-synced local drafts survive.
         d.knowledge = mergeServerAuthoritative(knowledge.map(mapKnowledge), d.knowledge);
@@ -2974,8 +2981,20 @@ export const useStore = create<Store>((set, get) => {
         if (f) f.sensitive = !f.sensitive;
       }),
     processFileById: (id) => {
+      // ISS-120: this fired "File processed" unconditionally — even when processFile found
+      // no such file and did nothing at all (`if (!file) return`). Same false-success class
+      // as ISS-110: a success signal that isn't reading the outcome it reports.
+      if (!get().data.files.some((f) => f.id === id)) {
+        toast({ kind: "error", title: "Couldn't process that file", message: "It's no longer in your library." });
+        return;
+      }
       commit((d) => processFile(d, id));
-      toast({ kind: "success", title: "File processed" });
+      // The toast and the "Indexed / Not indexed" badge now read the SAME state, so they
+      // can't disagree: success is claimed only once the file really is indexed.
+      const indexed = get().data.files.find((f) => f.id === id)?.searchIndexed === true;
+      toast(indexed
+        ? { kind: "success", title: "File processed", message: "It's indexed and searchable now." }
+        : { kind: "warn", title: "Not indexed yet", message: "The file was updated, but it isn't searchable yet." });
     },
     // Knowledge items are now server-owned (durable, editable, visibility-scoped) — the old
     // versions only ever wrote to this browser's IndexedDB, so nothing survived a refresh or
@@ -3214,11 +3233,19 @@ export const useStore = create<Store>((set, get) => {
     },
     duplicateMiniApp: (id) => {
       const newId = uid("app");
+      const source = get().data.miniApps.find((x) => x.id === id);
       commit((d) => {
         const app = d.miniApps.find((x) => x.id === id);
-        if (app) d.miniApps.unshift({ ...structuredClone(app), id: newId, name: `${app.name} (Copy)`, version: 1, createdAt: nowISO(), updatedAt: nowISO() });
+        // ISS-122: the clone copied `status` too, so duplicating an ARCHIVED app produced
+        // another archived one — "Mini app duplicated" reported success while the copy was
+        // only findable under Archived, with nothing saying so. A duplicate is something
+        // you just made in order to use it, so it lands ACTIVE, where you're already
+        // looking; the original's archived state is left alone.
+        if (app) d.miniApps.unshift({ ...structuredClone(app), id: newId, name: `${app.name} (Copy)`, status: "active", version: 1, createdAt: nowISO(), updatedAt: nowISO() });
       });
-      toast({ kind: "success", title: "Mini app duplicated" });
+      toast(source?.status === "archived"
+        ? { kind: "success", title: "Mini app duplicated", message: "The copy is active — the original stays archived." }
+        : { kind: "success", title: "Mini app duplicated" });
       return newId;
     },
 
