@@ -1528,9 +1528,25 @@ const handleRequest = async (req, res) => {
         if (!r.ok) return json(res, 422, { error: r.error, message: r.message ?? "Couldn't delete the event in Google Calendar." }, req);
         return json(res, 200, { ok: true, google: "deleted" }, req);
       }
+      // ISS-106: a CANONICAL event that was pushed to Google keeps a googleEventId.
+      // Deleting only the local record left the Google copy alive, so the next
+      // subscription sync re-imported it — the "deleted events come back" case. (Linked
+      // events were already handled above; the meal-delete route already did this for
+      // meal events, with the same reasoning.) Awaited rather than fire-and-forget so the
+      // response can state the Google outcome instead of implying a clean delete.
+      const gCopyId = ev.provenance?.googleEventId ?? null;
+      let googleOutcome;
+      if (gCopyId) {
+        if (!externalActionsEnabled(g.session.householdId)) {
+          googleOutcome = "kept_external_actions_disabled";
+        } else {
+          const r = await deleteGoogleCopy({ ev, householdId: g.session.householdId, actorId: g.session.actorId });
+          googleOutcome = r?.ok ? "deleted" : "failed";
+        }
+      }
       deleteEventRec(ev.id);
-      audit({ type: "event.delete", eventId: ev.id, ok: true }, req, g.session);
-      return json(res, 200, { ok: true }, req);
+      audit({ type: "event.delete", eventId: ev.id, ok: true, ...(googleOutcome ? { google: googleOutcome } : {}) }, req, g.session);
+      return json(res, 200, { ok: true, ...(googleOutcome ? { google: googleOutcome } : {}) }, req);
     }
     if (path === "/api/tasks" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);

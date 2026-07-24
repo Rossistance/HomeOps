@@ -27,6 +27,50 @@ export function mapGoogleEvents(items) {
     }));
 }
 
+// FamiliOS stores an all-day span with `endAt` INCLUSIVE and local-midnight ISO stamps —
+// see `coversDay` on both clients (it renders start..end inclusive) and `mergeGoogleEdit`
+// below, which already normalizes on the single-event edit path.
+//
+// BOTH upstream formats disagree: Google's `end.date` and iCalendar's `DTEND;VALUE=DATE`
+// (RFC 5545 §3.6.1) are EXCLUSIVE. Storing either verbatim made every all-day event render
+// one day too long (ISS-104) — a one-day anniversary showed on two days. A date-only
+// `startAt` was wrong in the other direction: `new Date("2026-07-31")` is UTC midnight,
+// which is the previous evening in any negative-offset zone, so US households saw all-day
+// events begin a day EARLY.
+//
+// Normalizing here — once, where the Google and .ics paths converge — fixes both at the
+// boundary and keeps every downstream renderer on one convention. Idempotent by
+// construction: only date-only (`YYYY-MM-DD`) stamps are rewritten and the result is
+// always full ISO, so re-syncing can never shift the same span twice.
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const parseLocalDate = (s) => { const [y, m, d] = String(s).split("-").map(Number); return new Date(y, m - 1, d); };
+export function normalizeAllDaySpan(ev) {
+  if (!ev?.allDay || !ev.startAt) return ev;
+  const startAt = DATE_ONLY_RE.test(String(ev.startAt)) ? parseLocalDate(ev.startAt).toISOString() : ev.startAt;
+  let endAt = ev.endAt ?? null;
+  if (endAt && DATE_ONLY_RE.test(String(endAt))) {
+    const inc = parseLocalDate(endAt);
+    inc.setDate(inc.getDate() - 1);                                // exclusive → inclusive
+    endAt = +inc > +new Date(startAt) ? inc.toISOString() : null;  // single-day ⇒ no end at all
+  }
+  return { ...ev, startAt, endAt };
+}
+
+/** Idempotent repair of all-day events stored BEFORE the ingest fix above (ISS-104): any
+ * all-day event still holding date-only stamps carries an exclusive end and a UTC-parsed
+ * start. Re-running is a no-op, since normalizeAllDaySpan only rewrites date-only stamps
+ * and always writes full ISO. Scoped to one household; returns the number repaired. */
+export function backfillAllDaySpans(householdId) {
+  let repaired = 0;
+  for (const ev of listEvents((e) => e.householdId === householdId && e.allDay === true && e.startAt)) {
+    if (!DATE_ONLY_RE.test(String(ev.startAt ?? "")) && !DATE_ONLY_RE.test(String(ev.endAt ?? ""))) continue;
+    const fixed = normalizeAllDaySpan(ev);
+    patchEvent(ev.id, { startAt: fixed.startAt, endAt: fixed.endAt });
+    repaired++;
+  }
+  return repaired;
+}
+
 /** Normalized dedupe fingerprint for an event: lowercased/trimmed title + the DATE
  * portion for all-day events (Google sends "2026-07-31", ICS feeds often send
  * "2026-07-31T00:00:00.000Z" for the same day — they must collide), else the full
@@ -90,7 +134,13 @@ export async function syncSubscription({ sub, icsText, session }) {
     // (singleEvents=true), so only the ICS path needs this.
     parsed = expandRecurring(parseICS(text), { horizonStart: Date.now() - 30 * 864e5, horizonEnd: Date.now() + 90 * 864e5 });
   }
+  // ISS-104: normalize all-day spans ONCE, right where the Google and .ics branches
+  // converge, so every downstream consumer sees the inclusive/local-midnight convention.
+  parsed = (parsed ?? []).map(normalizeAllDaySpan);
   const hh = session.householdId;
+  // Repair anything stored by the pre-fix ingest before comparing against this pull —
+  // otherwise a stale exclusive end reads as a "change" on every single sync.
+  backfillAllDaySpans(hh);
   const subId = sub?.id ?? null;
   const fpOf = eventFingerprint;
   // A feed sometimes carries literal twins — the same title on the same (all-day) date
