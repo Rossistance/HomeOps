@@ -145,6 +145,7 @@ export function plainLanguageAudit(a: AuditLike): string {
     case "run.approval_skipped_by_agent_policy": return "An approval step was skipped because this helper is set to run it without asking.";
     case "run.sweep_failed": return "A background tidy-up couldn't finish for one task — it will be retried.";
     case "skill.test_refused": return "A skill test was refused because some steps have no capability behind them yet.";
+    case "client.error": return "The app hit an error on someone's device and reported it here.";
     case "evolution.auto_accept": return "FamiliOS applied a small self-improvement on its own.";
     case "notify.deliver": return ok ? "A notification was delivered." : "A notification could not be delivered.";
     case "notify.blocked_by_kill_switch": return "A message was held back because external actions are paused.";

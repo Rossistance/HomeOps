@@ -14,11 +14,17 @@ import { SessionProvider, useSession } from "@/lib/session";
 import { capabilitiesFor, type Capabilities } from "@/lib/roles";
 import { RunProvider } from "@/lib/run-context";
 import { ThemePrefProvider, OnboardingProvider, AdvancedModeProvider, useOnboarding } from "@/lib/prefs";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { installCrashReporting } from "@/lib/crash-reporter";
 import { Lock } from "@/components/Lock";
 import { Splash } from "@/components/Splash";
 import { Onboarding } from "@/components/Onboarding";
 import { useTheme } from "@/theme";
 import { api } from "@/lib/api";
+
+// Installed at module scope so a crash during the FIRST render is still reported —
+// a handler wired up inside a component is too late for exactly the worst case.
+installCrashReporting();
 
 void SplashScreen.preventAutoHideAsync();
 
@@ -178,15 +184,19 @@ export default function RootLayout() {
   if (!fontsLoaded) return null;
 
   return (
-    <SafeAreaProvider>
-      <ThemePrefProvider>
-        <OnboardingProvider>
-          <AdvancedModeProvider>
-            <Shell />
-          </AdvancedModeProvider>
-        </OnboardingProvider>
-      </ThemePrefProvider>
-    </SafeAreaProvider>
+    // ErrorBoundary is the OUTERMOST wrapper on purpose: a provider that throws during
+    // render would otherwise take the whole tree down to a white screen with no report.
+    <ErrorBoundary screen="root">
+      <SafeAreaProvider>
+        <ThemePrefProvider>
+          <OnboardingProvider>
+            <AdvancedModeProvider>
+              <Shell />
+            </AdvancedModeProvider>
+          </OnboardingProvider>
+        </ThemePrefProvider>
+      </SafeAreaProvider>
+    </ErrorBoundary>
   );
 }
 

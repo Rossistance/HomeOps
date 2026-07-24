@@ -3484,6 +3484,36 @@ const handleRequest = async (req, res) => {
       audit({ type: "push.register", ok: true }, req, g.session);
       return json(res, 200, { ok: true }, req);
     }
+    /* ---- Client crash / error reports ------------------------------------------
+     * The iOS app had NO crash reporting of any kind: a render error was a white
+     * screen on a device nobody watching the server could see. Rather than add a
+     * third-party vendor (and a secret to manage), a client crash lands in the
+     * household's OWN audit trail — the same place every other event goes, which
+     * means it shows up in Activity with plain-language copy and a timestamp.
+     *
+     * Deliberately forgiving: a crash report must never be the thing that fails.
+     * A missing session is accepted (a crash can happen before/at sign-in), and the
+     * payload is truncated rather than rejected, because a rejected report is a
+     * report nobody ever sees. */
+    if (path === "/api/client-errors" && method === "POST") {
+      const g = gate(req, {});                       // session optional by design
+      const body = await readBody(req);
+      if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const clip = (v, n) => (typeof v === "string" ? v.slice(0, n) : undefined);
+      appendAudit({
+        type: "client.error",
+        ok: false,
+        platform: clip(body.platform, 32) ?? "unknown",
+        appVersion: clip(body.appVersion, 32),
+        fatal: body.fatal === true,
+        message: clip(body.message, 500) ?? "(no message)",
+        stack: clip(body.stack, 4000),
+        screen: clip(body.screen, 120),
+        householdId: g.ok ? g.session?.householdId ?? null : null,
+        actorId: g.ok ? g.session?.actorId ?? null : null,
+      });
+      return json(res, 200, { ok: true }, req);
+    }
     if (path === "/api/push-tokens" && method === "DELETE") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
