@@ -2,13 +2,14 @@
 // sheet. Native SwiftUI date/time pickers via @expo/ui (compact style inline on
 // iOS; dialog presentation elsewhere). Edit mode (?id=) prefls from the server
 // and adds a destructive delete. Synced (linked/public) events are read-only.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Switch, TextInput, View } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import { api, type ApprovalRec, type EventRec, type MemberRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { loadDraft, saveDraft, clearDraft, isEmptyDraft, type EventDraft } from "@/lib/event-drafts";
 import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
 // still shadows the ui/ directory until old screens are deleted centrally.
@@ -191,6 +192,70 @@ export default function EventFormScreen() {
     })();
   }, [id]);
 
+  /* ISS-123 — unsaved drafts survive dismissal and backgrounding.
+   * Keyed per household + draft id ("new" when creating, the event id when editing), so
+   * two half-finished edits never overwrite each other. Restored AFTER the server prefill
+   * above, because a draft is by definition the newer, unsaved state. Cleared ONLY by a
+   * successful save or an explicit discard — dismissing the sheet is not a discard. */
+  const householdId = session?.householdId ?? null;
+  const draftId = id ?? "new";
+  const [draftRestored, setDraftRestored] = useState(false);
+  const restoreTried = useRef(false);
+  // Snapshot of the form as it was loaded (server prefill for an edit, empty for a
+  // create). Without it, opening an existing event would immediately "draft" its own
+  // unchanged contents, and the next open would announce a restore that never happened.
+  const baselineRef = useRef<string | null>(null);
+  const buildDraft = (): EventDraft => ({
+    title, location, notes, scheduled, allDay, hasEnd,
+    day: day.toISOString(), start: start.toISOString(), end: end.toISOString(), endDay: endDay.toISOString(),
+    driverId, bring, bringInput, savedAt: new Date().toISOString(),
+  });
+  // Content signature — the timestamp is deliberately excluded so an untouched form
+  // never looks "changed" just because time passed.
+  const draftSignature = (d: EventDraft) => JSON.stringify({ ...d, savedAt: "" });
+
+  useEffect(() => {
+    if (loading || !householdId || restoreTried.current) return;
+    restoreTried.current = true;
+    baselineRef.current = draftSignature(buildDraft()); // what "unchanged" looks like
+    void (async () => {
+      const d = await loadDraft(householdId, draftId);
+      if (!d) return;
+      // A draft identical to what's already on screen isn't a restore — say nothing.
+      if (draftSignature(d) === baselineRef.current) return;
+      const revive = (iso: string, fallback: Date) => { const x = new Date(iso); return isNaN(+x) ? fallback : x; };
+      setTitle(d.title); setLocation(d.location); setNotes(d.notes);
+      setScheduled(d.scheduled); setAllDay(d.allDay); setHasEnd(d.hasEnd);
+      setDay(revive(d.day, new Date()));
+      setStart(revive(d.start, nextFullHour()));
+      setEnd(revive(d.end, nextFullHour()));
+      setEndDay(revive(d.endDay, new Date()));
+      setDriverId(d.driverId); setBring(d.bring ?? []); setBringInput(d.bringInput ?? "");
+      setDraftRestored(true);
+    })();
+  }, [loading, householdId, draftId]);
+
+  // Write the draft as it's typed (debounced), so dismissal and backgrounding are both
+  // already covered — there is no unmount handler to miss. An untouched blank editor
+  // leaves nothing behind, or every cancelled "+" would resurrect an empty form.
+  useEffect(() => {
+    if (loading || readOnly || !householdId || baselineRef.current === null) return;
+    const draft = buildDraft();
+    // Nothing typed, or nothing changed from what was loaded ⇒ no draft to keep, and
+    // clear any stale one so a saved edit can't leave a ghost behind.
+    if (isEmptyDraft(draft) || draftSignature(draft) === baselineRef.current) { void clearDraft(householdId, draftId); return; }
+    const t = setTimeout(() => { void saveDraft(householdId, draftId, draft); }, 400);
+    return () => clearTimeout(t);
+  }, [loading, readOnly, householdId, draftId, title, location, notes, scheduled, allDay,
+      hasEnd, day, start, end, endDay, driverId, bring, bringInput]);
+
+  const discardDraft = useCallback(() => {
+    if (householdId) void clearDraft(householdId, draftId);
+    setDraftRestored(false);
+    tapHaptic("select");
+    router.back();
+  }, [householdId, draftId]);
+
   /** Local midnight of a calendar day — the all-day anchor (keeps ISO timestamps
    * so every existing sort/render path holds; renderers key off `allDay`). */
   const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
@@ -225,6 +290,8 @@ export default function EventFormScreen() {
     setBusy(null);
     if (r.event) {
       tapHaptic("success");
+      // Saved ⇒ the draft has done its job and must not resurrect later (ISS-123).
+      if (householdId) void clearDraft(householdId, draftId);
       // One-save (DEC-06): with the remembered consent ON, saving also updates
       // Google — through the SAME approval gate (first push surfaces the inline
       // approval panel; nothing external happens silently).
@@ -364,6 +431,18 @@ export default function EventFormScreen() {
         <Notice text="Synced from Google Calendar — changes you save here update it in Google too." ok />
       ) : null}
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
+      {/* ISS-123: say plainly that the draft came back, and give the ONLY other way to
+          clear it besides saving — dismissing deliberately keeps it. */}
+      {draftRestored ? (
+        <View style={{ gap: spacing.sm }}>
+          <Notice text="Restored your unsaved draft — it was kept when you closed the editor." ok />
+          <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+            <PressableScale onPress={discardDraft} haptic={null} hitSlop={8} accessibilityRole="button" accessibilityLabel="Discard this draft">
+              <T kind="subMedium" color={colors.coral}>Discard draft</T>
+            </PressableScale>
+          </View>
+        </View>
+      ) : null}
 
       {/* Title */}
       <Well>
