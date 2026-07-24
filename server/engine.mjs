@@ -23,6 +23,7 @@ import { getInternalFunction } from "./internal-functions.mjs";
 import { resolveRegisteredFunction, runFunctionHandler, computeFunctionState } from "./functions.mjs";
 import { getAgent, getSkill } from "./store.mjs";
 import { isToolStepAllowed, partialUpdateAgent } from "./agents.mjs";
+import { resolveEffectivePolicy } from "./policy.mjs";
 import { partialUpdateSkill } from "./skills.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
 import { proposeEvolution, judgeEvolutionConfidence, INTERNAL_INPUTS, claimsExternalEffect } from "./planner.mjs";
@@ -277,7 +278,10 @@ function resolveTool(toolId, householdId) {
   const base = resolveToolBase(toolId);
   if (!base || !householdId) return base;
   const ov = getRiskOverride(householdId, toolId);
-  if (!ov) return base;
+  // Always hand back a FRESH object: the agent-policy pass below refines
+  // requiresApproval per run, and resolveToolBase may return a registered-function
+  // record that other callers share. Mutating that would leak across runs.
+  if (!ov) return { ...base };
   return {
     ...base,
     baseRequiresApproval: base.requiresApproval,
@@ -633,6 +637,36 @@ async function _drive(runId) {
           appendAudit({ type: "run.policy_block", runId, toolId: step.toolId, agentId: agent.id, reason: verdict.reason, householdId: run.householdId });
           return finishFailed(runId, `agent_policy_${verdict.reason}`);
         }
+      }
+      // WP-105/ISS-107: the agent's OWN approval policy — the "Runs without approval
+      // (low-risk)" and "Always requires your approval" lists the UI has always let a
+      // family edit, and which NO decision point read until now. They were inert, which is
+      // why the same settings kept getting re-applied with nothing changing. Resolved
+      // through the one policy authority so household, agent and capability rules can't
+      // disagree, and so a relaxation is bounded (see policy.mjs).
+      {
+        const baseApproval = resolved.baseRequiresApproval ?? resolved.requiresApproval;
+        const decision = resolveEffectivePolicy({
+          cap: {
+            id: step.toolId,
+            name: resolved.tool?.name ?? resolved.def?.name ?? step.toolId,
+            requiresApproval: baseApproval,
+            risk: resolved.risk,
+            action: resolved.action,
+            delivers: resolved.tool?.delivers ?? resolved.def?.delivers ?? false,
+          },
+          agent,
+          settings: getSettings(run.householdId),
+          override: getRiskOverride(run.householdId, step.toolId),
+        });
+        // Clearing a gate is admin-sanctioned but NEVER silent — the household override
+        // path is audited a few lines above, and an agent-level clear is audited here.
+        if (decision.rule === "agent.auto_allow" && baseApproval && !step.agentPolicyAudited) {
+          appendAudit({ type: "run.approval_skipped_by_agent_policy", runId, toolId: step.toolId, agentId: agent.id, rule: decision.rule, householdId: run.householdId, actorId: run.actorId });
+          patchRunStep(runId, i, { agentPolicyAudited: true });
+        }
+        resolved.requiresApproval = decision.requiresApproval;
+        resolved.policy = decision; // decision + rule + reason, for the effective-policy view
       }
     }
 
