@@ -14,6 +14,7 @@ import { coversDay, eventTimeLabel } from "@/lib/event-days";
 import { memberColor } from "@/lib/member-colors";
 import { isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
+import { useAdvancedMode } from "@/lib/prefs";
 import { useTheme, riskColor, tapHaptic } from "@/theme";
 import {
   T, Card, Badge, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
@@ -78,6 +79,7 @@ export default function TodayScreen() {
 function AdminToday() {
   const { colors, spacing } = useTheme();
   const { session } = useSession();
+  const { advanced } = useAdvancedMode();
   const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
@@ -183,9 +185,9 @@ function AdminToday() {
     void load();
   }, [load]);
 
-  // "What I learned" — recent things Famili picked up: new memories, improvement
-  // proposals waiting on review, and freshly completed runs. Newest, capped at 4.
-  const learnings = useMemo(() => {
+  // Two honest ledgers, split so activities and learnings never blur into one list.
+  // "What I learned" — new memories + improvement proposals waiting on review. Newest, capped at 4.
+  const learned = useMemo(() => {
     const out: { key: string; icon: string; fg: string; bg: string; title: string; subtitle: string }[] = [];
     for (const m of [...memory].sort((a, b) => b.createdAt - a.createdAt).slice(0, 2)) {
       out.push({ key: `m-${m.id}`, icon: "lightbulb.fill", fg: colors.amber, bg: colors.amberBg, title: m.text, subtitle: `New memory · ${new Date(m.createdAt).toLocaleDateString()}` });
@@ -193,12 +195,18 @@ function AdminToday() {
     for (const e of evolutions.filter((e) => e.status === "pending").slice(0, 2)) {
       out.push({ key: `e-${e.id}`, icon: "wand.and.stars", fg: colors.lavender, bg: colors.lavenderBg, title: e.title || "Improvement proposal", subtitle: `Improvement proposal${e.risk ? ` · ${e.risk} risk` : ""}` });
     }
-    for (const r of runs.filter((r) => ["completed", "succeeded"].includes(r.status)).slice(0, 2)) {
+    return out.slice(0, 4);
+  }, [memory, evolutions, colors]);
+  // "What I did" — freshly completed runs (the activity ledger). Read-only on Home; only
+  // Advanced Mode links it through to the full Activity log, which is hidden by default.
+  const did = useMemo(() => {
+    const out: { key: string; icon: string; fg: string; bg: string; title: string; subtitle: string }[] = [];
+    for (const r of runs.filter((r) => ["completed", "succeeded"].includes(r.status)).slice(0, 4)) {
       const done = r.steps.filter((s) => ["done", "completed", "succeeded"].includes(s.status)).length;
       out.push({ key: `r-${r.id}`, icon: "checkmark.circle.fill", fg: colors.sage, bg: colors.sageBg, title: r.title || "Run completed", subtitle: `Completed · ${done}/${r.steps.length} step${r.steps.length === 1 ? "" : "s"}` });
     }
     return out.slice(0, 4);
-  }, [memory, evolutions, runs, colors]);
+  }, [runs, colors]);
 
   // Meals and Tasks sit up front (not buried in Settings) — the two most-used
   // everyday surfaces after the calendar.
@@ -224,9 +232,11 @@ function AdminToday() {
               <PressableScale onPress={() => router.push("/profile")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="My profile">
                 <MemberAvatar member={meMember} size={34} />
               </PressableScale>
-              <PressableScale onPress={() => router.push("/activity")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Activity">
-                <SymTile name="clock" color={colors.textSecondary} bg={colors.surfaceSunken} size={34} iconSize={16} />
-              </PressableScale>
+              {advanced ? (
+                <PressableScale onPress={() => router.push("/activity")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Activity">
+                  <SymTile name="clock" color={colors.textSecondary} bg={colors.surfaceSunken} size={34} iconSize={16} />
+                </PressableScale>
+              ) : null}
             </View>
           </View>
           <T kind="h1" style={{ fontSize: 32, lineHeight: 38 }}>Good {part}, {first}</T>
@@ -568,12 +578,39 @@ function AdminToday() {
             </Rise>
           )}
 
-          {/* what I learned — recent memories, proposals, and completed runs */}
-          {learnings.length > 0 && (
+          {/* What I did — completed runs (the activity ledger). Rows are read-only; only
+              Advanced Mode links through to the full Activity log, hidden by default. */}
+          {did.length > 0 && (
             <Rise index={9}>
-              <SectionHeader title="What I learned" trailing={<SeeAll label="Activity" onPress={() => router.push("/activity")} />} />
+              <SectionHeader title="What I did" trailing={advanced ? <SeeAll label="Activity" onPress={() => router.push("/activity")} /> : undefined} />
               <Card padded={false}>
-                {learnings.map((l, i) => (
+                {did.map((l, i) => (
+                  <View
+                    key={l.key}
+                    style={{
+                      flexDirection: "row", alignItems: "center", gap: spacing.md,
+                      paddingHorizontal: spacing.lg, paddingVertical: 13,
+                      borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator,
+                    }}
+                  >
+                    <SymTile name={l.icon} color={l.fg} bg={l.bg} size={36} iconSize={17} />
+                    <View style={{ flex: 1, gap: 2 }}>
+                      <T kind="rowTitle" numberOfLines={2}>{l.title}</T>
+                      <T kind="detail" numberOfLines={1}>{l.subtitle}</T>
+                    </View>
+                  </View>
+                ))}
+              </Card>
+            </Rise>
+          )}
+
+          {/* What I learned — new memories + improvement proposals. Links to the learned
+              surface (memory + improvements), which stays visible without Advanced Mode. */}
+          {learned.length > 0 && (
+            <Rise index={10}>
+              <SectionHeader title="What I learned" trailing={<SeeAll label="All" onPress={() => router.push("/activity")} />} />
+              <Card padded={false}>
+                {learned.map((l, i) => (
                   <View
                     key={l.key}
                     style={{

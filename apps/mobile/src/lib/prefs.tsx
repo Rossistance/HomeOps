@@ -6,6 +6,7 @@ import { ThemePrefContext, type ThemePref } from "@/theme";
 
 const THEME_KEY = "familios_theme_pref";
 const ONBOARDED_KEY = "familios_onboarded";
+const ADVANCED_KEY = "familios_advanced_mode";
 
 export function ThemePrefProvider({ children }: { children: ReactNode }) {
   const [pref, setPrefState] = useState<ThemePref>("system");
@@ -55,3 +56,33 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
 }
 
 export function useOnboarding() { return useContext(OnboardingContext); }
+
+// Advanced Mode — a personal, on-device view preference (mirrors the web's
+// "homeops:advanced-mode"). OFF by default: the raw Activity log and the
+// "What I did" run history stay hidden behind it, so a plain family device
+// shows only the calm surfaces. Any role may turn it on for themselves.
+interface AdvancedModeState {
+  advanced: boolean;
+  setAdvanced: (v: boolean) => void;
+}
+
+const AdvancedModeContext = createContext<AdvancedModeState>({ advanced: false, setAdvanced: () => {} });
+
+export function AdvancedModeProvider({ children }: { children: ReactNode }) {
+  const [advanced, setAdvancedState] = useState(false);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const v = await SecureStore.getItemAsync(ADVANCED_KEY);
+        setAdvancedState(v === "1");
+      } catch { /* first run: stays off, the safe default */ }
+    })();
+  }, []);
+  const setAdvanced = useCallback((v: boolean) => {
+    setAdvancedState(v);
+    void SecureStore.setItemAsync(ADVANCED_KEY, v ? "1" : "0").catch(() => {});
+  }, []);
+  return <AdvancedModeContext.Provider value={{ advanced, setAdvanced }}>{children}</AdvancedModeContext.Provider>;
+}
+
+export function useAdvancedMode() { return useContext(AdvancedModeContext); }

@@ -13,7 +13,7 @@ import { Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } f
 import { SessionProvider, useSession } from "@/lib/session";
 import { capabilitiesFor, type Capabilities } from "@/lib/roles";
 import { RunProvider } from "@/lib/run-context";
-import { ThemePrefProvider, OnboardingProvider, useOnboarding } from "@/lib/prefs";
+import { ThemePrefProvider, OnboardingProvider, AdvancedModeProvider, useOnboarding } from "@/lib/prefs";
 import { Lock } from "@/components/Lock";
 import { Splash } from "@/components/Splash";
 import { Onboarding } from "@/components/Onboarding";
@@ -181,7 +181,9 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <ThemePrefProvider>
         <OnboardingProvider>
-          <Shell />
+          <AdvancedModeProvider>
+            <Shell />
+          </AdvancedModeProvider>
         </OnboardingProvider>
       </ThemePrefProvider>
     </SafeAreaProvider>

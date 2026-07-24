@@ -6,6 +6,7 @@ import { Alert, View } from "react-native";
 import { useFocusEffect } from "expo-router";
 import { api, type AuditEvent, type EvolutionReviewRec, type MemoryRec, type RunRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { useAdvancedMode } from "@/lib/prefs";
 import { useRevSync } from "@/lib/rev-sync";
 import { useRun } from "@/lib/run-context";
 import { useTheme, statusColor, riskColor, tapHaptic } from "@/theme";
@@ -65,6 +66,7 @@ function Segmented({ value, onChange }: { value: Filter; onChange: (f: Filter) =
 export default function ActivityScreen() {
   const { colors, spacing } = useTheme();
   const { session } = useSession();
+  const { advanced } = useAdvancedMode();
   const { activeRun, clearRun } = useRun();
   const canManage = session?.role === "Owner" || session?.role === "Adult Admin";
   const [loading, setLoading] = useState(true);
@@ -215,6 +217,9 @@ export default function ActivityScreen() {
             </Rise>
           ) : null}
 
+          {/* The raw run history is the Activity log proper — hidden unless Advanced Mode is on,
+              so a plain family device sees only the calm Improvements + Memory surfaces below. */}
+          {advanced ? (
           <Rise index={1}>
             <SectionHeader
               title="Run history"
@@ -249,6 +254,7 @@ export default function ActivityScreen() {
               </Card>
             )}
           </Rise>
+          ) : null}
 
           {improvements.length > 0 ? (
             <Rise index={2}>
@@ -333,6 +339,8 @@ export default function ActivityScreen() {
             )}
           </Rise>
 
+          {advanced ? (
+          <>
           <Rise index={4}>
             <SectionHeader title="Timeline" />
             <Segmented value={filter} onChange={setFilter} />
@@ -373,6 +381,8 @@ export default function ActivityScreen() {
           <T kind="detail" center style={{ marginTop: spacing.sm }}>
             Everything agents do is logged here.{"\n"}Nothing leaves the household without approval.
           </T>
+          </>
+          ) : null}
         </>
       )}
     </HScreen>

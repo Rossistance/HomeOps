@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert, Linking, Switch, TextInput, View } from "react-native";
 import { api, API_URL, type AIProviderRec, type CatalogToolRec, type RiskOverrideRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { useAdvancedMode } from "@/lib/prefs";
 import { useTheme, tapHaptic, type HearthColors } from "@/theme";
 import {
   Badge, Button, Card, ErrorState, HScreen, Notice, PressableScale,
@@ -255,6 +256,8 @@ export default function SettingsScreen() {
       {isAdmin ? <RiskOverridesSection /> : null}
       {isAdmin ? <AutoApproveImprovements /> : null}
 
+      <AdvancedModeToggle />
+
       <SectionHeader title="On the web" />
       <Rise index={2}>
         <Card padded={false}>
@@ -402,6 +405,37 @@ function RiskOverridesSection() {
               <T kind="sub">No approval-gated tools in the catalog.</T>
             </View>
           ) : null}
+        </Card>
+      </Rise>
+    </>
+  );
+}
+
+// Advanced Mode — a personal, on-device view preference (no server round-trip, no role
+// gate: it only changes what THIS device shows). OFF by default; turning it on reveals the
+// raw Activity log (run history + audit timeline) and the "What I did" link-through on
+// Today. What FamiliOS learned — memory and improvements — stays visible either way.
+function AdvancedModeToggle() {
+  const { colors, spacing } = useTheme();
+  const { advanced, setAdvanced } = useAdvancedMode();
+  return (
+    <>
+      <SectionHeader title="Advanced" />
+      <Rise index={2}>
+        <Card padded={false}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, padding: spacing.lg }}>
+            <SymTile name="slider.horizontal.3" color={colors.textSecondary} bg={colors.surfaceSunken} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <T kind="bodyMedium" color={colors.text}>Advanced Mode</T>
+              <T kind="sub">Shows the raw Activity log — run history and the full audit timeline. Off by default; what FamiliOS learned stays visible either way.</T>
+            </View>
+            <Switch
+              value={advanced}
+              onValueChange={(v) => { tapHaptic("select"); setAdvanced(v); }}
+              trackColor={{ true: colors.ember, false: colors.surfaceSunken }}
+              accessibilityLabel="Advanced Mode"
+            />
+          </View>
         </Card>
       </Rise>
     </>
