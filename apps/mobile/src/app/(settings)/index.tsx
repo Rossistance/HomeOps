@@ -104,6 +104,50 @@ export default function SettingsScreen() {
     ]);
   };
 
+  // In-app account deletion (App Store Review 5.1.1(v)). The server decides the blast
+  // radius from the caller's role and it is NOT symmetric — an Owner deletes the whole
+  // household — so the copy is role-aware and the final Alert repeats the consequence
+  // one last time before anything irreversible happens.
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [deleteNote, setDeleteNote] = useState<string | null>(null);
+
+  const runDelete = async () => {
+    setDeleting(true); setDeleteNote(null);
+    const r = await api.deleteMyAccount(deletePassword);
+    setDeleting(false);
+    if (r.ok) {
+      tapHaptic("success");
+      setDeletePassword("");
+      // The server has already cleared the session server-side; signOut clears this
+      // device's stored token and returns to the Lock screen.
+      await signOut();
+      return;
+    }
+    tapHaptic("error");
+    setDeletePassword("");
+    setDeleteNote(
+      r.error === "password_incorrect" ? "That password didn't match. Nothing was deleted."
+        : r.error === "not_identity_account" ? (r.message ?? "This profile signs in without an email account, so there's no account to delete. An Owner can remove the member from Settings → Household.")
+        : r.error === "network" ? "Couldn't reach the server, so nothing was deleted. Check your connection and try again."
+        : r.message ?? "Couldn't delete the account. Nothing was changed.",
+    );
+  };
+
+  const confirmDeleteAccount = () => {
+    Alert.alert(
+      isOwner ? `Delete ${householdName ?? "this household"}?` : "Delete your account?",
+      isOwner
+        ? "This permanently removes the household and everything in it for every member. It cannot be undone."
+        : "This permanently removes your account and your access to this household. It cannot be undone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: isOwner ? "Delete household" : "Delete account", style: "destructive", onPress: () => void runDelete() },
+      ],
+    );
+  };
+
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh}>
       <Rise index={0}>
@@ -241,6 +285,64 @@ export default function SettingsScreen() {
       <Rise index={5}>
         <Card>
           <Button title="Sign out" variant="danger" onPress={confirmSignOut} full />
+        </Card>
+      </Rise>
+
+      {/* Apple requires in-app account deletion for any app that lets you create an
+          account (App Store Review 5.1.1(v)); there was no mobile entry point at all.
+          Rendered inline rather than as a system dialog on purpose: this is irreversible,
+          and for an Owner it deletes the WHOLE household — that consequence should stay
+          on screen while you type your password, not flash past in a transient alert. */}
+      <Rise index={6}>
+        <SectionHeader title="Danger zone" />
+        <Card style={{ gap: spacing.md }}>
+          {!deleteOpen ? (
+            <>
+              <T kind="sub">
+                {isOwner
+                  ? "Deleting your account removes the entire household — every member, event, task, file, and helper. It cannot be undone."
+                  : "Deleting your account removes your sign-in and your access to this household. Shared household data stays with the family."}
+              </T>
+              <Button title="Delete my account" variant="danger" full onPress={() => { setDeleteOpen(true); setDeleteNote(null); }} />
+            </>
+          ) : (
+            <>
+              <T kind="bodyMedium" color={colors.coral}>
+                {isOwner ? `This deletes ${householdName ?? "your household"} for everyone` : "This deletes your account"}
+              </T>
+              <T kind="sub">
+                {isOwner
+                  ? "Every member, event, task, file, recipe, and helper in this household is permanently removed. Other members lose access immediately. This cannot be undone."
+                  : "You'll be signed out and lose access to this household. The family's shared data is not affected. This cannot be undone."}
+              </T>
+              <T kind="detail">Enter your account password to confirm.</T>
+              <TextInput
+                value={deletePassword}
+                onChangeText={setDeletePassword}
+                secureTextEntry
+                autoCapitalize="none"
+                autoComplete="current-password"
+                placeholder="Password"
+                placeholderTextColor={colors.textFaint}
+                accessibilityLabel="Account password, to confirm deletion"
+                style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, color: colors.text, backgroundColor: colors.surfaceSunken }}
+              />
+              {deleteNote ? <Notice text={deleteNote} ok={false} /> : null}
+              <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                <View style={{ flex: 1 }}>
+                  <Button title="Cancel" variant="ghost" full disabled={deleting} onPress={() => { setDeleteOpen(false); setDeletePassword(""); setDeleteNote(null); }} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    title={deleting ? "Deleting…" : isOwner ? "Delete household" : "Delete account"}
+                    variant="danger" full
+                    disabled={deleting || deletePassword.length === 0}
+                    onPress={confirmDeleteAccount}
+                  />
+                </View>
+              </View>
+            </>
+          )}
         </Card>
       </Rise>
 

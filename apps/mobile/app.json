@@ -36,6 +36,13 @@
         }
       ],
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "FamiliOS asks for your photo library so you can attach a picture to a question, set a family member's profile photo, or add a document to your household's Library. Photos you pick go only to your household's own server.",
+          "cameraPermission": "FamiliOS asks for the camera so you can photograph a document — a permission slip, an invoice, a school notice — straight into your household's Library. Nothing is captured unless you tap the shutter."
+        }
+      ],
+      [
         "expo-notifications",
         {
           "icon": "./assets/images/icon.png",

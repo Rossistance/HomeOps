@@ -715,6 +715,25 @@ export const api = {
     });
     return r.data ?? { ok: false, error: "network" };
   },
+  /**
+   * Delete the SIGNED-IN PERSON's FamiliOS account. Not to be confused with
+   * deleteAccount(id) below, which revokes a connected OAuth account — the names are
+   * close and the consequences are not.
+   *
+   * Apple requires in-app account deletion for any app that lets you create an account
+   * (App Store Review 5.1.1(v)); this had no mobile entry point at all.
+   *
+   * The server decides the blast radius from the caller's role, and it is NOT symmetric:
+   * an Owner deletes the ENTIRE household (tenant, identities, sessions — everyone's
+   * data), anyone else deletes only their own account. `deleted` says which happened, so
+   * the UI can confirm honestly rather than guess.
+   */
+  async deleteMyAccount(password: string): Promise<{ ok?: boolean; deleted?: "household" | "account"; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; deleted?: "household" | "account"; error?: string; message?: string }>(
+      "/account", { method: "DELETE", body: JSON.stringify({ password }) },
+    );
+    return r.data ?? { error: "network" };
+  },
   /** Revoke a connected OAuth account (server deletes tokens; ownership-checked). */
   async deleteAccount(id: string): Promise<{ ok?: boolean; error?: string }> {
     const r = await req<{ ok?: boolean; error?: string }>(`/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
