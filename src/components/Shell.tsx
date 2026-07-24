@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import { useStore } from "@/store/useStore";
 import { brand } from "@/brand";
 import { Icon } from "./Icon";
@@ -202,7 +202,22 @@ function Topbar() {
   // WP-001: server truth, matching useBadges() above.
   const approvals = useStore((s) => (canSeeApprovals ? s.serverApprovals.filter((a) => a.status === "pending").length : 0));
   const navigate = useStore((s) => s.navigate);
+  const goBack = useStore((s) => s.goBack);
+  const canGoBack = useStore((s) => s.routeStack.length > 0);
   const [drawer, setDrawer] = useState(false);
+  // ISS-115: map the BROWSER's back button (and Android/trackpad swipe-back) onto the
+  // in-app stack. Nothing ever called pushState, so hardware back unloaded the SPA —
+  // "back exits the whole section", exactly as reported. A sentinel entry is pushed per
+  // in-app move so there is something to pop; when the stack is empty we stop
+  // intercepting and let the browser leave normally.
+  useEffect(() => {
+    if (canGoBack) window.history.pushState({ familios: true }, "");
+  }, [canGoBack]);
+  useEffect(() => {
+    const onPop = () => { if (useStore.getState().routeStack.length > 0) useStore.getState().goBack(); };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
   useEffect(() => {
     if (!drawer) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setDrawer(false); };
@@ -216,6 +231,14 @@ function Topbar() {
         <button className="rounded-xl p-2 text-ink-600 hover:bg-ink-900/[0.05] lg:hidden" onClick={() => setDrawer(true)} aria-label="Open menu">
           <Icon name="Menu" size={20} />
         </button>
+        {/* ISS-115: there was no back at all — every screen was top-level, so the only
+            "back" was the browser's, which left the app entirely. Shown only when there
+            IS a parent to return to, so it never promises a move it can't make. */}
+        {canGoBack && (
+          <button onClick={goBack} aria-label="Back" title="Back" className="rounded-xl p-2 text-ink-600 hover:bg-ink-900/[0.05]">
+            <Icon name="ChevronLeft" size={20} />
+          </button>
+        )}
         <button onClick={() => setCommandOpen(true)} aria-label="Open command palette and search" className="flex flex-1 items-center gap-2 rounded-2xl border border-ink-900/10 bg-surface-rim px-3.5 py-2.5 text-sm text-ink-500 shadow-well transition-colors hover:border-ember-300 sm:max-w-md">
           <Icon name="Sparkles" size={16} className="text-ember-500" />
           <span className="flex-1 text-left">Ask FamiliOS, search, or run a command…</span>
@@ -320,6 +343,42 @@ export function DegradedBanner() {
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
+  // ISS-115 — scroll capture + restoration for local back. The store owns the stack and
+  // the offsets; this owns the only thing it shouldn't, the DOM node that actually
+  // scrolls (<main>, not window). Reporting the offset on scroll means navigate() always
+  // has a current value to record without reaching into the DOM itself.
+  const mainRef = useRef<HTMLElement>(null);
+  const route = useStore((s) => s.route);
+  const restoreScrollTop = useStore((s) => s.restoreScrollTop);
+  const setScrollTop = useStore((s) => s.setScrollTop);
+  const consumeScrollRestore = useStore((s) => s.consumeScrollRestore);
+
+  const onMainScroll = () => {
+    const el = mainRef.current;
+    if (el) setScrollTop(el.scrollTop);
+  };
+
+  // Only reset to top when the ROUTE actually changed. Keying the reset off
+  // `restoreScrollTop` instead was self-defeating: consumeScrollRestore() clears the flag,
+  // this effect re-runs, and the else-branch scrolled straight back to 0 — undoing the
+  // restoration it had just performed one frame earlier. (Caught by the E2E, not by
+  // reading it.)
+  const lastRouteKeyRef = useRef("");
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    const key = `${route.screen}|${JSON.stringify(route.params ?? {})}`;
+    const routeChanged = key !== lastRouteKeyRef.current;
+    lastRouteKeyRef.current = key;
+    if (restoreScrollTop != null) {
+      // Back: land where they actually were. Applied after the parent has painted, or the
+      // container isn't tall enough yet to accept the offset.
+      requestAnimationFrame(() => { el.scrollTop = restoreScrollTop; consumeScrollRestore(); });
+    } else if (routeChanged) {
+      el.scrollTop = 0; // a forward move starts at the top
+    }
+  }, [route.screen, route.params, restoreScrollTop]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div className="flex h-full">
       <Sidebar />
@@ -327,7 +386,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <StorageBanner />
         <DegradedBanner />
         <Topbar />
-        <main className="flex-1 overflow-y-auto px-3 pb-24 pt-5 sm:px-5 lg:px-8 lg:pb-10">
+        <main ref={mainRef} onScroll={onMainScroll} className="flex-1 overflow-y-auto px-3 pb-24 pt-5 sm:px-5 lg:px-8 lg:pb-10">
           <div className="mx-auto w-full max-w-7xl">{children}</div>
         </main>
         <MobileBottomNav />

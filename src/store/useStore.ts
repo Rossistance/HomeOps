@@ -507,6 +507,17 @@ export interface Store extends UIState {
 
   /* navigation + UI */
   navigate: (screen: ScreenId, params?: Record<string, string>) => void;
+  /* ISS-115 — local back. The router was flat: navigate() replaced `route` and kept no
+   * history at all, so there was no "parent" to return to and the browser's Back button
+   * left the app entirely ("back exits the whole section"). The stack records where you
+   * came from AND how far you'd scrolled, so returning lands you where you actually were.
+   * Shell reports/consumes the scroll offset, keeping the DOM out of the store. */
+  routeStack: { route: Route; scrollTop: number }[];
+  currentScrollTop: number;
+  restoreScrollTop: number | null;
+  setScrollTop: (n: number) => void;
+  consumeScrollRestore: () => void;
+  goBack: () => void;
   setCommandOpen: (open: boolean) => void;
   setSpaceFilter: (id: string) => void;
   toast: (t: Omit<Toast, "id">) => void;
@@ -816,6 +827,9 @@ export const useStore = create<Store>((set, get) => {
     /* ----- initial UI state (data replaced on init) ----- */
     data: buildSeedData(),
     route: { screen: "dashboard" },
+    routeStack: [],
+    currentScrollTop: 0,
+    restoreScrollTop: null,
     ready: false,
     storageMode: "indexeddb",
     commandOpen: false,
@@ -1068,7 +1082,37 @@ export const useStore = create<Store>((set, get) => {
         setAdvancedMode(true);
         toast({ kind: "info", title: "Advanced Mode enabled", message: "Skills and Functions are now in your menu — turn Advanced Mode off in Settings anytime." });
       }
-      set({ route: { screen, params }, commandOpen: false });
+      set((s) => {
+        // Same screen with the same params isn't a new place — don't stack a duplicate
+        // that Back would then have to be pressed twice to escape.
+        const same = s.route.screen === screen && JSON.stringify(s.route.params ?? {}) === JSON.stringify(params ?? {});
+        if (same) return { commandOpen: false } as Partial<Store>;
+        return {
+          // Capped: this is a breadcrumb for getting back, not a session recording.
+          routeStack: [...s.routeStack, { route: s.route, scrollTop: s.currentScrollTop }].slice(-30),
+          route: { screen, params },
+          commandOpen: false,
+          currentScrollTop: 0,
+          restoreScrollTop: null, // a forward move starts at the top
+        } as Partial<Store>;
+      });
+    },
+    setScrollTop: (n) => set({ currentScrollTop: n }),
+    consumeScrollRestore: () => set({ restoreScrollTop: null }),
+    goBack: () => {
+      const stack = get().routeStack;
+      if (stack.length === 0) return;
+      const prev = stack[stack.length - 1];
+      set({
+        route: prev.route,
+        routeStack: stack.slice(0, -1),
+        // Handed to Shell, which restores it once the parent has rendered — the "restores
+        // scroll" half of the criterion. Returning to the top of a long list you had
+        // scrolled halfway down is its own kind of being thrown around.
+        restoreScrollTop: prev.scrollTop,
+        currentScrollTop: prev.scrollTop,
+        commandOpen: false,
+      });
     },
     setCommandOpen: (open) => set({ commandOpen: open }),
     setSpaceFilter: (id) => set({ spaceFilter: id }),
@@ -1232,9 +1276,11 @@ export const useStore = create<Store>((set, get) => {
         runId = res.runId;
       });
       const last = get().data.runs.find((r) => r.id === runId);
+      // ISS-116: name the helper, so this can't be mistaken for a different run's result.
+      const who = get().data.agents.find((a) => a.id === id)?.name;
       toast({
         kind: last?.status === "Waiting for Approval" ? "warn" : "success",
-        title: last?.status === "Waiting for Approval" ? "Run paused for approval" : "Agent run complete",
+        title: `${last?.status === "Waiting for Approval" ? "Run paused for approval" : "Agent run complete"}${who ? ` — ${who}` : ""}`,
         message: last?.outputSummary,
       });
       return runId;
@@ -1345,9 +1391,20 @@ export const useStore = create<Store>((set, get) => {
       await get().syncServerRun(started.run.id);
       const finalRun = get().data.runs.find((r) => r.id === started.run!.id);
       const status = finalRun?.status ?? "Running";
+      // ISS-116: an unattributed "Run paused for approval" landing seconds after an
+      // unrelated "Automation paused" read as cause and effect, and the user blamed the
+      // control they had just touched. Runs are ASYNC — the only thing that makes one
+      // toast distinguishable from another is the entity it belongs to.
+      const subject =
+        (opts.automationId ? get().data.automations.find((a) => a.id === opts.automationId)?.name : undefined)
+        ?? (agentId ? get().data.agents.find((a) => a.id === agentId)?.name : undefined)
+        ?? opts.label ?? plan.title;
+      const base = status === "Completed" ? "Run complete"
+        : status === "Waiting for Approval" ? "Run paused for approval"
+        : status === "Failed" ? "Run had problems" : "Run started";
       toast({
         kind: status === "Failed" ? "error" : status === "Waiting for Approval" ? "warn" : status === "Completed" ? "success" : "info",
-        title: status === "Completed" ? "Run complete" : status === "Waiting for Approval" ? "Run paused for approval" : status === "Failed" ? "Run had problems" : "Run started",
+        title: subject ? `${base} — ${subject}` : base,
         message: finalRun?.outputSummary,
       });
       // The server records an evidence-backed proposal on failure (engine.mjs); the
@@ -2333,7 +2390,15 @@ export const useStore = create<Store>((set, get) => {
         }
       });
       const a = get().data.automations.find((x) => x.id === id);
-      toast({ kind: "info", title: a?.enabled ? "Automation enabled" : "Automation paused" });
+      // ISS-116: this said only "Automation paused". Seconds later an UNRELATED concurrent
+      // run said "Run paused for approval", and the two read as cause and effect — they
+      // aren't: toggleAutomation is a pure write and never starts a run. Naming the entity
+      // is what makes the two distinguishable at a glance.
+      toast({
+        kind: "info",
+        title: a?.enabled ? "Automation enabled" : "Automation paused",
+        message: a?.name,
+      });
     },
     runAutomation: (id, opts) => {
       let runId = "";
@@ -2351,14 +2416,17 @@ export const useStore = create<Store>((set, get) => {
         runId = res.runId;
       });
       const last = get().data.runs.find((r) => r.id === runId);
+      // ISS-116: this is the exact pair that was confused — a test run's approval pause
+      // arriving next to an "Automation paused" toggle toast. Both now name their entity.
+      const what = get().data.automations.find((a) => a.id === id)?.name;
       toast({
         kind: last?.status === "Failed" ? "error" : last?.status === "Waiting for Approval" ? "warn" : "success",
         title:
-          last?.status === "Failed"
+          `${last?.status === "Failed"
             ? "Test run failed"
             : last?.status === "Waiting for Approval"
               ? "Run paused for approval"
-              : "Test run complete",
+              : "Test run complete"}${what ? ` — ${what}` : ""}`,
         message: last?.outputSummary,
       });
       return runId;
