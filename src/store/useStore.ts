@@ -37,7 +37,7 @@ import type {
 } from "@/types";
 import { capabilitiesFor } from "@/lib/roles";
 import { multiAgentRosterResolved } from "@/lib/multiAgent";
-import { buildSeedData, buildEmptyData } from "@/data/seed";
+import { buildSeedData, buildEmptyData, isSampleData } from "@/data/seed";
 import { agentTemplates } from "@/data/agentTemplates";
 import { playbookCatalog } from "@/data/playbooksCatalog";
 import { workflowTemplates } from "@/data/workflowTemplates";
@@ -830,12 +830,29 @@ export const useStore = create<Store>((set, get) => {
     init: async () => {
       const mode = await detectStorageMode();
       const data = await loadAppData();
+      const storageError = mode === "unavailable" ? "Browser storage is unavailable — changes will not be saved." : undefined;
       if (!data) {
-        // Fresh, no-data first run → real onboarding (no auto-seeding of a sample).
-        set({ ready: true, storageMode: mode, needsOnboarding: true, storageError: mode === "unavailable" ? "Browser storage is unavailable — changes will not be saved." : undefined });
+        // An empty local store does NOT mean "new user". A returning browser — cleared
+        // site data, a fresh profile, another device — can still hold a valid session,
+        // and the server may already host this family's claimed household. Try to come
+        // BACK before offering to create anything: the old early-return skipped
+        // bootstrapSession entirely, so clearing storage stranded the owner on
+        // onboarding with no route to the Lock screen, and "Create household" would
+        // have minted a SECOND tenant beside their real one.
+        set({ ready: true, storageMode: mode, storageError });
+        await get().bootstrapSession();
+        const returning = !!get().session || !!(await backend.profiles().catch(() => null))?.claimed;
+        if (returning) {
+          // Never leave the Harper SAMPLE (this store's default `data`) standing in for a
+          // real household — it has no serverIds, so hydrate would blend it into their
+          // data. A clean base; the server hydrate fills in the real household.
+          set({ data: buildEmptyData("My Household", get().session?.actorName ?? "You"), needsOnboarding: false });
+        } else {
+          set({ needsOnboarding: true }); // genuine first run → real onboarding
+        }
         return;
       }
-      set({ data, ready: true, storageMode: mode, needsOnboarding: false, storageError: mode === "unavailable" ? "Browser storage is unavailable — changes will not be saved." : undefined });
+      set({ data, ready: true, storageMode: mode, needsOnboarding: false, storageError });
       // Restore any existing backend session; if present, load connector infra.
       await get().bootstrapSession();
     },
@@ -1930,6 +1947,16 @@ export const useStore = create<Store>((set, get) => {
         verified: c.verified, optInStatus: c.optInStatus, allowedAgentIds: c.allowedAgentIds ?? [],
       });
       commit((d) => {
+        // A real, server-backed household must NEVER merge into the local SAMPLE. Sample
+        // records carry no serverId, so every server-authoritative merge below would read
+        // them as never-synced local drafts and keep them forever — surfacing as Harper
+        // sample events, spaces, agents, knowledge, memories and messages blended into the
+        // family's own data. Reset to a clean base first; everything below then populates
+        // it from the server. Guarded on a real session, so exploring the sample with no
+        // session (the onboarding "Explore the sample" path) is left completely alone.
+        if (get().session && isSampleData(d)) {
+          Object.assign(d, buildEmptyData("My Household", get().session?.actorName ?? "You"));
+        }
         // Events are server-authoritative AND churn-prone: Google Calendar re-syncs
         // re-key the same event, so the old "keep locals whose id isn't in the current
         // server set" merge let stale copies pile up (prod: 41 server events → 511 in

@@ -438,6 +438,27 @@ export function defaultSettings(): AppData["settings"] {
 }
 
 /**
+ * True when this store holds the local SAMPLE household ("The Harper Family") rather
+ * than a real one.
+ *
+ * The sample ships as the store's DEFAULT `data` so the shell can render before
+ * onboarding. That is safe on its own, but its records carry no `serverId` — so a
+ * server-authoritative hydrate treats every one of them as a never-synced local draft
+ * and preserves it forever. Merged into a real household that surfaces as sample
+ * events, spaces, agents, knowledge, memories and messages blended in with the
+ * family's own data.
+ *
+ * Detected by the sample's own member ids (not a flag) so stores seeded before this
+ * check existed are recognised too. Two matches is enough — a member may have been
+ * renamed or removed while exploring.
+ */
+const SAMPLE_MEMBER_IDS = ["m-alex", "m-morgan", "m-lily", "m-noah"];
+export function isSampleData(d: Pick<AppData, "members">): boolean {
+  const ids = new Set((d.members ?? []).map((m) => m.id));
+  return SAMPLE_MEMBER_IDS.filter((id) => ids.has(id)).length >= 2;
+}
+
+/**
  * A real, empty household for first-run "Create household" onboarding. One owner
  * (the current user) and two starter spaces; everything else starts blank.
  */
