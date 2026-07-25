@@ -519,7 +519,17 @@ export default function CalendarScreen() {
             ok={false}
           />
           <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
-            <PressableScale onPress={() => router.push("/connections")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Reconnect the calendar">
+            {/* F2/F4 — say WHICH provider needs attention and WHERE we came from, so
+                Connections can scroll to that card, ring it, and give Back a real
+                destination. The provider comes from the stale event itself; guessing
+                "google" would ring the wrong card for an ICS feed. */}
+            <PressableScale
+              onPress={() => router.push({
+                pathname: "/connections",
+                params: { focus: staleEvents[0]?.staleSource?.provider ?? "google", from: "/(home)/calendar" },
+              })}
+              haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Reconnect the calendar"
+            >
               <T kind="subMedium" color={colors.ember}>Reconnect</T>
             </PressableScale>
           </View>
@@ -751,12 +761,39 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
     else Alert.alert("Couldn't resolve", r.message ?? (r.error === "insufficient_role" ? "Adults only." : r.error ?? "Try again."));
   };
 
+  /* A3 [14:16] — "for a long address or notes I want a DOWN-ARROW under the time, to peek at
+   * it at a glance, in ADDITION to the right-arrow that fully opens the event."
+   *
+   * Editable rows tap straight through to the editor, which meant there was no way to just
+   * LOOK at the address without leaving the calendar. The peek is only offered when there is
+   * genuinely something clipped or hidden to see — a chevron that reveals nothing is its own
+   * small lie. */
+  const hasMoreToSee = (e.location?.length ?? 0) > 28
+    || !!e.notes?.trim()
+    || (e.whatToBring?.length ?? 0) > 0
+    || (e.checklist?.length ?? 0) > 0
+    || (e.title?.length ?? 0) > 46;
+
   return (
     <View style={{ flexDirection: "row", gap: spacing.md }}>
       {/* Time rail */}
       <View style={{ width: 58, alignItems: "flex-end", paddingTop: 14 }}>
         <T kind="subMedium" color={colors.textSecondary}>{start ?? "Any"}</T>
         {end ? <T kind="caption" color={colors.textFaint}>{end}</T> : null}
+        {/* A3 — the peek. Under the time, exactly where he asked for it. */}
+        {hasMoreToSee && editable ? (
+          <PressableScale
+            haptic="select"
+            onPress={onToggle}
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityState={{ expanded }}
+            accessibilityLabel={expanded ? `Hide details of ${e.title}` : `Peek at details of ${e.title}`}
+            style={{ marginTop: 6, padding: 3 }}
+          >
+            <Sym name={expanded ? "chevron.up" : "chevron.down"} size={13} color={colors.textFaint} />
+          </PressableScale>
+        ) : null}
       </View>
 
       <View style={{ flex: 1, gap: spacing.sm }}>

@@ -109,7 +109,14 @@ export interface OAuthStartResult { ok?: boolean; url?: string; error?: string; 
 // secret-free view: scope catalog (what the consent screen grants, e.g. Google
 // Home devices on the Google provider) plus the actor's connected accounts.
 export interface ProviderScope { key: string; label: string; risk: string }
-export interface ProviderAccountRec { id: string; displayName?: string | null; status?: string }
+export interface ProviderAccountRec {
+  id: string; displayName?: string | null; status?: string;
+  /** B4 — the HOUSEHOLD MEMBER who connected it. "Our family identifies each other by name,
+   *  not by email address." Server-resolved from connectedByActorId. */
+  memberName?: string | null;
+  connectedByActorId?: string | null;
+  scopes?: string[];
+}
 export interface ProviderRec {
   id: string; name: string; category?: string; readiness: string;
   clientIdEnv?: string; clientSecretEnv?: string;

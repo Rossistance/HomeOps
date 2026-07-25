@@ -358,7 +358,10 @@ export default function AgentDetailScreen() {
             ))}
           </ChipRow>
           {connections.some((c) => !c.available) ? (
-            <PressableScale onPress={() => router.push("/(settings)/connections")} haptic="select" accessibilityRole="button" accessibilityLabel="Fix connections">
+            <PressableScale
+              onPress={() => router.push({ pathname: "/(settings)/connections", params: { from: `/(agents)/${id}` } })}
+              haptic="select" accessibilityRole="button" accessibilityLabel="Fix connections"
+            >
               <T kind="subMedium" color={colors.ember}>One of these needs reconnecting — fix it in Connections</T>
             </PressableScale>
           ) : null}

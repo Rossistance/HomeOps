@@ -277,6 +277,12 @@ export default function AutomationsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
   const [firingId, setFiringId] = useState<string | null>(null);
+  /* A12 [24:19] — "the automation text is cut off, and I can't tap it to see what happened or
+   * what it uses." Every line on the card was clamped to one or two lines and there was no
+   * way to open any of it: the only interaction was a long-press menu nobody would discover.
+   * Tapping now expands the card in place, showing the schedule, the linkage and the last
+   * result in full — the canonical card behaviour (A13) applied here. */
+  const [openId, setOpenId] = useState<string | null>(null);
   // Live "Test run" progress: the run the fired trigger started, polled to completion.
   const [live, setLive] = useState<{ triggerName: string; run: RunRec } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -442,18 +448,23 @@ export default function AutomationsScreen() {
               : null;
         const fired = timeAgo(t.lastFiredAt);
         const fireCount = t.fireCount ?? 0;
+        const open = openId === t.id;
         return (
           <Rise key={t.id} index={i + 1}>
             <PressableCard
+              onPress={() => { tapHaptic("select"); setOpenId(open ? null : t.id); }}
               onLongPress={canManage ? () => menu(t) : undefined}
-              haptic="select"
+              haptic={null}
               scaleTo={0.985}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: open }}
               accessibilityLabel={`${t.name}, ${TYPE_LABEL[t.type] ?? t.type}, ${t.enabled ? "enabled" : "disabled"}`}
-              accessibilityHint={canManage ? "Long-press for test run and delete" : undefined}
+              accessibilityHint={canManage ? "Opens details. Long-press for test run and delete" : "Opens details"}
               style={{ gap: spacing.sm }}
             >
               <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                 <View style={{ flex: 1, gap: 5 }}>
+                  {/* A1/A13 — the title wraps. It is a name; a name you can't read is not one. */}
                   <T kind="h3" color={colors.text}>{t.name}</T>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                     <Badge label={TYPE_LABEL[t.type] ?? t.type} icon={tb.icon} fg={tb.fg} bg={tb.bg} />
@@ -469,12 +480,13 @@ export default function AutomationsScreen() {
                   ios_backgroundColor={colors.surfaceSunken}
                   accessibilityLabel={`${t.name} enabled`}
                 />
+                <Sym name={open ? "chevron.up" : "chevron.down"} size={13} color={colors.textFaint} />
               </View>
 
               <View style={{ gap: 4 }}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
                   <Sym name="clock" size={12} color={colors.textFaint} />
-                  <T kind="caption" color={colors.textMuted} numberOfLines={1} style={{ flex: 1 }}>{t.scheduleText ?? fallbackScheduleText(t)}</T>
+                  <T kind="caption" color={colors.textMuted} numberOfLines={open ? undefined : 1} style={{ flex: 1 }}>{t.scheduleText ?? fallbackScheduleText(t)}</T>
                 </View>
                 {t.tzSource === "server" ? (
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
@@ -487,7 +499,7 @@ export default function AutomationsScreen() {
                 {linkage ? (
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
                     <Sym name="sparkles" size={12} color={colors.textFaint} />
-                    <T kind="caption" color={colors.textMuted} numberOfLines={1} style={{ flex: 1 }}>{linkage}</T>
+                    <T kind="caption" color={colors.textMuted} numberOfLines={open ? undefined : 1} style={{ flex: 1 }}>{linkage}</T>
                   </View>
                 ) : null}
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
@@ -497,6 +509,43 @@ export default function AutomationsScreen() {
                   </T>
                 </View>
               </View>
+
+              {/* A12 — "what happened, and what it uses", visible without leaving the screen. */}
+              {open ? (
+                <View style={{ gap: spacing.sm, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: spacing.sm }}>
+                  <View style={{ gap: 4 }}>
+                    <T kind="eyebrow">What it runs</T>
+                    <T kind="sub">{linkage ?? "Nothing is bound to it yet — it will fire and do nothing."}</T>
+                  </View>
+                  {t.webhookPath ? (
+                    <View style={{ gap: 4 }}>
+                      <T kind="eyebrow">Listening at</T>
+                      <T kind="sub" selectable>{t.webhookPath}</T>
+                    </View>
+                  ) : null}
+                  <View style={{ gap: 4 }}>
+                    <T kind="eyebrow">Last result</T>
+                    {res ? (
+                      <T kind="sub" color={res.fg}>
+                        {res.label}{t.lastResult?.error ? ` — ${t.lastResult.error}` : ""}
+                        {fired ? ` · ${fired}` : ""}
+                      </T>
+                    ) : (
+                      <T kind="sub">It hasn&apos;t run yet, so there&apos;s nothing to report.</T>
+                    )}
+                  </View>
+                  {t.lastRunId ? (
+                    <PressableScale
+                      haptic="select"
+                      onPress={() => router.push("/activity")}
+                      accessibilityRole="button"
+                      accessibilityLabel="See the full run"
+                    >
+                      <T kind="subMedium" color={colors.ember}>See the full run in Activity</T>
+                    </PressableScale>
+                  ) : null}
+                </View>
+              ) : null}
 
               {canManage ? (
                 <View style={{ flexDirection: "row", marginTop: 2 }}>

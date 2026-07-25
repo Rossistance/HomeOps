@@ -36,6 +36,16 @@ export default function LibraryScreen() {
   const [memory, setMemory] = useState<MemoryRec[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactRec[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeRec[]>([]);
+  // J1 — the tags this household already uses, most-used first. Offering them beats asking
+  // everyone to independently remember whether it's "medical" or "health".
+  const knownTags = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const k of knowledge) for (const t of k.tags ?? []) {
+      const key = t.trim();
+      if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([t]) => t);
+  }, [knowledge]);
   const [kOpen, setKOpen] = useState(false);
   const [editingK, setEditingK] = useState<KnowledgeRec | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -450,6 +460,7 @@ export default function LibraryScreen() {
         visible={kOpen}
         onClose={() => setKOpen(false)}
         onSaved={() => { setKOpen(false); setEditingK(null); void load(); }}
+        suggestedTags={knownTags}
       />
     </HScreen>
   );
@@ -457,11 +468,14 @@ export default function LibraryScreen() {
 
 /** Create / edit a knowledge item (title, type, content, tags, visibility, sensitive).
  *  New when item is null; edit PATCHes the existing record. */
-function KnowledgeSheet({ item, visible, onClose, onSaved }: {
+function KnowledgeSheet({ item, visible, onClose, onSaved, suggestedTags = [] }: {
   item: KnowledgeRec | null;
   visible: boolean;
   onClose: () => void;
   onSaved: () => void;
+  /** J1 — tags already in use in this household, so everyone doesn't have to remember their
+   *  own spelling of "insurance". */
+  suggestedTags?: string[];
 }) {
   const { colors, spacing, type } = useTheme();
   const [title, setTitle] = useState("");
@@ -525,9 +539,58 @@ function KnowledgeSheet({ item, visible, onClose, onSaved }: {
           <T kind="eyebrow">Details</T>
           <TextInput style={[inputStyle, { minHeight: 96 }]} placeholder="What should Famili remember?" placeholderTextColor={colors.textFaint} value={content} onChangeText={setContent} multiline accessibilityLabel="Knowledge details" />
         </View>
+        {/* J1 [20:55] — "I don't know what the tags are for. Are they supposed to
+            auto-identify what's in the images and files and categorise them? The
+            comma-separated thing is confusing."
+
+            The honest answer is no: nothing reads an image and invents tags, and a field
+            labelled only "Comma-separated" told him HOW to type without ever saying WHY. So
+            the label now says what a tag actually does — it's how you and the assistant find
+            this later — and the field offers the tags already in use instead of asking
+            everyone to remember their own spelling. */}
         <View style={{ gap: 6 }}>
           <T kind="eyebrow">Tags</T>
-          <TextInput style={inputStyle} placeholder="Comma-separated" placeholderTextColor={colors.textFaint} value={tags} onChangeText={setTags} autoCapitalize="none" accessibilityLabel="Tags, comma-separated" />
+          <T kind="caption" color={colors.textFaint}>
+            Words to find this by later — yours and Famili&apos;s. Type a few, or tap one below.
+          </T>
+          <TextInput
+            style={inputStyle}
+            placeholder="school, medical, insurance"
+            placeholderTextColor={colors.textFaint}
+            value={tags}
+            onChangeText={setTags}
+            autoCapitalize="none"
+            autoCorrect={false}
+            accessibilityLabel="Tags, separated by commas"
+          />
+          {suggestedTags.length > 0 ? (
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+              {suggestedTags.map((tg) => {
+                const chosen = tags.split(",").map((x) => x.trim().toLowerCase()).includes(tg.toLowerCase());
+                return (
+                  <PressableScale
+                    key={tg}
+                    haptic="select"
+                    onPress={() => {
+                      const list = tags.split(",").map((x) => x.trim()).filter(Boolean);
+                      setTags(chosen
+                        ? list.filter((x) => x.toLowerCase() !== tg.toLowerCase()).join(", ")
+                        : [...list, tg].join(", "));
+                    }}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: chosen }}
+                    accessibilityLabel={`Tag ${tg}`}
+                    style={{
+                      paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999,
+                      backgroundColor: chosen ? colors.emberBg : colors.surfaceSunken,
+                    }}
+                  >
+                    <T kind="caption" color={chosen ? colors.ember : colors.textSecondary}>#{tg}</T>
+                  </PressableScale>
+                );
+              })}
+            </View>
+          ) : null}
         </View>
         <View style={{ gap: 6 }}>
           <T kind="eyebrow">Who can see this</T>

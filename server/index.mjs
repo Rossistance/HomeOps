@@ -1272,7 +1272,15 @@ const handleRequest = async (req, res) => {
       const mine = listAccountsFor(g.session.householdId, g.session.actorId);
       const byProvider = {};
       for (const a of mine) (byProvider[a.provider] ||= []).push(a);
-      const providers = listConnectorProviders().map((p) => ({ ...p, accounts: byProvider[p.id] ?? [] }));
+      /* B4 [09:48] — "the calendar account shows wr…@gmail.com. It should show ROSS. Our
+       * family identifies each other by name, not by email address."
+       *
+       * The account's own displayName comes from the OAuth provider and is usually the email.
+       * The member who connected it is recorded on the account (connectedByActorId), so the
+       * name is right here — attached server-side so the web and the app say the same thing. */
+      const roster = new Map(listMembers((m) => m.householdId === g.session.householdId).map((m) => [m.actorId, m.displayName]));
+      const named = (a) => ({ ...a, memberName: roster.get(a.connectedByActorId) ?? null });
+      const providers = listConnectorProviders().map((p) => ({ ...p, accounts: (byProvider[p.id] ?? []).map(named) }));
       return json(res, 200, { providers, redirectUri: oauthRedirectUri() }, req);
     }
     if (path === "/api/accounts" && method === "GET") {

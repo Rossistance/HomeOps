@@ -4,6 +4,7 @@
 // Groceries screen; a link row here shows the open-item count.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Linking, ScrollView, TextInput, View } from "react-native";
+import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import Animated, { FadeOut, LinearTransition, ReduceMotion, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type Meal, type TaskRec } from "@/lib/api";
@@ -27,6 +28,18 @@ import { T } from "@/components/ui/text";
 
 const MANAGE_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member"];
 const SLOTS = ["breakfast", "lunch", "dinner", "snack"] as const;
+/* E8 — the same defaults the server applies when pushing a meal to the calendar
+ * (server/index.mjs mealCal SLOT_TIMES). Kept in step deliberately: showing 6pm here and
+ * putting 7pm on the calendar would be worse than showing nothing. */
+const SLOT_TIMES: Record<string, string> = { breakfast: "08:00", lunch: "12:00", dinner: "18:00", snack: "15:00" };
+/** "6:00 PM", or "6:00 PM usually" when the time is the slot's default rather than a choice. */
+function mealTimeLabel(m: { slot: string; time?: string | null }): string {
+  const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/.test(m.time ?? "") ? m.time! : (SLOT_TIMES[m.slot] ?? "18:00");
+  const [h, min] = hhmm.split(":").map(Number);
+  const d = new Date(); d.setHours(h, min, 0, 0);
+  const pretty = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return m.time ? pretty : `${pretty} usually`;
+}
 type Slot = (typeof SLOTS)[number];
 const pad2 = (n: number) => String(n).padStart(2, "0");
 /** Local (not UTC) YYYY-MM-DD — meal dates are literal day strings. */
@@ -412,6 +425,14 @@ function MealEditSheet({ meal, visible, week, todayKey, onClose, onSaved }: {
   const [date, setDate] = useState<string | null>(null);
   const [slot, setSlot] = useState<Slot>("dinner");
   const [time, setTime] = useState("");
+  // The picker needs a Date. An unset time opens on the slot's usual hour, so the first spin
+  // starts somewhere sensible rather than at whatever o'clock it happens to be.
+  const timeAsDate = useMemo(() => {
+    const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/.test(time) ? time : (SLOT_TIMES[slot] ?? "18:00");
+    const [h, m] = hhmm.split(":").map(Number);
+    const d = new Date(); d.setHours(h, m, 0, 0);
+    return d;
+  }, [time, slot]);
   const [servings, setServings] = useState("");
   const [ingredients, setIngredients] = useState("");
   const [recipeUrl, setRecipeUrl] = useState("");
@@ -503,8 +524,32 @@ function MealEditSheet({ meal, visible, week, todayKey, onClose, onSaved }: {
 
         <View style={{ flexDirection: "row", gap: spacing.md }}>
           <View style={{ flex: 1, gap: 6 }}>
-            <T kind="eyebrow">Time (HH:MM)</T>
-            <TextInput style={inputStyle} placeholder="18:00" placeholderTextColor={colors.textFaint} value={time} onChangeText={setTime} keyboardType="numbers-and-punctuation" accessibilityLabel="Meal time, 24-hour HH:MM" />
+            <T kind="eyebrow">Time</T>
+            {/* E8 — asking someone to type "18:00" is asking them to do the clock's job. The
+                native picker sets it; "Not set" clears it back to the slot's usual time. */}
+            <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, minHeight: 44 }}>
+              <DateTimePicker
+                value={timeAsDate}
+                mode="time"
+                display="compact"
+                accentColor={colors.ember}
+                onValueChange={(_e, d) => {
+                  const hh = String(d.getHours()).padStart(2, "0");
+                  const mm = String(d.getMinutes()).padStart(2, "0");
+                  setTime(`${hh}:${mm}`);
+                }}
+              />
+              {time ? (
+                <PressableScale
+                  haptic="select" onPress={() => setTime("")} hitSlop={8}
+                  accessibilityRole="button" accessibilityLabel="Clear the time"
+                >
+                  <T kind="caption" color={colors.textMuted}>Clear</T>
+                </PressableScale>
+              ) : (
+                <T kind="caption" color={colors.textFaint} style={{ flex: 1 }}>Not set — uses the usual {slot} time</T>
+              )}
+            </View>
           </View>
           <View style={{ flex: 1, gap: 6 }}>
             <T kind="eyebrow">Servings</T>
@@ -553,6 +598,17 @@ function MealCard({ m, canManage, busy, onGrocery, onCalendar, onEdit, onRemove 
       <PressableScale onPress={() => setOpen(!open)} haptic="select" accessibilityRole="button" accessibilityState={{ expanded: open }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
           <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={2}>{m.title}</T>
+          {/* E8 [23:42] — "the meals need an ACTUAL TIME. What time is dinner?" The field
+              existed and fed the calendar push, but the card only ever showed the slot, so
+              the one question a family asks out loud had no answer on screen. The badge shows
+              the real time when there is one, and the slot's usual time (marked as such) when
+              nobody has set one — never a made-up time presented as a decision. */}
+          <Badge
+            label={mealTimeLabel(m)}
+            icon="clock"
+            fg={m.time ? tint.fg : colors.textMuted}
+            bg={m.time ? tint.bg : colors.surfaceSunken}
+          />
           <Badge label={m.slot} fg={tint.fg} bg={tint.bg} />
           <Sym name={open ? "chevron.up" : "chevron.down"} size={12} color={colors.textFaint} />
         </View>

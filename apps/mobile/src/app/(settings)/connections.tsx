@@ -1,14 +1,18 @@
 // Connections — OAuth accounts, connector readiness, and subscribed calendars.
 // The OAuth flow runs through ASWebAuthenticationSession; the token exchange is
 // server-side, so we always reload after the browser closes.
-import { useCallback, useEffect, useState } from "react";
-import { Alert, TextInput, View } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert, type LayoutChangeEvent, ScrollView, TextInput, View } from "react-native";
+import Animated, {
+  ReduceMotion, useAnimatedStyle, useSharedValue, withRepeat, withSequence, withTiming,
+} from "react-native-reanimated";
 import * as WebBrowser from "expo-web-browser";
+import { Stack, router, useLocalSearchParams } from "expo-router";
 import { api, type CalendarSubscription, type ProviderRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { useTheme, riskColor, type HearthColors } from "@/theme";
+import { useTheme, riskColor, tapHaptic, type HearthColors } from "@/theme";
 import {
-  Badge, BrandIcon, Button, Card, EmptyState, HScreen, Notice, Rise, Row,
+  Badge, BrandIcon, Button, Card, EmptyState, HScreen, Notice, PressableScale, Rise, Row,
   SectionHeader, SkeletonCards, Sym, SymTile, T,
 } from "@/components/ui";
 
@@ -57,6 +61,21 @@ export default function ConnectionsScreen() {
   const [icsPaste, setIcsPaste] = useState("");
   const [subBusy, setSubBusy] = useState<string | null>(null);
 
+  /* F2 [07:02] — "when I tap Reconnect it should scroll to and focus that specific provider
+   * card, with an animated coloured ring around it, so I know which one it means."
+   * F4 [08:42] — "back must return to where I came from. Calendar to Connections to Back
+   * should land me on the Calendar, not in Settings."
+   *
+   * Both ride on link params: `focus` names the provider to highlight, `from` names the route
+   * that sent us. Neither is guessed — the caller says so, because only the caller knows. */
+  const params = useLocalSearchParams<{ focus?: string; from?: string }>();
+  const focusProvider = typeof params.focus === "string" ? params.focus : null;
+  const fromRoute = typeof params.from === "string" ? params.from : null;
+  const scroller = useRef<ScrollView>(null);
+  const cardY = useRef<Record<string, number>>({});
+  const [ringFor, setRingFor] = useState<string | null>(null);
+  const scrolledTo = useRef<string | null>(null);
+
   const load = useCallback(async () => {
     const [c, p, s] = await Promise.all([api.connectors(), api.providers(), api.calendarSubscriptions()]);
     setConnectors(c);
@@ -66,6 +85,23 @@ export default function ConnectionsScreen() {
   }, []);
   useEffect(() => { if (session) void load(); }, [session, load]);
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
+
+  // F2 — once the cards have laid out, bring the named one into view and ring it. Runs once
+  // per focus request: re-running on every render would fight the user's own scrolling.
+  useEffect(() => {
+    if (!loaded || !focusProvider || scrolledTo.current === focusProvider) return;
+    const y = cardY.current[focusProvider];
+    if (y == null) return;                     // its onLayout hasn't fired yet — try next paint
+    scrolledTo.current = focusProvider;
+    setTimeout(() => {
+      scroller.current?.scrollTo({ y: Math.max(0, y - 12), animated: true });
+      setRingFor(focusProvider);
+      tapHaptic("light");
+      // The ring is a pointer, not a state: it fades out on its own rather than needing a tap
+      // to dismiss something that was only ever "look here".
+      setTimeout(() => setRingFor(null), 2600);
+    }, 220);
+  }, [loaded, focusProvider, providers.length]);
 
   const connect = async (providerId: string, providerName: string) => {
     setConnecting(providerId);
@@ -170,7 +206,28 @@ export default function ConnectionsScreen() {
   };
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} scrollRef={scroller}>
+      {/* F4 — Connections lives in the Settings stack, so the default Back always went to
+          Settings no matter where you came from. When a caller tells us where it sent us
+          from, Back says so and goes there. */}
+      {fromRoute ? (
+        <Stack.Screen
+          options={{
+            headerLeft: () => (
+              <PressableScale
+                onPress={() => { tapHaptic("light"); router.replace(fromRoute as never); }}
+                hitSlop={12}
+                accessibilityRole="button"
+                accessibilityLabel={`Back to ${fromRoute.includes("calendar") ? "Calendar" : "where you were"}`}
+                style={{ flexDirection: "row", alignItems: "center", gap: 2 }}
+              >
+                <Sym name="chevron.left" size={17} color={colors.ember} />
+                <T kind="bodyMedium" color={colors.ember}>{fromRoute.includes("calendar") ? "Calendar" : "Back"}</T>
+              </PressableScale>
+            ),
+          }}
+        />
+      ) : null}
       <Rise index={0}>
         <T kind="sub">Connect accounts to let plans act on your behalf.</T>
       </Rise>
@@ -186,8 +243,10 @@ export default function ConnectionsScreen() {
             const connected = (p.accounts?.length ?? 0) > 0;
             const needsAuth = !connected && (p.readiness === "configured" || p.readiness === "not_configured");
             const m = connected ? readinessMeta(colors, "connected") : readinessMeta(colors, p.readiness === "configured" ? "needs_auth" : "not_configured");
+            const ringed = ringFor === p.id;
             return (
               <Rise key={p.id} index={Math.min(i + 1, 8)}>
+                <FocusRing active={ringed} onLayout={(e) => { cardY.current[p.id] = e.nativeEvent.layout.y; }}>
                 <Card style={{ gap: spacing.md }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                     <BrandIcon provider={p.id} />
@@ -203,15 +262,38 @@ export default function ConnectionsScreen() {
                   </View>
                   {connected ? (
                     <View style={{ gap: 6 }}>
-                      {p.accounts.map((a) => (
-                        <View key={a.id} style={{ flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.surfaceSunken, borderRadius: 10, borderCurve: "continuous", paddingHorizontal: 10, paddingVertical: 8 }}>
-                          <BrandIcon provider={p.id} size={22} />
-                          <T kind="subMedium" color={colors.textSecondary} numberOfLines={1} style={{ flex: 1 }}>
-                            {a.displayName || "Connected account"}
-                          </T>
-                          <Sym name="checkmark.circle.fill" size={14} color={colors.sage} />
-                        </View>
-                      ))}
+                      {p.accounts.map((a) => {
+                        const broken = ["needs_reconnect", "revoked", "expired", "degraded"].includes(a.status ?? "");
+                        return (
+                          <View key={a.id} style={{ flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.surfaceSunken, borderRadius: 10, borderCurve: "continuous", paddingHorizontal: 10, paddingVertical: 8 }}>
+                            <BrandIcon provider={p.id} size={22} />
+                            <View style={{ flex: 1 }}>
+                              {/* B4 [09:48] — "it shows wr…@gmail.com; it should show ROSS. Our
+                                  family identifies each other by name, not email." The name
+                                  leads; the address is the small print underneath. */}
+                              <T kind="subMedium" color={colors.text}>
+                                {a.memberName || a.displayName || "Connected account"}
+                              </T>
+                              {a.memberName && a.displayName && a.displayName !== a.memberName ? (
+                                <T kind="caption" color={colors.textFaint} numberOfLines={1}>{a.displayName}</T>
+                              ) : null}
+                            </View>
+                            {/* F3 [07:32] — "there should be a Reconnect button on the card
+                                itself, in the list view" — rather than only in a banner
+                                somewhere else that tells you to come here. */}
+                            {broken && canManage ? (
+                              <Button
+                                small variant="neutral" icon="arrow.clockwise"
+                                title={connecting === p.id ? "Opening…" : "Reconnect"}
+                                loading={connecting === p.id}
+                                onPress={() => void connect(p.id, p.name)}
+                              />
+                            ) : (
+                              <Sym name="checkmark.circle.fill" size={14} color={colors.sage} />
+                            )}
+                          </View>
+                        );
+                      })}
                     </View>
                   ) : null}
                   {(p.scopes?.length ?? 0) > 0 ? (
@@ -245,6 +327,7 @@ export default function ConnectionsScreen() {
                     </T>
                   ) : null}
                 </Card>
+                </FocusRing>
               </Rise>
             );
           })}
@@ -340,5 +423,45 @@ export default function ConnectionsScreen() {
         </>
       )}
     </HScreen>
+  );
+}
+
+/** F2 — the "which one do you mean" ring. A coloured outline that pulses a few times around
+ *  the card the user was sent to, then stops. Deliberately a POINTER and not a state: it
+ *  fades on its own rather than leaving something to dismiss. Respects Reduce Motion, where
+ *  it settles into a steady outline instead of pulsing. */
+function FocusRing({ active, children, onLayout }: {
+  active: boolean; children: React.ReactNode; onLayout: (e: LayoutChangeEvent) => void;
+}) {
+  const { colors, radii } = useTheme();
+  const glow = useSharedValue(0);
+  useEffect(() => {
+    if (!active) { glow.value = withTiming(0, { duration: 260 }); return; }
+    glow.value = withRepeat(
+      withSequence(
+        withTiming(1, { duration: 520, reduceMotion: ReduceMotion.System }),
+        withTiming(0.35, { duration: 520, reduceMotion: ReduceMotion.System }),
+      ),
+      3, false, undefined, ReduceMotion.System,
+    );
+  }, [active, glow]);
+  const style = useAnimatedStyle(() => ({
+    borderColor: colors.ember,
+    borderWidth: 2 * glow.value,
+    opacity: 0.35 + 0.65 * glow.value,
+  }));
+  return (
+    <View onLayout={onLayout}>
+      {children}
+      {active ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            { position: "absolute", left: -3, right: -3, top: -3, bottom: -3, borderRadius: radii.lg, borderCurve: "continuous" },
+            style,
+          ]}
+        />
+      ) : null}
+    </View>
   );
 }

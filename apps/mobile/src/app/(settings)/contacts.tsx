@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, TextInput, View } from "react-native";
 import { api, type ContactMethodRec, type ContactMethodType, type MemberRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { useTheme, type HearthColors } from "@/theme";
+import { useTheme, tapHaptic, type HearthColors } from "@/theme";
 import {
   Badge, Button, Card, Chip, ChipRow, ErrorState, HScreen, Notice,
   Rise, SectionHeader, SkeletonCards, SymTile, T, Well,
@@ -200,6 +200,48 @@ export default function ContactsScreen() {
     else setNotice({ text: "Contact method removed.", ok: true });
     await load();
   };
+  /* J2 [24:07] — "the contact methods need to be EDITABLE, not just removable." A typo in a
+   * phone number meant deleting the method, re-adding it, and re-verifying from scratch.
+   *
+   * Editing the VALUE resets verification server-side (that's correct — a different address
+   * has not proved anything), so the UI says so before the change rather than after. Editing
+   * only the label leaves verification alone. */
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editLabel, setEditLabel] = useState("");
+  const [editValue, setEditValue] = useState("");
+
+  const beginEdit = (c: ContactMethodRec) => {
+    tapHaptic("select");
+    setEditId(c.id);
+    setEditLabel(c.label);
+    setEditValue(c.value ?? "");
+  };
+
+  const saveEdit = async (c: ContactMethodRec) => {
+    const label = editLabel.trim();
+    const value = editValue.trim();
+    if (!label) { setNotice({ text: "Give it a name you'll recognise.", ok: false }); return; }
+    const valueChanged = value !== (c.value ?? "");
+    setBusy(`e:${c.id}`);
+    const r = await api.patchContactMethod(c.id, { label, ...(valueChanged ? { value } : {}) });
+    setBusy(null);
+    if (!r.contactMethod) {
+      setNotice({ text: r.message ?? "Couldn't save that change.", ok: false });
+      return;
+    }
+    tapHaptic("success");
+    setEditId(null);
+    setNotice({
+      // Say what the change actually cost. A silently un-verified method that stops
+      // delivering is the kind of quiet failure this app keeps hunting down.
+      text: valueChanged
+        ? `Saved. Because the address changed, "${label}" needs verifying again before anything can be sent to it.`
+        : "Saved.",
+      ok: true,
+    });
+    await load();
+  };
+
   const confirmRemove = (c: ContactMethodRec) => {
     Alert.alert(`Remove “${c.label}”?`, "Agents will no longer be able to message it.", [
       { text: "Cancel", style: "cancel" },
@@ -349,9 +391,61 @@ export default function ContactsScreen() {
                                 <Button title="Verify" variant="neutral" small loading={busy === `v:${c.id}`} onPress={() => void startVerify(c)} />
                               ) : null}
                               <Button title="Send test" variant="ghost" small icon="paperplane" loading={busy === `t:${c.id}`} onPress={() => void sendTest(c)} />
+                              {/* J2 — editable, not only removable. */}
+                              <Button title="Edit" variant="ghost" small icon="pencil" onPress={() => (editId === c.id ? setEditId(null) : beginEdit(c))} />
                               <View style={{ flex: 1 }} />
                               <Button title="Remove" variant="ghost" small icon="trash" loading={busy === `d:${c.id}`} onPress={() => confirmRemove(c)} />
                             </View>
+                          ) : null}
+
+                          {editId === c.id ? (
+                            <Well style={{ gap: spacing.sm }}>
+                              <View style={{ gap: 6 }}>
+                                <T kind="eyebrow">Name</T>
+                                <TextInput
+                                  value={editLabel}
+                                  onChangeText={setEditLabel}
+                                  placeholder="Mum's mobile"
+                                  placeholderTextColor={colors.textFaint}
+                                  accessibilityLabel="Contact method name"
+                                  style={inputStyle}
+                                />
+                              </View>
+                              {c.type === "Email" || c.type === "Phone/Text" ? (
+                                <View style={{ gap: 6 }}>
+                                  <T kind="eyebrow">{c.type === "Email" ? "Email address" : "Phone number"}</T>
+                                  <TextInput
+                                    value={editValue}
+                                    onChangeText={setEditValue}
+                                    placeholder={c.type === "Email" ? "them@example.com" : "+1 555 0100"}
+                                    placeholderTextColor={colors.textFaint}
+                                    autoCapitalize="none"
+                                    autoCorrect={false}
+                                    keyboardType={c.type === "Email" ? "email-address" : "phone-pad"}
+                                    accessibilityLabel={c.type === "Email" ? "Email address" : "Phone number"}
+                                    style={inputStyle}
+                                  />
+                                  {c.verified && editValue.trim() !== (c.value ?? "") ? (
+                                    <T kind="caption" color={colors.amber}>
+                                      Changing the address means verifying it again — a new address hasn&apos;t proved anything yet.
+                                    </T>
+                                  ) : null}
+                                </View>
+                              ) : null}
+                              <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                                <View style={{ flex: 1 }}>
+                                  <Button
+                                    title="Save" variant="ember" small full
+                                    loading={busy === `e:${c.id}`}
+                                    disabled={!editLabel.trim()}
+                                    onPress={() => void saveEdit(c)}
+                                  />
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                  <Button title="Cancel" variant="ghost" small full onPress={() => setEditId(null)} />
+                                </View>
+                              </View>
+                            </Well>
                           ) : null}
 
                           {codeEntryId === c.id && !c.verified ? (
