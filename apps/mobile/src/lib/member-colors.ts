@@ -33,9 +33,32 @@ export function fade(color: string, alpha: number): string {
 
 const FALLBACK_ACCENTS = ["ember", "sage", "sky", "lavender", "amber", "ink"];
 
+/* L2 [04:37] — "The M is green, the R is like a bluish colour. Those don't match the colours
+ * that are on the profile pictures… that colour for each person needs to exist throughout the
+ * app, and when it's updated one place it needs to automatically carry over to every other
+ * place inside the app."
+ *
+ * The cause wasn't a wrong palette, it was a SECOND one. Tasks carried its own AVATAR_TONES
+ * list indexed by the member's POSITION IN THE ARRAY — so a person's colour was a function of
+ * list order rather than of who they are. It disagreed with the avatar sitting next to it, and
+ * it changed when the roster changed.
+ *
+ * Everything now resolves here. The identity fallback is hashed from the ACTOR ID, not the
+ * display name: renaming yourself shouldn't change your colour, and two people who happen to
+ * share a first name shouldn't collide. A member with a chosen colour always wins, which is
+ * what makes "update it once" carry everywhere — there is nowhere else for it to be decided.
+ */
 export function memberColor(colors: HearthColors, m: MemberRec | null | undefined): string | null {
   if (!m) return null;
   if (m.color) return memberAccent(colors, m.color);
-  const i = [...m.displayName].reduce((a, c) => a + c.charCodeAt(0), 0) % FALLBACK_ACCENTS.length;
+  const key = m.actorId || m.displayName || "";
+  const i = [...key].reduce((a, c) => a + c.charCodeAt(0), 0) % FALLBACK_ACCENTS.length;
   return memberAccent(colors, FALLBACK_ACCENTS[i]);
+}
+
+/** The same colour as a fg/bg pair, for avatar tiles and chips. One resolution, two shapes —
+ *  so a tile and the name beside it can never disagree. */
+export function memberTone(colors: HearthColors, m: MemberRec | null | undefined): { fg: string; bg: string } {
+  const fg = memberColor(colors, m) ?? colors.textMuted;
+  return { fg, bg: fade(fg, 0.16) };
 }

@@ -9,7 +9,8 @@ import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withSequence,
 import { api, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
-import { useTheme, tapHaptic, type HearthColors } from "@/theme";
+import { useTheme, tapHaptic } from "@/theme";
+import { memberTone } from "@/lib/member-colors";
 // "ui/index" (not "ui"): the legacy src/components/ui.tsx still shadows the ui/
 // directory until the old screens are all ported — this resolves the new system.
 import { Badge, Button, Card, Chip, ChipRow, EmptyState, ErrorState, HScreen, Notice, Rise, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
@@ -58,14 +59,6 @@ function friendly(error?: string, message?: string): string {
   }
 }
 
-const AVATAR_TONES: ((c: HearthColors) => { fg: string; bg: string })[] = [
-  (c) => ({ fg: c.sky, bg: c.skyBg }),
-  (c) => ({ fg: c.sage, bg: c.sageBg }),
-  (c) => ({ fg: c.amber, bg: c.amberBg }),
-  (c) => ({ fg: c.lavender, bg: c.lavenderBg }),
-  (c) => ({ fg: c.coral, bg: c.coralBg }),
-];
-
 /* --------------------------- animated checkbox ------------------------- */
 function TaskCheck({ done, onPress }: { done: boolean; onPress: () => void }) {
   const { colors } = useTheme();
@@ -105,9 +98,11 @@ function TaskRow({ t, members, last, showGroup, helping, onToggle, onLongPress, 
   const done = t.status === "done";
   const overdue = !done && !!t.dueAt && Date.parse(t.dueAt) < Date.now();
   const pri = t.priority === "high" ? colors.coral : t.priority === "medium" ? colors.amber : colors.sage;
-  const mi = members.findIndex((m) => m.actorId === t.assignedMemberId);
-  const member = mi >= 0 ? members[mi] : null;
-  const av = AVATAR_TONES[Math.max(mi, 0) % AVATAR_TONES.length](colors);
+  const member = members.find((m) => m.actorId === t.assignedMemberId) ?? null;
+  // L2 — the person's OWN colour, from the one resolver. This used to be a palette indexed by
+  // the member's position in the array, which is why the initial here disagreed with the
+  // avatar everywhere else.
+  const av = memberTone(colors, member);
   return (
     <Pressable onPress={onOpen} onLongPress={onLongPress} delayLongPress={350} accessibilityLabel={t.title} accessibilityHint="Opens the task">
       <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: 12, borderBottomWidth: last ? 0 : 1, borderBottomColor: colors.border }}>
@@ -331,7 +326,8 @@ export default function TasksScreen() {
       {members.length > 1 ? (
         <Rise index={riseIdx++}>
           <View style={{ flexDirection: "row", gap: 8 }}>
-            {([["all", "Everyone"], ["mine", "Mine"], ["others", "Others"]] as const).map(([k, label]) => {
+            {/* R1 [04:12] — "instead of saying Mine, I think it should say Me." */}
+            {([["all", "Everyone"], ["mine", "Me"], ["others", "Others"]] as const).map(([k, label]) => {
               const active = who === k;
               return (
                 <Pressable

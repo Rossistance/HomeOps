@@ -5,7 +5,7 @@
 // card, quick actions, then the day at a glance: approvals needing you (and
 // help requests to/from you), coming up, bills due. Server-truth via api.*.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Platform, StyleSheet, View } from "react-native";
+import { Alert, Platform, ScrollView, StyleSheet, View } from "react-native";
 import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -263,7 +263,22 @@ function AdminToday() {
               child/grandparent/sitter opens their scoped home in owner-preview mode. */}
           {members.length > 0 && (
             <Rise index={1}>
-              <View style={{ flexDirection: "row", gap: spacing.lg, flexWrap: "wrap" }}>
+              {/* L1 [00:23] — "Melissa is still truncated. Beannie is still truncated… somehow
+                  we need to put these all together to where the whole name shows — whether
+                  that means offsetting them or zigzagging them up top across horizontally.
+                  Something inventive."
+
+                  Widening the cells was a patch, not a fix: any fixed width eventually meets a
+                  longer name, and a wrapping grid of fixed cells goes ragged as the roster
+                  grows. The strip scrolls horizontally instead and each cell is sized by its
+                  own name, so the name is never the thing that has to give. Six members fit on
+                  screen; a seventh scrolls rather than truncating anyone. */}
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={{ marginHorizontal: -spacing.lg }}
+                contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: spacing.lg, alignItems: "flex-start" }}
+              >
                 {members.map((m) => {
                   const dest = isChild(m) ? "/kid" : isGrandparent(m) ? "/grandparent" : isHelper(m) ? "/sitter" : null;
                   return (
@@ -272,15 +287,11 @@ function AdminToday() {
                       onPress={dest ? () => router.push({ pathname: dest, params: { id: m.actorId, preview: "1" } }) : undefined}
                       disabled={!dest}
                       haptic={dest ? "select" : null}
-                      style={{ alignItems: "center", gap: 5, width: 64 }}
+                      style={{ alignItems: "center", gap: 5, minWidth: 56, paddingHorizontal: 2 }}
                       accessibilityLabel={dest ? `Open ${m.displayName}'s view` : m.displayName}
                     >
                       <MemberAvatar member={m} size={48} />
-                      {/* "Melissa is still truncated. Beannie is still truncated." — reported
-                          on build 36, after the app-wide unclamp. This strip was bespoke and
-                          the earlier pass never reached it: a fixed 52pt cell with a one-line
-                          clamp cuts any name past about six characters. Wider cell, and the
-                          name wraps instead of being cut. A1's rule, applied here too. */}
+                      {/* No clamp and no fixed width — the cell grows to the name. */}
                       <T kind="detail" center>{m.displayName.split(" ")[0]}</T>
                     </PressableScale>
                   );
@@ -288,7 +299,7 @@ function AdminToday() {
                 <PressableScale
                   onPress={() => setInviteOpen(true)}
                   haptic="select"
-                  style={{ alignItems: "center", gap: 5, width: 64 }}
+                  style={{ alignItems: "center", gap: 5, minWidth: 56, paddingHorizontal: 2 }}
                   accessibilityLabel="Invite someone"
                 >
                   <View style={[st.avatar, { borderWidth: 1.5, borderStyle: "dashed", borderColor: colors.textFaint }]}>
@@ -296,7 +307,7 @@ function AdminToday() {
                   </View>
                   <T kind="detail">Invite</T>
                 </PressableScale>
-              </View>
+              </ScrollView>
             </Rise>
           )}
 

@@ -64,15 +64,39 @@ export function isAdultRole(role: string | null | undefined): boolean {
   return role === "Owner" || role === "Adult Admin" || role === "Adult Member";
 }
 
-/** Which home screen a signed-in member should land on. Relationship-first so it's
- * stable regardless of the exact role a grandparent/sitter was granted. */
+/**
+ * Which home screen a signed-in member should land on.
+ *
+ * ROLE decides, relationship only breaks ties below the adult line. This used to be the other
+ * way round — "relationship wins for view routing (a grandparent who is an Adult Member still
+ * gets the calm grandparent home)" — and that was wrong in a way that took a whole video to
+ * surface:
+ *
+ *   [v2 00:23] "On an adult member profile like my dad GPop… there is no calendar setup. I
+ *              don't know where that occurs, but there's no settings for them. So they don't
+ *              have the ability to get to connectors to add their email and their calendar."
+ *   [v2 00:37] "They can't see a proper calendar. All they see is this. They can't actually
+ *              click into these items to see details about them. They should be able to."
+ *   [v2 01:11] "I do not see the tasks and lists centre here."
+ *
+ * None of that was a permission problem — the Adult Member silo already grants all of it. It
+ * was routing: an adult grandparent was being handed the reduced grandparent home, which has
+ * no Settings, Agents or Library tab at all. Being someone's grandparent describes a
+ * relationship to the family, not a reduced standing in the app.
+ *
+ * So: an adult is an adult. The calm grandparent and sitter homes remain for people who
+ * genuinely have limited standing — a Guest/Helper, a Limited Member — where a stripped-back
+ * screen is a kindness rather than a cage.
+ */
 export function viewModeFor(m: MemberLike | null | undefined): ViewMode {
   if (!m) return "adult";
   if ((m.role ?? "") === "Owner") return "owner";
+  // A child is a child regardless of role — that gate protects them, and is the one place
+  // relationship must still outrank an over-generous role assignment.
   if (isChild(m)) return "child";
+  if (isAdultRole(m.role)) return "adult";
   if (isGrandparent(m)) return "grandparent";
   if (isHelper(m)) return "sitter";
-  if (isAdultRole(m.role)) return "adult";
   // Limited Member with no caregiving relationship — treat as a light adult view.
   return "adult";
 }
@@ -107,7 +131,13 @@ export function capabilitiesFor(m: MemberLike | null | undefined): Capabilities 
     isAdult,
     canManage,
     canInvite: canManage,
-    canCreateAgents: canManage,
+    /* [v2 02:13] "When he does eventually create an agent, he'll need an agents screen. He'll
+     * need an agent himself. And so will Beannie."
+     *
+     * The server already lets any adult build a helper for themselves (the Adult Member silo);
+     * this gate was still Adult-Admin-only, so the app hid the screen that would have worked.
+     * A client gate stricter than the server's is just a feature nobody can find. */
+    canCreateAgents: isAdult,
     canEditCalendar: isAdult,
     canAssignChores: isAdult,
     canUpload: isAdult,
