@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, ScrollView, Switch, TextInput, View } from "react-native";
 import { Image } from "expo-image";
 import { useLocalSearchParams } from "expo-router";
-import { api, type ArtifactRec, type FileRec, type KnowledgeRec, type MemoryRec } from "@/lib/api";
+import { api, type RunRec, type ArtifactRec, type FileRec, type KnowledgeRec, type MemoryRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 import {
@@ -35,6 +35,13 @@ export default function LibraryScreen() {
   const [files, setFiles] = useState<FileRec[]>([]);
   const [memory, setMemory] = useState<MemoryRec[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactRec[]>([]);
+  /* A10 [20:06] — "the run summary card needs to show what was INVOLVED — the connectors —
+   * and what went wrong and why." The card had a title, a date and a body: nothing about
+   * which accounts it touched, and nothing about the steps that didn't happen. Those facts
+   * live on the RUN the artifact came from, so the runs are loaded alongside and joined by
+   * runId. */
+  const [runs, setRuns] = useState<RunRec[]>([]);
+  const [expandedMemory, setExpandedMemory] = useState<string | null>(null);
   const [knowledge, setKnowledge] = useState<KnowledgeRec[]>([]);
   // J1 — the tags this household already uses, most-used first. Offering them beats asking
   // everyone to independently remember whether it's "medical" or "health".
@@ -63,8 +70,8 @@ export default function LibraryScreen() {
   const [justUploaded, setJustUploaded] = useState<FileRec | null>(null);
 
   const load = useCallback(async () => {
-    const [f, m, a, k] = await Promise.all([api.files(), api.memory(), api.artifacts(), api.knowledge()]);
-    setFiles(f); setMemory(m); setArtifacts(a); setKnowledge(k);
+    const [f, m, a, k, r] = await Promise.all([api.files(), api.memory(), api.artifacts(), api.knowledge(), api.runs().catch(() => [])]);
+    setFiles(f); setMemory(m); setArtifacts(a); setKnowledge(k); setRuns(r);
     setLoaded(true);
   }, []);
   useEffect(() => { if (session) void load(); }, [session, load]);
@@ -400,22 +407,47 @@ export default function LibraryScreen() {
           {memory.length === 0 ? (
             <EmptyState icon="brain" title="No memory yet" hint="Entries appear as your agents complete runs." />
           ) : (
-            memory.map((m, i) => (
-              <Rise key={m.id} index={Math.min(i + 2, 8)}>
-                <Card style={{ gap: spacing.sm }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.sm }}>
-                    <Badge label={m.type || m.scope} fg={colors.lavender} bg={colors.lavenderBg} />
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                      <T kind="caption" color={colors.textFaint}>{new Date(m.createdAt).toLocaleDateString()}</T>
-                      <PressableScale onPress={() => confirmRemoveMemory(m)} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Delete memory">
-                        <Sym name="trash" size={15} color={colors.textFaint} />
-                      </PressableScale>
+            memory.map((m, i) => {
+              /* A11 [20:35] — "the Notes and Approved-decisions cards need more context —
+               * all the available info — when they're expanded." A note said WHAT was learned
+               * and never where it came from, so there was no way to judge it. Everything the
+               * record actually carries is shown; nothing is invented to fill the space. */
+              const openM = expandedMemory === m.id;
+              const src = runs.find((r) => r.id === m.source?.runId) ?? null;
+              return (
+                <Rise key={m.id} index={Math.min(i + 2, 8)}>
+                  <Card style={{ gap: spacing.sm }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.sm }}>
+                      <Badge label={m.type || m.scope} fg={colors.lavender} bg={colors.lavenderBg} />
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                        <T kind="caption" color={colors.textFaint}>{new Date(m.createdAt).toLocaleDateString()}</T>
+                        <PressableScale onPress={() => confirmRemoveMemory(m)} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Delete memory">
+                          <Sym name="trash" size={15} color={colors.textFaint} />
+                        </PressableScale>
+                      </View>
                     </View>
-                  </View>
-                  <T kind="body" selectable>{m.text}</T>
-                </Card>
-              </Rise>
-            ))
+                    <PressableScale
+                      onPress={() => { tapHaptic("select"); setExpandedMemory(openM ? null : m.id); }}
+                      haptic={null}
+                      accessibilityRole="button"
+                      accessibilityState={{ expanded: openM }}
+                      accessibilityLabel={m.text}
+                    >
+                      <T kind="body" selectable>{m.text}</T>
+                    </PressableScale>
+                    {openM ? (
+                      <View style={{ gap: 6, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: spacing.sm }}>
+                        <MetaLine label="Scope" value={m.scope === "household" ? "The whole household" : m.scope} />
+                        <MetaLine label="Kind" value={m.type || "note"} />
+                        <MetaLine label="Learned" value={new Date(m.createdAt).toLocaleString()} />
+                        <MetaLine label="From" value={src ? `the run "${src.title}"` : m.source?.runId ? "a run that has since been cleared" : "someone in the household, directly"} />
+                        {src ? <RunDetail run={src} /> : null}
+                      </View>
+                    ) : null}
+                  </Card>
+                </Rise>
+              );
+            })
           )}
           </CollapsibleSection>
 
@@ -445,6 +477,8 @@ export default function LibraryScreen() {
                         ? <MarkdownText text={linked} />
                         : <T kind="sub" numberOfLines={3}>{a.body.slice(0, 240)}</T>
                     ) : null}
+                    {/* A10 — what was involved, and what didn't happen. */}
+                    {open ? <RunDetail run={runs.find((r) => r.id === a.runId) ?? null} /> : null}
                   </Card>
                 </Rise>
               );
@@ -609,5 +643,86 @@ function KnowledgeSheet({ item, visible, onClose, onSaved, suggestedTags = [] }:
         </View>
       </ScrollView>
     </HSheet>
+  );
+}
+
+/** A11 — one labelled fact. Deliberately dull: these exist so a family can judge a note, not
+ *  to be read as prose. */
+function MetaLine({ label, value }: { label: string; value: string }) {
+  const { colors } = useTheme();
+  return (
+    <View style={{ flexDirection: "row", gap: 8 }}>
+      <T kind="caption" color={colors.textFaint} style={{ width: 66 }}>{label}</T>
+      <T kind="caption" color={colors.textSecondary} style={{ flex: 1 }}>{value}</T>
+    </View>
+  );
+}
+
+/**
+ * A10 — "what was involved, and what went wrong and why."
+ *
+ * Every step of the run that produced this, the connection each one used, and — the part that
+ * was missing entirely — the steps that did NOT happen, with the reason the server recorded.
+ * A run summary that lists only the successes is how "3/3 finished" came to mean "nothing was
+ * sent"; that lesson is what this component exists to hold onto.
+ */
+function RunDetail({ run }: { run: RunRec | null }) {
+  const { colors, spacing } = useTheme();
+  if (!run) return null;
+  const steps = run.steps ?? [];
+  const ok = (st: string) => ["done", "completed", "succeeded"].includes(st);
+  const bad = (st: string) => ["failed", "skipped", "skipped_no_tool", "expired"].includes(st);
+  // The real accounts this run touched, named from each step's tool. FamiliOS's own internal
+  // functions are left out: they aren't a connection a family can lose.
+  const connectors = [...new Set(steps
+    .map((st) => st.toolId?.split(".")[0])
+    .filter((c): c is string => !!c && c !== "homeops"))]
+    .map((c) => c.replace(/[_-]+/g, " ").replace(/^\w/, (ch) => ch.toUpperCase()));
+  const shortfalls = steps.filter((st) => bad(st.status));
+
+  return (
+    <View style={{ gap: spacing.sm, marginTop: spacing.xs }}>
+      {connectors.length > 0 ? (
+        <View style={{ gap: 4 }}>
+          <T kind="eyebrow">What it used</T>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+            {connectors.map((c) => (
+              <View key={c} style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.surfaceSunken, borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4 }}>
+                <Sym name="link" size={10} color={colors.textFaint} />
+                <T kind="caption" color={colors.textSecondary}>{c}</T>
+              </View>
+            ))}
+          </View>
+        </View>
+      ) : null}
+
+      <View style={{ gap: 4 }}>
+        <T kind="eyebrow">Steps</T>
+        {steps.map((st, i) => (
+          <View key={i} style={{ flexDirection: "row", gap: 6, alignItems: "flex-start" }}>
+            <Sym
+              name={ok(st.status) ? "checkmark.circle.fill" : bad(st.status) ? "exclamationmark.circle.fill" : "circle"}
+              size={11}
+              color={ok(st.status) ? colors.sage : bad(st.status) ? colors.amber : colors.textFaint}
+              style={{ marginTop: 3 }}
+            />
+            <View style={{ flex: 1 }}>
+              <T kind="caption" color={colors.textSecondary}>{st.title}</T>
+              {/* The reason, at the same weight as the step. Burying it is how a run that
+                  delivered nothing still read as a success. */}
+              {bad(st.status) && st.detail ? (
+                <T kind="caption" color={colors.amber}>{st.detail}</T>
+              ) : null}
+            </View>
+          </View>
+        ))}
+      </View>
+
+      {shortfalls.length === 0 ? null : (
+        <T kind="caption" color={colors.amber}>
+          {shortfalls.length} step{shortfalls.length === 1 ? "" : "s"} didn&apos;t happen — see the reasons above.
+        </T>
+      )}
+    </View>
   );
 }

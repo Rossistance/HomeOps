@@ -41,7 +41,12 @@ export function Row({ title, subtitle, icon, iconColor, iconBg, leading, trailin
       {leading ?? (icon ? <SymTile name={icon} color={iconColor ?? colors.textMuted} bg={iconBg ?? colors.surfaceSunken} /> : null)}
       <View style={{ flex: 1, gap: 2 }}>
         <T kind="bodyMedium" color={colors.text}>{title}</T>
-        {subtitle ? <T kind="sub" numberOfLines={2}>{subtitle}</T> : null}
+        {/* A9 [19:43] — "the template descriptions need to be fully visible." Clamped at two
+            lines, the longer ones stopped mid-sentence, which is A4's complaint again: "why
+            would I click on something if I don't know exactly what it says." Unclamped HERE,
+            in the shared primitive, so it's fixed for every list in the app at once rather
+            than one screen at a time (A13). */}
+        {subtitle ? <T kind="sub">{subtitle}</T> : null}
       </View>
       {trailing}
       {chevron ? <Sym name="chevron.right" size={13} color={colors.textFaint} /> : null}
