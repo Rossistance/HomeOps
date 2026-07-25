@@ -8,7 +8,8 @@ import { PROVIDERS } from "./providers.mjs";
 import { CONNECTORS, readinessOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { providerChat, providerChatStream, providerChatWithFallback, aiProviderById } from "./ai.mjs";
-import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, listAgents, listSkills, listTriggers, getRiskOverride, recordAiUsage, aiBudgetExhausted } from "./store.mjs";
+import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, listAgents, listSkills, listTriggers, listConversations, getRiskOverride, recordAiUsage, aiBudgetExhausted } from "./store.mjs";
+import { agentVisibleTo } from "./agents.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
 import { searchWeb, readPage } from "./web.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
@@ -441,6 +442,7 @@ Be state-aware before scheduling ANYTHING:
 - The context lists upcomingMeals and upcomingEvents. If a requested date/slot already has something (e.g. Wednesday dinner is already "Tacos"), do NOT silently double-book: ANSWER with the conflict and ask — "Wednesday dinner is already Tacos. Swap it for X, or pick another night?" — then act on their choice (homeops.plan_meal accepts replace:true to swap).
 - Size everything to the household: householdSize and members (with relationships) are in the context. A family of 4 gets 4-serving meals — scale ingredient quantities and never propose "serves 10" without being asked.
 - Never re-add what already exists: check upcomingMeals, openTasks, existingAgents before proposing duplicates; prefer updating or extending the existing item.
+- context.familyChats is what the household has recently been discussing in its SHARED chats. Use it to stay oriented — do not re-ask something already settled there, and connect a request to it when it obviously relates. Never quote it back verbatim as though the person you are talking to said it, and never assume they were part of that conversation.
 - When the user states a durable household fact or preference ("we're vegetarian", "Grandma visits Sundays", "we're a family of 4"), remember it: include a homeops.write_memory step (scope "household") in your next plan, or propose a one-step plan for it — so every future conversation already knows.
 - Roster changes (add/remove/merge members) are human actions by design: point the user to Settings → Household (long-press a member to remove) or the web Members tab — never claim you can't help without saying where it IS done.
 
@@ -586,7 +588,36 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
   // Existing helpers/recipes/automations — so the assistant can EDIT/extend them by id
   // instead of creating duplicates, and answer "what helpers do I have?".
   const inHh = (x) => x.householdId === hh || x.householdId === "local";
-  const existingAgents = listAgents(inHh).map((a) => ({ id: a.id, name: a.name, purpose: a.purpose, status: a.status }));
+  /* PRIVACY: a PERSONAL helper belongs to the member who made it, and this list was flat —
+   * so one member's private helper appeared in another member's assistant context, and the
+   * assistant would cheerfully name it. Now filtered by the same agentVisibleTo rule the
+   * agents screen and the run selector use. Matters much more now that Adult Members build
+   * their own helpers by default (the silo). */
+  const existingAgents = listAgents(inHh)
+    .filter((a) => agentVisibleTo(a, session))
+    .map((a) => ({ id: a.id, name: a.name, purpose: a.purpose, status: a.status }));
+  /* The FAMILY chats, as context.
+   *
+   * Asked for as the other half of the Adult Member silo: their own chat stays private, but
+   * the assistant should "pick up on context on things that are happening in the entire
+   * household, and the family chats". It applies to everyone, not only Adult Members — an
+   * assistant that can't see the conversation where the family agreed on Saturday is going
+   * to ask about Saturday again.
+   *
+   * Household-visibility threads only. A personal thread — anyone's, including the caller's
+   * other ones — is never pulled in: that is exactly the isolation the silo promises, and
+   * the same rule canSeeConversation already enforces on the wire. Titles plus the last
+   * exchange, capped, because this is orientation and not a transcript.
+   */
+  const familyChats = listConversations((c) => c.householdId === hh && c.visibility === "household")
+    .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))
+    .slice(0, 5)
+    .map((c) => {
+      const msgs = (c.messages ?? []).filter((m) => m.text);
+      const last = msgs.slice(-2).map((m) => `${m.role === "user" ? "asked" : "answered"}: ${String(m.text).slice(0, 180)}`);
+      return { title: c.title, updatedAt: c.updatedAt, recent: last };
+    })
+    .filter((c) => c.recent.length > 0);
   const existingSkills = listSkills(inHh).map((s) => ({ id: s.id, name: s.name, description: s.description, status: s.status }));
   const existingAutomations = listTriggers(inHh).map((t) => ({ id: t.id, name: t.name, type: t.type, enabled: t.enabled }));
   // The meal plan rides along so scheduling conflicts are visible BEFORE the
@@ -606,6 +637,7 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
     householdSize, members, upcomingEvents: events, openTasks: tasks, upcomingMeals, recentMemory: memory,
     ...(memoryDisclosure ? { memoryDisclosure } : {}),
     existingAgents, existingSkills, existingAutomations,
+    ...(familyChats.length ? { familyChats } : {}),
     ...(location ? { location } : {}),
     clientHints: clientContext ?? undefined,
   };

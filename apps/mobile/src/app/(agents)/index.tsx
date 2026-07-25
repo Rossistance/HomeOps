@@ -7,6 +7,7 @@ import { Alert, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
 import { api, type AgentRec, type RunRec, type TriggerRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { canManageOwn } from "@/lib/roles";
 import { useTheme, tapHaptic } from "@/theme";
 import { Badge, EmptyState, ErrorState, ExpandCard, HScreen, Notice, PressableCard, PressableScale, Rise, SkeletonCards, Sym, SymTile, T } from "@/components/ui";
 import { NewAgentSheet } from "@/components/sheets/new-agent-sheet";
@@ -65,7 +66,10 @@ export default function AgentsScreen() {
   const { session } = useSession();
   const { colors, spacing } = useTheme();
   const { create } = useLocalSearchParams<{ create?: string }>();
-  const canManage = session?.role === "Owner" || session?.role === "Adult Admin";
+  /* Any adult may build a helper for themselves now (the silo). What an Adult Member can't
+   * do is make one that runs for the whole household — the server refuses that, and the
+   * detail screen says so rather than offering a control that would fail. */
+  const canManage = canManageOwn(session?.role);
 
   const [agents, setAgents] = useState<AgentX[]>([]);
   const [runs, setRuns] = useState<RunX[]>([]);

@@ -18,7 +18,7 @@ import { api, type AgentPlan, type AssistantResult, type ChatBuild, type Convers
 import { ResultCards } from "@/components/ResultCards";
 import { streamAssistant } from "@/lib/assistant-stream";
 import { getLocationContext } from "@/lib/location";
-import { capabilitiesFor } from "@/lib/roles";
+import { canManageHousehold, canManageOwn, capabilitiesFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
 import { useRun } from "@/lib/run-context";
 import { useTheme, useCalmMotion, riskColor, tapHaptic } from "@/theme";
@@ -64,7 +64,10 @@ export default function AskScreen() {
   const insets = useSafeAreaInsets();
   const { session } = useSession();
   const { startRun, activeRun } = useRun();
-  const canBuild = session?.role === "Owner" || session?.role === "Adult Admin";
+  // Any adult can build from chat now. For an Adult Member the server scopes what lands:
+  // the helper is personal and any automation is dropped (index.mjs demoteBuildForRole).
+  const canBuild = canManageOwn(session?.role);
+  const isAdmin = canManageHousehold(session?.role);
   // ISS-011: the server already demotes a build proposal to a plain answer for
   // anyone below Adult Admin on THEIR OWN turn (server/index.mjs demoteBuildForRole)
   // — this covers the other path, a build card an Owner/Admin proposed earlier
@@ -584,7 +587,11 @@ export default function AskScreen() {
               Family = shared with the household. Locked once a thread exists
               (the server owns the record's visibility from creation). */}
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            {([["personal", "Personal", colors.lavender], ["household", "Family", colors.ember]] as const).map(([key, label, tint]) => {
+            {/* An Adult Member's chats are private to them (the silo), so the Family option
+                isn't offered — a toggle that always refuses is worse than no toggle. */}
+            {([["personal", "Personal", colors.lavender], ["household", "Family", colors.ember]] as const)
+              .filter(([key]) => isAdmin || key === "personal")
+              .map(([key, label, tint]) => {
               const active = space === key;
               return (
                 <PressableScale
@@ -615,7 +622,10 @@ export default function AskScreen() {
               );
             })}
             <T kind="caption" color={colors.textFaint} style={{ flex: 1 }} numberOfLines={1}>
-              {movingSpace ? "Moving…" : space === "household" ? "Shared with the household" : "Only you can see this chat"}
+              {movingSpace ? "Moving…"
+                : space === "household" ? "Shared with the household"
+                : isAdmin ? "Only you can see this chat"
+                : "Your chats are private to you"}
             </T>
           </View>
 

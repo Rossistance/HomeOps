@@ -74,6 +74,7 @@ export default function ConnectionsScreen() {
   const scroller = useRef<ScrollView>(null);
   const cardY = useRef<Record<string, number>>({});
   const [ringFor, setRingFor] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
   const scrolledTo = useRef<string | null>(null);
 
   const load = useCallback(async () => {
@@ -85,6 +86,35 @@ export default function ConnectionsScreen() {
   }, []);
   useEffect(() => { if (session) void load(); }, [session, load]);
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
+
+  /* "Reconnect" that wouldn't go away, part two.
+   *
+   * An account's status only ever updated when something happened to USE it, so a stale
+   * "needs reconnect" on an account nobody was touching — another member's, or one with no
+   * calendar behind it — never corrected. A timer now re-probes them server-side; this is the
+   * button for when you're standing in front of the screen and don't want to wait for it. */
+  const checkNow = useCallback(async () => {
+    setChecking(true); setNotice(null);
+    const r = await api.checkConnections();
+    setChecking(false);
+    if (r.error) {
+      setNotice({ text: r.error === "insufficient_role" ? "Re-checking connections needs an adult member." : "Couldn't check just now.", ok: false });
+      return;
+    }
+    await load();
+    // Say what actually changed, including "nothing" — a check that reports success either
+    // way teaches you to stop believing it.
+    const healed = r.healed ?? 0;
+    const marked = r.marked ?? 0;
+    setNotice({
+      ok: marked === 0,
+      text: healed > 0 && marked === 0
+        ? `${healed} connection${healed === 1 ? " was" : "s were"} fine after all — the warning is cleared.`
+        : marked > 0
+          ? `${marked} connection${marked === 1 ? "" : "s"} really ${marked === 1 ? "does" : "do"} need reconnecting${healed ? `, and ${healed} cleared` : ""}.`
+          : `Checked ${r.checked ?? 0} connection${(r.checked ?? 0) === 1 ? "" : "s"} — nothing changed.`,
+    });
+  }, [load]);
 
   // F2 — once the cards have laid out, bring the named one into view and ring it. Runs once
   // per focus request: re-running on every render would fight the user's own scrolling.
@@ -229,7 +259,17 @@ export default function ConnectionsScreen() {
         />
       ) : null}
       <Rise index={0}>
-        <T kind="sub">Connect accounts to let plans act on your behalf.</T>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+          <T kind="sub" style={{ flex: 1 }}>Connect accounts to let plans act on your behalf.</T>
+          {canManage ? (
+            <Button
+              small variant="neutral" icon="arrow.clockwise"
+              title={checking ? "Checking…" : "Check now"}
+              loading={checking}
+              onPress={() => void checkNow()}
+            />
+          ) : null}
+        </View>
       </Rise>
 
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}

@@ -84,7 +84,7 @@ setInterval(() => { if (_rateBuckets.size > 5000) _rateBuckets.clear(); }, 10 * 
 import { listProviders as listAIProviders, aiProviderById, setProviderConfig, revokeProvider, setActiveProvider, providerHealth, providerModels, providerChat, bootstrapAIFromEnv } from "./ai.mjs";
 import { listProviders as listConnectorProviders, providerById as connectorProviderById, providerConfigured, publicProvider as publicConnectorProvider, findToolGlobal } from "./providers.mjs";
 import { buildAuthUrl, exchangeCode, apiForAccount } from "./oauth.mjs";
-import { listAccountsFor, getOwnedAccount, upsertAccount, revokeAccount, checkAccountHealth, publicAccount, accountStatusById } from "./accounts.mjs";
+import { listAccountsFor, getOwnedAccount, upsertAccount, revokeAccount, checkAccountHealth, sweepAccountHealth, publicAccount, accountStatusById } from "./accounts.mjs";
 import { planFromGoal, generateMiniApp, generatePlaybook, assistantRespond, assistantStream, proposeEvolution, toolCatalog } from "./planner.mjs";
 import { preflightAutomation } from "./automation-preflight.mjs";
 
@@ -1016,7 +1016,50 @@ const handleRequest = async (req, res) => {
       return json(res, 200, { plan: getPlan(g.session.householdId) }, req);
     }
 
-    /* ---- D5: operator-only, cross-household invite minting ----
+    /* ---- The Adult Member silo -------------------------------------------------------------
+ *
+ * An Adult Member is a grown-up in the household who is NOT one of its administrators —
+ * a partner, an adult child living at home, a live-in parent. Until now they were treated
+ * as a spectator: they could read the family calendar and add a task, and that was it.
+ * Asked for directly: they need their own connected accounts, their own calendars, their own
+ * tasks, and their own assistant — "a standalone silo for each individual adult member".
+ *
+ * The shape of that silo, and the reason for each half:
+ *
+ *   PRIVATE OUTWARD. Their chats and helpers are theirs. A personal chat is already
+ *   invisible to everyone else; what's added here is that an Adult Member can only ever
+ *   CREATE personal ones, so a private thought can't be published into the family space by
+ *   picking the wrong toggle. Their helpers are personal too, so nothing they build starts
+ *   running on the household's behalf.
+ *
+ *   INFORMED INWARD. The silo is about authorship, not ignorance. Their assistant still sees
+ *   the whole household — the calendar, the tasks, who's who, the meal plan, and now the
+ *   family chats — because an assistant that can't see Thursday is useless to the person
+ *   asking about Thursday. It reads all of it and writes none of it.
+ *
+ * The asymmetry is the whole design: full read of the household, writes confined to their own
+ * things. Owner and Adult Admin are unchanged and keep every household-level power.
+ */
+function isAdultMemberOnly(session) {
+  return session?.role === "Adult Member";
+}
+/** May this session create or change THIS agent? Admins: any. Adult Member: only their own,
+ *  and only while it stays personal. Anyone else: no. */
+function mayWriteAgent(session, agent, nextVisibility) {
+  if (roleAtLeast(session?.role, "Adult Admin")) return { ok: true };
+  if (!isAdultMemberOnly(session)) return { ok: false, error: "insufficient_role" };
+  const vis = nextVisibility ?? agent?.visibility ?? "household";
+  if (vis !== "personal") {
+    return { ok: false, error: "personal_only", message: "You can create helpers for yourself. A helper that runs for the whole household needs an Owner or Adult Admin." };
+  }
+  if (agent && agent.createdBy && agent.createdBy !== session.actorId) {
+    return { ok: false, error: "forbidden", message: "That helper belongs to someone else." };
+  }
+  if (agent && agent.system) return { ok: false, error: "forbidden" };
+  return { ok: true };
+}
+
+/* ---- D5: operator-only, cross-household invite minting ----
      * 404 (not 403) when the deployment has no operator configured, so the surface does not
      * even announce itself on an install that has it switched off. */
     if (path === "/api/admin/households" && method === "GET") {
@@ -1395,6 +1438,19 @@ const handleRequest = async (req, res) => {
       const h = await checkAccountHealth(owned.account);
       audit({ type: "account.health", provider: owned.account.provider, accountId: owned.account.id, ok: h.ok }, req, g.session);
       return json(res, 200, h, req);
+    }
+    /* The manual counterpart to the timer. Any ADULT may run it for the whole household —
+     * deliberately wider than POST /api/accounts/:id/health, which is restricted to the
+     * member who connected that one account. That restriction is exactly why a stale status
+     * on someone ELSE's account was unfixable from the screen showing it: Ross could see that
+     * Melissa's calendar said "reconnect" and had no way to ask whether that was still true.
+     * Re-checking is read-only — it can clear or confirm a status, never grant access. */
+    if (path === "/api/accounts/health-check" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!isAdultRole(g.session.role)) return json(res, 403, { error: "insufficient_role" }, req);
+      const out = await sweepAccountHealth({ householdId: g.session.householdId, force: true });
+      audit({ type: "account.health_sweep", ...out, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, ...out }, req);
     }
     const acctMatch = path.match(/^\/api\/accounts\/([^/]+)$/);
     if (acctMatch && method === "DELETE") {
@@ -2549,7 +2605,9 @@ const handleRequest = async (req, res) => {
         // The client seeds this with the truncated first message; titleAuto marks it as a
         // placeholder the namer is allowed to replace (I1).
         title: String(body.title ?? "New chat").slice(0, 80), titleAuto: true, messages: [],
-        visibility: body.visibility === "household" ? "household" : "personal",
+        // An Adult Member's chats are their own — see the silo note. Forced here rather than
+        // trusted from the body, so a mis-set toggle can never publish a private thread.
+        visibility: (body.visibility === "household" && !isAdultMemberOnly(g.session)) ? "household" : "personal",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
       return json(res, 200, { conversation: c }, req);
@@ -2586,6 +2644,9 @@ const handleRequest = async (req, res) => {
       if (body.visibility !== undefined) {
         if (c.actorId !== g.session.actorId) {
           return json(res, 403, { error: "forbidden", message: "Only the person who started this chat can move it between Personal and Family." }, req);
+        }
+        if (body.visibility === "household" && isAdultMemberOnly(g.session)) {
+          return json(res, 403, { error: "personal_only", message: "Your chats stay private to you. Sharing one with the household needs an Owner or Adult Admin." }, req);
         }
         patch.visibility = body.visibility === "household" ? "household" : "personal";
       }
@@ -3332,9 +3393,12 @@ const handleRequest = async (req, res) => {
       return json(res, 200, { agents: listPublicAgents(g.session, { status: url.searchParams.get("status") || undefined }) }, req);
     }
     if (path === "/api/agents" && method === "POST") {
-      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      // Adult Member may create helpers — PERSONAL ones only (see the silo note above).
+      const g = gate(req, { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       if (!body.name?.trim()) return json(res, 400, { error: "name_required" }, req);
+      const may = mayWriteAgent(g.session, null, body.visibility);
+      if (!may.ok) return json(res, 403, { error: may.error, ...(may.message ? { message: may.message } : {}) }, req);
       const agent = createAgent(body, g.session);
       audit({ type: "agent.create", agentId: agent.id, name: agent.name, ok: true }, req, g.session);
       return json(res, 200, { agent: publicAgent(agent) }, req);
@@ -3349,10 +3413,21 @@ const handleRequest = async (req, res) => {
         return json(res, 200, { agent: publicAgent(a) }, req);
       }
       if (method === "PUT" || method === "PATCH") {
-        const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+        const g = gate(req, { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
         const a = getAgent(id);
         if (!a || (a.householdId !== "local" && a.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-        const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+        {
+          // An Adult Member edits their own personal helper. They cannot reach a household
+          // helper, and cannot promote their own into one — that's a household-level act.
+          const may = mayWriteAgent(g.session, a, undefined);
+          if (!may.ok) return json(res, 403, { error: may.error, ...(may.message ? { message: may.message } : {}) }, req);
+          const bodyPeek = await readBody(req);
+          if (!bodyPeek) return json(res, 400, { error: "malformed_json" }, req);
+          const promoting = mayWriteAgent(g.session, a, bodyPeek.visibility);
+          if (!promoting.ok) return json(res, 403, { error: promoting.error, ...(promoting.message ? { message: promoting.message } : {}) }, req);
+          req.__prereadBody = bodyPeek;
+        }
+        const body = req.__prereadBody ?? await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
         // The session travels so approvalPolicy.unattended can be attributed to a real
         // person with real standing (agents.mjs sanitizeApprovalPolicy) — its high-risk tier
         // is only honoured for an Owner/Adult Admin, and a request body can't claim that.
@@ -3361,9 +3436,11 @@ const handleRequest = async (req, res) => {
         return json(res, 200, { agent: publicAgent(updated) }, req);
       }
       if (method === "DELETE") {
-        const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+        const g = gate(req, { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
         const a = getAgent(id);
         if (!a || (a.householdId !== "local" && a.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
+        const mayDel = mayWriteAgent(g.session, a, undefined);
+        if (!mayDel.ok) return json(res, 403, { error: mayDel.error, ...(mayDel.message ? { message: mayDel.message } : {}) }, req);
         const r = deleteAgent(id);
         if (r.error) return json(res, r.error === "not_found" ? 404 : 422, { error: r.error }, req);
         audit({ type: "agent.delete", agentId: id, ok: true }, req, g.session);
@@ -3373,9 +3450,15 @@ const handleRequest = async (req, res) => {
     const agentAction = path.match(/^\/api\/agents\/([^/]+)\/(run|duplicate|rollback|versions|context)$/);
     if (agentAction) {
       const [, id, action] = agentAction;
-      const g = gate(req, (action === "versions" || action === "context") ? { requireSession: true } : { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const g = gate(req, (action === "versions" || action === "context") ? { requireSession: true } : { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const a = getAgent(id);
       if (!a || (a.householdId !== "local" && a.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
+      // Running or copying a helper is a write in every way that matters — it can reach
+      // tools and send things — so it obeys the same rule as editing one.
+      if (action === "run" || action === "duplicate" || action === "rollback") {
+        const mayRun = mayWriteAgent(g.session, a, undefined);
+        if (!mayRun.ok) return json(res, 403, { error: mayRun.error, ...(mayRun.message ? { message: mayRun.message } : {}) }, req);
+      }
       if (action === "versions" && method === "GET") return json(res, 200, { versions: listAgentVersions(id) }, req);
       if (action === "context" && method === "GET") return json(res, 200, { context: agentContext(a, g.session) }, req);
       if (method !== "POST") return json(res, 405, { error: "method_not_allowed" }, req);
@@ -3759,11 +3842,18 @@ const handleRequest = async (req, res) => {
     // available + a passing test), automations are created enabled but their gated steps
     // still pause for approval at run time. Adult Admin only (creating agents/automations).
     if (path === "/api/assistant/build" && method === "POST") {
-      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const g = gate(req, { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const aiGated = childAiGate(g, res, req); if (aiGated) return aiGated;
       const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const spec = body.build ?? body;
+      // The same scoping the chat proposal got, applied to whatever actually arrives here —
+      // the client is not the enforcement point.
+      if (isAdultMemberOnly(g.session)) {
+        if (spec?.agent) spec.agent.visibility = "personal";
+        if (spec?.automation) delete spec.automation;
+        if (Array.isArray(spec?.edits)) spec.edits = [];
+      }
       const hasEdits = Array.isArray(spec?.edits) && spec.edits.length > 0;
       if (!spec || (typeof spec !== "object") || (!spec.skill && !spec.agent && !spec.automation && !hasEdits)) {
         return json(res, 400, { error: "empty_build", message: "Describe at least a skill, agent, automation, or edit to make." }, req);
@@ -4163,6 +4253,20 @@ function persistBuildOutcome(conversationId, session, out) {
  * plain answer that says what was understood and who can actually set it up. */
 function demoteBuildForRole(out, session) {
   if (!out?.ok || out.kind !== "build" || roleAtLeast(session.role, "Adult Admin")) return;
+  /* An Adult Member CAN build — for themselves. Rather than refusing the proposal, scope it:
+   * the helper becomes personal, and any automation is dropped, because an automation is by
+   * definition something that runs on the household's schedule without them present. What
+   * they get is a helper they can run; what they don't get is one that acts on its own. */
+  if (isAdultMemberOnly(session)) {
+    if (out.build?.agent) out.build.agent.visibility = "personal";
+    if (out.build?.automation) {
+      delete out.build.automation;
+      out.build.summary = `${String(out.build.summary ?? "").trim()} (Set up for you to run — an automation that fires on its own needs an Owner or Adult Admin.)`.trim();
+    }
+    // Editing EXISTING household items is still out of scope for them.
+    if (Array.isArray(out.build?.edits)) out.build.edits = [];
+    return;
+  }
   const what = String(out.build?.summary ?? out.build?.agent?.name ?? "that helper").slice(0, 160);
   out.kind = "answer";
   out.answer = `I can see what you're after — ${what}. Setting up a helper that runs on its own needs an adult admin on this household, so I can't create it from your account. Ask one of them to say the same thing to me and I'll build it, or I can just do it manually for you right now if you'd like.`;
@@ -4241,6 +4345,11 @@ server.listen(PORT, () => {
   // than scheduled on whichever device happened to create the task. Every 30s so a
   // "15 minutes before" lands within half a minute of the mark.
   setInterval(() => { void forEachTenant(() => sweepTaskReminders()); }, 30_000);
+  // Connection health, on a timer — see accounts.mjs sweepAccountHealth. Without this, an
+  // account's status describes the last thing that happened to touch it rather than what the
+  // credential can do now, which is how "needs reconnect" outlived the problem it named.
+  // Every 5 minutes; each account is throttled to one real probe per 15.
+  setInterval(() => { void forEachTenant(() => sweepAccountHealth({ householdId: CURRENT_TENANT })); }, 5 * 60_000);
   // Calendar auto-sync: re-pull url/google subscriptions that have gone stale so linked
   // events stay fresh without a manual "Sync now". Pasted imports are static — skipped.
   // Staleness window via HOMEOPS_CAL_SYNC_MINUTES (default 6h); swept every 15 minutes.

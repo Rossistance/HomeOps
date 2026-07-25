@@ -344,6 +344,15 @@ export const api = {
     try { await req("/session", { method: "DELETE" }); } finally { await setToken(null); }
   },
   /* ---- self-serve identity (C1.4): email sign-in, household create/join ---- */
+  /** Re-probe every connected account in the household right now. Any adult may run it: a
+   *  stale "needs reconnect" on someone ELSE's account was previously unfixable from the
+   *  screen that showed it. Read-only — it can clear or confirm a status, never grant access. */
+  async checkConnections(): Promise<{ ok?: boolean; checked?: number; healed?: number; marked?: number; error?: string }> {
+    const r = await req<{ ok?: boolean; checked?: number; healed?: number; marked?: number; error?: string }>("/accounts/health-check", { method: "POST", body: "{}" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+
   /* ---- D5: operator-only, cross-household ------------------------------------------ */
   async adminHouseholds(): Promise<AdminHouseholdRec[]> {
     const r = await req<{ households?: AdminHouseholdRec[] }>("/admin/households");

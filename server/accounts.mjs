@@ -126,4 +126,59 @@ export async function checkAccountHealth(account) {
   return { ok: h.ok, status: h.status, detail: h.detail, latencyMs: Date.now() - t0 };
 }
 
+/* ---- The reconnect that wouldn't clear, part two --------------------------------------
+ *
+ * Part one made a SUCCESSFUL call clear an unhealthy status (checkAccountHealth above, and
+ * the same rule in oauth.mjs apiForAccount). That was necessary and not sufficient, because
+ * both only fire for an account something happens to USE. Reported again after shipping it:
+ * "the reconnect button is still there."
+ *
+ * The hole: checkAccountHealth was reachable only from POST /api/accounts/:id/health, which
+ * is restricted to the member who connected that account, and nothing called it on a
+ * schedule. So an account that nothing exercises — Melissa's while Ross is the one syncing,
+ * or any connected account with no subscription behind it — kept whatever status it was last
+ * given, forever. The status stopped describing the account and started describing history.
+ *
+ * This sweep is the fix: probe every account in the household on a timer, so status reflects
+ * what the credential can do NOW rather than what last happened to touch it. It corrects in
+ * both directions — a working account clears, and a genuinely dead one gets marked without
+ * waiting for a family member to trip over it.
+ *
+ * Throttled per account (a probe is a real provider request), and never runs two probes for
+ * the same account concurrently.
+ */
+const HEALTH_MIN_INTERVAL_MS = 15 * 60 * 1000;
+const inFlight = new Set();
+
+export async function sweepAccountHealth({ householdId, now: t = Date.now(), force = false } = {}) {
+  const out = { checked: 0, healed: 0, marked: 0, skipped: 0 };
+  let accounts;
+  try {
+    accounts = listAccountsRaw().filter((a) => a.householdId === (householdId ?? "local"));
+  } catch { return out; }
+  for (const a of accounts) {
+    // A revoked account is a deliberate, explicit state — the family disconnected it. Probing
+    // it would be pointless and clearing it would undo something they chose.
+    if (a.status === "revoked") { out.skipped++; continue; }
+    if (inFlight.has(a.id)) { out.skipped++; continue; }
+    const last = a.lastHealthAt ? Date.parse(a.lastHealthAt) : 0;
+    if (!force && Number.isFinite(last) && t - last < HEALTH_MIN_INTERVAL_MS) { out.skipped++; continue; }
+    const before = a.status;
+    inFlight.add(a.id);
+    try {
+      const h = await checkAccountHealth(a);
+      out.checked++;
+      const after = getAccountRaw(a.id)?.status;
+      if (after === "connected" && before !== "connected") out.healed++;
+      else if (!h.ok && after !== before) out.marked++;
+    } catch {
+      // One unreachable provider must not stop the rest of the household's sweep.
+      out.skipped++;
+    } finally {
+      inFlight.delete(a.id);
+    }
+  }
+  return out;
+}
+
 export { getHealth };

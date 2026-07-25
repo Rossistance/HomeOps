@@ -21,6 +21,26 @@ export function roleAtLeast(role: string | null | undefined, min: Role): boolean
   return (ROLE_RANK[role ?? ""] ?? 0) >= (ROLE_RANK[min] ?? 999);
 }
 
+/* The Adult Member silo, client side.
+ *
+ * There are now TWO different questions, and conflating them is what made an Adult Member a
+ * spectator in the first place:
+ *
+ *   canManageHousehold — may this person change things that run for EVERYONE (household
+ *                        helpers, automations, invites, AI providers)? Owner / Adult Admin.
+ *   canManageOwn       — may this person build and run things for THEMSELVES? Any adult.
+ *
+ * These are cosmetic — the server is the source of truth (server/index.mjs mayWriteAgent) —
+ * but getting them right is what stops the app showing a button that 403s, or hiding one that
+ * would have worked.
+ */
+export function canManageHousehold(role: string | null | undefined): boolean {
+  return role === "Owner" || role === "Adult Admin";
+}
+export function canManageOwn(role: string | null | undefined): boolean {
+  return roleAtLeast(role, "Adult Member");
+}
+
 export interface MemberLike {
   role?: string | null;
   relationship?: string | null;

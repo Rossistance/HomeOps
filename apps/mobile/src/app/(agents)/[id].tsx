@@ -20,6 +20,7 @@ import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { api, type AgentContextRec, type AgentRec, type ApprovalRec, type RunRec, type TriggerRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { canManageHousehold } from "@/lib/roles";
 import { useTheme, statusColor, tapHaptic, type HearthColors } from "@/theme";
 import {
   T, Card, Badge, Chip, ChipRow, Row, SectionHeader, SkeletonCards, ErrorState,
@@ -58,7 +59,10 @@ export default function AgentDetailScreen() {
   const { session } = useSession();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { flash, show } = useConfirmFlash();
-  const canManage = session?.role === "Owner" || session?.role === "Adult Admin";
+  /* Two questions, not one (lib/roles): may they manage the HOUSEHOLD's helpers, or only
+   * their own? An Adult Member gets full control of a helper they made and none over one
+   * that runs for everyone — which is exactly what the server enforces. */
+  const isAdmin = canManageHousehold(session?.role);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -90,6 +94,9 @@ export default function AgentDetailScreen() {
   }, [id]);
   useFocusEffect(useCallback(() => { if (session) void load(); }, [session, load]));
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
+
+  const ownsThis = !!agent && agent.createdBy === session?.actorId && (agent.visibility ?? "household") === "personal";
+  const canManage = isAdmin || ownsThis;
 
   const steps = useMemo(() => stepsFrom(agent?.instructions), [agent]);
 
@@ -463,8 +470,10 @@ export default function AgentDetailScreen() {
       </Rise>
 
       {/* Space: family agents are shared; personal agents exist only for you.
-          Color-coded to match chat spaces (ember = family, lavender = personal). */}
-      {canManage && (
+          Color-coded to match chat spaces (ember = family, lavender = personal).
+          ADMIN ONLY — moving a helper into the family space makes it run for everyone, which
+          is the one thing an Adult Member's own helper may not become. */}
+      {isAdmin && (
         <Rise index={9}>
           <SectionHeader title="Space" />
           <Card style={{ flexDirection: "row", gap: spacing.sm }}>
