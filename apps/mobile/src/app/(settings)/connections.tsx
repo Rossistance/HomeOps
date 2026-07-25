@@ -262,7 +262,7 @@ export default function ConnectionsScreen() {
                   <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                     <SymTile name="calendar" color={colors.sky} bg={colors.skyBg} />
                     <View style={{ flex: 1, gap: 2 }}>
-                      <T kind="bodyMedium" color={colors.text} numberOfLines={1}>{s.name}</T>
+                      <T kind="bodyMedium" color={colors.text}>{s.name}</T>
                       <T kind="sub" numberOfLines={2}>
                         {s.source === "google" ? "Google Calendar" : s.url ? "ICS feed" : "Imported .ics"} · {syncLabel(s)}
                       </T>

@@ -198,7 +198,7 @@ function LiveRunCard({ triggerName, run, onDismiss }: { triggerName: string; run
     <Card style={{ gap: spacing.sm }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
         <View style={{ flex: 1, gap: 2 }}>
-          <T kind="h3" color={colors.text} numberOfLines={1}>{run.title || triggerName}</T>
+          <T kind="h3" color={colors.text}>{run.title || triggerName}</T>
           <T kind="caption" color={colors.textFaint}>{total === 0 ? "Starting…" : `Step ${stepN} of ${total}`}</T>
         </View>
         <Badge label={label} fg={tone.fg} bg={tone.bg} />
@@ -454,7 +454,7 @@ export default function AutomationsScreen() {
             >
               <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                 <View style={{ flex: 1, gap: 5 }}>
-                  <T kind="h3" color={colors.text} numberOfLines={1}>{t.name}</T>
+                  <T kind="h3" color={colors.text}>{t.name}</T>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                     <Badge label={TYPE_LABEL[t.type] ?? t.type} icon={tb.icon} fg={tb.fg} bg={tb.bg} />
                     {res ? <Badge label={res.label} fg={res.fg} bg={res.bg} /> : null}

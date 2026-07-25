@@ -8,9 +8,9 @@ import { router, useLocalSearchParams } from "expo-router";
 import { api, type AgentRec, type RunRec, type TriggerRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
-import { Badge, EmptyState, ErrorState, HScreen, Notice, PressableCard, PressableScale, Rise, SkeletonCards, Sym, SymTile, T } from "@/components/ui";
+import { Badge, EmptyState, ErrorState, ExpandCard, HScreen, Notice, PressableCard, PressableScale, Rise, SkeletonCards, Sym, SymTile, T } from "@/components/ui";
 import { NewAgentSheet } from "@/components/sheets/new-agent-sheet";
-import { agentIcon, agentTint, scheduleForAgent } from "@/lib/agent-meta";
+import { agentIcon, agentTint, scheduleForAgent, connectionsForToolIds } from "@/lib/agent-meta";
 
 type AgentX = AgentRec & { system?: boolean; icon?: string };
 type RunX = RunRec & { sourceRef?: { agentId?: string | null } | null; createdAt?: string | number };
@@ -201,26 +201,47 @@ export default function AgentsScreen() {
         const schedule = scheduleTextForAgent(a.id, triggers);
         return (
           <Rise key={a.id} index={i + 2}>
-            <PressableCard
-              onPress={() => router.push(`/(agents)/${a.id}`)}
-              onLongPress={canManage ? () => menu(a) : undefined}
-              haptic="select"
-              scaleTo={0.985}
-              accessibilityLabel={`${a.name}, ${a.status}`}
-              accessibilityHint={canManage ? "Opens details. Long-press for duplicate and delete" : "Opens details"}
-              style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}
+            {/* The canonical card (ExpandCard). Every line here used to be
+                numberOfLines={1}: "every agent, I can't read its actual title… I also have
+                no idea what tools it uses, what connections it uses — that should be easily
+                and visibly displayed there on that card." The name now WRAPS, and the
+                chips answer "what does this thing actually use" without opening anything. */}
+            <ExpandCard
+              icon={agentIcon(a.name)}
+              iconColor={tint.fg}
+              iconBg={tint.bg}
+              title={a.name}
+              badge={{ label: a.status, fg: tint.fg, bg: tint.bg }}
+              summary={a.purpose || undefined}
+              chips={[
+                { label: schedule ?? "Runs manually", icon: schedule ? "clock" : "hand.tap", tone: schedule ? "info" : "muted" },
+                ...(a.toolIds?.length ? [{ label: `${a.toolIds.length} tool${a.toolIds.length === 1 ? "" : "s"}`, icon: "wrench.and.screwdriver", tone: "muted" as const }] : []),
+                ...connectionsForToolIds(a.toolIds).map((c) => ({ label: c.label, icon: c.icon, tone: "info" as const })),
+                ...(last ? [{ label: `Last run ${timeAgo(last)}`, icon: "checkmark.circle", tone: "good" as const }]
+                  : count ? [{ label: `${count} runs`, icon: "clock.arrow.circlepath", tone: "muted" as const }]
+                  : [{ label: "Never run", icon: "circle", tone: "muted" as const }]),
+              ]}
+              action={{ label: "Open helper", icon: "arrow.right", onPress: () => router.push(`/(agents)/${a.id}`) }}
+              secondaryAction={canManage ? { label: "More", icon: "ellipsis", onPress: () => menu(a) } : undefined}
             >
-              <SymTile name={agentIcon(a.name)} color={tint.fg} bg={tint.bg} size={44} iconSize={20} />
-              <View style={{ flex: 1, gap: 2 }}>
-                <T kind="rowTitle" numberOfLines={1}>{a.name}</T>
-                {!!a.purpose && <T kind="detail" numberOfLines={1}>{a.purpose}</T>}
-                <T kind="detail" color={colors.textFaint} numberOfLines={1}>
-                  {schedule ?? "Runs manually"}{last ? ` · last run ${timeAgo(last)}` : count ? ` · ${count} runs` : ""}
-                </T>
-              </View>
-              <Badge label={a.status} fg={tint.fg} bg={tint.bg} />
-              <Sym name="chevron.right" size={13} color={colors.textFaint} />
-            </PressableCard>
+              {/* Named skills + connections, expanded — "what IS that skill?" */}
+              {a.toolIds?.length ? (
+                <View style={{ gap: 6 }}>
+                  <T kind="eyebrow">Tools it can use</T>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                    {a.toolIds.map((t) => <Badge key={t} label={t} fg={colors.textMuted} bg={colors.surfaceSunken} />)}
+                  </View>
+                </View>
+              ) : (
+                <T kind="sub" color={colors.textMuted}>No tools are attached to this helper yet, so it can answer but not act.</T>
+              )}
+              {a.instructions ? (
+                <View style={{ gap: 4 }}>
+                  <T kind="eyebrow">What it does</T>
+                  <T kind="sub" color={colors.textSecondary}>{a.instructions}</T>
+                </View>
+              ) : null}
+            </ExpandCard>
           </Rise>
         );
       })}

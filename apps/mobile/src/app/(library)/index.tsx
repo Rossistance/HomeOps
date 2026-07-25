@@ -305,7 +305,7 @@ export default function LibraryScreen() {
                       <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, padding: spacing.lg }}>
                         <SymTile name={fileIcon(f.mime)} color={colors.textSecondary} bg={colors.surfaceSunken} size={36} iconSize={16} />
                         <View style={{ flex: 1, gap: 2 }}>
-                          <T kind="rowTitle" numberOfLines={1}>{f.name}</T>
+                          <T kind="rowTitle">{f.name}</T>
                           <T kind="detail" numberOfLines={1}>
                             {spaceLabel(spaceOf(f))} · {fmtSize(f.sizeBytes)} · {new Date(f.createdAt).toLocaleDateString()}{f.uploadedBy ? ` · ${f.uploadedBy}` : ""}
                           </T>

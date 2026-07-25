@@ -13,3 +13,4 @@ export { Rise } from "./stagger";
 export { HScreen } from "./screen";
 export { MarkdownText } from "./markdown";
 export { HSheet, SheetCTA, useConfirmFlash, type FlashKind } from "./sheet";
+export { ExpandCard, type ExpandCardProps, type CardChip } from "./expand-card";

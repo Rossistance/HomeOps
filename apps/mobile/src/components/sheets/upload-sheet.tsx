@@ -250,7 +250,7 @@ function FileTile({ picked, label, onRemove }: { picked: Picked; label?: string;
       <SymTile name={isImg ? "photo" : "doc.text"} color={colors.ember} bg={colors.emberBg} size={40} iconSize={18} />
       <View style={{ flex: 1, gap: 2 }}>
         {label ? <T kind="caption" color={colors.textFaint}>{label.toUpperCase()}</T> : null}
-        <T kind="rowTitle" numberOfLines={1}>{picked.name}</T>
+        <T kind="rowTitle">{picked.name}</T>
         <T kind="detail">{fmtSize(picked.size)}</T>
       </View>
       <PressableScale onPress={onRemove} hitSlop={10} accessibilityRole="button" accessibilityLabel={`Remove ${label ?? "file"}`}>

@@ -329,7 +329,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
                     <T kind="subMedium" color={colors.textMuted} style={{ width: 78, fontSize: 14 }}>
                       {new Date(e.startAt!).toLocaleDateString(undefined, { weekday: "short" })} {eventTimeLabel(e)}
                     </T>
-                    <T kind="rowTitle" style={{ flex: 1, fontSize: 16 }} numberOfLines={1}>{e.title}</T>
+                    <T kind="rowTitle" style={{ flex: 1, fontSize: 16 }}>{e.title}</T>
                   </View>
                 ))}
               </Card>

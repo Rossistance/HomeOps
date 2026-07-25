@@ -460,7 +460,7 @@ function AdminToday() {
                         >
                           <SymTile name={approvalIcon(a)} color={risk.fg} bg={risk.bg} size={36} iconSize={17} />
                           <View style={{ flex: 1, gap: 2 }}>
-                            <T kind="rowTitle" numberOfLines={1}>{title}</T>
+                            <T kind="rowTitle">{title}</T>
                             <T kind="detail">{a.category || a.toolId} · {a.risk} risk</T>
                           </View>
                           <Sym name="chevron.right" size={13} color={colors.textFaint} />
@@ -506,7 +506,7 @@ function AdminToday() {
                   <Card key={h.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                     <SymTile name="hourglass" color={colors.amber} bg={colors.amberBg} size={36} iconSize={16} />
                     <View style={{ flex: 1, gap: 2 }}>
-                      <T kind="rowTitle" numberOfLines={1}>{h.kind === "offer" ? `Offered to help ${h.toName}` : `Waiting on ${h.toName}…`}</T>
+                      <T kind="rowTitle">{h.kind === "offer" ? `Offered to help ${h.toName}` : `Waiting on ${h.toName}…`}</T>
                       <T kind="detail" numberOfLines={2}>{h.message}</T>
                     </View>
                     <Button small variant="ghost" title="Cancel" loading={helpBusyId === h.id} onPress={() => void cancelHelp(h)} />
@@ -535,7 +535,7 @@ function AdminToday() {
                     }}
                   >
                     <View style={{ flex: 1, gap: 2 }}>
-                      <T kind="rowTitle" numberOfLines={1}>{e.title}</T>
+                      <T kind="rowTitle">{e.title}</T>
                       <T kind="detail" numberOfLines={1}>
                         {new Date(e.startAt!).toLocaleDateString(undefined, { weekday: "short" })}
                         {" · "}
@@ -566,7 +566,7 @@ function AdminToday() {
                   >
                     <SymTile name="tag" color={colors.amber} bg={colors.amberBg} size={36} iconSize={17} />
                     <View style={{ flex: 1, gap: 2 }}>
-                      <T kind="rowTitle" numberOfLines={1}>{b.title}</T>
+                      <T kind="rowTitle">{b.title}</T>
                       {!!b.dueAt && (
                         <T kind="detail">Due {new Date(b.dueAt).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}</T>
                       )}

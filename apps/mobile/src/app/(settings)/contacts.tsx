@@ -334,7 +334,7 @@ export default function ContactsScreen() {
                           <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                             <SymTile name={TYPE_ICON[c.type] ?? "bell"} color={tn.fg} bg={tn.bg} />
                             <View style={{ flex: 1, gap: 2 }}>
-                              <T kind="bodyMedium" color={colors.text} numberOfLines={1}>{c.label}</T>
+                              <T kind="bodyMedium" color={colors.text}>{c.label}</T>
                               <T kind="sub" numberOfLines={1}>
                                 {c.value ? `${c.value} · ` : ""}{c.optInStatus === "Opted In" ? "Opted in" : c.optInStatus}
                                 {c.allowedAgentIds.length > 0 ? ` · ${c.allowedAgentIds.length} agent${c.allowedAgentIds.length === 1 ? "" : "s"} allowed` : ""}

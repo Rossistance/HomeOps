@@ -54,3 +54,42 @@ export function scheduleForAgent(agentId: string, triggers: TriggerRec[]): strin
   if (mine.length === 0) return null;
   return humanSchedule(mine[0]);
 }
+
+/**
+ * Which real-world CONNECTIONS a helper touches, derived from its tool ids.
+ *
+ * From the 2026-07-25 walkthrough: "I also have no idea what tools it uses, what
+ * connections it uses — that should be easily and visibly displayed there on that card.
+ * It doesn't have to be big, but so there's a visual reference." A raw id like
+ * `gmail.search` is not that reference; "Gmail" is.
+ *
+ * Internal `homeops.*` tools are deliberately omitted — they are FamiliOS itself, not an
+ * outside account the family has to connect or can lose.
+ */
+const CONNECTION_LABELS: Record<string, { label: string; icon: string }> = {
+  gmail: { label: "Gmail", icon: "envelope" },
+  gcal: { label: "Google Calendar", icon: "calendar" },
+  google: { label: "Google", icon: "calendar" },
+  calendar: { label: "Calendar", icon: "calendar" },
+  sms: { label: "Text messaging", icon: "message" },
+  twilio: { label: "Text messaging", icon: "message" },
+  weather: { label: "Weather", icon: "cloud.sun" },
+  web: { label: "Web search", icon: "globe" },
+  browser: { label: "Browser", icon: "safari" },
+  rss: { label: "Feeds", icon: "dot.radiowaves.left.and.right" },
+  http: { label: "External service", icon: "network" },
+  smarthome: { label: "Smart home", icon: "house" },
+  slack: { label: "Slack", icon: "number" },
+  dropbox: { label: "Dropbox", icon: "shippingbox" },
+};
+
+export function connectionsForToolIds(toolIds?: string[] | null): { label: string; icon: string }[] {
+  const seen = new Map<string, { label: string; icon: string }>();
+  for (const id of toolIds ?? []) {
+    const prefix = String(id).split(".")[0]?.toLowerCase();
+    if (!prefix || prefix === "homeops") continue;
+    const meta = CONNECTION_LABELS[prefix];
+    if (meta && !seen.has(meta.label)) seen.set(meta.label, meta);
+  }
+  return [...seen.values()];
+}

@@ -272,7 +272,7 @@ export default function InboxScreen() {
                 <Rise key={a.id} index={i + 1}>
                   <Card>
                     <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-                      <T kind="h3" color={colors.text} style={{ flex: 1 }} numberOfLines={1}>{a.toolId}</T>
+                      <T kind="h3" color={colors.text} style={{ flex: 1 }}>{a.toolId}</T>
                       <Badge label={`${a.risk} risk`} fg={risk.fg} bg={risk.bg} />
                     </View>
                     {a.preview ? <T kind="sub" style={{ marginTop: 6 }}>{a.preview}</T> : null}
