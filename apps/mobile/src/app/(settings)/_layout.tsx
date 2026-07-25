@@ -13,6 +13,7 @@ export default function SettingsLayout() {
       <Stack.Screen name="contacts" options={{ title: "Contacts" }} />
       <Stack.Screen name="connections" options={{ title: "Connections" }} />
       <Stack.Screen name="ai" options={{ title: "AI Providers" }} />
+      <Stack.Screen name="nests" options={{ title: "Nests" }} />
       {/* D5 — reachable only for the platform operator; the screen itself refuses everyone
           else, and the routes behind it 404. */}
       <Stack.Screen name="operator" options={{ title: "Operator" }} />

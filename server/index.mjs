@@ -56,6 +56,7 @@ import {
 import { agentTemplateSections } from "./agent-templates.mjs";
 import { nameConversation } from "./planner.mjs";
 import { suggestAddresses } from "./places.mjs";
+import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, sweepTaskReminders } from "./reminders.mjs";
 import { getAgent } from "./store.mjs";
@@ -179,7 +180,11 @@ function nextSubscriptionColor(householdId) {
 // (visibility "household"), where any household member can read and continue it.
 function canSeeConversation(c, session) {
   if (!c || c.householdId !== session.householdId) return false;
-  return c.actorId === session.actorId || c.visibility === "household";
+  if (c.actorId === session.actorId) return true;
+  // A nest thread is visible to the nest, and to nobody else — not to an Owner, not to an
+  // Adult Admin. A space the household's administrator can read is not the space he asked for.
+  if (c.visibility === "nest" && c.nestId) return canSeeNest(c.nestId, session.householdId, session.actorId);
+  return c.visibility === "household";
 }
 const APP_ORIGIN = ALLOWED_ORIGINS[0] || "http://localhost:5173";
 const ROOT_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1131,6 +1136,74 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (made.error) return json(res, 400, { error: made.error }, req);
       audit({ type: "admin.invite_created", householdId, role, ok: true }, req, g.session);
       return json(res, 200, made, req);   // createInvite already returns { invite }
+    }
+
+    /* ---- Nests: a small group inside the household ----
+     * "There should be some way to associate two profiles… send an invite to create a nest…
+     * and the other person would approve — you can either join or decline… and be able to
+     * leave that nest at any point." Membership is consented both ways, and leaving never
+     * deletes what was made inside. */
+    if (path === "/api/nests" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const roster = new Map(listMembers((m) => m.householdId === g.session.householdId).map((m) => [m.actorId, m.displayName]));
+      // Only what concerns THIS person: the nests they are in, and the invitations waiting on
+      // them. A nest they were never asked to join is none of their business.
+      const mine = nestsFor(g.session.householdId, g.session.actorId);
+      const invites = nestInvitesFor(g.session.householdId, g.session.actorId);
+      return json(res, 200, {
+        nests: mine.map((n) => publicNest(n, roster, g.session.actorId)),
+        invitations: invites.map((n) => publicNest(n, roster, g.session.actorId)),
+      }, req);
+    }
+    if (path === "/api/nests" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      // Any adult may form one. It grants no authority over anyone — it is a shared room.
+      if (!isAdultRole(g.session.role)) return json(res, 403, { error: "insufficient_role", message: "Adults can create a nest." }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const out = createNest({
+        householdId: g.session.householdId, actorId: g.session.actorId,
+        name: body.name, inviteActorIds: Array.isArray(body.inviteActorIds) ? body.inviteActorIds : [],
+      });
+      if (out.error) return json(res, 400, { error: out.error, ...(out.message ? { message: out.message } : {}) }, req);
+      const roster = new Map(listMembers((m) => m.householdId === g.session.householdId).map((m) => [m.actorId, m.displayName]));
+      // Tell the people invited — an invitation nobody sees is not an invitation.
+      for (const m of out.nest.members.filter((x) => x.status === "invited")) {
+        addNotification({
+          householdId: g.session.householdId, actorId: m.actorId, channel: "in_app",
+          title: `${roster.get(g.session.actorId) ?? "Someone"} invited you to a nest`,
+          body: `${nestLabel(out.nest, roster)} — a shared space just for the two of you. Join or decline in Settings.`,
+          to: null,
+        });
+        void pushToMember({
+          householdId: g.session.householdId, actorId: m.actorId,
+          title: "You've been invited to a nest",
+          body: `${roster.get(g.session.actorId) ?? "Someone"} wants to share a space with you.`,
+          data: { type: "nest", id: out.nest.id },
+        }).catch(() => {});
+      }
+      audit({ type: "nest.create", nestId: out.nest.id, ok: true }, req, g.session);
+      return json(res, 200, { nest: publicNest(out.nest, roster, g.session.actorId) }, req);
+    }
+    const nestAction = path.match(/^\/api\/nests\/([^/]+)\/(accept|decline|leave|invite)$/);
+    if (nestAction && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const [, nestId, action] = nestAction;
+      const roster = new Map(listMembers((m) => m.householdId === g.session.householdId).map((m) => [m.actorId, m.displayName]));
+      let out;
+      if (action === "accept" || action === "decline") {
+        out = respondToNest({ nestId, householdId: g.session.householdId, actorId: g.session.actorId, accept: action === "accept" });
+      } else if (action === "leave") {
+        out = leaveNest({ nestId, householdId: g.session.householdId, actorId: g.session.actorId });
+      } else {
+        const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+        out = inviteToNest({ nestId, householdId: g.session.householdId, actorId: g.session.actorId, inviteActorIds: Array.isArray(body.inviteActorIds) ? body.inviteActorIds : [] });
+      }
+      if (out.error) {
+        const code = out.error === "not_found" ? 404 : out.error === "forbidden" ? 403 : 400;
+        return json(res, code, { error: out.error, ...(out.message ? { message: out.message } : {}) }, req);
+      }
+      audit({ type: `nest.${action}`, nestId, ok: true }, req, g.session);
+      return json(res, 200, { nest: publicNest(out.nest, roster, g.session.actorId), ...(out.archived ? { archived: true } : {}) }, req);
     }
 
     /* ---- Household invites: join codes for existing households ---- */
@@ -2674,7 +2747,14 @@ function mayWriteAgent(session, agent, nextVisibility) {
         title: String(body.title ?? "New chat").slice(0, 80), titleAuto: true, messages: [],
         // An Adult Member's chats are their own — see the silo note. Forced here rather than
         // trusted from the body, so a mis-set toggle can never publish a private thread.
-        visibility: (body.visibility === "household" && !isAdultMemberOnly(g.session)) ? "household" : "personal",
+        /* A chat can live in a nest — "it would say Personal, and then GPop + Beannie as its
+         * own group, the way it does for the whole household where it says personal or
+         * family". Membership is verified here; naming a nest you are not in does not put you
+         * in it. An Adult Member is still barred from the HOUSEHOLD space (the silo), but a
+         * nest is theirs by consent, so it is open to them. */
+        ...(body.visibility === "nest" && body.nestId && canSeeNest(String(body.nestId), g.session.householdId, g.session.actorId)
+          ? { visibility: "nest", nestId: String(body.nestId) }
+          : { visibility: (body.visibility === "household" && !isAdultMemberOnly(g.session)) ? "household" : "personal" }),
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
       return json(res, 200, { conversation: c }, req);
@@ -3159,11 +3239,16 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // `?include=all` exists so a future "everything stored for this household" view — or a
       // support question about disk use — can still see them, rather than the app pretending
       // the bytes aren't there.
+      /* O3 [08:31] — the briefing was attributed to "m-owner". "It needs to be their real name
+       * as it is in the app." The record stores an actor id, which is right; resolving it to a
+       * name is the server's job, not something every screen should re-derive. */
+      const roster = new Map(listMembers((m) => m.householdId === g.session.householdId).map((m) => [m.actorId, m.displayName]));
       const includeAll = url.searchParams.get("include") === "all";
       const visible = listFiles((f) => f.householdId === g.session.householdId)
         .filter((f) => includeAll || (f.kind ?? "document") !== "avatar")
         .filter((f) => canSeeEntity(f, g.session))
-        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .map((f) => ({ ...f, uploadedByName: roster.get(f.uploadedBy) ?? null }));
       return json(res, 200, { files: visible }, req);
     }
     if (path === "/api/files" && method === "POST") {
@@ -3249,6 +3334,25 @@ function mayWriteAgent(session, agent, nextVisibility) {
       pageBufs.forEach((p, i) => writeFileBlob(pageBlobIds[i], p.buf));
       audit({ type: "file.upload", fileId: rec.id, name, sizeBytes, pageCount: pageBufs.length, ok: true }, req, g.session);
       return json(res, 200, { file: rec }, req);
+    }
+    /* O2 [08:24] — "the Daily Household Briefing has some odd characters in it, and it says
+     * that it cannot be previewed. We need the ability to preview that."
+     *
+     * The odd characters were the split-UTF-8 bug (fixed in readRaw). The "cannot be
+     * previewed" was real: the client only renders text and images inline, so a PDF got
+     * "no inline preview — open it on the web app to download", which is a dead end on a phone.
+     *
+     * The server can now read a file (file-understanding.mjs) — so it does, and returns text a
+     * phone can show. A PDF becomes its text, a photo becomes a description. Anything genuinely
+     * unreadable returns the honest reason rather than a shrug. */
+    const filePreview = path.match(/^\/api\/files\/([^/]+)\/preview$/);
+    if (filePreview && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const f = getFileRec(filePreview[1]);
+      if (!f || f.householdId !== g.session.householdId || !canSeeEntity(f, g.session)) return json(res, 404, { error: "not_found" }, req);
+      const out = await understandFile(f.id, { householdId: g.session.householdId });
+      if (!out.ok) return json(res, 200, { ok: false, error: out.error, message: out.message }, req);
+      return json(res, 200, { ok: true, kind: out.kind, text: out.text, truncated: !!out.truncated }, req);
     }
     const fileContent = path.match(/^\/api\/files\/([^/]+)\/content$/);
     if (fileContent && method === "GET") {

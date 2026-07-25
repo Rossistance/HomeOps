@@ -15,7 +15,7 @@ import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec, type MemberRec, type ResultGroupRec, type RunRec } from "@/lib/api";
+import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec, type MemberRec, type NestRec, type ResultGroupRec, type RunRec } from "@/lib/api";
 import { ResultCards } from "@/components/ResultCards";
 import { streamAssistant } from "@/lib/assistant-stream";
 import { getLocationContext } from "@/lib/location";
@@ -56,6 +56,9 @@ interface Msg {
 
 interface Suggestion { text: string; icon: string }
 
+/** "personal" | "household" | "nest:<id>" — the three places a chat can live. */
+type SpaceKey = "personal" | "household" | `nest:${string}`;
+
 /* "Photos, files, documents, videos, whatever seem to have a 5 MB cap, which is very small."
  * 25 MB now, matching the server (index.mjs MAX_FILE_BYTES). Base64 inflates by 4/3, and the
  * request ceiling above it is sized to clear that. */
@@ -87,7 +90,12 @@ export default function AskScreen() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   // Chat space: personal (private to you — the default, how chats have always
   // worked) or family (shared — any household member can read and continue it).
+  /* A chat lives in one of three places now — "it would say Personal, and then GPop + Beannie
+   * as its own group, the way it does for the whole household where it says personal or
+   * family". A nest is identified by its id; personal and household are the two fixed ones. */
   const [space, setSpace] = useState<"personal" | "household">("personal");
+  const [nestId, setNestId] = useState<string | null>(null);
+  const [myNests, setMyNests] = useState<NestRec[]>([]);
   const [recent, setRecent] = useState<ConversationRec[]>([]);
   const [movingSpace, setMovingSpace] = useState(false);
   // M1/M7 — the header condenses once a thread is going, and drags back open.
@@ -125,7 +133,10 @@ export default function AskScreen() {
 
   // I2 — only this space's chats. A chat with no recorded visibility is treated as personal,
   // which is what it was created as before the field existed.
-  const visibleRecent = recent.filter((c) => (c.visibility === "household" ? "household" : "personal") === space);
+  const visibleRecent = recent.filter((c) =>
+    nestId
+      ? c.visibility === "nest" && c.nestId === nestId
+      : c.visibility !== "nest" && (c.visibility === "household" ? "household" : "personal") === space);
 
   const scroller = useRef<ScrollView>(null);
   const instantScroll = useRef(false);
@@ -197,6 +208,7 @@ export default function AskScreen() {
   useEffect(() => {
     if (!session) return;
     let live = true;
+    void api.nests().then((n) => { if (live) setMyNests(n.nests); }).catch(() => null);
     void api.members()
       .then((ms) => { if (live) setMe(ms.find((x) => x.isCurrentUser) ?? null); })
       .catch(() => null);
@@ -239,6 +251,7 @@ export default function AskScreen() {
     instantScroll.current = true;
     setConversationId(c.id);
     setSpace(c.visibility === "household" ? "household" : "personal");
+    setNestId(c.visibility === "nest" ? (c.nestId ?? null) : null);
     setMsgs(mapServerMessages(c));
   }, [busy, flushReveal, mapServerMessages]);
 
@@ -312,21 +325,40 @@ export default function AskScreen() {
   /* I3 — move THIS chat between Personal and Family. With no thread yet it's just a choice
    * about where the next one lands; with a thread it's a real visibility change, so the
    * publishing direction asks first. */
-  const switchSpace = useCallback(async (next: "personal" | "household") => {
-    if (!conversationId) { setSpace(next); return; }
+  const switchSpace = useCallback(async (next: SpaceKey) => {
+    const toNest = next.startsWith("nest:") ? next.slice(5) : null;
+    // With no thread yet this is just a choice about where the NEXT one lands.
+    if (!conversationId) {
+      setNestId(toNest);
+      setSpace(toNest ? "personal" : (next as "personal" | "household"));
+      return;
+    }
+    /* Moving an EXISTING thread into or out of a nest would change who can read everything
+     * already in it, and the people it would become visible to never agreed to that. So it
+     * isn't offered: start a new chat in the nest instead. Said plainly rather than silently
+     * doing nothing. */
+    if (toNest || nestId) {
+      Alert.alert(
+        "Start a new chat instead",
+        "A chat can't be moved into or out of a nest — everyone in it would suddenly be able to read what came before. Tap New, then pick the space.",
+      );
+      return;
+    }
+    // Past the guards above, this can only be one of the two fixed spaces.
+    const fixed = next as "personal" | "household";
     const commit = async () => {
       setMovingSpace(true);
-      const r = await api.patchConversation(conversationId, { visibility: next });
+      const r = await api.patchConversation(conversationId, { visibility: fixed });
       setMovingSpace(false);
       if (!r.conversation) {
         Alert.alert("Couldn't move this chat", r.message ?? "Something went wrong.");
         return;
       }
       tapHaptic("success");
-      setSpace(next);
+      setSpace(fixed);
       setRecent((rs) => rs.map((c) => (c.id === conversationId ? r.conversation! : c)));
     };
-    if (next === "household") {
+    if (fixed === "household") {
       Alert.alert(
         "Share this chat with the family?",
         "Everyone in the household will be able to read it — including everything already said.",
@@ -342,6 +374,7 @@ export default function AskScreen() {
     flushReveal();
     setConversationId(null);
     setMsgs([]);
+    setNestId(null);
     void loadHome();
   }, [busy, flushReveal, loadHome]);
 
@@ -380,8 +413,9 @@ export default function AskScreen() {
     setBusy(true);
     // First turn creates the durable server thread; later turns reuse it.
     let convId = conversationId;
+    const isFirstExchange = !convId;
     if (!convId) {
-      const c = await api.createConversation(t0.slice(0, 60), space);
+      const c = await api.createConversation(t0.slice(0, 60), nestId ? "nest" : space, nestId ?? undefined);
       if (c) {
         convId = c.id;
         setConversationId(c.id);
@@ -404,6 +438,15 @@ export default function AskScreen() {
       r = await api.assistant(t, { conversationId: convId ?? undefined, context });
     }
     setBusy(false);
+    /* M4 [05:32] — "it doesn't really rename like it should intelligently."
+     *
+     * It DOES: the server names a thread from its first exchange (I1). But the client seeded
+     * `recent` with the truncated first message and never re-read it, so the chip kept the
+     * stub title for the whole session and the rename was invisible. Refresh the list once,
+     * after the first exchange, which is exactly when the server has just renamed it. */
+    if (isFirstExchange) {
+      void api.conversations().then((cs) => setRecent(cs.slice(0, 8))).catch(() => null);
+    }
     const aid = uid + "a";
     pendingAnchorId.current = aid;
     if (r.ok) {
@@ -631,10 +674,16 @@ export default function AskScreen() {
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8, display: headerOpen ? "flex" : "none" }}>
             {/* An Adult Member's chats are private to them (the silo), so the Family option
                 isn't offered — a toggle that always refuses is worse than no toggle. */}
-            {([["personal", "Personal", colors.lavender], ["household", "Family", colors.ember]] as const)
-              .filter(([key]) => isAdmin || key === "personal")
+            {([
+              ["personal", "Personal", colors.lavender] as const,
+              // One chip per nest this person is actually in, between Personal and Family —
+              // which is the order he described, and matches how private each one is.
+              ...myNests.map((n) => [`nest:${n.id}`, n.label, colors.sky] as const),
+              ["household", "Family", colors.ember] as const,
+            ])
+              .filter(([key]) => isAdmin || key !== "household")
               .map(([key, label, tint]) => {
-              const active = space === key;
+              const active = key.startsWith("nest:") ? nestId === key.slice(5) : (space === key && !nestId);
               return (
                 <PressableScale
                   key={key}
@@ -645,7 +694,7 @@ export default function AskScreen() {
                      to be disabled the moment a thread existed. Now it MOVES the thread —
                      with a confirmation on the direction that publishes it, because making a
                      personal chat family-visible exposes everything already said in it. */
-                  onPress={() => { if (!active) void switchSpace(key); }}
+                  onPress={() => { if (!active) void switchSpace(key as SpaceKey); }}
                   accessibilityRole="button"
                   accessibilityState={{ selected: active }}
                   accessibilityLabel={`${label} space`}
@@ -665,6 +714,7 @@ export default function AskScreen() {
             })}
             <T kind="caption" color={colors.textFaint} style={{ flex: 1 }} numberOfLines={1}>
               {movingSpace ? "Moving…"
+                : nestId ? `Only ${myNests.find((n) => n.id === nestId)?.label ?? "your nest"} can see this`
                 : space === "household" ? "Shared with the household"
                 : isAdmin ? "Only you can see this chat"
                 : "Your chats are private to you"}

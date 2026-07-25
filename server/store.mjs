@@ -1043,6 +1043,17 @@ export const deleteContactVerification = (methodId) => _contactVerifications.rem
 /* ---- In-app notifications (item 16b) ----
  * Durable per-household notification records — the "in-app / family dashboard" delivery
  * channel, and the audit trail for email/text sends. Actor-scoped reads. */
+/* ---- Nests (a small group inside the household) ----
+ * "GPop and Beannie are actually married… it might make sense to keep their own agents and
+ * grocery list and task list available between the two of them, and yet still isolated from
+ * the broader family group." A nest is a third visibility scope alongside personal and
+ * household — see server/nests.mjs for the rules. */
+const _nests = keyedCollection("nests.json");
+export const listNests = (filter) => _nests.list(filter);
+export const getNest = (id) => _nests.get(id);
+export const putNest = (n) => _nests.put(n);
+export const deleteNestRec = (id) => _nests.remove(id);
+
 const _notifications = keyedCollection("notifications.json");
 export const listNotifications = (filter) => _notifications.list(filter);
 export function addNotification(n) {

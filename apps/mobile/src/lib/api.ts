@@ -98,8 +98,10 @@ export interface ConversationMessage {
 }
 export interface ConversationRec {
   id: string; title: string; messages: ConversationMessage[]; createdAt: string; updatedAt: string;
-  /** Chat space: "personal" (private to its creator — the default) or "household" (family space, shared). */
-  visibility?: "personal" | "household";
+  /** Chat space: "personal" (private to its creator — the default), "household" (the family),
+   *  or "nest" (a small group inside the household — see NestRec). */
+  visibility?: "personal" | "household" | "nest";
+  nestId?: string | null;
   actorId?: string;
 }
 // Durable server runs (read-only view) — used to enrich approval previews with the
@@ -215,6 +217,9 @@ export interface FileRec {
   tags: string[]; visibility: string; spaceId: string; uploadedBy: string; source: string; createdAt: string;
   // Multi-page uploads (front/back of an ID, etc.) — one logical file, N page blobs.
   pageBlobIds?: string[]; pageCount?: number;
+  /** O3 — the uploader's real name, resolved server-side. The record stores an actor id. */
+  uploadedByName?: string | null;
+  kind?: "avatar" | "document";
 }
 // Server-durable knowledge items (household memory the user writes + curates).
 export interface KnowledgeRec {
@@ -366,6 +371,23 @@ export const api = {
     return r.data ?? { error: "network" };
   },
 
+  /* ---- Nests ---------------------------------------------------------------------- */
+  async nests(): Promise<{ nests: NestRec[]; invitations: NestRec[] }> {
+    const r = await req<{ nests?: NestRec[]; invitations?: NestRec[] }>("/nests");
+    return { nests: r.data?.nests ?? [], invitations: r.data?.invitations ?? [] };
+  },
+  async createNest(inviteActorIds: string[], name?: string): Promise<{ nest?: NestRec; error?: string; message?: string }> {
+    const r = await req<{ nest?: NestRec; error?: string; message?: string }>("/nests", {
+      method: "POST", body: JSON.stringify({ inviteActorIds, name }),
+    });
+    return r.data ?? { error: "network" };
+  },
+  /** accept | decline | leave — always for YOURSELF; the server refuses anything else. */
+  async nestAction(id: string, action: "accept" | "decline" | "leave"): Promise<{ nest?: NestRec; archived?: boolean; error?: string; message?: string }> {
+    const r = await req<{ nest?: NestRec; archived?: boolean; error?: string; message?: string }>(`/nests/${encodeURIComponent(id)}/${action}`, { method: "POST", body: "{}" });
+    return r.data ?? { error: "network" };
+  },
+
   /* ---- D5: operator-only, cross-household ------------------------------------------ */
   async adminHouseholds(): Promise<AdminHouseholdRec[]> {
     const r = await req<{ households?: AdminHouseholdRec[] }>("/admin/households");
@@ -453,8 +475,10 @@ export const api = {
     const r = await req<{ conversations: ConversationRec[] }>("/conversations");
     return r.data?.conversations ?? [];
   },
-  async createConversation(title: string, visibility?: "personal" | "household"): Promise<ConversationRec | null> {
-    const r = await req<{ conversation?: ConversationRec }>("/conversations", { method: "POST", body: JSON.stringify({ title, visibility }) });
+  /** `nestId` is required when visibility is "nest" — the server verifies membership, so
+   *  naming a nest you are not in falls back to a private chat rather than sharing it. */
+  async createConversation(title: string, visibility?: "personal" | "household" | "nest", nestId?: string): Promise<ConversationRec | null> {
+    const r = await req<{ conversation?: ConversationRec }>("/conversations", { method: "POST", body: JSON.stringify({ title, visibility, nestId }) });
     return r.data?.conversation ?? null;
   },
   async conversation(id: string): Promise<ConversationRec | null> {
@@ -721,6 +745,13 @@ export const api = {
   async fileContent(id: string): Promise<{ name?: string; mime?: string; contentBase64?: string; error?: string }> {
     const r = await req<{ name?: string; mime?: string; contentBase64?: string; error?: string }>(`/files/${encodeURIComponent(id)}/content`);
     return r.data ?? { error: "network" };
+  },
+  /* O2 — a readable preview for anything the phone can't render inline (a PDF becomes its
+   * text; a photo becomes a description). Returns the honest reason when a file genuinely
+   * can't be read, rather than "no inline preview". */
+  async filePreview(id: string): Promise<{ ok?: boolean; kind?: string; text?: string; truncated?: boolean; message?: string }> {
+    const r = await req<{ ok?: boolean; kind?: string; text?: string; truncated?: boolean; message?: string }>(`/files/${encodeURIComponent(id)}/preview`);
+    return r.data ?? { ok: false, message: "Couldn't reach the server." };
   },
   async deleteFile(id: string): Promise<{ ok?: boolean; error?: string }> {
     const r = await req<{ ok?: boolean; error?: string }>(`/files/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -1114,6 +1145,17 @@ export interface AgentRec {
 // E1 — one address suggestion: the name a family recognises, the address under it, and the
 // full string that goes INTO the field (a label alone won't navigate anywhere).
 export interface AddressSuggestionRec { label: string; detail: string; value: string; placeId: string | null }
+/* Nests — a small group inside the household. "GPop and Beannie are actually married… their
+ * own agents and grocery list and task list available between the two of them, and yet still
+ * isolated from the broader family group." A third space alongside Personal and Family. */
+export interface NestMemberRec { actorId: string; name: string | null; status: "joined" | "invited" | "declined" | "left"; respondedAt: string | null }
+export interface NestRec {
+  id: string; name: string | null; label: string;
+  createdBy: string; createdAt: string;
+  members: NestMemberRec[];
+  myStatus: NestMemberRec["status"] | null;
+}
+
 // G6 — starter helpers, grouped into navigable sections (server/agent-templates.mjs).
 // A template is an opening sentence, not a pre-built agent: `prompt` goes to the planner,
 // which drafts against THIS household's real connections, and the family approves it.

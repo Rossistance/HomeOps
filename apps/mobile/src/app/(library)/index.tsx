@@ -105,7 +105,15 @@ export default function LibraryScreen() {
     if (preview?.id === f.id) { setPreview(null); return; }
     const isText = isTextMime(f.mime);
     const isImage = f.mime.startsWith("image/");
-    if (!isText && !isImage) { setPreview({ id: f.id, mime: f.mime }); return; }
+    if (!isText && !isImage) {
+      /* O2 — a PDF used to dead-end at "no inline preview — open it on the web app", which is
+       * no use on a phone. The server can read the file now, so ask it and show the text. */
+      setBusy(`open:${f.id}`);
+      const p = await api.filePreview(f.id);
+      setBusy(null);
+      setPreview({ id: f.id, mime: f.mime, text: p.ok ? (p.text || "(this file has no readable text in it)") : (p.message ?? "Couldn't read this file.") });
+      return;
+    }
     setBusy(`open:${f.id}`);
     const c = await api.fileContent(f.id);
     setBusy(null);
@@ -324,7 +332,7 @@ export default function LibraryScreen() {
                         <View style={{ flex: 1, gap: 2 }}>
                           <T kind="rowTitle">{f.name}</T>
                           <T kind="detail" numberOfLines={1}>
-                            {spaceLabel(spaceOf(f))} · {fmtSize(f.sizeBytes)} · {new Date(f.createdAt).toLocaleDateString()}{f.uploadedBy ? ` · ${f.uploadedBy}` : ""}
+                            {spaceLabel(spaceOf(f))} · {fmtSize(f.sizeBytes)} · {new Date(f.createdAt).toLocaleDateString()}{f.uploadedByName ? ` · ${f.uploadedByName}` : ""}
                           </T>
                         </View>
                         {b && <Badge label={b.label} fg={b.fg} bg={b.bg} />}

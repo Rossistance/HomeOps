@@ -282,6 +282,9 @@ export default function SettingsScreen() {
           <Row icon="checklist" iconColor={colors.lavender} iconBg={colors.lavenderBg} title="Tasks & Lists" chevron onPress={() => router.push("/tasks")} />
           <Row icon="fork.knife" iconColor={colors.sage} iconBg={colors.sageBg} title="Meals" chevron onPress={() => router.push("/meals")} />
           <Row icon="person.2" iconColor={colors.sky} iconBg={colors.skyBg} title="Contacts" chevron onPress={() => router.push("/contacts")} />
+          {/* Nests — a small group inside the household. Any adult can form one; it grants no
+              authority over anyone, so there is no role gate beyond that. */}
+          <Row icon="person.2.fill" iconColor={colors.lavender} iconBg={colors.lavenderBg} title="Nests" subtitle="A shared space for just some of you" chevron onPress={() => router.push("/nests")} />
           <Row icon="clock" iconColor={colors.amber} iconBg={colors.amberBg} title="Automations" chevron onPress={() => router.push("/automations")} />
           <Row icon="doc.text" iconColor={colors.textMuted} iconBg={colors.surfaceSunken} title="Playbooks" chevron onPress={() => router.push("/playbooks")} />
           <Row icon="cpu" iconColor={colors.ember} iconBg={colors.emberBg} title="AI Providers" chevron onPress={() => router.push("/ai")} last={!session?.isOperator} />
