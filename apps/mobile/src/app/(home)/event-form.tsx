@@ -3,7 +3,7 @@
 // iOS; dialog presentation elsewhere). Edit mode (?id=) prefls from the server
 // and adds a destructive delete. Synced (linked/public) events are read-only.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Switch, TextInput, View } from "react-native";
+import { Alert, ScrollView, Switch, TextInput, View } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
@@ -11,6 +11,8 @@ import { api, type ApprovalRec, type EventRec, type MemberRec } from "@/lib/api"
 import { useSession } from "@/lib/session";
 import { loadDraft, saveDraft, clearDraft, isEmptyDraft, type EventDraft } from "@/lib/event-drafts";
 import { useTheme, tapHaptic } from "@/theme";
+import { AddressField } from "@/components/AddressField";
+import { ActionBar, ACTION_BAR_HEIGHT } from "@/components/ui/action-bar";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
 // still shadows the ui/ directory until old screens are deleted centrally.
 import { Badge, Chip, ChipRow } from "@/components/ui/badge";
@@ -197,8 +199,12 @@ export default function EventFormScreen() {
    * two half-finished edits never overwrite each other. Restored AFTER the server prefill
    * above, because a draft is by definition the newer, unsaved state. Cleared ONLY by a
    * successful save or an explicit discard — dismissing the sheet is not a discard. */
-  // ISS-109: Return on the title moves to Location rather than dead-ending.
-  const locationRef = useRef<TextInput>(null);
+  // C3 — [13:37] "the 'what to bring' field is at the bottom of the screen; when I tap it
+  // the keyboard covers it and it doesn't scroll up." The keyboard inset alone can't fix that
+  // now: the pinned Save bar sits over the last ~76pt of content, and the inset knows nothing
+  // about it. So this screen scrolls that field into view itself.
+  const scroller = useRef<ScrollView>(null);
+  const bringY = useRef(0);
   const householdId = session?.householdId ?? null;
   const draftId = id ?? "new";
   const [draftRestored, setDraftRestored] = useState(false);
@@ -420,7 +426,8 @@ export default function EventFormScreen() {
   }
 
   return (
-    <HScreen bottomPad={56}>
+    <View style={{ flex: 1, backgroundColor: colors.bg }}>
+      <HScreen bottomPad={ACTION_BAR_HEIGHT + 24} scrollRef={scroller}>
       {header}
 
       {!canManage ? (
@@ -461,10 +468,9 @@ export default function EventFormScreen() {
           multiline
           submitBehavior="blurAndSubmit"
           onChangeText={(t) => setTitle(t.replace(/[\r\n]+/g, " "))}
-          onSubmitEditing={() => locationRef.current?.focus()}
           editable={!readOnly && canManage}
           accessibilityLabel="Event title"
-          returnKeyType="next"
+          returnKeyType="done"
         />
       </Well>
 
@@ -533,25 +539,14 @@ export default function EventFormScreen() {
         )}
       </Well>
 
-      {/* Location */}
+      {/* Location — E1 autocomplete, E2 tap-to-navigate, E3 an edit button (AddressField). */}
       <SectionHeader title="Location" />
-      <Well style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-        <Sym name="mappin.and.ellipse" size={16} color={colors.textFaint} />
-        <TextInput
-          ref={locationRef}
-          style={[inputStyle, { flex: 1 }]}
-          placeholder="Where is it? (optional)"
-          placeholderTextColor={colors.textFaint}
-          value={location}
-          // ISS-109: addresses are long — wrap rather than scroll them out of sight.
-          multiline
-          submitBehavior="blurAndSubmit"
-          onChangeText={(t) => setLocation(t.replace(/[\r\n]+/g, " "))}
-          editable={!readOnly && canManage}
-          accessibilityLabel="Event location"
-          returnKeyType="done"
-        />
-      </Well>
+      <AddressField
+        value={location}
+        onChange={setLocation}
+        editable={!readOnly && canManage}
+        inputStyle={inputStyle}
+      />
 
       {/* Notes (ISS-006 — carried into the Google description on push) */}
       <SectionHeader title="Notes" />
@@ -609,7 +604,10 @@ export default function EventFormScreen() {
         </View>
       ) : null}
       {!readOnly && canManage ? (
-        <Well style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+        <Well
+          style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}
+          onLayout={(e) => { bringY.current = e.nativeEvent.layout.y; }}
+        >
           <TextInput
             style={[inputStyle, { flex: 1 }]}
             placeholder="Cleats, water bottle, snacks…"
@@ -617,6 +615,9 @@ export default function EventFormScreen() {
             value={bringInput}
             onChangeText={setBringInput}
             onSubmitEditing={addBring}
+            // Scroll it clear of both the keyboard and the pinned Save bar. Delayed so the
+            // keyboard's own inset animation has already been applied.
+            onFocus={() => setTimeout(() => scroller.current?.scrollTo({ y: Math.max(0, bringY.current - 90), animated: true }), 180)}
             accessibilityLabel="Add items to bring, comma-separated"
             returnKeyType="done"
           />
@@ -668,14 +669,8 @@ export default function EventFormScreen() {
               />
             </Well>
           ) : null}
-          <Button
-            title={isEdit ? (alsoGoogle && !linkedGoogle ? "Save & update Google" : "Save changes") : "Add event"}
-            variant="ember"
-            full
-            loading={busy === "save" || (busy === "push" && !pushApproval)}
-            disabled={!canSave}
-            onPress={() => void save()}
-          />
+          {/* Save has left the scroll — see the ActionBar below. Delete stays down here on
+              purpose: a destructive action should take a deliberate scroll to reach. */}
           {isEdit ? (
             <Button
               title="Delete event"
@@ -688,6 +683,31 @@ export default function EventFormScreen() {
           ) : null}
         </View>
       ) : null}
-    </HScreen>
+      </HScreen>
+
+      {/* C4/C5 — [15:03] "Save is not visible at all… that's crucial", and [13:48] "Save
+          changes should be closer to the text entry." Both are answered by taking the commit
+          control out of the scrolling content: it's pinned, and it rides the keyboard up, so
+          when a field is focused Save is directly above the keys. */}
+      {!readOnly && canManage ? (
+        <ActionBar>
+          <Button
+            title={isEdit ? (alsoGoogle && !linkedGoogle ? "Save & update Google" : "Save changes") : "Add event"}
+            variant="ember"
+            full
+            loading={busy === "save" || (busy === "push" && !pushApproval)}
+            disabled={!canSave}
+            onPress={() => void save()}
+          />
+          {/* Why Save is unavailable, at the moment it's unavailable — rather than a dead
+              button and no explanation. */}
+          {!canSave && busy === null ? (
+            <T kind="caption" center color={colors.textFaint}>
+              {!title.trim() ? "Give it a title to save." : endInvalid ? "Fix the end time to save." : ""}
+            </T>
+          ) : null}
+        </ActionBar>
+      ) : null}
+    </View>
   );
 }

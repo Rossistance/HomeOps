@@ -54,6 +54,8 @@ import {
   deriveCapabilitiesFromSteps, agentVisibleTo,
 } from "./agents.mjs";
 import { agentTemplateSections } from "./agent-templates.mjs";
+import { suggestAddresses } from "./places.mjs";
+import { isValidReminder, sweepTaskReminders } from "./reminders.mjs";
 import { getAgent } from "./store.mjs";
 import {
   createSkill, replaceSkill, partialUpdateSkill, deleteSkill, duplicateSkill,
@@ -1646,12 +1648,26 @@ const handleRequest = async (req, res) => {
       if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       if (!String(body.title ?? "").trim()) return json(res, 400, { error: "title_required" }, req);
+      // H2 [21:49] — "it should have a start date and time and an end date and time, like a
+      // calendar item, not just today/tomorrow/next week." Validated the same way events are:
+      // an unparseable stamp is refused here rather than stored and rendered as "Invalid Date".
+      for (const k of ["startAt", "endAt", "dueAt"]) {
+        if (badTimestamp(body[k])) return json(res, 400, { error: "bad_timestamp", message: `"${k}" isn't a valid date and time.` }, req);
+      }
+      // H5 [22:19] — "reminders: 15 minutes before, 30 minutes before, producing a real
+      // notification." Only the offsets the UI offers are storable, so nothing can be set
+      // that no screen can show or explain.
+      if (body.remindMinutesBefore !== undefined && !isValidReminder(body.remindMinutesBefore)) {
+        return json(res, 400, { error: "bad_reminder" }, req);
+      }
       const tk = putTask({
         id: "tk_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         title: String(body.title).trim(), type: body.type ?? "task", status: body.status ?? "todo",
         dueAt: body.dueAt ?? null, assignedMemberId: body.assignedMemberId ?? null, spaceId: body.spaceId ?? "sp-family",
         priority: body.priority ?? "medium", amount: body.amount ?? null, visibility: body.visibility ?? "household",
         listName: body.listName ?? undefined,
+        startAt: body.startAt ?? null, endAt: body.endAt ?? null,
+        remindMinutesBefore: body.remindMinutesBefore ?? null, reminderSentAt: null,
         notes: body.notes ?? "", source: "user", createdBy: g.session.actorId,
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
@@ -1673,6 +1689,16 @@ const handleRequest = async (req, res) => {
       if (ifUpdatedAt && tk.updatedAt && ifUpdatedAt !== tk.updatedAt) {
         return json(res, 409, { error: "stale_write", message: "This task changed on another device — refresh and try again.", current: tk }, req);
       }
+      for (const k of ["startAt", "endAt", "dueAt"]) {
+        if (k in patch && badTimestamp(patch[k])) return json(res, 400, { error: "bad_timestamp", message: `"${k}" isn't a valid date and time.` }, req);
+      }
+      if ("remindMinutesBefore" in patch && !isValidReminder(patch.remindMinutesBefore)) {
+        return json(res, 400, { error: "bad_reminder" }, req);
+      }
+      // Moving the time, or changing the lead, must RE-ARM the reminder — otherwise a task
+      // pushed from Tuesday to Friday keeps a spent stamp and silently never nudges again.
+      const timingChanged = ["startAt", "dueAt", "remindMinutesBefore"].some((k) => k in patch && patch[k] !== tk[k]);
+      if (timingChanged) patch.reminderSentAt = null;
       const updated = patchTask(tk.id, patch);
       audit({ type: "task.update", taskId: tk.id, ok: true }, req, g.session);
       return json(res, 200, { task: updated }, req);
@@ -1685,6 +1711,54 @@ const handleRequest = async (req, res) => {
       deleteTaskRec(tk.id);
       audit({ type: "task.delete", taskId: tk.id, ok: true }, req, g.session);
       return json(res, 200, { ok: true }, req);
+    }
+
+    // H7 [23:18] — "when a task has a date it should append to the calendar, and push to
+    // that person's Google account." Same back-reference pattern as meals: linked by taskId,
+    // idempotent (re-adding updates the linked event rather than duplicating it), and once
+    // it's a canonical event the existing approval-gated push sends it to Google. The
+    // ASSIGNEE is the event's owner, because "that person's Google account" is the ask —
+    // pushing a chore assigned to Beannie into my calendar helps nobody.
+    const taskCal = path.match(/^\/api\/tasks\/([^/]+)\/to-calendar$/);
+    if (taskCal && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const tk = getTask(taskCal[1]);
+      if (!tk || tk.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!canSeeEntity(tk, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      const startAt = tk.startAt || tk.dueAt;
+      if (!startAt) return json(res, 400, { error: "date_required", message: "Give the task a date before adding it to the calendar." }, req);
+      const owner = tk.assignedMemberId || tk.createdBy || g.session.actorId;
+      const fields = {
+        title: tk.title,
+        startAt,
+        endAt: tk.endAt ?? null,
+        notes: tk.notes ?? "",
+      };
+      const existing = listEvents((e) => e.householdId === g.session.householdId && e.taskId === tk.id)[0];
+      if (existing) {
+        const updated = patchEvent(existing.id, fields);
+        if (getSettings(g.session.householdId).calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
+          void pushEventToGoogle({ ev: updated, householdId: g.session.householdId, actorId: owner })
+            .then((r) => appendAudit({ type: "calendar.autopush", eventId: updated.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) })).catch(() => {});
+        }
+        audit({ type: "task.to_calendar", taskId: tk.id, eventId: existing.id, action: "updated", ok: true }, req, g.session);
+        return json(res, 200, { ok: true, event: updated, action: "updated" }, req);
+      }
+      const ev = putEvent({
+        id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        ...fields, allDay: false, location: "", spaceId: tk.spaceId ?? "sp-family",
+        participantIds: tk.assignedMemberId ? [tk.assignedMemberId] : [],
+        driverId: null, ownerId: owner, backupOwnerId: null,
+        whatToBring: [], checklist: [], travel: null, reminders: [], attachments: [], comments: [],
+        mealImpact: null, taskId: tk.id, visibility: tk.visibility ?? "household", category: "Task",
+        layer: "canonical", status: "confirmed", source: "FamiliOS",
+        provenance: { via: "task", actorId: g.session.actorId },
+        createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
+      });
+      patchTask(tk.id, { eventId: ev.id });   // so the task row can say it's on the calendar
+      audit({ type: "task.to_calendar", taskId: tk.id, eventId: ev.id, action: "created", ok: true }, req, g.session);
+      return json(res, 200, { ok: true, event: ev, action: "created" }, req);
     }
 
     /* ---- Help requests: "can you help?" asks between members ----
@@ -2932,6 +3006,19 @@ const handleRequest = async (req, res) => {
       }
     }
 
+    // E1 [10:55] — "It's just raw text. It needs address autocomplete, smart sorting like
+    // most web apps." Fires on keystrokes from the event location field, so it stays cheap:
+    // labels and addresses only, no ratings, no drive times. A dead upstream returns an empty
+    // list rather than an error — a lookup that can't answer must never interrupt typing.
+    if (path === "/api/places/suggest" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+      const out = await suggestAddresses(url.searchParams.get("q") ?? "", {
+        lat: num(url.searchParams.get("lat")), lng: num(url.searchParams.get("lng")),
+      });
+      return json(res, 200, out, req);
+    }
+
     // G6 — the starter-helper catalog, grouped. Mobile carried four hand-written entries
     // while the web read thirteen from its own file; this is the one list both can ask for.
     // Static and household-independent, so any signed-in member may read it.
@@ -3846,6 +3933,10 @@ server.listen(PORT, () => {
   void forEachTenant(() => recoverRuns()); // re-drive any runs that were mid-flight at shutdown
   setInterval(() => { void forEachTenant(() => expireStaleRuns()); }, 60_000); // sweep stale parked runs
   setInterval(() => { void forEachTenant(() => tick()); }, 10_000); // fire due schedule/recurring triggers
+  // H5 — task reminders reach the ASSIGNEE's phone, which is why they're swept here rather
+  // than scheduled on whichever device happened to create the task. Every 30s so a
+  // "15 minutes before" lands within half a minute of the mark.
+  setInterval(() => { void forEachTenant(() => sweepTaskReminders()); }, 30_000);
   // Calendar auto-sync: re-pull url/google subscriptions that have gone stale so linked
   // events stay fresh without a manual "Sync now". Pasted imports are static — skipped.
   // Staleness window via HOMEOPS_CAL_SYNC_MINUTES (default 6h); swept every 15 minutes.

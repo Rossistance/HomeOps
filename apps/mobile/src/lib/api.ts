@@ -139,6 +139,18 @@ export interface TaskRec {
   id: string; title: string; type: string; status: string; dueAt: string | null;
   assignedMemberId: string | null; priority: string; amount: number | null; visibility: string;
   listName?: string;
+  // H2/H4/H5/H7 — a task is a scheduled item: it has a start and an end like a calendar
+  // entry, a description that doesn't have to fit in the title, a reminder that produces a
+  // real notification, and (once dated) a place on the calendar.
+  startAt?: string | null;
+  endAt?: string | null;
+  notes?: string;
+  /** 0 = at the time, 15, 30, 60, 1440. null = no reminder. */
+  remindMinutesBefore?: number | null;
+  reminderSentAt?: string | null;
+  /** Set once the task has been added to the calendar. */
+  eventId?: string | null;
+  createdBy?: string | null;
 }
 // Meal plan + the read-only "linked" calendar layer (ICS/Google subscriptions) —
 // same shapes as the web client (src/connectors/api.ts).
@@ -519,8 +531,10 @@ export const api = {
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
-  async updateTask(id: string, patch: Partial<TaskRec>): Promise<{ task?: TaskRec; error?: string }> {
-    const r = await req<{ task?: TaskRec; error?: string }>(`/tasks/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+  // `message` rides along because the server explains a refused edit in plain words
+  // (bad_timestamp, bad_reminder, stale_write) and the sheet shows that rather than a code.
+  async updateTask(id: string, patch: Partial<TaskRec>): Promise<{ task?: TaskRec; error?: string; message?: string }> {
+    const r = await req<{ task?: TaskRec; error?: string; message?: string }>(`/tasks/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
@@ -558,6 +572,13 @@ export const api = {
   // stays behind the existing approval-gated calendar push.
   async mealToCalendar(id: string): Promise<{ ok?: boolean; event?: EventRec; action?: string; error?: string; message?: string }> {
     const r = await req<{ ok?: boolean; event?: EventRec; action?: string; error?: string; message?: string }>(`/meals/${encodeURIComponent(id)}/to-calendar`, { method: "POST", body: "{}" });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  // H7 — put a dated task on the household calendar, owned by the person it's assigned to,
+  // so the existing approval-gated Google push sends it to THEIR account.
+  async taskToCalendar(id: string): Promise<{ ok?: boolean; event?: EventRec; action?: string; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; event?: EventRec; action?: string; error?: string; message?: string }>(`/tasks/${encodeURIComponent(id)}/to-calendar`, { method: "POST", body: "{}" });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
@@ -827,6 +848,15 @@ export const api = {
     const r = await req<{ agents: AgentRec[] }>("/agents");
     return r.data?.agents ?? [];
   },
+  // E1 — address autocomplete for the event location field. Never throws and never surfaces
+  // an error: this runs while someone is typing, and a lookup that can't answer must not
+  // interrupt them.
+  async suggestAddresses(q: string, at?: { latitude: number; longitude: number } | null): Promise<AddressSuggestionRec[]> {
+    const p = new URLSearchParams({ q });
+    if (at) { p.set("lat", String(at.latitude)); p.set("lng", String(at.longitude)); }
+    const r = await req<{ suggestions?: AddressSuggestionRec[] }>(`/places/suggest?${p}`).catch(() => null);
+    return r?.data?.suggestions ?? [];
+  },
   // G6 — the starter-helper catalog, grouped, from the server. Mobile used to carry four
   // hand-written entries of its own while the web read thirteen from a different file.
   async agentTemplates(): Promise<AgentTemplateSectionRec[]> {
@@ -948,6 +978,9 @@ export interface AgentRec {
   };
   skillIds?: string[];
 }
+// E1 — one address suggestion: the name a family recognises, the address under it, and the
+// full string that goes INTO the field (a label alone won't navigate anywhere).
+export interface AddressSuggestionRec { label: string; detail: string; value: string; placeId: string | null }
 // G6 — starter helpers, grouped into navigable sections (server/agent-templates.mjs).
 // A template is an opening sentence, not a pre-built agent: `prompt` goes to the planner,
 // which drafts against THIS household's real connections, and the family approves it.

@@ -8,7 +8,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
-import { api, type CalendarSubscription, type EventRec, type MemberRec } from "@/lib/api";
+import { api, type CalendarSubscription, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { LinearGradient } from "expo-linear-gradient";
 import { fade, memberAccent, memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
@@ -83,6 +83,7 @@ export default function CalendarScreen() {
   const [events, setEvents] = useState<EventRec[]>([]);
   const [members, setMembers] = useState<MemberRec[]>([]);
   const [subs, setSubs] = useState<CalendarSubscription[]>([]);
+  const [tasks, setTasks] = useState<TaskRec[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   // Agenda (timeline) is the default; month is a paging grid so you can look a
@@ -101,9 +102,13 @@ export default function CalendarScreen() {
 
   const load = useCallback(async () => {
     // api.* swallow network errors into empty arrays, so probe /health for honesty.
-    const [health, ev, mem, s] = await Promise.all([api.health(), api.events(), api.members(), api.calendarSubscriptions()]);
+    // H6 [23:06] — "tasks live separate from the schedule, but when they have a date they
+    // should show up in a consolidated view." So dated tasks are fetched and shown under the
+    // day they fall on, clearly as tasks — not converted into fake events, which is how a
+    // checkbox ends up in an event editor that can't save it.
+    const [health, ev, mem, s, tks] = await Promise.all([api.health(), api.events(), api.members(), api.calendarSubscriptions(), api.tasks()]);
     if (!health) { setPhase("error"); return; }
-    setEvents(ev); setMembers(mem); setSubs(s);
+    setEvents(ev); setMembers(mem); setSubs(s); setTasks(tks);
     setPhase("ready");
   }, []);
 
@@ -113,6 +118,21 @@ export default function CalendarScreen() {
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
   const conflictCount = useMemo(() => events.filter((e) => conflictOf(e)).length, [events]);
+
+  // H6 — dated, still-open tasks, grouped by the day they land on.
+  const tasksByDay = useMemo(() => {
+    const map: Record<string, TaskRec[]> = {};
+    for (const t of tasks) {
+      if (t.status === "done") continue;
+      const at = t.startAt ?? t.dueAt;
+      if (!at) continue;
+      const d = new Date(at);
+      if (Number.isNaN(+d)) continue;
+      (map[dayKey(d)] ??= []).push(t);
+    }
+    for (const k of Object.keys(map)) map[k].sort((a, b) => String(a.startAt ?? a.dueAt).localeCompare(String(b.startAt ?? b.dueAt)));
+    return map;
+  }, [tasks]);
 
   // ONE sync: every subscription syncs and Google-side edits pull back in a single
   // pass (POST /calendar/sync-all). Also runs silently every ~60s while the screen
@@ -574,6 +594,12 @@ export default function CalendarScreen() {
                     onToggle={() => setExpanded(expanded === e.id ? null : e.id)}
                   />
                 ))}
+                {/* The consolidated part of H6: the day's tasks, under the day's events,
+                    visibly a different kind of thing. Tapping opens Tasks, where it can
+                    actually be edited and checked off. */}
+                {(tasksByDay[k] ?? []).map((t) => (
+                  <DayTask key={t.id} t={t} name={t.assignedMemberId ? nameOf(t.assignedMemberId) : null} />
+                ))}
               </View>
             </Rise>
           ))}
@@ -635,6 +661,42 @@ export default function CalendarScreen() {
 }
 
 /** One agenda entry: time rail on the left, event card on the right. */
+/** H6 — a dated task, shown under its day but never dressed up as an event. Tapping goes to
+ *  Tasks, which is where it can be edited and checked off; an event editor can do neither. */
+function DayTask({ t, name }: { t: TaskRec; name: string | null }) {
+  const { colors, spacing, radii } = useTheme();
+  const at = t.startAt ?? t.dueAt;
+  const d = at ? new Date(at) : null;
+  const overdue = !!at && Date.parse(at) < Date.now();
+  const time = d && !Number.isNaN(+d) ? d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : null;
+  return (
+    <PressableScale
+      haptic="select"
+      onPress={() => router.push("/(settings)/tasks")}
+      accessibilityRole="button"
+      accessibilityLabel={`Task: ${t.title}${time ? ` at ${time}` : ""}`}
+      accessibilityHint="Opens Tasks"
+      style={{
+        flexDirection: "row", alignItems: "center", gap: spacing.sm,
+        backgroundColor: colors.surfaceSunken, borderRadius: radii.sm, borderCurve: "continuous",
+        paddingHorizontal: spacing.md, paddingVertical: 10,
+        borderLeftWidth: 3, borderLeftColor: overdue ? colors.coral : colors.sky,
+      }}
+    >
+      <Sym name="checklist" size={14} color={overdue ? colors.coral : colors.sky} />
+      <View style={{ flex: 1 }}>
+        {/* Never clamped — "people need to be able to read their entire name… this happens
+            throughout the application." */}
+        <T kind="subMedium" color={colors.text}>{t.title}</T>
+        <T kind="caption" color={overdue ? colors.coral : colors.textFaint}>
+          Task{time ? ` · ${time}` : ""}{name ? ` · ${name.split(" ")[0]}` : ""}{overdue ? " · overdue" : ""}
+        </T>
+      </View>
+      <Sym name="chevron.right" size={12} color={colors.textFaint} />
+    </PressableScale>
+  );
+}
+
 function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChanged, expanded, onToggle }: {
   e: EventRec;
   nameOf: (id: string | null) => string | null;

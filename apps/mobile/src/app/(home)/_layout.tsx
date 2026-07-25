@@ -22,7 +22,11 @@ export default function HomeLayout() {
           presentation: "formSheet",
           headerLargeTitle: false,
           sheetGrabberVisible: true,
-          sheetAllowedDetents: [0.75, 1.0],
+          // C2 — [10:25] "It only raises about halfway. It should raise all the way to the
+          // top and use the full screen." The 0.75 detent was the default it opened at, and
+          // it's gone rather than merely deprioritised: leaving it in means one stray drag
+          // puts the form back in the half-height state he was complaining about.
+          sheetAllowedDetents: [1.0],
         }}
       />
     </Stack>

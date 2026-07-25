@@ -1,18 +1,23 @@
 // Standard screen scaffold: ScrollView with automatic safe-area insets,
 // pull-to-refresh, and consistent content padding. First child of every route.
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 import { RefreshControl, ScrollView } from "react-native";
 import { useTheme } from "@/theme";
 
-export function HScreen({ children, refreshing, onRefresh, bottomPad = 40 }: {
+export function HScreen({ children, refreshing, onRefresh, bottomPad = 40, scrollRef }: {
   children: ReactNode;
   refreshing?: boolean;
   onRefresh?: () => void;
   bottomPad?: number;
+  /** For screens that must scroll a specific field into view themselves — a bottom-most
+   *  input still lands under the pinned action bar, which the keyboard inset can't know
+   *  about. See C3 in the event form ("what to bring"). */
+  scrollRef?: RefObject<ScrollView | null>;
 }) {
   const { colors, spacing } = useTheme();
   return (
     <ScrollView
+      ref={scrollRef}
       contentInsetAdjustmentBehavior="automatic"
       style={{ flex: 1, backgroundColor: colors.bg }}
       contentContainerStyle={{ padding: spacing.lg, paddingBottom: bottomPad, gap: spacing.md }}

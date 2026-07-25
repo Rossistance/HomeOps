@@ -33,10 +33,10 @@ export function PressableCard({ children, style, padded = true, ...rest }: Press
 }
 
 /** Sunken surface for inputs / secondary info wells. */
-export function Well({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
+export function Well({ children, style, onLayout }: { children: ReactNode; style?: StyleProp<ViewStyle>; onLayout?: (e: LayoutChangeEvent) => void }) {
   const { colors, spacing } = useTheme();
   return (
-    <View style={[{ backgroundColor: colors.surfaceSunken, borderRadius: 16, borderCurve: "continuous", padding: spacing.md }, style]}>
+    <View onLayout={onLayout} style={[{ backgroundColor: colors.surfaceSunken, borderRadius: 16, borderCurve: "continuous", padding: spacing.md }, style]}>
       {children}
     </View>
   );

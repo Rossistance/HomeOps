@@ -5,6 +5,7 @@
 import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods, listAgents, getAgent, getMember } from "./store.mjs";
 import { partialUpdateAgent } from "./agents.mjs";
 import { mealEventNotes, pushEventToGoogle } from "./calendar.mjs";
+import { searchPlaces } from "./places.mjs";
 import { deliverNotification, deliverInAppFallback } from "./notify.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
 import crypto from "node:crypto";
@@ -134,6 +135,36 @@ export const INTERNAL_FUNCTIONS = {
         // Read back what ACTUALLY applies, so a refused tier can't be reported as granted.
         ...(unattendedNote ? { unattended: next.approvalPolicy?.unattended ?? { enabled: false }, unattendedNote } : {}),
       } };
+    },
+  },
+  /* ---- Real places (K4) ------------------------------------------------------------
+   * Typed in full, and answered with prose and two links: "give me a list of the 5 best
+   * restaurants near me, sort them by highest to lowest and for each give me the results on
+   * whether it is often busy or not right now, estimated wait time" — plus distance and
+   * drive time. There was no place data behind the assistant at all; it could only guess or
+   * link out.
+   *
+   * The result rows are deliberately shaped so assistant-runs.mjs rowCard renders them as
+   * comparable cards with no extra mapping (K2). And `limitations` travels with them because
+   * two of the four things he asked for genuinely are not published by any mapping API — the
+   * honest answer is to name that, not to fill the gap with something plausible. */
+  "homeops.find_places": {
+    id: "homeops.find_places",
+    name: "Find places nearby",
+    action: "Read",
+    risk: "Low",
+    requiresApproval: false,
+    delivers: false,
+    connectorId: "homeops",
+    connectorName: "Places",
+    async run(ctx, input) {
+      const query = String(input?.query ?? "").trim();
+      if (!query) return { ok: false, error: "query_required", message: "What should I look for — restaurants, a pharmacy, a park?" };
+      const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+      const limit = Math.min(10, Math.max(1, Number(input?.limit) || 5));
+      const r = await searchPlaces(query, { lat: num(input?.lat), lng: num(input?.lng), limit });
+      if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "Couldn't look that up right now." };
+      return { ok: true, result: { places: r.places, provider: r.provider, limitations: r.limitations } };
     },
   },
   "homeops.write_memory": {

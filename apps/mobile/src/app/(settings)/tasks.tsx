@@ -4,7 +4,7 @@
 // check-offs, and a collapsed Completed drawer. The server enforces roles and
 // visibility; we only surface friendly messages when it says no.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Pressable, TextInput, View } from "react-native";
+import { Alert, Pressable, ScrollView, TextInput, View } from "react-native";
 import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withSequence, withSpring } from "react-native-reanimated";
 import { api, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
@@ -13,6 +13,7 @@ import { useTheme, tapHaptic, type HearthColors } from "@/theme";
 // "ui/index" (not "ui"): the legacy src/components/ui.tsx still shadows the ui/
 // directory until the old screens are all ported — this resolves the new system.
 import { Badge, Button, Card, Chip, ChipRow, EmptyState, ErrorState, HScreen, Notice, Rise, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
+import { TaskSheet } from "@/components/sheets/task-sheet";
 
 /* ------------------------------ grouping ------------------------------ */
 const TYPE_GROUP: Record<string, string> = {
@@ -95,10 +96,10 @@ function TaskCheck({ done, onPress }: { done: boolean; onPress: () => void }) {
 }
 
 /* -------------------------------- row ---------------------------------- */
-function TaskRow({ t, members, last, showGroup, helping, onToggle, onLongPress }: {
+function TaskRow({ t, members, last, showGroup, helping, onToggle, onLongPress, onOpen }: {
   t: TaskRec; members: MemberRec[]; last: boolean; showGroup: boolean;
   helping?: string | null; // helper's name when an accepted help request moved/covers this task (WP-001)
-  onToggle: () => void; onLongPress: () => void;
+  onToggle: () => void; onLongPress: () => void; onOpen: () => void;
 }) {
   const { colors, spacing } = useTheme();
   const done = t.status === "done";
@@ -108,7 +109,7 @@ function TaskRow({ t, members, last, showGroup, helping, onToggle, onLongPress }
   const member = mi >= 0 ? members[mi] : null;
   const av = AVATAR_TONES[Math.max(mi, 0) % AVATAR_TONES.length](colors);
   return (
-    <Pressable onLongPress={onLongPress} delayLongPress={350} accessibilityLabel={t.title}>
+    <Pressable onPress={onOpen} onLongPress={onLongPress} delayLongPress={350} accessibilityLabel={t.title} accessibilityHint="Opens the task">
       <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: 12, borderBottomWidth: last ? 0 : 1, borderBottomColor: colors.border }}>
         <TaskCheck done={done} onPress={onToggle} />
         <View style={{ flex: 1, gap: 4 }}>
@@ -135,6 +136,20 @@ function TaskRow({ t, members, last, showGroup, helping, onToggle, onLongPress }
                 <View accessibilityLabel={`${helping} is helping with this`} style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.lavenderBg, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 999 }}>
                   <Sym name="hand.raised.fill" size={10} color={colors.lavender} />
                   <T kind="caption" color={colors.lavender}>{helping} is helping</T>
+                </View>
+              ) : null}
+              {t.remindMinutesBefore != null ? (
+                <View accessibilityLabel="Has a reminder" style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
+                  <Sym name="bell.fill" size={9} color={colors.textFaint} />
+                  <T kind="caption" color={colors.textFaint}>
+                    {t.remindMinutesBefore === 0 ? "on time" : t.remindMinutesBefore >= 1440 ? "1d" : t.remindMinutesBefore >= 60 ? `${t.remindMinutesBefore / 60}h` : `${t.remindMinutesBefore}m`}
+                  </T>
+                </View>
+              ) : null}
+              {t.eventId ? (
+                <View accessibilityLabel="On the calendar" style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
+                  <Sym name="calendar.badge.checkmark" size={9} color={colors.sage} />
+                  <T kind="caption" color={colors.sage}>on calendar</T>
                 </View>
               ) : null}
               {showGroup ? <T kind="caption" color={colors.textFaint}>{groupOf(t)}</T> : null}
@@ -166,11 +181,21 @@ export default function TasksScreen() {
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
   const [activeList, setActiveList] = useState("All");
   const [doneOpen, setDoneOpen] = useState(false);
+  // H1 [21:31] — "group the tasks by person: mine, and everybody else's." A household list
+  // that mixes everyone's chores together is a list nobody reads as theirs.
+  const [who, setWho] = useState<"all" | "mine" | "others">("all");
+  // The task sheet: everything a task needs that the row and composer can't hold (H2-H7).
+  const [editing, setEditing] = useState<TaskRec | null>(null);
   // Composer
   const [title, setTitle] = useState("");
   const [quickDue, setQuickDue] = useState<QuickDue>(null);
   const [assignee, setAssignee] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  // C6 [21:45] — "the add-task input doesn't recenter when the keyboard comes up." The
+  // composer sits under the filter chips, and the chip rows it reveals as you type push it
+  // further down; the keyboard inset alone doesn't chase it.
+  const scroller = useRef<ScrollView>(null);
+  const composerY = useRef(0);
 
   const load = useCallback(async () => {
     const [tks, mems, hrs] = await Promise.all([api.tasks(), api.members(), api.helpRequests()]);
@@ -200,8 +225,17 @@ export default function TasksScreen() {
     return map;
   }, [helpRequests]);
 
-  const open = useMemo(() => tasks.filter((t) => t.status !== "done"), [tasks]);
-  const done = useMemo(() => tasks.filter((t) => t.status === "done"), [tasks]);
+  // H1 — "mine" is what's assigned to me; "others" is everything assigned to someone else.
+  // A task assigned to NOBODY belongs in both views: it's unclaimed household work, and
+  // hiding it from "mine" is how it stays unclaimed.
+  const me = session?.actorId ?? null;
+  const mineFilter = useCallback((t: TaskRec) => {
+    if (who === "all") return true;
+    if (who === "mine") return !t.assignedMemberId || t.assignedMemberId === me;
+    return !!t.assignedMemberId && t.assignedMemberId !== me;
+  }, [who, me]);
+  const open = useMemo(() => tasks.filter((t) => t.status !== "done" && mineFilter(t)), [tasks, mineFilter]);
+  const done = useMemo(() => tasks.filter((t) => t.status === "done" && mineFilter(t)), [tasks, mineFilter]);
   const listNames = useMemo(() => [...new Set(tasks.map(groupOf))].sort((a, b) => a.localeCompare(b)), [tasks]);
 
   const byDue = (a: TaskRec, b: TaskRec) => (a.dueAt ?? "9999").localeCompare(b.dueAt ?? "9999") || a.title.localeCompare(b.title);
@@ -243,6 +277,7 @@ export default function TasksScreen() {
   const menuFor = (t: TaskRec) => {
     tapHaptic("select");
     Alert.alert(t.title, undefined, [
+      { text: "Edit…", onPress: () => setEditing(t) },
       { text: t.status === "done" ? "Mark as open" : "Mark as done", onPress: () => void toggle(t) },
       {
         text: "Delete…", style: "destructive",
@@ -288,8 +323,35 @@ export default function TasksScreen() {
   let riseIdx = 0;
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} scrollRef={scroller}>
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
+
+      {/* H1 — mine vs everybody else's. Shown only when there IS someone else in the
+          household; a one-person list has nothing to split. */}
+      {members.length > 1 ? (
+        <Rise index={riseIdx++}>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            {([["all", "Everyone"], ["mine", "Mine"], ["others", "Others"]] as const).map(([k, label]) => {
+              const active = who === k;
+              return (
+                <Pressable
+                  key={k}
+                  onPress={() => { tapHaptic("select"); setWho(k); }}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={`${label} tasks`}
+                  style={{
+                    flex: 1, alignItems: "center", paddingVertical: 9, borderRadius: 12, borderCurve: "continuous",
+                    backgroundColor: active ? colors.ember : colors.surfaceSunken,
+                  }}
+                >
+                  <T kind="subMedium" color={active ? colors.onEmber : colors.textSecondary} style={{ fontWeight: "600" }}>{label}</T>
+                </Pressable>
+              );
+            })}
+          </View>
+        </Rise>
+      ) : null}
 
       {listNames.length > 0 ? (
         <Rise index={riseIdx++}>
@@ -305,7 +367,10 @@ export default function TasksScreen() {
       {canAdd ? (
         <Rise index={riseIdx++}>
           <Card style={{ gap: spacing.md }}>
-            <Well style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 2 }}>
+            <Well
+              style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 2 }}
+              onLayout={(e) => { composerY.current = e.nativeEvent.layout.y; }}
+            >
               <Sym name="plus.circle.fill" size={18} color={colors.ember} />
               <TextInput
                 value={title}
@@ -315,6 +380,9 @@ export default function TasksScreen() {
                 style={{ flex: 1, color: colors.text, fontFamily: fonts.regular, fontSize: 15, paddingVertical: 10 }}
                 returnKeyType="done"
                 onSubmitEditing={() => void add()}
+                // C6 — bring the composer (and the Due/Assign chips it reveals) up above the
+                // keyboard instead of leaving it wherever the page happened to be scrolled.
+                onFocus={() => setTimeout(() => scroller.current?.scrollTo({ y: Math.max(0, composerY.current - 24), animated: true }), 180)}
                 accessibilityLabel="New task title"
               />
               {title.trim() ? <Button title="Add" variant="ember" small loading={adding} onPress={() => void add()} /> : null}
@@ -373,6 +441,7 @@ export default function TasksScreen() {
                 helping={helperFor.get(t.id) ?? null}
                 onToggle={() => void toggle(t)}
                 onLongPress={() => menuFor(t)}
+                onOpen={() => setEditing(t)}
               />
             ))}
           </Card>
@@ -410,12 +479,23 @@ export default function TasksScreen() {
                   showGroup={activeList === "All"}
                   onToggle={() => void toggle(t)}
                   onLongPress={() => menuFor(t)}
+                  onOpen={() => setEditing(t)}
                 />
               ))
               : null}
           </Card>
         </Rise>
       ) : null}
+
+      <TaskSheet
+        visible={!!editing}
+        task={editing}
+        members={members}
+        canEdit={canAdd}
+        onClose={() => setEditing(null)}
+        onSaved={(t) => setTasks((arr) => arr.map((x) => (x.id === t.id ? t : x)))}
+        onDeleted={(tid) => setTasks((arr) => arr.filter((x) => x.id !== tid))}
+      />
     </HScreen>
   );
 }

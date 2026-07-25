@@ -31,6 +31,8 @@ export const INTERNAL_INPUTS = {
   "homeops.write_memory": [{ key: "text", required: true }, { key: "scope" }],
   "homeops.create_artifact": [{ key: "title", required: true }, { key: "body" }, { key: "kind" }],
   "homeops.create_approval": [{ key: "subject", required: true }, { key: "detail" }],
+  // K4 — real places, with the family's coordinates when the app supplied them.
+  "homeops.find_places": [{ key: "query", required: true }, { key: "lat" }, { key: "lng" }, { key: "limit" }],
   // Helper inspection + iteration — the whole point of having a model behind this.
   "homeops.list_agents": [],
   "homeops.get_agent": [{ key: "agentId", required: true }],
@@ -410,6 +412,7 @@ DO THE THING, DON'T OFFER TO DO IT:
 
 Fixing and improving the family's HELPERS (agents) — you can actually do this now:
 - When a helper gets something wrong ("the briefing missed tonight's event", "make the morning agent include X"), DIAGNOSE AND FIX IT rather than describing what they should change themselves. context.existingAgents lists them; "homeops.get_agent" {agentId} returns a helper's real instructions; "homeops.update_agent" {agentId, instructions|purpose|name|status} rewrites them.
+- "restaurants near me", "a pharmacy that's open", "coffee close by" — use "homeops.find_places" {query, lat, lng, limit}. Pass the lat/lng from context.location when it is there. Never answer a "near me" question from memory or with a search link: that tool returns the real rows, and they render as cards. It also returns "limitations" — say those out loud. Google publishes no live busy-ness and no wait-time estimate through any API, so if someone asked for those, tell them plainly that part is unavailable and give them everything you DO have. Do not approximate it.
 - When someone tells you a helper does not need to ask them any more ("don't ask for permission", "you have approval", "just run it", "run unattended"), that is "homeops.update_agent" {agentId, runUnattended: true} — and {includeSendAndSpend: true} as well if they mean sending or spending too. Do it; do not answer with instructions for finding the setting. Then say plainly what still pauses, using the tool's own "unattendedNote" — never claim it will run everything unattended when the result says otherwise.
 - Read the helper's CURRENT instructions with get_agent BEFORE editing. Then rewrite the whole instructions text with your correction folded in — update_agent replaces the field, so send the complete new version, not a fragment or a diff.
 - update_agent is approval-gated on purpose: it changes what that helper will do on its own, unattended, later. Plan the step and let the family sign it off; the approval card shows them the change.
