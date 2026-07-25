@@ -94,6 +94,19 @@ export function apiForAccount(account) {
       if (!next) { const a = getAccountRaw(account.id); if (a) { a.status = "needs_reconnect"; a.updatedAt = new Date().toISOString(); putAccount(a); } return r; }
       r = await call(next.access);
     }
+    // SELF-HEAL: a call that actually succeeded is proof this credential works, so an
+    // account still flagged needs_reconnect/degraded is carrying a stale verdict. Clearing
+    // it here — at the one place every provider request passes through — is what makes a
+    // successful sync ("2 calendars synced, 40 updated") visibly resolve the warning,
+    // instead of the family being told to reconnect something that demonstrably works.
+    if (r.ok) {
+      const a = getAccountRaw(account.id);
+      if (a && a.status !== "connected" && a.status !== "revoked") {
+        a.status = "connected";
+        a.updatedAt = new Date().toISOString();
+        putAccount(a);
+      }
+    }
     return r;
   };
 }

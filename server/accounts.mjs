@@ -105,7 +105,23 @@ export async function checkAccountHealth(account) {
   let h;
   try { h = await def.health(apiForAccount(account)); } catch (e) { h = { ok: false, status: "error", detail: String(e?.message ?? e) }; }
   const a = getAccountRaw(account.id);
-  if (a) { a.lastHealthAt = now(); a.lastHealthOk = h.ok; if (!h.ok && a.status === "connected") a.status = "degraded"; if (h.ok && a.status === "degraded") a.status = "connected"; a.updatedAt = now(); putAccount(a); }
+  if (a) {
+    a.lastHealthAt = now();
+    a.lastHealthOk = h.ok;
+    if (!h.ok && a.status === "connected") a.status = "degraded";
+    // A SUCCESSFUL probe clears any unhealthy status, not just "degraded".
+    //
+    // This recovery used to read `a.status === "degraded"`, which made
+    // needs_reconnect a one-way door: once set, a working credential could never clear
+    // it. Reported verbatim: "even though I synced the accounts you can see here that
+    // they are still showing reconnect… I could log out, close the app, doesn't matter,
+    // it'll still be there." The status outlived the problem it described, and the
+    // calendar's stale-source banner (ISS-121) faithfully repeated it forever.
+    // A probe that just succeeded IS the evidence the account works.
+    if (h.ok && a.status !== "connected") a.status = "connected";
+    a.updatedAt = now();
+    putAccount(a);
+  }
   setHealth(`acct:${account.id}`, { ok: h.ok, status: h.status, latencyMs: Date.now() - t0 });
   return { ok: h.ok, status: h.status, detail: h.detail, latencyMs: Date.now() - t0 };
 }
