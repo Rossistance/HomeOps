@@ -133,10 +133,64 @@ function draftedHeadline(run, o) {
 // Exported for the WP-002 summarizeOutcome truth-table unit test (server/test/
 // summarize-outcome.test.mjs) — a pure function over a plain run object, no server
 // or tenant context required.
+/** One readable line for a fetched row — enough to recognise it, never a JSON dump. */
+function rowLine(x) {
+  if (x == null) return null;
+  if (typeof x === "string") return x.trim() || null;
+  if (typeof x !== "object") return String(x);
+  const name = x.title ?? x.name ?? x.summary ?? x.subject ?? x.text ?? null;
+  if (!name) return null;
+  const when = x.startAt ?? x.start ?? x.dueAt ?? x.date ?? x.at ?? null;
+  const whenTxt = when ? (() => {
+    const d = new Date(when);
+    return Number.isNaN(+d) ? String(when)
+      : d.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  })() : null;
+  const where = x.location || x.address || null;
+  return `• ${String(name).trim()}${whenTxt ? ` — ${whenTxt}` : ""}${where ? ` (${where})` : ""}`;
+}
+
+/**
+ * The DATA a run actually fetched, rendered into the reply.
+ *
+ * Recorded verbatim, three turns running: "you didnt return anything" → "still nothing" →
+ * "still nothing", while the assistant kept answering "here's the family task list…". And
+ * from another session: "OK, you didn't return anything in the chat thread — did you get
+ * the events? I can read here in a list? I need to be able to do that without going back
+ * to the Calendar screen."
+ *
+ * The cause was here: this file only ever surfaced text from REASONING steps
+ * (`composed`, i.e. steps with no toolId). A step that actually went and fetched events,
+ * tasks or places returns structured ROWS, and those were dropped on the floor — so the
+ * family got "Done — finished (1/1 steps)" for a run whose entire purpose was to show
+ * them a list. The run worked; the answer just never carried what it found.
+ */
+function fetchedRowsText(o) {
+  const blocks = [];
+  for (const s of o.succeeded) {
+    if (!s.toolId) continue;                    // reasoning steps are handled separately
+    const r = s.result;
+    if (!r || typeof r !== "object") continue;
+    // Find the first array of rows the tool returned, whatever it named it.
+    const arr = Array.isArray(r) ? r
+      : Object.values(r).find((v) => Array.isArray(v) && v.length && typeof v[0] === "object");
+    if (!Array.isArray(arr) || arr.length === 0) continue;
+    const lines = arr.slice(0, 12).map(rowLine).filter(Boolean);
+    if (!lines.length) continue;
+    const more = arr.length > lines.length ? `\n…and ${arr.length - lines.length} more` : "";
+    blocks.push(`${s.title ? `${s.title}:\n` : ""}${lines.join("\n")}${more}`);
+  }
+  return blocks.join("\n\n").trim();
+}
+
 export function runOutcomeText(run) {
   const o = summarizeOutcome(run);
   const reasoning = o.composed.filter((s) => s.result?.text).map((s) => s.result.text).join("\n\n").trim();
-  const body = reasoning ? `\n\n${reasoning.slice(0, 1200)}` : "";
+  const fetched = fetchedRowsText(o);
+  // Rows first: when a family asked to SEE something, the list is the answer and the
+  // narration is the footnote.
+  const combined = [fetched, reasoning].filter(Boolean).join("\n\n");
+  const body = combined ? `\n\n${combined.slice(0, 2000)}` : "";
   const shortfalls = shortfallLines(o);
   const caveat = shortfalls.length ? `\n\n${shortfalls.join("\n")}` : "";
 
