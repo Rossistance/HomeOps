@@ -2,11 +2,12 @@
 // come from the server registry (/api/profiles), the same roster the session
 // role is resolved from, so what you pick here is exactly what the server will
 // grant. No typed-name actorId guessing, no client-chosen roles.
-import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, KeyboardAvoidingView, RefreshControl, ScrollView, TextInput, View } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ActivityIndicator, Image, KeyboardAvoidingView, type LayoutChangeEvent, RefreshControl, ScrollView, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { api, type ProfileRec } from "@/lib/api";
+import { api, API_URL, type ProfileRec } from "@/lib/api";
+import { fade, memberAccent } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
 import { useTheme } from "@/theme";
 import {
@@ -16,6 +17,14 @@ import {
 export function Lock() {
   const { colors, spacing, radii, fonts } = useTheme();
   const { setSession } = useSession();
+  const scrollRef = useRef<ScrollView>(null);
+  // A stable accent per member: their chosen colour, else a deterministic one from the
+  // name so two people never look identical (mirrors lib/member-colors memberColor()).
+  const FALLBACKS = ["sage", "coral", "amber", "sky", "lavender", "ink"];
+  const accentOf = (p: ProfileRec): string =>
+    memberAccent(colors, p.color)
+    ?? memberAccent(colors, FALLBACKS[[...p.displayName].reduce((a, c) => a + c.charCodeAt(0), 0) % FALLBACKS.length])
+    ?? colors.ember;
   const [profiles, setProfiles] = useState<ProfileRec[] | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<ProfileRec | null>(null);
@@ -86,6 +95,37 @@ export function Lock() {
 
   const initials = (name: string) => name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
 
+  /* B1/B3 — the Lock screen showed identical flat letter tiles for everyone: "the
+   * individual profiles do not reuse the profile images for the actual profiles inside the
+   * app — I actually would like them to", and "these are not colored properly to match
+   * what's inside of the application and they need to be."
+   *
+   * Photo → emoji → initials, and ALWAYS tinted with the member's own accent so a family
+   * can pick their row out at a glance. The photo comes from the pre-auth avatar endpoint,
+   * which is gated by the same privacy setting as this roster. */
+  const ProfileAvatar = ({ p, accent }: { p: ProfileRec; accent: string }) => {
+    const [failed, setFailed] = useState(false);
+    const pid = p.photoFileId ?? null;
+    const emoji = pid?.startsWith("emoji:") ? pid.slice("emoji:".length) : null;
+    const showPhoto = !!pid && !emoji && !failed;
+    return (
+      <View style={{ width: 44, height: 44, borderRadius: 14, borderCurve: "continuous", backgroundColor: fade(accent, 0.16), alignItems: "center", justifyContent: "center", overflow: "hidden", borderWidth: 1.5, borderColor: fade(accent, 0.5) }}>
+        {showPhoto ? (
+          <Image
+            source={{ uri: `${API_URL}/api/profiles/${encodeURIComponent(p.actorId)}/avatar` }}
+            style={{ width: "100%", height: "100%" }}
+            onError={() => setFailed(true)}
+            accessibilityIgnoresInvertColors
+          />
+        ) : emoji ? (
+          <T kind="h3">{emoji}</T>
+        ) : (
+          <T kind="h3" color={accent}>{initials(p.displayName)}</T>
+        )}
+      </View>
+    );
+  };
+
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       {/* Hearth glow rising from the bottom edge — same ember in light and dark
@@ -98,6 +138,8 @@ export function Lock() {
       <SafeAreaView style={{ flex: 1 }}>
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={process.env.EXPO_OS === "ios" ? "padding" : undefined}>
           <ScrollView
+            ref={scrollRef}
+            automaticallyAdjustKeyboardInsets
             contentContainerStyle={{ flexGrow: 1, justifyContent: "center", padding: spacing.xl, paddingBottom: 48 }}
             keyboardShouldPersistTaps="handled"
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void onRefresh()} tintColor={colors.textFaint} />}
@@ -135,12 +177,10 @@ export function Lock() {
                     disabled={busy}
                     accessibilityRole="button"
                     accessibilityLabel={`Sign in as ${p.displayName}, ${p.role}${p.pinRequired ? ", PIN required" : ""}`}
-                    style={[{ marginBottom: spacing.md }, active && { borderColor: colors.ember }]}
+                    style={[{ marginBottom: spacing.md }, active && { borderColor: accentOf(p) }]}
                   >
                     <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-                      <View style={{ width: 44, height: 44, borderRadius: 14, borderCurve: "continuous", backgroundColor: colors.emberBg, alignItems: "center", justifyContent: "center" }}>
-                        <T kind="h3" color={colors.ember}>{initials(p.displayName)}</T>
-                      </View>
+                      <ProfileAvatar p={p} accent={accentOf(p)} />
                       <View style={{ flex: 1, gap: 2 }}>
                         <T kind="bodyMedium" color={colors.text}>{p.displayName}</T>
                         <T kind="sub">{p.role}{p.relationship ? ` · ${p.relationship}` : ""}{p.pinRequired ? " · PIN" : ""}</T>
@@ -158,7 +198,19 @@ export function Lock() {
 
             {selected?.pinRequired ? (
               <Rise index={(profiles?.length ?? 0) + 1}>
-                <Card style={{ marginTop: spacing.sm }}>
+                {/* C1 — "the box for the actual pin entry is now sitting right above the
+                    keyboard, but it didn't refocus to where I can easily hit log in; I have
+                    to click out somewhere to do it… what's better is that the sign in button
+                    is still visible right above the keyboard and I do not have to scroll up."
+                    onLayout reports where this card landed and we scroll it fully into view,
+                    so Sign in arrives with the field instead of under the keyboard. */}
+                <Card
+                  style={{ marginTop: spacing.sm }}
+                  onLayout={(e: LayoutChangeEvent) => {
+                    const y = e.nativeEvent.layout.y;
+                    requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: Math.max(0, y - 24), animated: true }));
+                  }}
+                >
                   <T kind="eyebrow">Household PIN · {selected.displayName}</T>
                   <TextInput
                     value={pin}

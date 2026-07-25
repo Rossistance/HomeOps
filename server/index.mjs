@@ -722,6 +722,18 @@ const handleRequest = async (req, res) => {
       const rosterOf = () => listMembers({ householdId: pTarget }).filter((m) => !m.archived).map((m) => ({
         actorId: m.actorId, displayName: m.displayName, role: m.role,
         pinRequired: pPinSet && (m.role === "Owner" || m.role === "Adult Admin"),
+        // The Lock screen showed flat, identical letter tiles. From the owner walkthrough:
+        // "the individual profiles do not reuse the profile images for the actual profiles
+        // inside the app — I actually would like them to, and it makes sense that they
+        // should", and "these are not colored properly to match what's inside of the
+        // application and they need to be."
+        //
+        // `color` is a display accent, not PII. `photoFileId` is an opaque id — the bytes
+        // are served by /api/profiles/:actorId/avatar below, behind the SAME
+        // hideProfilesPreAuth gate that already governs whether this roster is visible at
+        // all, so a family that opts out of a public roster stays fully opted out.
+        color: m.color ?? null,
+        photoFileId: m.photoFileId ?? null,
       }));
       const profiles = pHint ? runWithTenant(pHint, rosterOf) : rosterOf();
       return json(res, 200, {
@@ -729,6 +741,40 @@ const handleRequest = async (req, res) => {
         claimed: profiles.some((p) => !SEED_ACTOR_IDS.includes(p.actorId)),
         householdName: pSettings.householdName ?? null,
       }, req);
+    }
+    /* ---- Pre-auth profile avatar (Lock screen) --------------------------------------
+     * Serves ONLY the photo of a member who already appears in the pre-auth roster above,
+     * for the SAME household, behind the SAME hideProfilesPreAuth gate. Nothing new is
+     * disclosed: if the roster is public this face is already named on that screen, and if
+     * a family hid the roster this 404s with it.
+     *
+     * Deliberately narrow: it resolves the member's OWN photoFileId and refuses any other
+     * id, so it can never become a general unauthenticated file reader. */
+    const preAuthAvatar = path.match(/^\/api\/profiles\/([^/]+)\/avatar$/);
+    if (preAuthAvatar && method === "GET") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const aHintRaw = url.searchParams.get("household");
+      const aHint = (aHintRaw && /^hh_[a-z0-9]+$/.test(aHintRaw) && tenantEngine().tenantIds().includes(aHintRaw)) ? aHintRaw : null;
+      const aTarget = aHint ?? CURRENT_TENANT;
+      const aFlagOn = getSettings(aTarget).hideProfilesPreAuth === true
+        || (aTarget === CURRENT_TENANT && /^(1|true|yes|on)$/i.test(String(process.env.HOMEOPS_HIDE_PROFILES_PREAUTH ?? "")));
+      const aSess = sessionFromReq(req);
+      if (aFlagOn && !(aSess && aSess.householdId === aTarget)) return json(res, 404, { error: "not_found" }, req);
+      const readAvatar = () => {
+        const m = listMembers({ householdId: aTarget }).find((x) => x.actorId === preAuthAvatar[1] && !x.archived);
+        const pid = m?.photoFileId ?? null;
+        // "emoji:" avatars carry no blob — the client renders the glyph itself.
+        if (!pid || pid.startsWith("emoji:")) return null;
+        const f = getFileRec(pid);
+        if (!f || f.householdId !== aTarget) return null;
+        const blobIds = Array.isArray(f.pageBlobIds) && f.pageBlobIds.length ? f.pageBlobIds : [f.id];
+        const buf = readFileBlob(blobIds[0]);
+        return buf ? { buf, mime: f.mime ?? "image/jpeg" } : null;
+      };
+      const out = aHint ? runWithTenant(aHint, readAvatar) : readAvatar();
+      if (!out) return json(res, 404, { error: "not_found" }, req);
+      res.writeHead(200, { "content-type": out.mime, "cache-control": "private, max-age=300", ...corsHeaders(req) });
+      return res.end(out.buf);
     }
     // Claim the household: replace the demo Harper roster with YOUR owner profile.
     // Unauthenticated by necessity (a new household has nobody to sign in as), but

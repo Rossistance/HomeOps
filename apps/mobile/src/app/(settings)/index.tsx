@@ -17,6 +17,7 @@ import {
 } from "@/components/ui";
 import { ConnectionSheet, type ConnectionService } from "@/components/sheets/connection-sheet";
 import { InviteSheet } from "@/components/sheets/invite-sheet";
+import { MemberAvatar } from "@/app/(home)/profile";
 
 export default function SettingsScreen() {
   const { colors, dark, spacing } = useTheme();
@@ -203,7 +204,12 @@ export default function SettingsScreen() {
                 return (
                   <Row
                     key={m.actorId}
-                    icon="person.fill"
+                    // B5/B6: was a generic person glyph — "each member here has just a
+                    // generic person icon, they need their profile pictures here… each one
+                    // should be designated by color, so it's easily identifiable."
+                    // MemberAvatar already renders the real photo (or emoji) inside the
+                    // member's own accent ring.
+                    leading={<MemberAvatar member={m} size={38} />}
                     iconColor={memberAccent(colors, m.color) ?? colors.ember}
                     iconBg={colors.emberBg}
                     title={`${m.displayName}${m.isCurrentUser ? " — you" : ""}`}

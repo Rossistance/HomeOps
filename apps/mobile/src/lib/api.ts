@@ -258,7 +258,14 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<Res<T
   return { status: res.status, ok: res.ok, data: data as T };
 }
 
-export interface ProfileRec { actorId: string; displayName: string; role: string; relationship: string | null; pinRequired: boolean }
+export interface ProfileRec {
+  actorId: string; displayName: string; role: string; relationship: string | null; pinRequired: boolean;
+  /** Lock-screen identity (owner walkthrough 00:27 / 03:45): the accent the member picked,
+   *  and their photo id. Bytes come from GET /api/profiles/:actorId/avatar, which sits
+   *  behind the same pre-auth privacy gate as this roster. */
+  color?: string | null;
+  photoFileId?: string | null;
+}
 
 export const api = {
   url: API_URL,

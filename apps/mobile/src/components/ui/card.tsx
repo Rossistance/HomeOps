@@ -1,7 +1,7 @@
 // Material surfaces. Cards get a warm rim highlight + soft drop shadow (light)
 // or a rim-only treatment (dark). PressableCard adds tactile scale + haptic.
 import type { ReactNode } from "react";
-import { View, type StyleProp, type ViewStyle } from "react-native";
+import { View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from "react-native";
 import { useTheme } from "@/theme";
 import { PressableScale, type PressableScaleProps } from "./pressable-scale";
 
@@ -18,9 +18,9 @@ export function cardStyle(colors: ReturnType<typeof useTheme>["colors"], dark: b
   };
 }
 
-export function Card({ children, style, padded = true }: { children: ReactNode; style?: StyleProp<ViewStyle>; padded?: boolean }) {
+export function Card({ children, style, padded = true, onLayout }: { children: ReactNode; style?: StyleProp<ViewStyle>; padded?: boolean; onLayout?: (e: LayoutChangeEvent) => void }) {
   const { colors, dark, spacing } = useTheme();
-  return <View style={[cardStyle(colors, dark), padded && { padding: spacing.lg }, style]}>{children}</View>;
+  return <View onLayout={onLayout} style={[cardStyle(colors, dark), padded && { padding: spacing.lg }, style]}>{children}</View>;
 }
 
 export function PressableCard({ children, style, padded = true, ...rest }: PressableScaleProps & { padded?: boolean }) {
