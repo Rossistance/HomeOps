@@ -109,3 +109,22 @@ test("an oversized page is refused with 413 (per-page cap)", async () => {
   const r = await adult.req("/api/files", { method: "POST", body: JSON.stringify({ name: "big", pages: [{ base64: b64("ok") }, { base64: big }] }) });
   assert.equal(r.status, 413);
 });
+
+test("the same photo attached twice is ONE file, not two", async () => {
+  // IMG_2957.PNG appeared three times in the library at 3.4 MB each — attaching the same photo
+  // again made another copy of it. Same household, same name, same bytes is one file the
+  // family uploaded more than once.
+  const body = JSON.stringify({ name: "IMG_2957.PNG", contentBase64: b64("the same bytes"), mime: "image/png" });
+  const first = await adult.req("/api/files", { method: "POST", body });
+  const second = await adult.req("/api/files", { method: "POST", body });
+  assert.equal(second.status, 200);
+  assert.equal(second.data.file.id, first.data.file.id, "the existing record is returned, so anything pointing at it still resolves");
+  assert.equal(second.data.deduped, true, "and it says so rather than pretending it created one");
+});
+
+test("the same NAME with different bytes is still a new file", async () => {
+  // A v2 of a form is not a duplicate.
+  const a = await adult.req("/api/files", { method: "POST", body: JSON.stringify({ name: "form.pdf", contentBase64: b64("version one") }) });
+  const b = await adult.req("/api/files", { method: "POST", body: JSON.stringify({ name: "form.pdf", contentBase64: b64("version two") }) });
+  assert.notEqual(b.data.file.id, a.data.file.id);
+});

@@ -200,12 +200,24 @@ function AdminToday() {
   // "What I did" — freshly completed runs (the activity ledger). Read-only on Home; only
   // Advanced Mode links it through to the full Activity log, which is hidden by default.
   const did = useMemo(() => {
-    const out: { key: string; icon: string; fg: string; bg: string; title: string; subtitle: string }[] = [];
-    for (const r of runs.filter((r) => ["completed", "succeeded"].includes(r.status)).slice(0, 4)) {
+    /* "Offer help for Melissa's car oil change" appeared twice, identically. Those ARE two
+     * separate runs — the same thing really did happen twice — so silently collapsing them
+     * would hide a double-execution, and listing both reads as a rendering bug. Grouped by
+     * title with a count instead: one row, and it says it happened twice. */
+    const byTitle = new Map<string, { title: string; done: number; steps: number; times: number }>();
+    for (const r of runs.filter((r) => ["completed", "succeeded"].includes(r.status))) {
+      const title = r.title || "Run completed";
       const done = r.steps.filter((s) => ["done", "completed", "succeeded"].includes(s.status)).length;
-      out.push({ key: `r-${r.id}`, icon: "checkmark.circle.fill", fg: colors.sage, bg: colors.sageBg, title: r.title || "Run completed", subtitle: `Completed · ${done}/${r.steps.length} step${r.steps.length === 1 ? "" : "s"}` });
+      const prev = byTitle.get(title);
+      if (prev) { prev.times += 1; continue; }
+      byTitle.set(title, { title, done, steps: r.steps.length, times: 1 });
     }
-    return out.slice(0, 4);
+    return [...byTitle.values()].slice(0, 4).map((g) => ({
+      key: `r-${g.title}`,
+      icon: "checkmark.circle.fill", fg: colors.sage, bg: colors.sageBg,
+      title: g.title,
+      subtitle: `Completed · ${g.done}/${g.steps} step${g.steps === 1 ? "" : "s"}${g.times > 1 ? ` · ${g.times}×` : ""}`,
+    }));
   }, [runs, colors]);
 
   // Meals and Tasks sit up front (not buried in Settings) — the two most-used

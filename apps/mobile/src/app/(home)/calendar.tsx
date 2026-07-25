@@ -218,11 +218,16 @@ export default function CalendarScreen() {
     const p = e.provenance ?? {};
     const ids = [p.subscriptionId, ...((p.alsoSubscriptionIds as string[] | undefined) ?? [])]
       .filter((x): x is string => typeof x === "string");
+    /* Q3 [10:42] — "Spike the speech therapy says wrhixin@gmail.com. It needs to say my name,
+     * Ross." The subscription's NAME is the Google account's email, so falling back to it put
+     * an address where a person belongs. The server already resolves which MEMBER connected
+     * each calendar (ownerName); use that, and keep the email only as the last resort for an
+     * ICS feed that has no member behind it at all. */
     const names = ids
-      .map((id) => subs.find((s) => s.id === id)?.name)
-      .filter((n): n is string => !!n)
-      .map((n) => /\(([^)]+)\)/.exec(n)?.[1] ?? n);
-    return names.length ? names.join(" · ") : null;
+      .map((id) => subs.find((s) => s.id === id))
+      .filter((sub): sub is NonNullable<typeof sub> => !!sub)
+      .map((sub) => sub.ownerName ?? (/\(([^)]+)\)/.exec(sub.name)?.[1] ?? sub.name));
+    return names.length ? [...new Set(names)].join(" · ") : null;
   }, [nameOf, subs]);
   /** The single accent a whole event card keys off: first participant's color →
    * the event owner's member color (linked Google events carry the member who

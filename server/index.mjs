@@ -262,16 +262,32 @@ function sendStatic(req, res, file) {
  * upload (a 25 MB file is ~34 MB of base64 plus JSON overhead) while still being a ceiling.
  * Overflow resolves to null, which every caller already treats as malformed_json. */
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
+/*
+ * Reported as "the Daily Household Briefing has some odd characters in it" — the file was
+ * stored as `Daily Household Briefing ÃÂÂ July 13, 2026.pdf`. The original had an em-dash.
+ *
+ * The cause was here: this used to accumulate with `b += chunk`, which coerces each Buffer to
+ * a string SEPARATELY. A multi-byte UTF-8 character straddling a chunk boundary is therefore
+ * decoded as two half-characters, and every accent, dash and emoji in a large enough request
+ * comes out mangled. Small bodies arrive in one chunk and look perfect, which is exactly why
+ * this survived so long — it only bites once a request is big enough to be split, i.e. an
+ * upload.
+ *
+ * Buffers are collected and decoded ONCE, over the whole body, so a character can no longer be
+ * torn in half by the network.
+ */
 function readRaw(req) {
   return new Promise((resolve) => {
-    let b = "";
+    const chunks = [];
+    let len = 0;
     let over = false;
     req.on("data", (c) => {
       if (over) return;
-      b += c;
-      if (b.length > MAX_BODY_BYTES) { over = true; b = ""; try { req.destroy(); } catch { /* already gone */ } }
+      len += c.length;
+      if (len > MAX_BODY_BYTES) { over = true; chunks.length = 0; try { req.destroy(); } catch { /* already gone */ } return; }
+      chunks.push(c);
     });
-    req.on("end", () => resolve(over ? null : b));
+    req.on("end", () => resolve(over ? null : Buffer.concat(chunks).toString("utf8")));
     req.on("error", () => resolve(null));
   });
 }
@@ -3080,6 +3096,30 @@ function mayWriteAgent(session, agent, nextVisibility) {
      * library. Upload is JSON base64 (no multipart dependency), capped at ~5 MB. */
     if (path === "/api/files" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      /* Files uploaded BEFORE `kind` existed carry no kind, and the back-compat rule treats a
+       * missing kind as a document — which is right for a school form and wrong for the photo
+       * that is currently somebody's face. So the ones a member actually points at are
+       * retagged here, once, on read: "the profile images are still not stored elsewhere…
+       * they're shown as home files."
+       *
+       * Deliberately derived from the ROSTER rather than guessed from a filename: a file is an
+       * avatar because a member's photoFileId names it, which is the only thing that makes it
+       * one. Cheap (a Set built from members already in memory) and self-healing — a photo
+       * replaced tomorrow stops being an avatar the moment nobody points at it.
+       */
+      {
+        const claimed = new Set(
+          listMembers((m) => m.householdId === g.session.householdId)
+            .map((m) => m.photoFileId)
+            .filter((x) => typeof x === "string" && !x.startsWith("emoji:")),
+        );
+        for (const fid of claimed) {
+          const f = getFileRec(fid);
+          if (f && f.householdId === g.session.householdId && (f.kind ?? "document") !== "avatar") {
+            putFileRec({ ...f, kind: "avatar" });
+          }
+        }
+      }
       // Avatars are excluded: they're chrome, not household documents (see the POST below).
       // `?include=all` exists so a future "everything stored for this household" view — or a
       // support question about disk use — can still see them, rather than the app pretending
@@ -3128,6 +3168,25 @@ function mayWriteAgent(session, agent, nextVisibility) {
         if (!buf || buf.length === 0) return json(res, 400, { error: "bad_base64" }, req);
         pageBufs.push({ name: null, buf });
       }
+      /* IMG_2957.PNG appeared three times in the library at 3.4 MB each — attaching the same
+       * photo twice created a second copy of it, and a third. Same household, same name, same
+       * bytes: that is one file the family uploaded more than once, not three documents.
+       *
+       * Deduped on a content hash. The EXISTING record is returned untouched, so anything
+       * already pointing at it (a member's avatar, a chat attachment, a knowledge item) keeps
+       * resolving. Different bytes under the same name are still a new file — a v2 of a form
+       * is not a duplicate. */
+      const contentHash = crypto.createHash("sha256")
+        .update(String(name))
+        .update(Buffer.concat(pageBufs.map((p) => p.buf)))
+        .digest("hex");
+      {
+        const existing = listFiles((f) => f.householdId === g.session.householdId && f.contentHash === contentHash)[0];
+        if (existing) {
+          audit({ type: "file.upload", fileId: existing.id, name, deduped: true, ok: true }, req, g.session);
+          return json(res, 200, { file: existing, deduped: true }, req);
+        }
+      }
       const id = "file_" + crypto.randomBytes(8).toString("hex");
       // Page 0's blob lives under the record id (so a legacy single-page reader still works);
       // extra pages get `<id>_p1`, `<id>_p2`, … . pageBlobIds indexes them in order.
@@ -3149,6 +3208,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
          * chrome, not a household file. Anything without a kind stays a document, so every
          * file uploaded before today is unaffected. */
         kind: body.kind === "avatar" ? "avatar" : "document",
+        contentHash,
         createdAt: new Date().toISOString(),
       });
       pageBufs.forEach((p, i) => writeFileBlob(pageBlobIds[i], p.buf));
