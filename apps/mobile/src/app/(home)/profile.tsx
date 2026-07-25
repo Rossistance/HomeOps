@@ -118,6 +118,8 @@ export default function ProfileScreen() {
       contentBase64: a.base64!,
       mime: a.mimeType ?? "image/jpeg",
       visibility: "private",
+      // Not a household document — keeps faces out of the family file library.
+      kind: "avatar",
     });
     setUploading(false);
     if (!r.file) { setNote({ text: `Couldn't upload that photo: ${r.message ?? r.error ?? "unknown error"}`, ok: false }); return; }

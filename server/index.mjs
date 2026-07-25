@@ -3064,7 +3064,14 @@ function mayWriteAgent(session, agent, nextVisibility) {
      * library. Upload is JSON base64 (no multipart dependency), capped at ~5 MB. */
     if (path === "/api/files" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const visible = listFiles((f) => f.householdId === g.session.householdId).filter((f) => canSeeEntity(f, g.session))
+      // Avatars are excluded: they're chrome, not household documents (see the POST below).
+      // `?include=all` exists so a future "everything stored for this household" view — or a
+      // support question about disk use — can still see them, rather than the app pretending
+      // the bytes aren't there.
+      const includeAll = url.searchParams.get("include") === "all";
+      const visible = listFiles((f) => f.householdId === g.session.householdId)
+        .filter((f) => includeAll || (f.kind ?? "document") !== "avatar")
+        .filter((f) => canSeeEntity(f, g.session))
         .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
       return json(res, 200, { files: visible }, req);
     }
@@ -3112,6 +3119,15 @@ function mayWriteAgent(session, agent, nextVisibility) {
         tags: Array.isArray(body.tags) ? body.tags.map(String).slice(0, 10) : [],
         visibility: body.visibility ?? "household", spaceId: body.spaceId ?? "sp-family",
         uploadedBy: g.session.actorId, source: body.source ?? "upload",
+        /* Reported: "the profile images are being stored as home files instead of in a
+         * dedicated location." They were — an avatar went through the same upload path as a
+         * school form, so everyone's face turned up in the family document library.
+         *
+         * The blob still lives in the same store (it has to; that's what serves the picture),
+         * but the record now says what it is, and the library lists DOCUMENTS. An avatar is
+         * chrome, not a household file. Anything without a kind stays a document, so every
+         * file uploaded before today is unaffected. */
+        kind: body.kind === "avatar" ? "avatar" : "document",
         createdAt: new Date().toISOString(),
       });
       pageBufs.forEach((p, i) => writeFileBlob(pageBlobIds[i], p.buf));

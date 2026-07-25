@@ -229,7 +229,7 @@ export function Onboarding() {
                     const a = res.assets[0];
                     if (a.base64!.length * 0.75 > MAX_PHOTO_BYTES) { setPhotoNote("That photo is over the 5 MB cap."); return; }
                     setUploading(true);
-                    const up = await api.uploadFile({ name: a.fileName ?? `avatar-${Date.now()}.jpg`, contentBase64: a.base64!, mime: a.mimeType ?? "image/jpeg", visibility: "private" });
+                    const up = await api.uploadFile({ name: a.fileName ?? `avatar-${Date.now()}.jpg`, contentBase64: a.base64!, mime: a.mimeType ?? "image/jpeg", visibility: "private", kind: "avatar" });
                     setUploading(false);
                     if (!up.file) { setPhotoNote("Couldn't upload that one — try another, or pick an emoji."); return; }
                     setPhotoFileId(up.file.id);

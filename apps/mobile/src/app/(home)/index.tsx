@@ -272,18 +272,23 @@ function AdminToday() {
                       onPress={dest ? () => router.push({ pathname: dest, params: { id: m.actorId, preview: "1" } }) : undefined}
                       disabled={!dest}
                       haptic={dest ? "select" : null}
-                      style={{ alignItems: "center", gap: 5, width: 52 }}
+                      style={{ alignItems: "center", gap: 5, width: 64 }}
                       accessibilityLabel={dest ? `Open ${m.displayName}'s view` : m.displayName}
                     >
                       <MemberAvatar member={m} size={48} />
-                      <T kind="detail" numberOfLines={1}>{m.displayName.split(" ")[0]}</T>
+                      {/* "Melissa is still truncated. Beannie is still truncated." — reported
+                          on build 36, after the app-wide unclamp. This strip was bespoke and
+                          the earlier pass never reached it: a fixed 52pt cell with a one-line
+                          clamp cuts any name past about six characters. Wider cell, and the
+                          name wraps instead of being cut. A1's rule, applied here too. */}
+                      <T kind="detail" center>{m.displayName.split(" ")[0]}</T>
                     </PressableScale>
                   );
                 })}
                 <PressableScale
                   onPress={() => setInviteOpen(true)}
                   haptic="select"
-                  style={{ alignItems: "center", gap: 5, width: 52 }}
+                  style={{ alignItems: "center", gap: 5, width: 64 }}
                   accessibilityLabel="Invite someone"
                 >
                   <View style={[st.avatar, { borderWidth: 1.5, borderStyle: "dashed", borderColor: colors.textFaint }]}>

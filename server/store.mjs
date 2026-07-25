@@ -457,7 +457,11 @@ export function isAdultRole(role) {
 //   private      → owner + participants only
 export function canSeeEntity(entity, { role, actorId } = {}) {
   if (!entity) return false;
-  const isOwner = entity.ownerId === actorId || entity.createdBy === actorId;
+  // `uploadedBy` is the file collection's name for the same idea as ownerId/createdBy. Without
+  // it, a visibility:"private" FILE was invisible to the person who uploaded it — which is how
+  // a profile photo could upload successfully, save its id onto the member, and then silently
+  // never render anywhere (the avatar fell back to initials and nothing reported a failure).
+  const isOwner = entity.ownerId === actorId || entity.createdBy === actorId || entity.uploadedBy === actorId;
   const members = entity.participantIds ?? entity.memberIds ?? [];
   const isParticipant = (Array.isArray(members) && members.includes(actorId)) || entity.assignedMemberId === actorId;
   if (isOwner || isParticipant) return true;

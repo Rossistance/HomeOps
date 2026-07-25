@@ -667,7 +667,9 @@ export const api = {
   // `pages` (optional) uploads a multi-page logical file (e.g. front + back of an ID) —
   // contentBase64 stays the primary/first-page blob for back-compat; the server files
   // the extra pages and returns pageBlobIds[]/pageCount on the record.
-  async uploadFile(body: { name: string; contentBase64: string; mime?: string; tags?: string[]; visibility?: string; pages?: { name?: string; base64: string }[] }): Promise<{ file?: FileRec; error?: string; message?: string }> {
+  /** `kind: "avatar"` keeps a profile picture out of the family document library — the blob
+   *  is stored the same way, but the Library lists documents. Omitted means document. */
+  async uploadFile(body: { name: string; contentBase64: string; mime?: string; tags?: string[]; visibility?: string; kind?: "avatar" | "document"; pages?: { name?: string; base64: string }[] }): Promise<{ file?: FileRec; error?: string; message?: string }> {
     const r = await req<{ file?: FileRec; error?: string; message?: string }>("/files", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };
     if (r.status === 413) return { error: "too_large" };
