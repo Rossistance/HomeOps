@@ -7,7 +7,7 @@ import { Alert, ScrollView, Switch, TextInput, View } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
-import { api, type ApprovalRec, type EventRec, type MemberRec } from "@/lib/api";
+import { api, type ApprovalRec, type AttendeeRec, type EventRec, type MemberRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { loadDraft, saveDraft, clearDraft, isEmptyDraft, type EventDraft } from "@/lib/event-drafts";
 import { useTheme, tapHaptic } from "@/theme";
@@ -133,6 +133,12 @@ export default function EventFormScreen() {
   // WP-003/ISS-005: all-day events — real model concept, not a faked time.
   const [allDay, setAllDay] = useState(false);
   const [driverId, setDriverId] = useState<string | null>(null);
+  /* E5 [12:26] — "replace or augment the note-for-driver with WHO'S ATTENDING: let me pick
+   * GPop, Beannie, Melissa." Attendees are saved through their own endpoint rather than the
+   * event PATCH, because setting them has a side effect the PATCH must not have: it NOTIFIES
+   * the people added (E6), and it has to preserve answers people already gave (E7). */
+  const [attendees, setAttendees] = useState<AttendeeRec[]>([]);
+  const [attendeeBusy, setAttendeeBusy] = useState(false);
   const [bring, setBring] = useState<{ item: string; memberId: string | null }[]>([]);
   const [bringInput, setBringInput] = useState("");
   // WP-003/ISS-006: general notes — the server has stored EventRec.notes all
@@ -178,6 +184,10 @@ export default function EventFormScreen() {
           setLocation(e.location ?? "");
           setNotes(e.notes ?? "");
           setDriverId(e.driverId);
+          // An event from before this feature has participantIds but no answers. Reading that
+          // as "everyone accepted" would show a card claiming three people said yes when
+          // nobody was ever asked.
+          setAttendees(e.attendees ?? (e.participantIds ?? []).map((m) => ({ memberId: m, status: "invited" as const, respondedAt: null })));
           setBring(e.whatToBring.map((w) => ({ item: w.item, memberId: w.memberId })));
           const s = e.startAt ? new Date(e.startAt) : null;
           if (s && !isNaN(+s)) {
@@ -563,7 +573,106 @@ export default function EventFormScreen() {
         />
       </Well>
 
-      {/* Driver */}
+      {/* E5/E6/E7 — who's attending, whether they've been told, and what they said. */}
+      {isEdit ? (
+        <>
+          <SectionHeader title="Who's coming" />
+          <View style={{ gap: spacing.sm }}>
+            <ChipRow>
+              {members.map((m) => {
+                const row = attendees.find((a) => a.memberId === m.actorId);
+                return (
+                  <Chip
+                    key={m.actorId}
+                    label={m.displayName.split(" ")[0]}
+                    icon={row?.status === "accepted" ? "checkmark.circle.fill" : row?.status === "declined" ? "xmark.circle.fill" : row ? "person.fill" : "person"}
+                    selected={!!row}
+                    onPress={readOnly || !canManage || attendeeBusy ? undefined : () => void (async () => {
+                      const next = row
+                        ? attendees.filter((a) => a.memberId !== m.actorId).map((a) => a.memberId)
+                        : [...attendees.map((a) => a.memberId), m.actorId];
+                      setAttendeeBusy(true);
+                      const r = await api.setEventAttendees(id!, next);
+                      setAttendeeBusy(false);
+                      if (!r.event) {
+                        setNotice({ text: r.message ?? "Couldn't change who's coming.", ok: false });
+                        return;
+                      }
+                      tapHaptic("success");
+                      setAttendees(r.event.attendees ?? []);
+                      // Say what actually happened. "Added" without "and told them" is the
+                      // kind of half-truth this app has been rooting out.
+                      if (r.notified) setNotice({ text: `${m.displayName.split(" ")[0]} has been told they're on this.`, ok: true });
+                    })()}
+                  />
+                );
+              })}
+            </ChipRow>
+            {attendees.length > 0 ? (
+              <View style={{ gap: 4 }}>
+                {attendees.map((a) => {
+                  const m = members.find((x) => x.actorId === a.memberId);
+                  const mine = a.memberId === session?.actorId;
+                  const tone = a.status === "accepted" ? colors.sage : a.status === "declined" ? colors.coral : colors.textFaint;
+                  return (
+                    <View key={a.memberId} style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, minHeight: 34 }}>
+                      <Sym
+                        name={a.status === "accepted" ? "checkmark.circle.fill" : a.status === "declined" ? "xmark.circle.fill" : "clock"}
+                        size={14} color={tone}
+                      />
+                      <T kind="sub" color={colors.text} style={{ flex: 1 }}>
+                        {m?.displayName ?? a.memberId}
+                        <T kind="sub" color={tone}>
+                          {a.status === "accepted" ? " · coming" : a.status === "declined" ? " · can't make it" : " · hasn't answered"}
+                        </T>
+                      </T>
+                      {/* E7 — the accept/decline pair, and only for your OWN row: the server
+                          refuses answering for anyone else unless you're an adult. */}
+                      {mine ? (
+                        <View style={{ flexDirection: "row", gap: 6 }}>
+                          {(["accepted", "declined"] as const).map((want) => (
+                            <PressableScale
+                              key={want}
+                              haptic="select"
+                              disabled={attendeeBusy || a.status === want}
+                              onPress={() => void (async () => {
+                                setAttendeeBusy(true);
+                                const r = await api.rsvpEvent(id!, want);
+                                setAttendeeBusy(false);
+                                if (!r.event) { setNotice({ text: r.message ?? "Couldn't send your answer.", ok: false }); return; }
+                                tapHaptic(want === "accepted" ? "success" : "light");
+                                setAttendees(r.event.attendees ?? []);
+                              })()}
+                              accessibilityRole="button"
+                              accessibilityLabel={want === "accepted" ? "I'm coming" : "I can't make it"}
+                              style={{
+                                paddingHorizontal: 11, paddingVertical: 5, borderRadius: 999,
+                                backgroundColor: a.status === want ? (want === "accepted" ? colors.sageBg : colors.coralBg) : colors.surfaceSunken,
+                                opacity: attendeeBusy ? 0.6 : 1,
+                              }}
+                            >
+                              <T kind="caption" color={want === "accepted" ? colors.sage : colors.coral} style={{ fontWeight: "600" }}>
+                                {want === "accepted" ? "I'm in" : "Can't"}
+                              </T>
+                            </PressableScale>
+                          ))}
+                        </View>
+                      ) : null}
+                    </View>
+                  );
+                })}
+              </View>
+            ) : (
+              <T kind="caption" color={colors.textFaint}>
+                Nobody added yet. Picking someone tells them they&apos;re on it, and they can answer.
+              </T>
+            )}
+          </View>
+        </>
+      ) : null}
+
+      {/* Driver — kept alongside attendees, not replaced by them: "who's driving" is a
+          different question from "who's coming", and a carpool needs both. */}
       <SectionHeader title="Driver" />
       <ChipRow>
         <Chip label="No driver" selected={driverId === null} onPress={readOnly || !canManage ? undefined : () => setDriverId(null)} />

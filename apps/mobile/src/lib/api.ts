@@ -143,7 +143,13 @@ export interface EventRec {
    *  (needs_reconnect / revoked / expired), so a disconnected calendar can never contribute
    *  silently. Server-derived per request — it clears itself once the account reconnects. */
   staleSource?: { accountId: string; status: string; provider: string; connectedByActorId: string | null };
+  /** E5/E7 — who's on the event and what they said. Absent on events created before this
+   *  feature, which carry `participantIds` only; those read as "invited", never as accepted. */
+  attendees?: AttendeeRec[];
+  /** H7 — set when this event was created from a task. */
+  taskId?: string | null;
 }
+export interface AttendeeRec { memberId: string; status: "invited" | "accepted" | "declined"; respondedAt: string | null }
 export interface TaskRec {
   id: string; title: string; type: string; status: string; dueAt: string | null;
   assignedMemberId: string | null; priority: string; amount: number | null; visibility: string;
@@ -425,6 +431,15 @@ export const api = {
   async conversation(id: string): Promise<ConversationRec | null> {
     const r = await req<{ conversation?: ConversationRec }>(`/conversations/${encodeURIComponent(id)}`);
     return r.data?.conversation ?? null;
+  },
+  /* I1/I3 — rename a thread (which pins the name against the auto-namer), or move it between
+   * Personal and Family. The server allows the move only for the thread's own author: making
+   * a personal chat family-visible publishes everything already in it. */
+  async patchConversation(id: string, patch: { title?: string; visibility?: "personal" | "household" }): Promise<{ conversation?: ConversationRec; error?: string; message?: string }> {
+    const r = await req<{ conversation?: ConversationRec; error?: string; message?: string }>(`/conversations/${encodeURIComponent(id)}`, {
+      method: "PATCH", body: JSON.stringify(patch),
+    });
+    return r.data ?? { error: "network" };
   },
   async deleteConversation(id: string): Promise<{ ok?: boolean; error?: string }> {
     const r = await req<{ ok?: boolean; error?: string }>(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -876,6 +891,22 @@ export const api = {
   async updateEvent(id: string, patch: Record<string, unknown>): Promise<{ event?: EventRec; error?: string; message?: string }> {
     const r = await req<{ event?: EventRec; error?: string }>(`/events/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
     if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  /* ---- E5/E6/E7: who's coming, told, and answering --------------------------------- */
+  async setEventAttendees(id: string, memberIds: string[]): Promise<{ event?: EventRec; notified?: number; error?: string; message?: string }> {
+    const r = await req<{ event?: EventRec; notified?: number; error?: string; message?: string }>(`/events/${encodeURIComponent(id)}/attendees`, {
+      method: "POST", body: JSON.stringify({ memberIds }),
+    });
+    if (r.status === 403) return { error: "insufficient_role" };
+    return r.data ?? { error: "network" };
+  },
+  /** `memberId` is optional: omit it to answer for yourself (the only thing most members
+   *  may do — the server refuses answering for anyone else unless you're an adult). */
+  async rsvpEvent(id: string, status: "accepted" | "declined" | "invited", memberId?: string): Promise<{ event?: EventRec; error?: string; message?: string }> {
+    const r = await req<{ event?: EventRec; error?: string; message?: string }>(`/events/${encodeURIComponent(id)}/rsvp`, {
+      method: "POST", body: JSON.stringify({ status, ...(memberId ? { memberId } : {}) }),
+    });
     return r.data ?? { error: "network" };
   },
   async deleteEvent(id: string): Promise<{ ok?: boolean; error?: string }> {

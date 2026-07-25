@@ -54,6 +54,7 @@ import {
   deriveCapabilitiesFromSteps, agentVisibleTo,
 } from "./agents.mjs";
 import { agentTemplateSections } from "./agent-templates.mjs";
+import { nameConversation } from "./planner.mjs";
 import { suggestAddresses } from "./places.mjs";
 import { isValidReminder, sweepTaskReminders } from "./reminders.mjs";
 import { getAgent } from "./store.mjs";
@@ -298,6 +299,26 @@ function audit(event, req, session) {
     requestId: req?.__rid ?? null,
     ip: req?.socket?.remoteAddress ?? null,
   });
+}
+
+/* I1 — rename a thread from its first exchange, once, and only while it still carries the
+ * auto-title (the truncated first message). A family that renamed a chat themselves keeps
+ * their name: overwriting a deliberate title with a generated one is worse than a bad title.
+ * Fire-and-forget — the turn is already saved and must not wait on, or fail because of, this. */
+function maybeNameConversation(convId, { question, answer, session }) {
+  const conv = getConversation(convId);
+  if (!conv || conv.titleAuto === false) return;
+  // Only the FIRST exchange: 2 messages means the pair we just wrote.
+  if ((conv.messages ?? []).length > 2) return;
+  if (!String(answer ?? "").trim()) return;      // nothing to name it from
+  void nameConversation({ question, answer, session })
+    .then((title) => {
+      if (!title) return;
+      const fresh = getConversation(convId);
+      if (!fresh || fresh.titleAuto === false) return;
+      putConversation({ ...fresh, title, titleAuto: true, updatedAt: new Date().toISOString() });
+    })
+    .catch(() => { /* the thread keeps the title it already has */ });
 }
 
 /* ----------------------------- Job scheduler ---------------------------- */
@@ -1686,6 +1707,102 @@ const handleRequest = async (req, res) => {
       audit({ type: "event.create", eventId: ev.id, ok: true }, req, g.session);
       return json(res, 200, { event: ev }, req);
     }
+    /* ---- E5/E6/E7: who's coming, told, and answering ----
+     * [12:26] "Replace or augment 'note for driver' with WHO'S ATTENDING — let me pick GPop,
+     *          Beannie, Melissa."
+     * [12:56] "Selecting them should notify them, or at least inform them they're on it."
+     * [13:07] "And they should be able to accept or decline, like a meeting invite."
+     *
+     * `attendees` is a list of { memberId, status, respondedAt } living alongside the older
+     * `participantIds` (which many screens and the Google push still read). Setting attendees
+     * keeps participantIds in step, so nothing downstream has to learn a new field to keep
+     * working — and an existing event with participants but no RSVP list is read as everyone
+     * "invited", not as everyone silently accepted.
+     */
+    const eventAttendees = path.match(/^\/api\/events\/([^/]+)\/attendees$/);
+    if (eventAttendees && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const ev = getEvent(eventAttendees[1]);
+      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!canSeeEntity(ev, g.session) || (!isAdultRole(g.session.role) && ev.ownerId !== g.session.actorId)) return json(res, 403, { error: "forbidden" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const wanted = Array.isArray(body.memberIds) ? body.memberIds.map(String) : null;
+      if (!wanted) return json(res, 400, { error: "member_ids_required" }, req);
+      // Only real, non-archived household members — an invite to an id nobody holds is a
+      // row on a card that can never respond.
+      const roster = new Map(listMembers((m) => m.householdId === g.session.householdId && !m.archived).map((m) => [m.actorId, m]));
+      const ids = [...new Set(wanted.filter((x) => roster.has(x)))];
+      const prior = new Map((ev.attendees ?? []).map((a) => [a.memberId, a]));
+      // An existing answer is PRESERVED across an edit: re-saving the list must not silently
+      // reset someone who already declined back to "invited".
+      const attendees = ids.map((memberId) => prior.get(memberId) ?? { memberId, status: "invited", respondedAt: null });
+      // Whoever is genuinely new AND isn't the person doing the adding — nobody needs a
+      // notification telling them what they just did.
+      const added = ids.filter((x) => !prior.has(x) && x !== g.session.actorId);
+      const updated = patchEvent(ev.id, { attendees, participantIds: ids });
+
+      // E6 — newly added people are actually told. Their own device (push) plus a durable
+      // in-app notification, so it survives a phone that was off. Never re-notified on an
+      // unrelated edit: only `added`.
+      const when = updated.startAt
+        ? new Date(updated.startAt).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+        : "no date set yet";
+      for (const memberId of added) {
+        addNotification({
+          householdId: g.session.householdId, actorId: memberId, channel: "in_app",
+          title: `You're on "${updated.title}"`,
+          body: `${when}${updated.location ? ` · ${updated.location}` : ""}. Let them know if you can make it.`,
+          to: null,
+        });
+        void pushToMember({
+          householdId: g.session.householdId, actorId: memberId,
+          title: `You're on "${updated.title}"`,
+          body: `${when}. Accept or decline in FamiliOS.`,
+          data: { type: "event", id: updated.id },
+        }).catch(() => {});
+      }
+      audit({ type: "event.attendees_set", eventId: ev.id, count: ids.length, notified: added.length, ok: true }, req, g.session);
+      return json(res, 200, { event: updated, notified: added.length }, req);
+    }
+    // E7 — accept or decline, for YOURSELF. An adult may answer on behalf of a child they can
+    // already act for; nobody else can put words in another member's mouth.
+    const eventRsvp = path.match(/^\/api\/events\/([^/]+)\/rsvp$/);
+    if (eventRsvp && method === "POST") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const ev = getEvent(eventRsvp[1]);
+      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const status = ["accepted", "declined", "invited"].includes(body.status) ? body.status : null;
+      if (!status) return json(res, 400, { error: "bad_status", message: "Answer with accepted, declined, or invited." }, req);
+      const memberId = String(body.memberId ?? g.session.actorId);
+      if (memberId !== g.session.actorId && !isAdultRole(g.session.role)) {
+        return json(res, 403, { error: "forbidden", message: "You can only answer for yourself." }, req);
+      }
+      const list = ev.attendees ?? (ev.participantIds ?? []).map((m) => ({ memberId: m, status: "invited", respondedAt: null }));
+      if (!list.some((a) => a.memberId === memberId)) {
+        return json(res, 400, { error: "not_an_attendee", message: "That person isn't on this event." }, req);
+      }
+      const attendees = list.map((a) => (a.memberId === memberId
+        ? { ...a, status, respondedAt: status === "invited" ? null : new Date().toISOString() }
+        : a));
+      const updated = patchEvent(ev.id, { attendees });
+      // The organizer finds out. Silent RSVPs are the reason people text "did you see my
+      // reply?" — and the event owner is the one who has to plan around the answer.
+      if (ev.ownerId && ev.ownerId !== memberId) {
+        const who = getMember(memberId)?.displayName ?? "Someone";
+        addNotification({
+          householdId: g.session.householdId, actorId: ev.ownerId, channel: "in_app",
+          title: `${who} ${status === "accepted" ? "is coming" : status === "declined" ? "can't make it" : "hasn't answered"}`,
+          body: `"${updated.title}"`,
+          to: null,
+        });
+      }
+      audit({ type: "event.rsvp", eventId: ev.id, memberId, status, ok: true }, req, g.session);
+      return json(res, 200, { event: updated }, req);
+    }
+
     const eventOne = path.match(/^\/api\/events\/([^/]+)$/);
     if (eventOne && (method === "PATCH" || method === "POST")) {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -2421,7 +2538,9 @@ const handleRequest = async (req, res) => {
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const c = putConversation({
         id: "conv_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId, actorId: g.session.actorId,
-        title: String(body.title ?? "New chat").slice(0, 80), messages: [],
+        // The client seeds this with the truncated first message; titleAuto marks it as a
+        // placeholder the namer is allowed to replace (I1).
+        title: String(body.title ?? "New chat").slice(0, 80), titleAuto: true, messages: [],
         visibility: body.visibility === "household" ? "household" : "personal",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
@@ -2433,6 +2552,39 @@ const handleRequest = async (req, res) => {
       const c = getConversation(convOne[1]);
       if (!canSeeConversation(c, g.session)) return json(res, 404, { error: "not_found" }, req);
       return json(res, 200, { conversation: c }, req);
+    }
+    // I1 — renaming a thread by hand pins the name: titleAuto:false stops the auto-namer
+    // from ever overwriting a title a person chose deliberately.
+    // I3 — and the same route moves a thread between Personal and Family, which was
+    // previously only possible by starting a new chat.
+    if (convOne && method === "PATCH") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const c = getConversation(convOne[1]);
+      if (!canSeeConversation(c, g.session)) return json(res, 404, { error: "not_found" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const patch = {};
+      if (body.title !== undefined) {
+        const title = String(body.title).trim();
+        if (!title) return json(res, 400, { error: "title_required" }, req);
+        patch.title = title.slice(0, 80);
+        patch.titleAuto = false;
+      }
+      /* I3 [16:45] — "from inside a chat I can't switch between Personal and Family without
+       * starting a new one. That's not the correct path."
+       *
+       * Moving a thread between spaces is a real visibility change, so only its OWNER may do
+       * it: making a personal thread family-visible publishes everything already in it, and
+       * that is not a decision for anyone else to take on your behalf. */
+      if (body.visibility !== undefined) {
+        if (c.actorId !== g.session.actorId) {
+          return json(res, 403, { error: "forbidden", message: "Only the person who started this chat can move it between Personal and Family." }, req);
+        }
+        patch.visibility = body.visibility === "household" ? "household" : "personal";
+      }
+      if (Object.keys(patch).length === 0) return json(res, 400, { error: "nothing_to_change" }, req);
+      const next = putConversation({ ...c, ...patch, updatedAt: new Date().toISOString() });
+      audit({ type: "conversation.update", conversationId: c.id, changed: Object.keys(patch), ok: true }, req, g.session);
+      return json(res, 200, { conversation: next }, req);
     }
     if (convOne && method === "DELETE") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -3505,6 +3657,8 @@ const handleRequest = async (req, res) => {
           appendConversationMessage(conv.id, out.ok
             ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, runId: out.run?.id ?? null, model: out.model ?? null, at }
             : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at });
+          // I1 — name the thread from the first exchange (see maybeNameConversation).
+          if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? out.plan?.summary ?? out.build?.summary ?? "", session: g.session });
         }
       }
       audit({ type: "assistant.respond", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
@@ -3578,6 +3732,9 @@ const handleRequest = async (req, res) => {
           appendConversationMessage(conv.id, out.ok
             ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, runId: out.run?.id ?? null, model: out.model ?? null, at: new Date().toISOString() }
             : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at: new Date().toISOString() });
+          // I1 — the streaming path is the one the real chat UI uses, so naming has to happen
+          // here too or it would never fire in practice.
+          if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? out.plan?.summary ?? out.build?.summary ?? "", session: g.session });
         }
         audit({ type: "assistant.stream", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
         res.write(`data: ${JSON.stringify({ type: "done", result: out })}\n\n`);

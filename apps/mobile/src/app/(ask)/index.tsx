@@ -83,6 +83,7 @@ export default function AskScreen() {
   // worked) or family (shared — any household member can read and continue it).
   const [space, setSpace] = useState<"personal" | "household">("personal");
   const [recent, setRecent] = useState<ConversationRec[]>([]);
+  const [movingSpace, setMovingSpace] = useState(false);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [kbVisible, setKbVisible] = useState(false);
   // One pending attachment (uploaded immediately; referenced on the next send).
@@ -90,6 +91,10 @@ export default function AskScreen() {
   const [attaching, setAttaching] = useState(false);
   // Current member record → child AI gating (server enforces 403 ai_disabled too).
   const [me, setMe] = useState<MemberRec | null>(null);
+
+  // I2 — only this space's chats. A chat with no recorded visibility is treated as personal,
+  // which is what it was created as before the field existed.
+  const visibleRecent = recent.filter((c) => (c.visibility === "household" ? "household" : "personal") === space);
 
   const scroller = useRef<ScrollView>(null);
   const instantScroll = useRef(false);
@@ -272,6 +277,34 @@ export default function AskScreen() {
     handledDraft.current = d;
     setText(d);
   }, [params.draft]);
+
+  /* I3 — move THIS chat between Personal and Family. With no thread yet it's just a choice
+   * about where the next one lands; with a thread it's a real visibility change, so the
+   * publishing direction asks first. */
+  const switchSpace = useCallback(async (next: "personal" | "household") => {
+    if (!conversationId) { setSpace(next); return; }
+    const commit = async () => {
+      setMovingSpace(true);
+      const r = await api.patchConversation(conversationId, { visibility: next });
+      setMovingSpace(false);
+      if (!r.conversation) {
+        Alert.alert("Couldn't move this chat", r.message ?? "Something went wrong.");
+        return;
+      }
+      tapHaptic("success");
+      setSpace(next);
+      setRecent((rs) => rs.map((c) => (c.id === conversationId ? r.conversation! : c)));
+    };
+    if (next === "household") {
+      Alert.alert(
+        "Share this chat with the family?",
+        "Everyone in the household will be able to read it — including everything already said.",
+        [{ text: "Cancel", style: "cancel" }, { text: "Share", onPress: () => void commit() }],
+      );
+      return;
+    }
+    await commit();
+  }, [conversationId]);
 
   const newChat = useCallback(() => {
     if (busy) return;
@@ -557,17 +590,23 @@ export default function AskScreen() {
                 <PressableScale
                   key={key}
                   haptic="select"
-                  disabled={!!conversationId}
-                  onPress={() => setSpace(key)}
+                  disabled={movingSpace}
+                  /* I3 [16:45] — "from inside a chat I can't switch between Personal and
+                     Family without starting a new chat. That's not the correct path." It used
+                     to be disabled the moment a thread existed. Now it MOVES the thread —
+                     with a confirmation on the direction that publishes it, because making a
+                     personal chat family-visible exposes everything already said in it. */
+                  onPress={() => { if (!active) void switchSpace(key); }}
                   accessibilityRole="button"
                   accessibilityState={{ selected: active }}
                   accessibilityLabel={`${label} space`}
+                  accessibilityHint={conversationId && !active ? `Moves this chat to ${label}` : undefined}
                   style={{
                     flexDirection: "row", alignItems: "center", gap: 6,
                     paddingHorizontal: 11, paddingVertical: 6, borderRadius: 999,
                     backgroundColor: active ? tint : "transparent",
                     borderWidth: 1, borderColor: active ? tint : colors.border,
-                    opacity: conversationId && !active ? 0.4 : 1,
+                    opacity: movingSpace && !active ? 0.4 : 1,
                   }}
                 >
                   <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: active ? colors.surface : tint }} />
@@ -576,12 +615,14 @@ export default function AskScreen() {
               );
             })}
             <T kind="caption" color={colors.textFaint} style={{ flex: 1 }} numberOfLines={1}>
-              {space === "household" ? "Shared with the household" : "Only you can see this chat"}
+              {movingSpace ? "Moving…" : space === "household" ? "Shared with the household" : "Only you can see this chat"}
             </T>
           </View>
 
-          {/* Conversation switcher: recent chats as chips; long-press deletes. */}
-          {recent.length > 0 ? (
+          {/* I2 [16:21] — "the Personal tab should show ONLY personal chats, and Family only
+              family. The dot colour is the section cue." They were all listed together under
+              both, which made the toggle above look decorative. */}
+          {visibleRecent.length > 0 ? (
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
@@ -590,7 +631,7 @@ export default function AskScreen() {
               keyboardShouldPersistTaps="handled"
             >
               <ConvChip icon="plus" label="New" onPress={newChat} />
-              {recent.map((c) => (
+              {visibleRecent.map((c) => (
                 <ConvChip
                   key={c.id}
                   label={c.title || "Untitled chat"}

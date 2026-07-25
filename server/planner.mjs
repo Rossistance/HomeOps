@@ -51,6 +51,51 @@ const MINIAPP_TYPES = ["Chore Board", "Trip Planner", "Budget Snapshot", "Grocer
 const RISKS = ["Low", "Medium", "High", "Sensitive"];
 const EXECUTABLE = ["connected", "authorized_write", "authorized_readonly", "local_only"];
 
+/* I1 [16:14] — "intelligently name the chat, like ChatGPT or Claude does."
+ *
+ * Chats were titled with the first 40-60 characters of whatever the user typed, so the
+ * switcher filled up with chips reading "give me a list of the 5…" and "What can you do
+ * for…" — the exact truncation complaint from A5/K5, but caused by the title itself rather
+ * than by the layout.
+ *
+ * Named from the first exchange (question AND answer), because the question alone is often
+ * the ambiguous half: "what about Thursday?" means nothing without what came back.
+ *
+ * Deliberately cheap and deliberately optional. It runs once per thread, on the smallest
+ * available model call, and any failure leaves the existing title exactly as it was — a chat
+ * with a clumsy name is a small annoyance; a chat that failed to save because naming it
+ * broke is not.
+ */
+const TITLE_SYS = `Name this conversation the way a person would name a note about it.
+- 2 to 5 words. Title Case. No quotes, no trailing period, no emoji.
+- Name the SUBJECT, not the request: "Restaurants Near Home", not "User Asks For Restaurants".
+- If it is about a specific person or event, use their name: "Beannie's Dentist Appointment".
+- If the exchange is small talk or a test, answer exactly: Quick Question
+Reply with ONLY the title.`;
+
+export async function nameConversation({ question, answer, session, providerId }) {
+  const pid = activeProviderId(providerId, session?.householdId);
+  if (!pid) return null;
+  if (aiBudgetExhausted(session?.householdId)) return null;
+  recordAiUsage(session?.householdId, "title");
+  const out = await providerChatWithFallback(pid, {
+    messages: [
+      { role: "system", content: TITLE_SYS },
+      { role: "user", content: `Q: ${String(question ?? "").slice(0, 600)}\n\nA: ${String(answer ?? "").slice(0, 600)}` },
+    ],
+  }).catch(() => null);
+  if (!out?.ok || !out.text) return null;
+  // A model that ignores the instructions must not be able to write a paragraph into a chip.
+  const title = String(out.text)
+    .split("\n")[0]
+    .replace(/^["'\s]+|["'\s.]+$/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 60)
+    .trim();
+  if (!title || title.length < 3) return null;
+  return title;
+}
+
 function activeProviderId(explicit, householdId) {
   return explicit || getSettings(householdId).aiActiveProvider || null;
 }
