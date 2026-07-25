@@ -249,6 +249,65 @@ export async function providerChatWithFallback(primaryId, opts) {
   return out; // honest original failure — nothing else could answer
 }
 
+/* ---- Vision: a message may carry IMAGES, not just text -----------------------------------
+ *
+ * Recorded verbatim, the assistant answering its own bug: "attachments are generally meant for
+ * any file, document, or photo the chat UI passes through to me. In this conversation, though,
+ * I'm NOT RECEIVING READABLE ATTACHMENT CONTENTS, so I can't inspect the specific image you
+ * sent here."
+ *
+ * It was telling the truth. A message's `content` was a plain string everywhere in this file,
+ * so an attached photo could never be part of the turn no matter what the upload did.
+ *
+ * A message content may now be either a string (unchanged, every existing caller) or
+ * `{ text, images: [{ mime, base64 }] }`. Each provider needs its own shape for that, so the
+ * conversion lives here rather than at the call sites — a caller should be able to attach a
+ * photo without knowing which model the household happens to be using.
+ */
+function hasImages(m) {
+  return m && typeof m.content === "object" && Array.isArray(m.content.images) && m.content.images.length > 0;
+}
+/** Any message anywhere in this conversation carrying an image. */
+export function messagesHaveImages(messages) {
+  return (messages ?? []).some(hasImages);
+}
+const contentText = (c) => (typeof c === "string" ? c : String(c?.text ?? ""));
+
+function toOpenAIContent(c) {
+  if (typeof c === "string") return c;
+  const parts = [];
+  if (c.text) parts.push({ type: "text", text: String(c.text) });
+  for (const img of c.images ?? []) {
+    parts.push({ type: "image_url", image_url: { url: `data:${img.mime || "image/jpeg"};base64,${img.base64}` } });
+  }
+  return parts.length ? parts : String(c.text ?? "");
+}
+function toAnthropicContent(c) {
+  if (typeof c === "string") return c;
+  const parts = [];
+  // Images first: Anthropic's own guidance is that the image should precede the question
+  // about it, and it measurably answers better that way.
+  for (const img of c.images ?? []) {
+    parts.push({ type: "image", source: { type: "base64", media_type: img.mime || "image/jpeg", data: img.base64 } });
+  }
+  if (c.text) parts.push({ type: "text", text: String(c.text) });
+  return parts.length ? parts : String(c.text ?? "");
+}
+function toGeminiParts(c) {
+  if (typeof c === "string") return [{ text: c }];
+  const parts = [];
+  if (c.text) parts.push({ text: String(c.text) });
+  for (const img of c.images ?? []) {
+    parts.push({ inline_data: { mime_type: img.mime || "image/jpeg", data: img.base64 } });
+  }
+  return parts.length ? parts : [{ text: String(c.text ?? "") }];
+}
+/** Ollama takes base64 images on a separate `images` array beside the text. */
+function toOllamaMessage(m) {
+  if (!hasImages(m)) return { ...m, content: contentText(m.content) };
+  return { role: m.role, content: contentText(m.content), images: (m.content.images ?? []).map((i) => i.base64) };
+}
+
 export async function providerChat(id, { messages = [], model } = {}) {
   const p = aiProviderById(id);
   if (!p) return { ok: false, error: "unknown_provider" };
@@ -263,8 +322,8 @@ export async function providerChat(id, { messages = [], model } = {}) {
   }
   try {
     if (p.style === "anthropic") {
-      const system = messages.find((m) => m.role === "system")?.content;
-      const conv = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
+      const system = contentText(messages.find((m) => m.role === "system")?.content);
+      const conv = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: toAnthropicContent(m.content) }));
       const r = await getJSON(`${base}/v1/messages`, {
         method: "POST",
         headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
@@ -275,8 +334,8 @@ export async function providerChat(id, { messages = [], model } = {}) {
       return { ok: true, model: useModel, text: (r.json?.content ?? []).map((c) => c.text).join("").trim() };
     }
     if (p.style === "gemini") {
-      const contents = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
-      const sys = messages.find((m) => m.role === "system")?.content;
+      const contents = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: toGeminiParts(m.content) }));
+      const sys = contentText(messages.find((m) => m.role === "system")?.content);
       const r = await getJSON(`${base}/models/${encodeURIComponent(useModel)}:generateContent?key=${encodeURIComponent(key)}`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ contents, ...(sys ? { systemInstruction: { parts: [{ text: sys }] } } : {}) }),
@@ -289,7 +348,7 @@ export async function providerChat(id, { messages = [], model } = {}) {
     if (p.style === "ollama") {
       const r = await getJSON(`${base}/api/chat`, {
         method: "POST", headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
-        body: JSON.stringify({ model: useModel, messages, stream: false }),
+        body: JSON.stringify({ model: useModel, messages: messages.map(toOllamaMessage), stream: false }),
       }, p.local, CHAT_TIMEOUT_MS);
       if (!r.ok) return { ok: false, error: r.error, message: r.message };
       if (!r.httpOk) return { ok: false, error: "provider_error", message: sanitizeProviderError(r.json), status: r.status };
@@ -297,7 +356,8 @@ export async function providerChat(id, { messages = [], model } = {}) {
     }
     // openai style
     const headers = { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) };
-    const r = await getJSON(`${base}/chat/completions`, { method: "POST", headers, body: JSON.stringify({ model: useModel, messages }) }, p.local, CHAT_TIMEOUT_MS);
+    const oaMessages = messages.map((m) => ({ ...m, content: toOpenAIContent(m.content) }));
+    const r = await getJSON(`${base}/chat/completions`, { method: "POST", headers, body: JSON.stringify({ model: useModel, messages: oaMessages }) }, p.local, CHAT_TIMEOUT_MS);
     if (!r.ok) return { ok: false, error: r.error, message: r.message };
     if (!r.httpOk) return { ok: false, error: "provider_error", message: sanitizeProviderError(r.json), status: r.status };
     return { ok: true, model: useModel, text: (r.json?.choices?.[0]?.message?.content ?? "").trim() };
@@ -333,8 +393,8 @@ export async function providerChatStream(id, { messages = [], model } = {}, onTo
   let fullText = "";
   try {
     if (p.style === "anthropic") {
-      const system = messages.find((m) => m.role === "system")?.content;
-      const conv = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
+      const system = contentText(messages.find((m) => m.role === "system")?.content);
+      const conv = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: toAnthropicContent(m.content) }));
       let buf = "";
       const r = await safeFetchStream(
         `${base}/v1/messages`,

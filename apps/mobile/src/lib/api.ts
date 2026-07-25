@@ -70,6 +70,19 @@ export interface ResultCardRec {
   url?: string;
   refId?: string;
   meta?: { label: string; value: string }[];
+  /* Set when this row came out of a FILE the assistant read — a photo of a schedule, a
+   * permission slip, a class list. It is a PROPOSAL: nothing has been created. The card gets
+   * an Add button, and the family picks. `when` is the source document's own wording ("Tuesday
+   * 4:15pm"), deliberately not parsed into a timestamp — see server/file-extract.mjs. */
+  candidate?: {
+    type: "event" | "task" | "list_item";
+    title: string;
+    when?: string | null;
+    where?: string | null;
+    notes?: string | null;
+    who?: string | null;
+    source?: string | null;
+  };
 }
 export interface ResultGroupRec {
   title: string; connector?: string; toolId?: string; rows: ResultCardRec[]; more?: number;
@@ -653,6 +666,36 @@ export const api = {
     const r = await req<{ ok?: boolean; event?: EventRec; action?: string; error?: string; message?: string }>(`/tasks/${encodeURIComponent(id)}/to-calendar`, { method: "POST", body: "{}" });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
+  },
+  /* Create one thing the assistant found inside a file. Deliberately one call per card: the
+   * family taps Add on the ones they want, and the ones they don't are simply never created. */
+  async addExtracted(c: NonNullable<ResultCardRec["candidate"]>): Promise<{ ok?: boolean; error?: string; message?: string }> {
+    if (c.type === "event") {
+      const r = await req<{ event?: EventRec; error?: string; message?: string }>("/events", {
+        method: "POST",
+        body: JSON.stringify({
+          title: c.title,
+          // No startAt: the source said "Tuesday 4:15pm" and guessing a year and a timezone
+          // from that is how a confident card becomes a wrong appointment. It lands under
+          // "No date set" with the original wording in the notes, ready to be given a real time.
+          startAt: null,
+          location: c.where ?? "",
+          notes: [c.when ? `From the file: ${c.when}` : null, c.notes, c.source ? `Source: ${c.source}` : null].filter(Boolean).join("\n"),
+          visibility: "household",
+        }),
+      });
+      return r.data?.event ? { ok: true } : { error: r.data?.error ?? "network", message: r.data?.message };
+    }
+    const r = await req<{ task?: TaskRec; error?: string; message?: string }>("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        title: c.title,
+        type: c.type === "list_item" ? "list" : "task",
+        ...(c.type === "list_item" ? { listName: "Groceries" } : {}),
+        notes: [c.when ? `From the file: ${c.when}` : null, c.notes, c.source ? `Source: ${c.source}` : null].filter(Boolean).join("\n"),
+      }),
+    });
+    return r.data?.task ? { ok: true } : { error: r.data?.error ?? "network", message: r.data?.message };
   },
   async deleteTask(id: string): Promise<{ ok?: boolean; error?: string }> {
     const r = await req<{ ok?: boolean; error?: string }>(`/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });

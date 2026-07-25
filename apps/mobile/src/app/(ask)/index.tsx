@@ -55,8 +55,10 @@ interface Msg {
 
 interface Suggestion { text: string; icon: string }
 
-// Attachments ride the same 5 MB base64 pipeline as the Upload sheet.
-const MAX_ATTACH_BYTES = 5 * 1024 * 1024;
+/* "Photos, files, documents, videos, whatever seem to have a 5 MB cap, which is very small."
+ * 25 MB now, matching the server (index.mjs MAX_FILE_BYTES). Base64 inflates by 4/3, and the
+ * request ceiling above it is sized to clear that. */
+const MAX_ATTACH_BYTES = 25 * 1024 * 1024;
 
 export default function AskScreen() {
   const { colors, spacing, radii, type, dark } = useTheme();
@@ -407,7 +409,7 @@ export default function AskScreen() {
     const r = await api.uploadFile({ name, contentBase64: base64, mime, visibility: "household" });
     setAttaching(false);
     if (!r.file) {
-      Alert.alert("Couldn't attach", r.error === "too_large" ? "That file is over the 5 MB cap."
+      Alert.alert("Couldn't attach", r.error === "too_large" ? "That file is over the 25 MB cap."
         : r.error === "insufficient_role" ? "Attaching files needs Limited Member or higher."
         : r.message ?? r.error ?? "Try again.");
       return;
@@ -421,7 +423,7 @@ export default function AskScreen() {
       const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false });
       if (res.canceled || !res.assets?.[0]) return;
       const a = res.assets[0];
-      if ((a.size ?? 0) > MAX_ATTACH_BYTES) { Alert.alert("Too large", "That file is over the 5 MB cap."); return; }
+      if ((a.size ?? 0) > MAX_ATTACH_BYTES) { Alert.alert("Too large", "That file is over the 25 MB cap."); return; }
       const b64 = await readAsStringAsync(a.uri, { encoding: "base64" });
       await finishAttach(a.name ?? "document", b64, a.mimeType ?? "application/octet-stream");
     } catch (e) {
@@ -437,7 +439,7 @@ export default function AskScreen() {
       const a = res.canceled ? null : res.assets?.[0];
       if (!a) return;
       if (!a.base64) { Alert.alert("Couldn't read that photo"); return; }
-      if (a.base64.length * 0.75 > MAX_ATTACH_BYTES) { Alert.alert("Too large", "That photo is over the 5 MB cap."); return; }
+      if (a.base64.length * 0.75 > MAX_ATTACH_BYTES) { Alert.alert("Too large", "That photo is over the 25 MB cap."); return; }
       await finishAttach(a.fileName ?? `photo-${Date.now()}.jpg`, a.base64, a.mimeType ?? "image/jpeg");
     } catch (e) {
       Alert.alert("Couldn't attach", String((e as Error)?.message ?? e));

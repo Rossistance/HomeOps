@@ -77,7 +77,7 @@ export function MemberAvatar({ member, size = 40, ringWidth = 2 }: {
 
 const ACCENTS = ["ink", "sage", "coral", "amber", "sky", "lavender"] as const;
 const EMOJIS = ["🦊", "🐻", "🦉", "🐙", "🌻", "🍀", "⭐️", "🌈", "🐝", "🦋", "🍕", "⚽️"] as const;
-const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+const MAX_PHOTO_BYTES = 25 * 1024 * 1024;  // matches the server cap
 
 export default function ProfileScreen() {
   const { colors, spacing } = useTheme();
@@ -111,7 +111,7 @@ export default function ProfileScreen() {
     });
     if (res.canceled || !res.assets?.[0]?.base64) return;
     const a = res.assets[0];
-    if (a.base64!.length * 0.75 > MAX_PHOTO_BYTES) { setNote({ text: "That photo is over the 5 MB cap.", ok: false }); return; }
+    if (a.base64!.length * 0.75 > MAX_PHOTO_BYTES) { setNote({ text: "That photo is over the 25 MB cap.", ok: false }); return; }
     setUploading(true);
     const r = await api.uploadFile({
       name: a.fileName ?? `avatar-${Date.now()}.jpg`,

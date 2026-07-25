@@ -6,6 +6,8 @@ import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMea
 import { partialUpdateAgent } from "./agents.mjs";
 import { mealEventNotes, pushEventToGoogle } from "./calendar.mjs";
 import { searchPlaces } from "./places.mjs";
+import { understandFile } from "./file-understanding.mjs";
+import { extractStructured } from "./file-extract.mjs";
 import { deliverNotification, deliverInAppFallback } from "./notify.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
 import crypto from "node:crypto";
@@ -165,6 +167,74 @@ export const INTERNAL_FUNCTIONS = {
       const r = await searchPlaces(query, { lat: num(input?.lat), lng: num(input?.lng), limit });
       if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "Couldn't look that up right now." };
       return { ok: true, result: { places: r.places, provider: r.provider, limitations: r.limitations } };
+    },
+  },
+  /* ---- Reading a file, and pulling the family's life out of it -------------------------
+   *
+   * Asked for directly after the attachment bug: "it'd be really amazing if I could ask
+   * questions about them, and then even more amazing than all that would be to have it be able
+   * to parse information from them into categories or presented back to me, and recognise
+   * things that it correlates with the app — like if it was a photo of a schedule it could say
+   * 'I found these items, here are the cards, choose which ones you'd want to add'."
+   *
+   * Two tools, deliberately separate:
+   *   read_file    — answer questions ABOUT a file. No side effects.
+   *   extract_from_file — find the calendar events, tasks and list items INSIDE it, and hand
+   *                  them back as rows. They render as cards (the same resultGroups path the
+   *                  chat already uses), each with an Add action, so the family PICKS. Nothing
+   *                  is written to the calendar by extracting.
+   *
+   * That last point is the whole design. A photo of a school schedule contains nine things;
+   * silently creating nine events is the kind of help nobody asked for. */
+  "homeops.read_file": {
+    id: "homeops.read_file",
+    name: "Read a file",
+    action: "Read",
+    risk: "Low",
+    requiresApproval: false,
+    delivers: false,
+    connectorId: "homeops",
+    connectorName: "FamiliOS",
+    async run(ctx, input) {
+      const fileId = String(input?.fileId ?? "").trim();
+      if (!fileId) return { ok: false, error: "file_id_required", message: "Which file? Pass its fileId." };
+      const out = await understandFile(fileId, { householdId: ctx.householdId, prompt: input?.question });
+      if (!out.ok) return { ok: false, error: out.error, message: out.message };
+      return { ok: true, result: { name: out.name, kind: out.kind, text: out.text, truncated: !!out.truncated } };
+    },
+  },
+  "homeops.extract_from_file": {
+    id: "homeops.extract_from_file",
+    name: "Find events and tasks in a file",
+    action: "Read",
+    risk: "Low",
+    // No approval: this only PROPOSES. Nothing lands on a calendar or a list until a person
+    // taps Add on the card.
+    requiresApproval: false,
+    delivers: false,
+    connectorId: "homeops",
+    connectorName: "FamiliOS",
+    async run(ctx, input) {
+      const fileId = String(input?.fileId ?? "").trim();
+      if (!fileId) return { ok: false, error: "file_id_required", message: "Which file? Pass its fileId." };
+      const read = await understandFile(fileId, {
+        householdId: ctx.householdId,
+        prompt: "Transcribe every date, time, name, place and task in this, exactly as written, preserving order.",
+      });
+      if (!read.ok) return { ok: false, error: read.error, message: read.message };
+      const found = await extractStructured({ householdId: ctx.householdId, text: read.text, sourceName: read.name });
+      if (!found.ok) return { ok: false, error: found.error, message: found.message };
+      const items = found.items ?? [];
+      if (items.length === 0) {
+        return { ok: true, result: { candidates: [], sourceName: read.name, note: `I read "${read.name}" but couldn't find anything with a date or an action in it.` } };
+      }
+      return { ok: true, result: {
+        // Named `candidates` so the card renderer picks it up as rows (assistant-runs.mjs
+        // rowsFromResult finds the first array of objects, whatever it's called).
+        candidates: items,
+        sourceName: read.name,
+        note: `${items.length} thing${items.length === 1 ? "" : "s"} found in "${read.name}". Nothing has been added — pick the ones you want.`,
+      } };
     },
   },
   "homeops.write_memory": {

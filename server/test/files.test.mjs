@@ -45,7 +45,10 @@ test("adults-only visibility hides a file from a child", async () => {
 });
 
 test("oversize upload is refused with 413", async () => {
-  const big = "A".repeat(7_000_001);
+  // The cap moved from ~5 MB to 25 MB ("photos, files, documents, videos, whatever seem to
+  // have a 5 MB cap, which is very small"). The behaviour under test is unchanged: over the
+  // line is refused, and refused with 413 rather than a silent truncation.
+  const big = "A".repeat(Math.ceil(25 * 1024 * 1024 * 4 / 3) + 1);
   const r = await adult.req("/api/files", { method: "POST", body: JSON.stringify({ name: "big.bin", contentBase64: big }) });
   assert.equal(r.status, 413);
 });
@@ -102,7 +105,7 @@ test("a single-base64 upload is a 1-page file (back-compat)", async () => {
 });
 
 test("an oversized page is refused with 413 (per-page cap)", async () => {
-  const big = "A".repeat(7_000_001);
+  const big = "A".repeat(Math.ceil(25 * 1024 * 1024 * 4 / 3) + 1);
   const r = await adult.req("/api/files", { method: "POST", body: JSON.stringify({ name: "big", pages: [{ base64: b64("ok") }, { base64: big }] }) });
   assert.equal(r.status, 413);
 });

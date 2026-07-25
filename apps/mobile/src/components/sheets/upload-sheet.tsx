@@ -47,7 +47,7 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
       const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false });
       if (res.canceled || !res.assets?.[0]) return;
       const a = res.assets[0];
-      if ((a.size ?? 0) > MAX_BYTES) { setNote("That file is over the 5 MB cap."); return; }
+      if ((a.size ?? 0) > MAX_BYTES) { setNote("That file is over the 25 MB cap."); return; }
       const b64 = await readAsStringAsync(a.uri, { encoding: "base64" });
       setBackPage(null); // documents are single-page
       const picked = { name: a.name ?? "document", base64: b64, mime: a.mimeType ?? "application/octet-stream", size: a.size ?? Math.round(b64.length * 0.75) };
@@ -61,7 +61,7 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
   // Convert a picked image asset into a Picked (or set a note + return null on failure).
   function toPicked(a: ImagePicker.ImagePickerAsset, label: string): Picked | null {
     if (!a.base64) { setNote("Couldn't read that photo."); return null; }
-    if (a.base64.length * 0.75 > MAX_BYTES) { setNote("That photo is over the 5 MB cap."); return null; }
+    if (a.base64.length * 0.75 > MAX_BYTES) { setNote("That photo is over the 25 MB cap."); return null; }
     return {
       name: a.fileName ?? `${label}-${Date.now()}.jpg`,
       base64: a.base64, mime: a.mimeType ?? "image/jpeg",
@@ -149,7 +149,7 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
     });
     setBusy(false);
     if (!r.file) {
-      setNote(r.error === "too_large" ? "That file is over the 5 MB cap."
+      setNote(r.error === "too_large" ? "That file is over the 25 MB cap."
         : r.error === "insufficient_role" ? "Uploading needs Limited Member or higher."
         : `Upload failed: ${r.message ?? r.error ?? "unknown error"}`);
       return;

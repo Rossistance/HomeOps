@@ -16,10 +16,10 @@
 import { useState } from "react";
 import { Alert, Linking, View } from "react-native";
 import { router } from "expo-router";
-import { useTheme } from "@/theme";
+import { useTheme, tapHaptic } from "@/theme";
 import { mapQuery, openDirections, openInMaps } from "@/lib/maps";
 import { ExpandCard, Sym, T, type CardChip } from "@/components/ui";
-import type { ResultCardRec, ResultGroupRec } from "@/lib/api";
+import { api, type ResultCardRec, type ResultGroupRec } from "@/lib/api";
 
 /** Device-local formatting — the server deliberately ships `when` raw so this can happen here. */
 function whenLabel(when: string | undefined, allDay?: boolean): string | null {
@@ -66,17 +66,46 @@ function ResultCard({ card, icon }: { card: ResultCardRec; icon: string }) {
   const { colors, spacing } = useTheme();
   const [open, setOpen] = useState(false);
   const place = mapQuery(card.where, card.title);
+  /* A card that came out of a FILE is a proposal, not a record — "I found these items, here
+   * are the cards, choose which ones you'd want to add." Adding is per-card on purpose: the
+   * ones nobody taps are simply never created. */
+  const [added, setAdded] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const cand = card.candidate;
+
+  const addIt = async () => {
+    if (!cand || adding || added) return;
+    setAdding(true);
+    const r = await api.addExtracted(cand);
+    setAdding(false);
+    if (!r.ok) {
+      Alert.alert("Couldn't add that", r.message ?? "Something went wrong.");
+      return;
+    }
+    tapHaptic("success");
+    setAdded(true);
+  };
 
   // The action is whatever this row can actually do. A card whose row has no address and no
   // link gets no button rather than a decorative one.
-  const action = card.where
+  const action = cand
+    ? {
+        label: added ? "Added" : adding ? "Adding…" : cand.type === "event" ? "Add to calendar" : cand.type === "list_item" ? "Add to groceries" : "Add task",
+        icon: added ? "checkmark" : "plus",
+        loading: adding,
+        disabled: added,
+        onPress: () => void addIt(),
+      }
+    : card.where
     ? { label: "Directions", icon: "location.fill", onPress: () => void openDirections(place, "apple").then((ok) => { if (!ok) Alert.alert("Couldn't open Maps"); }) }
     : card.url
       ? { label: "Open", icon: "safari", onPress: () => void Linking.openURL(card.url!) }
       : card.refId && /^evt|^task/.test(card.refId)
         ? { label: "Open", icon: "chevron.right", onPress: () => router.push(card.refId!.startsWith("task") ? "/(home)" : "/(home)") }
         : undefined;
-  const secondaryAction = card.where && card.url
+  const secondaryAction = cand
+    ? undefined
+    : card.where && card.url
     ? { label: "Details", icon: "safari", onPress: () => void Linking.openURL(card.url!) }
     : card.where
       ? { label: "In Google Maps", icon: "map", onPress: () => void openInMaps(place, "google") }

@@ -28,7 +28,7 @@ const ADMIN_ROLES = new Set(["Owner", "Adult Admin"]);
  * screens use, so nothing here is a special onboarding-only shortcut that drifts later. */
 const ACCENTS = ["ink", "sage", "coral", "amber", "sky", "lavender"] as const;
 const EMOJIS = ["🦊", "🐻", "🦉", "🐙", "🌻", "🍀", "⭐️", "🌈", "🐝", "🦋", "🍕", "⚽️"] as const;
-const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+const MAX_PHOTO_BYTES = 25 * 1024 * 1024;  // matches the server cap
 
 // Prompts, not pre-written facts: the content has to come from the family, or the assistant
 // starts out "knowing" things nobody told it.
@@ -227,7 +227,7 @@ export function Onboarding() {
                     const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], base64: true, quality: 0.7, allowsEditing: true, aspect: [1, 1] });
                     if (res.canceled || !res.assets?.[0]?.base64) return;
                     const a = res.assets[0];
-                    if (a.base64!.length * 0.75 > MAX_PHOTO_BYTES) { setPhotoNote("That photo is over the 5 MB cap."); return; }
+                    if (a.base64!.length * 0.75 > MAX_PHOTO_BYTES) { setPhotoNote("That photo is over the 25 MB cap."); return; }
                     setUploading(true);
                     const up = await api.uploadFile({ name: a.fileName ?? `avatar-${Date.now()}.jpg`, contentBase64: a.base64!, mime: a.mimeType ?? "image/jpeg", visibility: "private", kind: "avatar" });
                     setUploading(false);

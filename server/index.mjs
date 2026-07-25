@@ -56,6 +56,7 @@ import {
 import { agentTemplateSections } from "./agent-templates.mjs";
 import { nameConversation } from "./planner.mjs";
 import { suggestAddresses } from "./places.mjs";
+import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, sweepTaskReminders } from "./reminders.mjs";
 import { getAgent } from "./store.mjs";
 import {
@@ -256,8 +257,23 @@ function sendStatic(req, res, file) {
   fs.createReadStream(file).pipe(res);
   return true;
 }
+/* A request body was accumulated with no ceiling at all — any caller could stream an
+ * unbounded string into memory. Capped now, and generously: the cap has to clear a real
+ * upload (a 25 MB file is ~34 MB of base64 plus JSON overhead) while still being a ceiling.
+ * Overflow resolves to null, which every caller already treats as malformed_json. */
+const MAX_BODY_BYTES = 64 * 1024 * 1024;
 function readRaw(req) {
-  return new Promise((resolve) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => resolve(b)); });
+  return new Promise((resolve) => {
+    let b = "";
+    let over = false;
+    req.on("data", (c) => {
+      if (over) return;
+      b += c;
+      if (b.length > MAX_BODY_BYTES) { over = true; b = ""; try { req.destroy(); } catch { /* already gone */ } }
+    });
+    req.on("end", () => resolve(over ? null : b));
+    req.on("error", () => resolve(null));
+  });
 }
 async function readBody(req) {
   const raw = await readRaw(req);
@@ -3081,7 +3097,12 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const name = String(body.name ?? "").trim();
       if (!name) return json(res, 400, { error: "name_required" }, req);
-      const CAP = 7_000_000; // ~5 MB of base64, enforced per page
+      /* "Photos, files, documents, videos, whatever seem to have a 5 MB cap, which is very
+       * small." It was 5 MB — small enough that a phone photo at full resolution, or any
+       * video at all, bounced. 25 MB per page now (base64 inflates by 4/3, hence ~34 MB), with
+       * the request ceiling above sized to clear it. */
+      const MAX_FILE_BYTES = 25 * 1024 * 1024;
+      const CAP = Math.ceil(MAX_FILE_BYTES * 4 / 3); // ~34 MB of base64, enforced per page
       // A logical file can carry multiple pages (front+back of an ID card, a multi-page
       // scan). `pages: [{ name?, base64 }]` writes one blob per page; the classic single
       // `contentBase64` upload is preserved verbatim as a 1-page file (full back-compat).
@@ -3092,7 +3113,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         for (const p of body.pages) {
           const pb64 = String(p?.base64 ?? "");
           if (!pb64) return json(res, 400, { error: "content_required" }, req);
-          if (pb64.length > CAP) return json(res, 413, { error: "too_large", message: "Each page is capped at ~5 MB." }, req);
+          if (pb64.length > CAP) return json(res, 413, { error: "too_large", message: "Each page is capped at 25 MB." }, req);
           let buf;
           try { buf = Buffer.from(pb64, "base64"); } catch { return json(res, 400, { error: "bad_base64" }, req); }
           if (!buf || buf.length === 0) return json(res, 400, { error: "bad_base64" }, req);
@@ -3101,7 +3122,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       } else {
         const b64 = String(body.contentBase64 ?? "");
         if (!b64) return json(res, 400, { error: "content_required" }, req);
-        if (b64.length > CAP) return json(res, 413, { error: "too_large", message: "Files are capped at ~5 MB." }, req);
+        if (b64.length > CAP) return json(res, 413, { error: "too_large", message: "Files are capped at 25 MB." }, req);
         let buf;
         try { buf = Buffer.from(b64, "base64"); } catch { return json(res, 400, { error: "bad_base64" }, req); }
         if (!buf || buf.length === 0) return json(res, 400, { error: "bad_base64" }, req);
@@ -3720,6 +3741,19 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const aiGated = childAiGate(g, res, req); if (aiGated) return aiGated;
       const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      /* THE ATTACHMENT BUG. Recorded verbatim: "I'm not receiving readable attachment
+       * contents, so I can't inspect the specific image you sent here."
+       *
+       * That was true. The client uploaded the file, showed the chip, and passed
+       * `context.attachedFileId` — and nothing on this side ever opened it. The model got a
+       * filename and was asked to describe a photo.
+       *
+       * The file is now READ before the turn: text is decoded, a photo goes through the
+       * household's own vision model, and the result is handed to the assistant as context.
+       * A file we genuinely can't read reports why, in the reply, instead of the assistant
+       * apologising for an emptiness it can't explain. */
+      await attachFileContext(body, g.session);
+
       // Prior turns from the durable conversation ride into the model call —
       // otherwise the assistant forgets facts stated one message earlier.
       const histConv = body.conversationId ? getConversation(body.conversationId) : null;
@@ -3779,6 +3813,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const aiGated = childAiGate(g, res, req); if (aiGated) return aiGated;
       const gated = planGate(g, res, req); if (gated) return gated;
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      // Same as POST /api/assistant — and this is the route the app really uses, so an
+      // attachment that only worked on the non-streaming path would still look broken.
+      await attachFileContext(body, g.session);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", ...corsHeaders(req) });
       let tokenCount = 0;
       try {
@@ -4267,6 +4304,31 @@ function persistBuildOutcome(conversationId, session, out) {
  * refusal: it looks like progress and ends in a wall. So a build proposal aimed at
  * someone who cannot build is demoted, HERE at the single server authority, into a
  * plain answer that says what was understood and who can actually set it up. */
+/**
+ * Read whatever the user attached and fold it into the turn's context.
+ *
+ * Mutates `body.context` in place: `attachedFileText` is what the assistant reads, and
+ * `attachedFileError` is the honest account when the file can't be read — which the planner
+ * prompt is told to relay rather than blaming the attachment feature.
+ */
+async function attachFileContext(body, session) {
+  const fileId = body?.context?.attachedFileId;
+  if (!fileId || typeof fileId !== "string") return;
+  try {
+    const out = await understandFile(fileId, { householdId: session.householdId });
+    body.context = { ...body.context };
+    if (out.ok) {
+      body.context.attachedFileText = out.text;
+      body.context.attachedFileKind = out.kind;
+      if (out.truncated) body.context.attachedFileTruncated = true;
+    } else {
+      body.context.attachedFileError = out.message ?? "That file couldn't be read.";
+    }
+  } catch (e) {
+    body.context = { ...body.context, attachedFileError: String(e?.message ?? e) };
+  }
+}
+
 function demoteBuildForRole(out, session) {
   if (!out?.ok || out.kind !== "build" || roleAtLeast(session.role, "Adult Admin")) return;
   /* An Adult Member CAN build — for themselves. Rather than refusing the proposal, scope it:
