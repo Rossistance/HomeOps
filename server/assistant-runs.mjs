@@ -133,21 +133,146 @@ function draftedHeadline(run, o) {
 // Exported for the WP-002 summarizeOutcome truth-table unit test (server/test/
 // summarize-outcome.test.mjs) — a pure function over a plain run object, no server
 // or tenant context required.
+/* ---- K2: a fetched row, ONCE, as structure ----------------------------------
+ * Typed verbatim in the 2026-07-25 chat recordings: "still not returned in line, in chat,
+ * RESULTS AS CARDS". The restaurant answers came back as prose plus a couple of Yelp links,
+ * with nothing comparable side by side.
+ *
+ * So a row is extracted exactly once, into a plain shape, and BOTH renderers read it: the
+ * text path (which still has to work for the web, for notifications, and for any client
+ * that only has a string) and the card path (`resultGroups` on the run_result message).
+ * One extraction means the two can never disagree about what the run found — the failure
+ * mode that produced "Here's the list:" with no list. */
+const pick = (o, keys) => {
+  for (const k of keys) { const v = o?.[k]; if (v != null && v !== "") return v; }
+  return null;
+};
+const NAME_KEYS = ["title", "name", "summary", "subject", "text", "label"];
+const WHEN_KEYS = ["startAt", "start", "dueAt", "date", "at", "when", "time", "scheduledFor"];
+const WHERE_KEYS = ["location", "address", "formattedAddress", "venue", "vicinity", "place"];
+const DETAIL_KEYS = ["description", "notes", "detail", "snippet", "body", "purpose", "reason"];
+const URL_KEYS = ["url", "link", "href", "website", "mapsUrl", "webUrl"];
+// The facts the owner asked to compare across rows, with human labels and a fixed order so
+// two cards in the same group line up. "busy right now", "estimated wait time", distance and
+// drive time are his literal words — when a tool supplies them they show; when it doesn't,
+// nothing is invented (see K4 — the data source itself is still missing).
+const META_KEYS = [
+  ["rating", "Rating"], ["reviewCount", "Reviews"], ["price", "Price"], ["priceLevel", "Price"],
+  ["busy", "Busy now"], ["waitTime", "Wait"], ["distance", "Distance"], ["driveTime", "Drive"],
+  ["eta", "ETA"], ["openNow", "Open"], ["cuisine", "Cuisine"], ["category", "Category"],
+  ["status", "Status"], ["priority", "Priority"], ["dueIn", "Due"],
+  ["assigneeName", "For"], ["assignedToName", "For"], ["assignee", "For"], ["owner", "Owner"],
+  ["calendarName", "Calendar"], ["calendar", "Calendar"], ["organizer", "Organizer"],
+  ["phone", "Phone"], ["attendeeCount", "Attendees"],
+];
+
+function metaValue(key, v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "boolean") {
+    if (key === "openNow") return v ? "Open now" : "Closed now";
+    return v ? "Yes" : "No";
+  }
+  if (typeof v === "number") return key === "rating" ? `${v}★` : String(v);
+  if (typeof v !== "string") return null;
+  return v.slice(0, 40);
+}
+
+/** A fetched row reduced to the facts a person can act on. Null when there's no name to
+ *  show — a row we can't label is not rendered rather than dumped as JSON. */
+export function rowCard(x) {
+  if (x == null) return null;
+  if (typeof x === "string") { const t = x.trim(); return t ? { title: t.slice(0, 200) } : null; }
+  if (typeof x !== "object") return { title: String(x).slice(0, 200) };
+  const name = pick(x, NAME_KEYS);
+  if (name == null) return null;
+  const card = { title: String(name).trim().slice(0, 200) };
+  // `when` stays raw so the CLIENT formats it in the device's locale and timezone; the
+  // server keeps its own pre-rendered copy for the text path only.
+  const when = pick(x, WHEN_KEYS);
+  if (when != null) card.when = typeof when === "string" ? when : String(when);
+  const where = pick(x, WHERE_KEYS);
+  if (where != null && typeof where === "string") card.where = where.slice(0, 160);
+  const detail = pick(x, DETAIL_KEYS);
+  if (detail != null && typeof detail === "string" && detail.trim() && detail.trim() !== card.title) {
+    card.detail = detail.trim().slice(0, 600);
+  }
+  const url = pick(x, URL_KEYS);
+  if (typeof url === "string" && /^https?:\/\//i.test(url)) card.url = url.slice(0, 500);
+  if (typeof x.id === "string") card.refId = x.id;
+  if (x.allDay === true) card.allDay = true;
+  const meta = [];
+  const seen = new Set();
+  for (const [key, label] of META_KEYS) {
+    if (seen.has(label)) continue;          // rating/reviewCount aliases: first hit wins
+    const value = metaValue(key, x[key]);
+    if (value == null) continue;
+    seen.add(label);
+    meta.push({ label, value });
+    if (meta.length >= 6) break;
+  }
+  if (meta.length) card.meta = meta;
+  return card;
+}
+
+function whenText(when) {
+  if (!when) return null;
+  const d = new Date(when);
+  return Number.isNaN(+d) ? String(when)
+    : d.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 /** One readable line for a fetched row — enough to recognise it, never a JSON dump. */
 function rowLine(x) {
-  if (x == null) return null;
-  if (typeof x === "string") return x.trim() || null;
-  if (typeof x !== "object") return String(x);
-  const name = x.title ?? x.name ?? x.summary ?? x.subject ?? x.text ?? null;
-  if (!name) return null;
-  const when = x.startAt ?? x.start ?? x.dueAt ?? x.date ?? x.at ?? null;
-  const whenTxt = when ? (() => {
-    const d = new Date(when);
-    return Number.isNaN(+d) ? String(when)
-      : d.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-  })() : null;
-  const where = x.location || x.address || null;
-  return `• ${String(name).trim()}${whenTxt ? ` — ${whenTxt}` : ""}${where ? ` (${where})` : ""}`;
+  const c = rowCard(x);
+  if (!c) return null;
+  const w = c.allDay ? whenText(c.when)?.replace(/,?\s*\d{1,2}:\d{2}\s*[AP]M$/i, "") : whenText(c.when);
+  const facts = c.meta?.length ? ` · ${c.meta.map((m) => `${m.label} ${m.value}`).join(" · ")}` : "";
+  return `• ${c.title}${w ? ` — ${w}` : ""}${c.where ? ` (${c.where})` : ""}${facts}`;
+}
+
+/** The friendly connection a step's tool belongs to ("Google Calendar"), or null for
+ *  FamiliOS's own internal functions — nothing to disclose there. A9/A10 asked for this
+ *  on every card that runs something: "what was involved". */
+function connectorLabelFor(toolId) {
+  if (!toolId || toolId.startsWith("homeops.")) return null;
+  const platform = findToolGlobal(toolId);
+  if (platform?.provider?.name) return platform.provider.name;
+  for (const c of CONNECTORS) {
+    if ((c.tools ?? []).some((t) => t.id === toolId)) return c.name ?? null;
+  }
+  const prefix = toolId.split(".")[0];
+  return prefix ? prefix.replace(/[_-]+/g, " ").replace(/^\w/, (ch) => ch.toUpperCase()) : null;
+}
+
+const ROW_CAP = 12;
+
+/** Every group of rows the run fetched, as structure — the card payload for the chat. */
+export function runResultGroups(run) {
+  const o = summarizeOutcome(run);
+  const groups = [];
+  for (const s of o.succeeded) {
+    if (!s.toolId) continue;
+    const arr = rowsFromResult(s.result);
+    if (!arr) continue;
+    const rows = arr.slice(0, ROW_CAP).map(rowCard).filter(Boolean);
+    if (!rows.length) continue;
+    groups.push({
+      title: s.title || "Results",
+      ...(connectorLabelFor(s.toolId) ? { connector: connectorLabelFor(s.toolId) } : {}),
+      toolId: s.toolId,
+      rows,
+      ...(arr.length > rows.length ? { more: arr.length - rows.length } : {}),
+    });
+  }
+  return groups;
+}
+
+/** The first array of row-shaped objects a tool returned, whatever it named it. */
+function rowsFromResult(r) {
+  if (!r || typeof r !== "object") return null;
+  const arr = Array.isArray(r) ? r
+    : Object.values(r).find((v) => Array.isArray(v) && v.length && typeof v[0] === "object");
+  return Array.isArray(arr) && arr.length ? arr : null;
 }
 
 /**
@@ -169,13 +294,9 @@ function fetchedRowsText(o) {
   const blocks = [];
   for (const s of o.succeeded) {
     if (!s.toolId) continue;                    // reasoning steps are handled separately
-    const r = s.result;
-    if (!r || typeof r !== "object") continue;
-    // Find the first array of rows the tool returned, whatever it named it.
-    const arr = Array.isArray(r) ? r
-      : Object.values(r).find((v) => Array.isArray(v) && v.length && typeof v[0] === "object");
-    if (!Array.isArray(arr) || arr.length === 0) continue;
-    const lines = arr.slice(0, 12).map(rowLine).filter(Boolean);
+    const arr = rowsFromResult(s.result);
+    if (!arr) continue;
+    const lines = arr.slice(0, ROW_CAP).map(rowLine).filter(Boolean);
     if (!lines.length) continue;
     const more = arr.length > lines.length ? `\n…and ${arr.length - lines.length} more` : "";
     blocks.push(`${s.title ? `${s.title}:\n` : ""}${lines.join("\n")}${more}`);
@@ -183,10 +304,16 @@ function fetchedRowsText(o) {
   return blocks.join("\n\n").trim();
 }
 
-export function runOutcomeText(run) {
+/**
+ * The outcome message. `includeRows: false` produces the SAME message with the bullet rows
+ * left out — for a client that is rendering those rows as cards instead (K2), so the family
+ * never reads the same five restaurants twice. Every other reader (the web thread, exports,
+ * notifications) takes the full text, which is why the rows can't simply be moved out of it.
+ */
+export function runOutcomeText(run, { includeRows = true } = {}) {
   const o = summarizeOutcome(run);
   const reasoning = o.composed.filter((s) => s.result?.text).map((s) => s.result.text).join("\n\n").trim();
-  const fetched = fetchedRowsText(o);
+  const fetched = includeRows ? fetchedRowsText(o) : "";
   // Rows first: when a family asked to SEE something, the list is the answer and the
   // narration is the footnote.
   const combined = [fetched, reasoning].filter(Boolean).join("\n\n");
@@ -388,10 +515,19 @@ export function registerAssistantRunHooks() {
     // WP-004 — every created task/list item/artifact across the whole run, not just
     // the first draft (see buildResultLinks above). Additive alongside artifactId/link.
     const links = buildResultLinks(run);
+    // K2 — "still not returned in line, in chat, results as cards". The rows ride along as
+    // structure so the thread can render them as real, comparable cards; the text still
+    // carries the same rows for every other reader (web, notifications, exports).
+    const resultGroups = runResultGroups(run);
     appendToConversation(run, {
       kind: "run_result", runId: run.id, status: run.status, text: runOutcomeText(run),
       ...(draftArtifactId ? { artifactId: draftArtifactId, link: `/api/artifacts?runId=${run.id}` } : {}),
       ...(links.length ? { links } : {}),
+      ...(resultGroups.length
+        // textWithoutRows is the same message minus the bullets the cards now carry — a
+        // card-rendering client reads this instead of `text` so nothing is duplicated.
+        ? { resultGroups, textWithoutRows: runOutcomeText(run, { includeRows: false }) }
+        : {}),
     });
     // 2. Self-healing, once.
     if (run.status === "failed" && !run.sourceRef.isRepair) {

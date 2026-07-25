@@ -131,3 +131,37 @@ test("another household's OWN helper is invisible", async () => {
   assert.equal(w.ok, false, "nor edit it");
   assert.equal(w.error, "unknown_agent");
 });
+
+/* ---- G5: "don't ask for permission, you have approval" — said IN CHAT [18:52] ---- */
+
+test("the assistant can turn a helper loose from chat, and reports what still pauses", async () => {
+  const r = await call("homeops.update_agent", { agentId: briefingId, runUnattended: true });
+  assert.equal(r.ok, true);
+  assert.equal(r.result.unattended.enabled, true);
+  assert.equal(r.result.unattended.includeHighRisk, false, "asking for the plain version doesn't quietly include sending");
+  assert.match(r.result.unattendedNote, /sends or spends still pauses/i,
+    "the reply names the limit instead of implying it now does everything alone");
+});
+
+test("the high-risk tier is refused for a member without the standing, and SAID so", async () => {
+  // ctx.actorId is "m-owner", but no such member record exists in this bare store — so the
+  // role lookup yields null, which is exactly the un-attributed case that must NOT unlock
+  // sending. The note has to admit that rather than confirming the request.
+  const r = await call("homeops.update_agent", { agentId: briefingId, runUnattended: true, includeSendAndSpend: true });
+  assert.equal(r.ok, true);
+  assert.equal(r.result.unattended.includeHighRisk, false);
+  assert.match(r.result.unattendedNote, /Owner/, "it names who could actually grant this");
+});
+
+test("turning it back off is one sentence away too", async () => {
+  await call("homeops.update_agent", { agentId: briefingId, runUnattended: true });
+  const r = await call("homeops.update_agent", { agentId: briefingId, runUnattended: false });
+  assert.equal(r.ok, true);
+  assert.equal(r.result.unattended.enabled, false);
+  assert.match(r.result.unattendedNote, /ask before/i);
+});
+
+test("runUnattended alone is a real change — not \"nothing to change\"", async () => {
+  const r = await call("homeops.update_agent", { agentId: briefingId, runUnattended: true });
+  assert.notEqual(r.error, "nothing_to_change");
+});

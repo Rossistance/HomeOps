@@ -14,7 +14,8 @@ import Animated, {
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec, type MemberRec, type RunRec } from "@/lib/api";
+import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec, type MemberRec, type ResultGroupRec, type RunRec } from "@/lib/api";
+import { ResultCards } from "@/components/ResultCards";
 import { streamAssistant } from "@/lib/assistant-stream";
 import { getLocationContext } from "@/lib/location";
 import { capabilitiesFor } from "@/lib/roles";
@@ -47,6 +48,9 @@ interface Msg {
   builtAutomation?: BuiltAutomationInfo;
   error?: boolean;
   runId?: string; // plan messages that the server already started executing
+  // K2 — what the run actually fetched, as cards, in line. "still not returned in line, in
+  // chat, results as cards."
+  resultGroups?: ResultGroupRec[];
 }
 
 interface Suggestion { text: string; icon: string }
@@ -177,12 +181,19 @@ export default function AskScreen() {
 
   /* ---------- conversations ---------- */
   const mapServerMessages = useCallback((c: ConversationRec): Msg[] =>
-    c.messages.map((m, i) => ({
-      id: `${c.id}-${i}`, role: m.role, text: m.text,
-      plan: m.plan ?? undefined, build: m.build ?? undefined, built: !!m.built,
-      error: m.kind === "error" || (m.kind === "run_result" && m.status === "failed"),
-      runId: m.runId ?? undefined,
-    })), []);
+    c.messages.map((m, i) => {
+      const groups = m.resultGroups?.length ? m.resultGroups : undefined;
+      return {
+        id: `${c.id}-${i}`, role: m.role,
+        // With cards rendering the rows, the prose drops them so the same five results
+        // aren't read twice — the server ships both forms of the same message.
+        text: groups ? (m.textWithoutRows ?? m.text) : m.text,
+        plan: m.plan ?? undefined, build: m.build ?? undefined, built: !!m.built,
+        error: m.kind === "error" || (m.kind === "run_result" && m.status === "failed"),
+        runId: m.runId ?? undefined,
+        resultGroups: groups,
+      };
+    }), []);
 
   const openConversation = useCallback(async (id: string) => {
     if (busy) return;
@@ -412,9 +423,17 @@ export default function AskScreen() {
   const expectRunResult = useRef(false);
   const handledRunRef = useRef<string | null>(null);
   const runPlan = useCallback(async (plan: AgentPlan) => {
-    expectRunResult.current = true;
-    await startRun(plan);
-  }, [startRun]);
+    // Inside a live thread the SERVER writes the outcome: its run_result carries the rows
+    // this run fetched as cards (K2) and persists, which the locally-composed summary below
+    // can't do — it only ever had stringified step output. The local path stays for a run
+    // started before the thread exists.
+    expectRunResult.current = true;   // set BEFORE the await: a fast run can finish inside it
+    const runId = await startRun(plan, { conversationId: conversationId ?? undefined });
+    if (runId && conversationId) {
+      expectRunResult.current = false;
+      watchServerRun(runId, conversationId);
+    }
+  }, [conversationId, startRun, watchServerRun]);
 
   useEffect(() => {
     if (!activeRun || !expectRunResult.current) return;
@@ -690,11 +709,15 @@ export default function AskScreen() {
                 }}
               >
                 <View style={{ maxWidth: "94%", alignSelf: "stretch", gap: spacing.sm }}>
-                  <Card padded={false} style={{ padding: spacing.md, borderTopLeftRadius: 6, alignSelf: "flex-start", maxWidth: "100%" }}>
-                    {m.error
-                      ? <T selectable color={colors.coral}>{m.text}</T>
-                      : <MarkdownText text={m.text} />}
-                  </Card>
+                  {m.text.trim() ? (
+                    <Card padded={false} style={{ padding: spacing.md, borderTopLeftRadius: 6, alignSelf: "flex-start", maxWidth: "100%" }}>
+                      {m.error
+                        ? <T selectable color={colors.coral}>{m.text}</T>
+                        : <MarkdownText text={m.text} />}
+                    </Card>
+                  ) : null}
+                  {/* K2 — the rows the run fetched, as real cards, right here in the thread. */}
+                  {m.resultGroups ? <ResultCards groups={m.resultGroups} /> : null}
                   {plan ? <PlanCard plan={plan} autoRun={!!m.runId} onRun={() => void runPlan(plan)} /> : null}
                   {build ? (
                     isGuest && !m.built ? (

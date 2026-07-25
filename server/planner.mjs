@@ -31,6 +31,15 @@ export const INTERNAL_INPUTS = {
   "homeops.write_memory": [{ key: "text", required: true }, { key: "scope" }],
   "homeops.create_artifact": [{ key: "title", required: true }, { key: "body" }, { key: "kind" }],
   "homeops.create_approval": [{ key: "subject", required: true }, { key: "detail" }],
+  // Helper inspection + iteration — the whole point of having a model behind this.
+  "homeops.list_agents": [],
+  "homeops.get_agent": [{ key: "agentId", required: true }],
+  "homeops.update_agent": [
+    { key: "agentId", required: true }, { key: "name" }, { key: "purpose" }, { key: "instructions" }, { key: "status" },
+    // G5: "don't ask for permission, you have approval" — said in chat, so it has to be
+    // reachable from chat. includeSendAndSpend only lands for an Owner/Adult Admin.
+    { key: "runUnattended" }, { key: "includeSendAndSpend" },
+  ],
 };
 
 const ICONS = ["Bot", "Sun", "Mail", "Inbox", "Calendar", "Receipt", "CreditCard", "UtensilsCrossed", "Plane", "Stethoscope", "Wrench", "HeartHandshake", "FolderOpen", "PawPrint", "Gift", "Search", "ShoppingCart", "Bell", "ShieldCheck", "FileText", "Globe", "MessageSquare", "ListChecks"];
@@ -401,6 +410,7 @@ DO THE THING, DON'T OFFER TO DO IT:
 
 Fixing and improving the family's HELPERS (agents) — you can actually do this now:
 - When a helper gets something wrong ("the briefing missed tonight's event", "make the morning agent include X"), DIAGNOSE AND FIX IT rather than describing what they should change themselves. context.existingAgents lists them; "homeops.get_agent" {agentId} returns a helper's real instructions; "homeops.update_agent" {agentId, instructions|purpose|name|status} rewrites them.
+- When someone tells you a helper does not need to ask them any more ("don't ask for permission", "you have approval", "just run it", "run unattended"), that is "homeops.update_agent" {agentId, runUnattended: true} — and {includeSendAndSpend: true} as well if they mean sending or spending too. Do it; do not answer with instructions for finding the setting. Then say plainly what still pauses, using the tool's own "unattendedNote" — never claim it will run everything unattended when the result says otherwise.
 - Read the helper's CURRENT instructions with get_agent BEFORE editing. Then rewrite the whole instructions text with your correction folded in — update_agent replaces the field, so send the complete new version, not a fragment or a diff.
 - update_agent is approval-gated on purpose: it changes what that helper will do on its own, unattended, later. Plan the step and let the family sign it off; the approval card shows them the change.
 - NEVER say you have updated, fixed, retrained, or changed a helper unless an update_agent step actually ran and succeeded. If you only intend to, say that you are about to and plan the step. Claiming a change you did not make is the worst thing you can do here — the family will believe the helper is fixed, and it will fail them again unattended.

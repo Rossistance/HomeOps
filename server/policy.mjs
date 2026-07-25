@@ -101,6 +101,41 @@ export function resolveEffectivePolicy({ cap, agent = null, settings = {}, overr
     }
   }
 
+  // 6b. RELAXING, agent level, BLANKET — G4/G5 from the 2026-07-25 review.
+  //
+  //   [18:47] "There should be an override to run all the time no matter what."
+  //   [18:52] on a helper built from chat: "don't ask for permission, you have approval."
+  //
+  // Per-capability autoAllow (rule 6) can't express that: nobody is going to enumerate every
+  // tool a helper might reach for, and a helper the family built by talking to it doesn't
+  // have a tool list yet. So `unattended` is the blanket form of the same relaxation, with
+  // the SAME asymmetry that governs everything else here:
+  //
+  //   unattended.enabled          → clears the gate on low-risk steps, for any capability
+  //   unattended.includeHighRisk  → also clears send/spend/high-risk steps, and is therefore
+  //                                 gated on it having been set by a REAL PERSON with the
+  //                                 authority (Owner/Adult Admin, recorded in setByRole).
+  //                                 An agent writing this flag into its own record gets
+  //                                 nothing — the same reason rule 6 is bounded.
+  //
+  // Rules 1 (household kill switch) and 4 ("always ask me") still sit above this, in that
+  // order, so a family can turn a helper loose and still fence off the one step they want to
+  // see every time.
+  const un = agent?.approvalPolicy?.unattended;
+  if (un?.enabled && base.baseRequiresApproval) {
+    const authorized = un.includeHighRisk === true
+      && ["Owner", "Adult Admin"].includes(String(un.setByRole ?? ""));
+    if (!isHighStakes(effectiveCap)) {
+      return decide(ALLOWED, "agent.unattended", "This helper is set to run unattended, and this step is low-risk.");
+    }
+    if (authorized) {
+      return decide(ALLOWED, "agent.unattended_high_risk",
+        `An ${un.setByRole} chose to let this helper run ${String(base.risk).toLowerCase()}-risk steps unattended.`);
+    }
+    return decide(NEEDS_APPROVAL, "agent.unattended_refused",
+      `${cap.name ?? cap.id} sends or spends, so running unattended doesn't cover it — an Owner has to allow that separately.`);
+  }
+
   // 7-8. Nothing overrode the capability's own default.
   if (base.baseRequiresApproval) {
     return decide(NEEDS_APPROVAL, "capability.requires_approval", `${cap?.name ?? cap?.id ?? "This step"} needs your approval by default.`);

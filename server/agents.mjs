@@ -9,12 +9,13 @@ import crypto from "node:crypto";
 import {
   listAgents, getAgent, putAgent, patchAgent, deleteAgentRec,
   readJSON, writeJSON, listContactMethods, patchContactMethod,
-  getSettings, getRiskOverride,
+  getSettings, getRiskOverride, getSkill,
 } from "./store.mjs";
 import { resolveEffectivePolicy } from "./policy.mjs";
 import { toolCatalog } from "./planner.mjs";
 import { listPublicFunctions } from "./functions.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
+import { skillReadiness } from "./skills.mjs";
 
 /* ------------------------------ versioning ------------------------------ */
 export function listAgentVersions(agentId) {
@@ -28,7 +29,51 @@ function snapshotAgent(agent) {
 
 /* --------------------------------- shape -------------------------------- */
 const AGENT_STATUSES = ["Active", "Paused", "Draft", "Needs Attention", "Archived"];
-function normalizeAgent(body, base = {}) {
+
+/**
+ * G4/G5 — "There should be an override to run all the time no matter what" [18:47], and for
+ * a helper built from chat, "don't ask for permission, you have approval" [18:52].
+ *
+ * `approvalPolicy.unattended` is what policy.mjs rule 6b reads, and its high-risk tier is
+ * honoured only when `setByRole` says an Owner or Adult Admin chose it. That makes this
+ * function security-relevant: `setBy`/`setByRole`/`setAt` are STAMPED FROM THE SESSION and
+ * whatever the request body claimed is thrown away. Otherwise the flag that authorises
+ * unattended sending could be forged by the same generated agent it authorises — which is
+ * exactly the hole rule 6's low-risk bound exists to close.
+ *
+ * With no session (migrations, internal edits, the repair path) the tier cannot be raised at
+ * all: an unattended flag arrives un-attributed, so it only ever covers low-risk steps.
+ */
+function sanitizeApprovalPolicy(incoming, base, session) {
+  const prev = base?.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] };
+  if (incoming === undefined) return prev;
+  const p = incoming && typeof incoming === "object" ? incoming : {};
+  const out = {
+    autoAllow: Array.isArray(p.autoAllow) ? p.autoAllow : (prev.autoAllow ?? []),
+    alwaysApprove: Array.isArray(p.alwaysApprove) ? p.alwaysApprove : (prev.alwaysApprove ?? []),
+  };
+  const un = p.unattended;
+  if (un === undefined) {
+    if (prev.unattended) out.unattended = prev.unattended;   // untouched by this write
+    return out;
+  }
+  if (!un || typeof un !== "object" || un.enabled !== true) return out;  // turned off → gone
+  const role = session?.role ?? null;
+  const canRaise = ["Owner", "Adult Admin"].includes(String(role));
+  const wantsHigh = un.includeHighRisk === true;
+  out.unattended = {
+    enabled: true,
+    // Asking for the high-risk tier without the standing to grant it is recorded as the
+    // low tier, not as an error — the UI reads back what actually applies.
+    includeHighRisk: wantsHigh && canRaise,
+    setBy: session?.actorId ?? null,
+    setByRole: canRaise ? role : null,
+    setAt: new Date().toISOString(),
+  };
+  return out;
+}
+
+function normalizeAgent(body, base = {}, session = null) {
   return {
     icon: body.icon ?? base.icon ?? "Bot",
     purpose: body.purpose ?? base.purpose ?? "",
@@ -43,7 +88,7 @@ function normalizeAgent(body, base = {}) {
     allowedFunctionIds: Array.isArray(body.allowedFunctionIds) ? body.allowedFunctionIds : (base.allowedFunctionIds ?? []),
     deniedToolIds: Array.isArray(body.deniedToolIds) ? body.deniedToolIds : (base.deniedToolIds ?? []),
     deniedFunctionIds: Array.isArray(body.deniedFunctionIds) ? body.deniedFunctionIds : (base.deniedFunctionIds ?? []),
-    approvalPolicy: body.approvalPolicy ?? base.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] },
+    approvalPolicy: sanitizeApprovalPolicy(body.approvalPolicy, base, session),
     triggers: Array.isArray(body.triggers) ? body.triggers : (base.triggers ?? []),
   };
 }
@@ -87,7 +132,7 @@ export function createAgent(body, session) {
     householdId: session?.householdId ?? "local",
     createdBy: session?.actorId ?? null,
     name: body.name ?? "Untitled agent",
-    ...normalizeAgent(body),
+    ...normalizeAgent(body, {}, session),
     system: false,
     version: 1,
     createdAt: Date.now(),
@@ -97,14 +142,14 @@ export function createAgent(body, session) {
   return agent;
 }
 
-export function replaceAgent(id, body) {
+export function replaceAgent(id, body, session = null) {
   const existing = getAgent(id);
   if (!existing) return null;
   snapshotAgent(existing);
   const next = {
     ...existing,
     name: body.name ?? existing.name,
-    ...normalizeAgent(body, existing),
+    ...normalizeAgent(body, existing, session),
     id, householdId: existing.householdId, system: existing.system,
     version: (existing.version ?? 1) + 1,
     updatedAt: new Date().toISOString(),
@@ -113,13 +158,18 @@ export function replaceAgent(id, body) {
   return next;
 }
 
-export function partialUpdateAgent(id, patch) {
+export function partialUpdateAgent(id, patch, session = null) {
   const existing = getAgent(id);
   if (!existing) return null;
   snapshotAgent(existing);
   const next = {
     ...existing,
     ...patch,
+    // A PATCH spreads the body verbatim, so approvalPolicy has to be re-stamped here too —
+    // this is the route a client actually uses to turn unattended running on.
+    ...(patch && Object.prototype.hasOwnProperty.call(patch, "approvalPolicy")
+      ? { approvalPolicy: sanitizeApprovalPolicy(patch.approvalPolicy, existing, session) }
+      : {}),
     id, householdId: existing.householdId, system: existing.system,
     version: (existing.version ?? 1) + 1,
     updatedAt: new Date().toISOString(),
@@ -238,9 +288,43 @@ export function agentContext(agent, session) {
     ...toolView.filter((t) => t.permitted && t.available).map((t) => t.toolId),
     ...fnView.filter((f) => f.permitted && f.available).map((f) => f.id),
   ];
+  // G3 — "will it run unattended?" answered from the policy, not from a label. A helper runs
+  // unattended when nothing it can actually execute would stop and wait for a person.
+  const unattended = agent.approvalPolicy?.unattended ?? null;
+  const gatedNow = [
+    ...toolView.filter((t) => t.permitted && t.available && t.policy?.requiresApproval).map((t) => t.name),
+    ...fnView.filter((f) => f.permitted && f.available && f.policy?.requiresApproval).map((f) => f.name),
+  ];
+  // G2 — [18:06] "It says it runs the assigned use case skill. Well, what IS that skill?"
+  // The agent detail screen showed that sentence with no way to find out. Name them, say how
+  // many steps each has, and say whether it can actually run today.
+  const skills = (agent.skillIds ?? []).map((sid) => {
+    const s = getSkill(sid);
+    if (!s) return { id: sid, name: "Missing skill", stepCount: 0, ready: false, blockedReason: "It no longer exists." };
+    const readiness = skillReadiness(s, session);
+    return {
+      id: s.id,
+      name: s.name ?? "Untitled skill",
+      description: s.description ?? "",
+      stepCount: (s.steps ?? []).length,
+      stepNames: (s.steps ?? []).slice(0, 8).map((st) => st.name ?? st.step_id ?? "Untitled step"),
+      ready: !!readiness.ready,
+      blockedReason: readiness.ready ? null : (readiness.unresolved?.[0]?.detail ?? "Something it needs isn't set up yet."),
+    };
+  });
+
   return {
     agentId: agent.id,
     openAllowList: allowTools.length === 0 && allowFns.length === 0, // permissive (deny-only) default
+    skills,
+    unattended: unattended?.enabled
+      ? { enabled: true, includeHighRisk: !!unattended.includeHighRisk, setByRole: unattended.setByRole ?? null, setAt: unattended.setAt ?? null }
+      : { enabled: false, includeHighRisk: false, setByRole: null, setAt: null },
+    // The honest answer, and the exact steps that would still park. An empty list with
+    // executables present is the only thing that means "this runs start to finish alone".
+    runsUnattended: gatedNow.length === 0 && executable.length > 0,
+    gatedCapabilityNames: gatedNow.slice(0, 8),
+    gatedCount: gatedNow.length,
     // ISS-124: tools and functions carry INDEPENDENT allow-lists, so a single
     // "openAllowList" boolean can't describe the state honestly — restricting tools while
     // leaving functions open reads as "explicit" overall even though every function is

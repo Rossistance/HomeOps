@@ -2,7 +2,7 @@
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
-import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods, listAgents, getAgent } from "./store.mjs";
+import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods, listAgents, getAgent, getMember } from "./store.mjs";
 import { partialUpdateAgent } from "./agents.mjs";
 import { mealEventNotes, pushEventToGoogle } from "./calendar.mjs";
 import { deliverNotification, deliverInAppFallback } from "./notify.mjs";
@@ -94,17 +94,45 @@ export const INTERNAL_FUNCTIONS = {
       for (const f of ["name", "purpose", "instructions", "status"]) {
         if (typeof input?.[f] === "string" && input[f].trim()) patch[f] = input[f].trim();
       }
+      // G5 — [18:52], on a helper the family built by talking to it: "don't ask for
+      // permission, you have approval." That sentence is said IN CHAT, so this is where it
+      // has to be actionable. It is not a permission WIDENING (the helper's allow-lists are
+      // untouched); it removes the pause on the steps it can already run.
+      //
+      // The role is read from the store for the acting member — never from the model's input
+      // — so the high-risk tier is granted only when the person actually asking has the
+      // standing to grant it (agents.mjs sanitizeApprovalPolicy makes the same check again).
+      // And this tool is approval-gated, so the family sees the change before it takes hold.
+      let unattendedNote = null;
+      if (typeof input?.runUnattended === "boolean") {
+        const role = getMember(ctx.actorId)?.role ?? null;
+        patch.approvalPolicy = {
+          ...(a.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] }),
+          unattended: input.runUnattended
+            ? { enabled: true, includeHighRisk: input.includeSendAndSpend === true }
+            : { enabled: false },
+        };
+        unattendedNote = !input.runUnattended
+          ? "It will ask before gated steps again."
+          : input.includeSendAndSpend === true && ["Owner", "Adult Admin"].includes(String(role))
+            ? "It will now run on its own, including steps that send or spend."
+            : input.includeSendAndSpend === true
+              ? "It will now run low-risk steps on its own. Sending and spending still needs an Owner to allow it, so those still pause."
+              : "It will now run low-risk steps on its own. Anything that sends or spends still pauses for you.";
+      }
       if (Object.keys(patch).length === 0) {
-        return { ok: false, error: "nothing_to_change", message: "Say what to change — name, purpose, instructions, or status." };
+        return { ok: false, error: "nothing_to_change", message: "Say what to change — name, purpose, instructions, status, or whether it runs unattended." };
       }
       const before = { name: a.name, purpose: a.purpose ?? "", instructions: a.instructions ?? "", status: a.status ?? "Active" };
-      const next = partialUpdateAgent(id, patch);
+      const next = partialUpdateAgent(id, patch, { actorId: ctx.actorId, householdId: ctx.householdId, role: getMember(ctx.actorId)?.role ?? null });
       if (!next) return { ok: false, error: "update_failed", message: "Couldn't save that change." };
       // before/after travels back so the chat can show what actually changed — and so a
       // claim of having edited a helper is backed by a diff, not by assertion.
       return { ok: true, result: {
         id: next.id, name: next.name, version: next.version,
         changed: Object.keys(patch), before, after: { ...before, ...patch },
+        // Read back what ACTUALLY applies, so a refused tier can't be reported as granted.
+        ...(unattendedNote ? { unattended: next.approvalPolicy?.unattended ?? { enabled: false }, unattendedNote } : {}),
       } };
     },
   },

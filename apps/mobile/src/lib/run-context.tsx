@@ -32,11 +32,14 @@ export interface ActiveRun {
 
 interface RunCtx {
   activeRun: ActiveRun | null;
-  startRun: (plan: AgentPlan) => Promise<void>;
+  /** Resolves to the server run id (null when the run couldn't be started). Pass
+   *  `conversationId` to make the SERVER own the outcome message — that's the path that
+   *  carries fetched rows back as cards (K2) and survives an app restart. */
+  startRun: (plan: AgentPlan, opts?: { conversationId?: string }) => Promise<string | null>;
   clearRun: () => void;
 }
 
-const Ctx = createContext<RunCtx>({ activeRun: null, startRun: async () => {}, clearRun: () => {} });
+const Ctx = createContext<RunCtx>({ activeRun: null, startRun: async () => null, clearRun: () => {} });
 export function useRun() { return useContext(Ctx); }
 
 function mapStepStatus(s: string, approvalId: string | null): RunStepState["status"] {
@@ -106,8 +109,8 @@ export function RunProvider({ children }: { children: React.ReactNode }) {
   }, []);
   useEffect(() => stopPolling, [stopPolling]);
 
-  const startRun = useCallback(async (plan: AgentPlan) => {
-    if (startingRef.current) return;
+  const startRun = useCallback(async (plan: AgentPlan, opts?: { conversationId?: string }) => {
+    if (startingRef.current) return null;
     startingRef.current = true;
     stopPolling();
     const startedAt = new Date().toISOString();
@@ -124,7 +127,7 @@ export function RunProvider({ children }: { children: React.ReactNode }) {
       startedAt,
     });
 
-    const res = await api.startRunPlan(plan);
+    const res = await api.startRunPlan(plan, opts);
     startingRef.current = false;
     if (!res.run) {
       setActiveRun((prev) => prev ? {
@@ -138,7 +141,7 @@ export function RunProvider({ children }: { children: React.ReactNode }) {
             : res.message ?? res.error ?? "The server couldn't start this run.",
         } : s),
       } : prev);
-      return;
+      return null;
     }
 
     setActiveRun(toActiveRun(res.run, startedAt));
@@ -157,6 +160,7 @@ export function RunProvider({ children }: { children: React.ReactNode }) {
       }
       if (Date.now() > deadline) stopPolling();
     }, POLL_MS);
+    return runId;
   }, [stopPolling]);
 
   const clearRun = useCallback(() => {

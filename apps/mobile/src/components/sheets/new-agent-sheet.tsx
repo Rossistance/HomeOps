@@ -2,20 +2,13 @@
 // template); Famili's real planner drafts the agent. Step 2: review the draft,
 // then create it for real via buildFromChat. AI-first: no local agent templates
 // are created behind the planner's back.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Alert, ScrollView, TextInput, View } from "react-native";
-import { api, type ChatBuild } from "@/lib/api";
-import { useTheme } from "@/theme";
+import { api, type AgentTemplateSectionRec, type ChatBuild } from "@/lib/api";
+import { useTheme, tapHaptic } from "@/theme";
 import {
   T, Badge, Well, Row, SymTile, PressableScale, HSheet, SheetCTA, Notice, useConfirmFlash,
 } from "@/components/ui";
-
-const TEMPLATES = [
-  { name: "Homework Helper", icon: "graduationcap", desc: "Assignments tracked, kids nudged before due dates", prompt: "Create a Homework Helper agent that tracks the kids' assignments and reminds them on school nights at 6pm." },
-  { name: "Carpool Coordinator", icon: "person.2", desc: "Pickup rotations confirmed with your approval", prompt: "Create a Carpool Coordinator agent that reads practice times from the calendar and drafts pickup confirmations for my approval." },
-  { name: "Travel Prep", icon: "folder", desc: "Packing lists and documents before each trip", prompt: "Create a Travel Prep agent that spots trips on the calendar, builds packing lists, and checks document renewal dates two weeks before each trip." },
-  { name: "Plant & Yard", icon: "sun.max", desc: "Seasonal watering and yard reminders", prompt: "Create a Plant & Yard agent that sends weekly watering and yard reminders, adjusted to the weather." },
-] as const;
 
 export function NewAgentSheet({ visible, onClose, onCreated }: {
   visible: boolean;
@@ -29,6 +22,19 @@ export function NewAgentSheet({ visible, onClose, onCreated }: {
   const [note, setNote] = useState<string | null>(null);
   const [build, setBuild] = useState<ChatBuild | null>(null);
   const [conversationId, setConversationId] = useState<string | undefined>(undefined);
+  const [sections, setSections] = useState<AgentTemplateSectionRec[]>([]);
+  const [section, setSection] = useState("__all");
+
+  // Loaded when the sheet opens rather than at mount — the catalog is static, but a screen
+  // that never opens this sheet has no business fetching it.
+  useEffect(() => {
+    if (!visible || sections.length) return;
+    let live = true;
+    void api.agentTemplates().then((s) => { if (live) setSections(s); }).catch(() => null);
+    return () => { live = false; };
+  }, [visible, sections.length]);
+
+  const visibleSections = section === "__all" ? sections : sections.filter((s) => s.key === section);
 
   function reset() {
     setText(""); setBusy(false); setNote(null); setBuild(null); setConversationId(undefined);
@@ -95,22 +101,64 @@ export function NewAgentSheet({ visible, onClose, onCreated }: {
               </Well>
               <T kind="detail">Describe it in a sentence — Famili drafts the agent for your review.</T>
               {note && <Notice text={note} ok={false} />}
+              {/* G6 — [19:18] "there's only four templates in the mobile app, the web app has
+                  a lot more… all need to be brought over, grouped into sections so I can
+                  navigate them quickly." The list is the SERVER's now, and the section chips
+                  are the quick navigation: tap one and only that group is listed. */}
               <T kind="eyebrow">Or start from a template</T>
-              <View style={{ gap: 2 }}>
-                {TEMPLATES.map((t, i) => (
-                  <Row
-                    key={t.name}
-                    icon={t.icon}
-                    iconColor={colors.ember}
-                    iconBg={colors.emberBg}
-                    title={t.name}
-                    subtitle={t.desc}
-                    chevron
-                    onPress={() => setText(t.prompt)}
-                    last={i === TEMPLATES.length - 1}
-                  />
-                ))}
-              </View>
+              {sections.length === 0 ? (
+                <T kind="sub">Templates couldn't load just now — describe it above instead.</T>
+              ) : (
+                <>
+                  <ScrollView
+                    horizontal showsHorizontalScrollIndicator={false}
+                    style={{ marginHorizontal: -spacing.xl, flexGrow: 0 }}
+                    contentContainerStyle={{ paddingHorizontal: spacing.xl, gap: 8 }}
+                    keyboardShouldPersistTaps="handled"
+                  >
+                    {[{ key: "__all", title: "All" }, ...sections].map((s) => {
+                      const active = section === s.key;
+                      return (
+                        <PressableScale
+                          key={s.key}
+                          haptic="select"
+                          onPress={() => setSection(s.key)}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected: active }}
+                          accessibilityLabel={s.title}
+                          style={{
+                            paddingHorizontal: 13, paddingVertical: 7, borderRadius: 999,
+                            backgroundColor: active ? colors.ember : colors.surfaceSunken,
+                          }}
+                        >
+                          <T kind="subMedium" color={active ? colors.onEmber : colors.textSecondary}>{s.title}</T>
+                        </PressableScale>
+                      );
+                    })}
+                  </ScrollView>
+                  {visibleSections.map((s) => (
+                    <View key={s.key} style={{ gap: 2 }}>
+                      <View style={{ flexDirection: "row", alignItems: "baseline", gap: 6, paddingBottom: 4 }}>
+                        <T kind="eyebrow">{s.title}</T>
+                        {s.blurb ? <T kind="caption" color={colors.textFaint} style={{ flex: 1 }}>{s.blurb}</T> : null}
+                      </View>
+                      {s.templates.map((t, i) => (
+                        <Row
+                          key={t.id}
+                          icon={t.icon}
+                          iconColor={colors.ember}
+                          iconBg={colors.emberBg}
+                          title={t.name}
+                          subtitle={t.desc}
+                          chevron
+                          onPress={() => { tapHaptic("light"); setText(t.prompt); }}
+                          last={i === s.templates.length - 1}
+                        />
+                      ))}
+                    </View>
+                  ))}
+                </>
+              )}
             </>
           ) : (
             <>

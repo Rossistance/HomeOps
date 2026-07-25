@@ -53,6 +53,7 @@ import {
   rollbackAgent, listAgentVersions, agentContext, selectAgent, publicAgent, listPublicAgents,
   deriveCapabilitiesFromSteps, agentVisibleTo,
 } from "./agents.mjs";
+import { agentTemplateSections } from "./agent-templates.mjs";
 import { getAgent } from "./store.mjs";
 import {
   createSkill, replaceSkill, partialUpdateSkill, deleteSkill, duplicateSkill,
@@ -2931,6 +2932,14 @@ const handleRequest = async (req, res) => {
       }
     }
 
+    // G6 — the starter-helper catalog, grouped. Mobile carried four hand-written entries
+    // while the web read thirteen from its own file; this is the one list both can ask for.
+    // Static and household-independent, so any signed-in member may read it.
+    if (path === "/api/agent-templates" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      return json(res, 200, { sections: agentTemplateSections() }, req);
+    }
+
     /* ---- Agent registry (Slice 5) ---- */
     if (path === "/api/agents" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -2958,7 +2967,10 @@ const handleRequest = async (req, res) => {
         const a = getAgent(id);
         if (!a || (a.householdId !== "local" && a.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
         const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-        const updated = method === "PUT" ? replaceAgent(id, body) : partialUpdateAgent(id, body);
+        // The session travels so approvalPolicy.unattended can be attributed to a real
+        // person with real standing (agents.mjs sanitizeApprovalPolicy) — its high-risk tier
+        // is only honoured for an Owner/Adult Admin, and a request body can't claim that.
+        const updated = method === "PUT" ? replaceAgent(id, body, g.session) : partialUpdateAgent(id, body, g.session);
         audit({ type: "agent.update", agentId: id, ok: true }, req, g.session);
         return json(res, 200, { agent: publicAgent(updated) }, req);
       }

@@ -47,11 +47,32 @@ export interface BuildResult {
 export interface AssistantResult { ok: boolean; kind?: "answer" | "plan" | "build"; answer?: string; plan?: AgentPlan; build?: ChatBuild; run?: RunRec; model?: string; error?: string; message?: string }
 // Server-durable assistant conversations — same records the web client uses, so a chat
 // started on the phone shows up on the web (and vice versa) and survives app restarts.
+// K2 — the rows a run actually fetched, as structure, so the chat can render real cards
+// instead of prose ("still not returned in line, in chat, results as cards"). Built once on
+// the server (server/assistant-runs.mjs rowCard/runResultGroups) so the text summary and the
+// cards can never disagree about what was found. `when` arrives RAW so the device formats it
+// in its own locale and timezone.
+export interface ResultCardRec {
+  title: string;
+  when?: string;
+  allDay?: boolean;
+  where?: string;
+  detail?: string;
+  url?: string;
+  refId?: string;
+  meta?: { label: string; value: string }[];
+}
+export interface ResultGroupRec {
+  title: string; connector?: string; toolId?: string; rows: ResultCardRec[]; more?: number;
+}
 export interface ConversationMessage {
   role: "user" | "assistant"; text: string; at: string; kind?: string;
   plan?: AgentPlan | null; build?: ChatBuild | null; built?: boolean;
   builtIds?: { skillId?: string; agentId?: string; triggerId?: string };
   runId?: string | null; status?: string;
+  resultGroups?: ResultGroupRec[] | null;
+  /** The same message with the row bullets removed — read this when rendering resultGroups. */
+  textWithoutRows?: string | null;
 }
 export interface ConversationRec {
   id: string; title: string; messages: ConversationMessage[]; createdAt: string; updatedAt: string;
@@ -755,9 +776,18 @@ export const api = {
   },
 
   /* ---- Durable server runs (canonical runtime; resolves step inputs itself) ---- */
-  async startRunPlan(plan: AgentPlan): Promise<{ run?: RunRec; error?: string; message?: string }> {
+  // `conversationId` makes the run's outcome the SERVER's message: the run-finished hook
+  // appends a durable run_result carrying the fetched rows as cards (K2), which the local
+  // client-built summary could never do — it only ever had stringified step output. It also
+  // means the result survives an app restart and shows up on the web. Authority-bearing
+  // sourceRef fields are stripped server-side (clientSourceRef); conversationId is not one.
+  async startRunPlan(plan: AgentPlan, opts?: { conversationId?: string }): Promise<{ run?: RunRec; error?: string; message?: string }> {
     const r = await req<{ run?: RunRec; error?: string; message?: string }>("/runs/start", {
-      method: "POST", body: JSON.stringify({ plan, source: "manual" }),
+      method: "POST",
+      body: JSON.stringify({
+        plan, source: "manual",
+        ...(opts?.conversationId ? { sourceRef: { conversationId: opts.conversationId } } : {}),
+      }),
     });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
@@ -796,6 +826,18 @@ export const api = {
   async agents(): Promise<AgentRec[]> {
     const r = await req<{ agents: AgentRec[] }>("/agents");
     return r.data?.agents ?? [];
+  },
+  // G6 — the starter-helper catalog, grouped, from the server. Mobile used to carry four
+  // hand-written entries of its own while the web read thirteen from a different file.
+  async agentTemplates(): Promise<AgentTemplateSectionRec[]> {
+    const r = await req<{ sections: AgentTemplateSectionRec[] }>("/agent-templates");
+    return r.data?.sections ?? [];
+  },
+  // G2/G3/G4 — the one server computation behind "what does this helper actually use, what
+  // is it allowed to do, and will it run without me?" (server/agents.mjs agentContext).
+  async agentContext(id: string): Promise<AgentContextRec | null> {
+    const r = await req<{ context?: AgentContextRec }>(`/agents/${encodeURIComponent(id)}/context`);
+    return r.data?.context ?? null;
   },
   async patchAgent(id: string, patch: Record<string, unknown>): Promise<{ agent?: AgentRec; error?: string }> {
     const r = await req<{ agent?: AgentRec; error?: string }>(`/agents/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
@@ -900,6 +942,41 @@ export interface AgentRec {
   visibility?: "household" | "personal";
   createdBy?: string | null;
   lastRunAt?: string | null; runCount?: number; toolIds?: string[]; createdAt?: string; updatedAt?: string;
+  approvalPolicy?: {
+    autoAllow?: string[]; alwaysApprove?: string[];
+    unattended?: { enabled?: boolean; includeHighRisk?: boolean; setByRole?: string | null; setAt?: string | null };
+  };
+  skillIds?: string[];
+}
+// G6 — starter helpers, grouped into navigable sections (server/agent-templates.mjs).
+// A template is an opening sentence, not a pre-built agent: `prompt` goes to the planner,
+// which drafts against THIS household's real connections, and the family approves it.
+export interface AgentTemplateRec { id: string; name: string; category: string; icon: string; desc: string; prompt: string }
+export interface AgentTemplateSectionRec { key: string; title: string; blurb?: string; templates: AgentTemplateRec[] }
+// The effective-policy view, computed server-side in ONE pass (server/agents.mjs
+// agentContext) so a row and a count can never tell different stories.
+export interface EffectivePolicyRec {
+  decision: "allowed" | "needs_approval" | "blocked";
+  rule: string; reason: string; requiresApproval: boolean;
+  risk: string; baseRequiresApproval: boolean; riskOverridden: boolean;
+}
+export interface AgentContextRec {
+  agentId: string;
+  openAllowList: boolean;
+  openToolAllowList: boolean;
+  openFunctionAllowList: boolean;
+  tools: { toolId: string; name: string; connectorName: string; action: string; requiresApproval: boolean; available: boolean; permitted: boolean; denied: boolean; policy: EffectivePolicyRec }[];
+  functions: { id: string; name: string; type: string; requiresApproval: boolean; available: boolean; state: string; permitted: boolean; denied: boolean; policy: EffectivePolicyRec }[];
+  executable: string[];
+  availableCount: number; permittedCount: number; executableCount: number;
+  /** G2 — [18:06] "it says it runs the assigned use case skill. Well, what IS that skill?" */
+  skills: { id: string; name: string; description?: string; stepCount: number; stepNames?: string[]; ready: boolean; blockedReason?: string | null }[];
+  /** G4 — the grant that actually applies, refused tiers included. */
+  unattended: { enabled: boolean; includeHighRisk: boolean; setByRole: string | null; setAt: string | null };
+  /** G3 — "will it run unattended?" answered from the policy, not from a label. */
+  runsUnattended: boolean;
+  gatedCapabilityNames: string[];
+  gatedCount: number;
 }
 export interface TriggerRec {
   id: string; name: string; type: string; enabled: boolean; agentId?: string | null;
