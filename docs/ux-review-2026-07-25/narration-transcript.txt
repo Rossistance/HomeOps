@@ -1,0 +1,334 @@
+[00:00] quick
+[00:02] Summarized version of the first three videos that I shared that do not have audio
+[00:09] And it'll be quick for context, but you'll be able to use it in combination with the other
+[00:15] videos
+[00:16] To be able to pick up on what I was
+[00:20] Getting at and inferring right here. The first thing I noticed is that after the toast on the home screen
+[00:26] the
+[00:27] individual profiles do not reuse the
+[00:31] profile images profile pictures for the actual profiles in and inside the app I
+[00:39] actually would like them to and
+[00:43] It makes sense that they that they should
+[00:48] Additionally the icon above welcome home is not the
+[00:52] family OS icon at all
+[00:58] One other thing is when you go to
+[01:01] Sign in with email
+[01:03] you're prompted for a
+[01:06] Email and an eight character password. I have not set one of these up and I last time I did it
+[01:13] It broke the application and had to use a bootstrap pin to get back in
+[01:18] There's no
+[01:19] Place that I've seen that this is set up
+[01:23] For my family at least but with a new family it will be
+[01:29] But there needs to be a
+[01:32] Forgot password button here
+[01:35] Absolutely that
+[01:39] can
+[01:41] Send an email
+[01:44] with a code
+[01:46] To recover the account or reset password so forgot username and
+[01:53] Forgot password
+[01:55] Or forgot email and forgot password
+[01:59] The next thing is if I
+[02:02] Were
+[02:04] Creating a new household. I'm given my name and invite code optional a household name optional
+[02:12] My email and the password the household name
+[02:17] Does not need to be optional it needs to be required
+[02:21] the invite code
+[02:23] needs to be optional and
+[02:25] I will need the ability to generate those
+[02:29] myself
+[02:31] through a
+[02:37] Interface of some sort that allows me to generate invite codes for
+[02:45] any
+[02:48] Household to sign up because I am the inventor and owner of the entire application
+[02:56] For new households they
+[02:59] will not get this option and
+[03:04] It would probably be better if the entire invite code
+[03:10] section was
+[03:12] shrunk down into a text
+[03:15] That says
+[03:17] invite code and then expands if you clicked it otherwise it will stay empty and
+[03:22] It'll just read from top to bottom
+[03:25] your name
+[03:27] Your household name your email and your password and
+[03:30] Then create that then create household
+[03:33] so now that we have covered the home screen let's go ahead and
+[03:40] Login
+[03:43] Wait one more thing actually
+[03:45] For each one of these cards they need to match the color profile that the user has selected once they've set up
+[03:54] This is fine for a new house
+[03:58] but a
+[03:59] New house needs to have a walkthrough that makes you set up your profile add a picture using it an icon
+[04:06] Set up your color and answer some other basic information that you would need in there including
+[04:14] You know, maybe some starting
+[04:16] Agents and a couple preferences facts
+[04:21] and knowledge that you might want to add for now
+[04:26] on my
+[04:28] My household profile
+[04:31] These are not
+[04:33] Color properly that match what's inside of the application and they need to be so let's click in
+[04:38] I'm gonna input my pin
+[04:42] It is okay
+[04:45] That you're seeing this because we're still in testing
+[04:49] One thing I noticed is that when I went to input my pen
+[04:53] the
+[04:55] box for the actual pin
+[04:58] Entry is now sitting right above the keyboard
+[05:00] But it didn't refocus to where I can easily hit log and I have to decide to click out somewhere like
+[05:06] this to
+[05:07] To do it
+[05:09] What's better is if that I click in to put my pen in
+[05:12] When I click my own profile it relocates me down here to put my pen in but right about here
+[05:17] Where the sign in button is still visible right above the keyboard and I do not have to scroll up like I just did
+[05:24] It just automatically goes there. So it would just be like where it is right now
+[05:31] Okay, then after pushing sign in my profile loads
+[05:38] One of the first things I noticed is that
+[05:42] my profile
+[05:48] names for my household members
+[05:52] Some of them get cut off
+[05:54] Because they're too long
+[06:00] This can't happen people need to be able to read their entire name
+[06:04] This happens throughout the application currently and needs to change. It's not exactly text wrapping
+[06:12] It's on all that it's there needs to be a way to display
+[06:16] the information and
+[06:20] It all fit
+[06:23] It needs to be organized and
+[06:26] Be easy to identify at first glance. So
+[06:31] You'll see the same thing that happens down here in the calendar the address is cut off. I can't tell where that's at
+[06:38] I'd like to be able to
+[06:40] So the first thing I'm going to touch on is the calendar. I'm going in it
+[06:44] Well, you'll notice is that it says there's two events that come from a calendar that can't refresh
+[06:48] They may be out of date until it's reconnected. Okay
+[06:52] That's fine, but
+[06:54] I'm gonna hit sync
+[06:56] And it says that there's two counters or synced there's 40 updated. Okay
+[07:02] I'm gonna go to reconnect because it's still showing me this message and I'm upon hitting reconnect. It shows me the Google
+[07:11] Card
+[07:12] whatever the
+[07:14] Calendar that needs to reconnect is it needs to focus on that card if it were Microsoft it would need to focus in the center of the screen on Microsoft
+[07:23] And potentially even highlight it with a ring around it color ring around it to show that that's the one an animated ring
+[07:32] There also would need to be a reconnect button here on the outside of this card. This is the card that is underneath
+[07:40] inside of connections and
+[07:42] And it is a view of everything, but it doesn't actually let you reconnect from here
+[07:46] But we can see it's connected. I have a green check mark right next to my name and it says connected that is truthful and
+[07:55] I'm gonna just test it out here. The first thing I'm gonna do is go down and sync the calendar from here
+[08:00] It's synced. I'm gonna sync the calendar from here
+[08:07] It's synced. That's the two calendars. I'm gonna go ahead and say connected Google calendar
+[08:12] Which is the same calendar WR Hickson at gmail.com. I'm gonna say connect
+[08:18] Google calendar and
+[08:22] We saw it update we saw the time update
+[08:25] now
+[08:27] That means that we're good. Okay, we're even shown that
+[08:32] We are we are good here
+[08:35] Okay, the other time okay
+[08:38] So what we're gonna do next is we're gonna go back when I hit back here
+[08:42] It's gonna take me to settings, but the screen that led me there in this situation
+[08:48] was actually the calendar screen and even though it's the normal process to
+[08:55] That the going back from the connection screen would lead me to settings in that case
+[09:01] In cases like it if I started on the calendar screen and it made me link to the connection screen
+[09:08] Then when I hit back in that particular use case it should get me back to the calendar screen
+[09:15] I will hit the home button that's a day button now at the bottom which will take me back to the calendar screen, okay?
+[09:25] Even though I
+[09:27] synced the accounts you can see here that they are still showing reconnect
+[09:32] They I can refresh it doesn't matter I could
+[09:38] I could log out or log out of the app walk back in close the app doesn't matter. It'll still be there
+[09:45] Additionally, I had mentioned previously that
+[09:48] Where it says WR Hixen at gmail.com if I was the one who added this calendar
+[09:55] it clearly
+[09:57] Is associated with my profile
+[09:59] Which is Ross it doesn't need to necessarily see my email address as much as it needs to say Ross
+[10:06] Other family members looking at this calendar are gonna more easily be able to identify their
+[10:13] Family members named and they are their email address
+[10:16] so
+[10:18] That's not correct if I click into this event. It says well, it was synced from Google calendar, okay?
+[10:25] One thing you'll notice it initially immediately is that this screen raises halfway
+[10:32] Why doesn't it raise all the way to the top like this?
+[10:35] It should it should raise all the way to the top
+[10:38] This way I can see some of the other important details that I need to see and
+[10:43] Use the all the available screen space
+[10:47] So I'll put it up there myself and
+[10:50] We'll look at some of the items here. So
+[10:55] one thing that I noticed is that again the
+[10:59] location
+[11:01] I've asked for this before is is just text
+[11:05] however, what I'd like to do is have some sort of
+[11:09] Availability to where I go type start typing in an address there
+[11:15] This I can address here and it uses this a smart sorting function like most other web apps use that lets me select from
+[11:24] addresses I
+[11:25] Can select it and that way it has a link to an actual
+[11:30] function and another app which would be that I
+[11:33] could then click it
+[11:37] Or a button out to the side and actually
+[11:41] be taken outside of the family OS app and to
+[11:47] Google Maps or or whatever my default maps application would be
+[11:54] Or Apple Maps
+[11:57] Currently that doesn't happen
+[11:59] You just clicking it and edit the text and it's just raw text it would be nice if there was a
+[12:05] edit button here
+[12:08] That allowed me to to change the location and it be linked to an outside service next thing is I click into notes I
+[12:16] Can type notes here. This is great. This should be appended to the actual body of whatever the calendar event is when it gets pushed to Google
+[12:26] There's a note for driver
+[12:30] This is this is nice, but
+[12:35] It'd be better if this says
+[12:38] You know who's attending right who should who should be attending this and that way
+[12:45] if I
+[12:46] needed to if I wanted to invite
+[12:49] You know g-pop or beanie or Melissa
+[12:53] that I could click these and
+[12:56] It wouldn't
+[12:58] Essentially let them know that yeah
+[13:00] I've added a calendar event that has them in it and they're now obviously being informed and notified of that calendar event
+[13:07] They are invited to the calendar event whether they want to attend or not on their end. They should receive a
+[13:16] You know
+[13:18] Accept or decline like any meeting invite would get this is essentially just like a meeting invite
+[13:24] That's what I would use it for if I click down into to what to bring
+[13:30] This is this is nice
+[13:34] I'm gonna click into this okay
+[13:37] Again though just like the home screen when I click into this
+[13:40] Since it's the bottom of the screen currently
+[13:43] What should happen is it should it should go right up here? Okay?
+[13:48] And these the save changes in the bottom of this text entry box should
+[13:54] Be closer together probably so that doesn't have to go much further. I can click
+[14:00] Check from here to just get out of that box or I could click save changes which will make me feel
+[14:07] Safer doing that and I would just go save changes and
+[14:11] It would close the screen. Yep. So it just doesn't slide up properly
+[14:16] Another thing you'll notice is that
+[14:19] Some of these items
+[14:21] again, they are
+[14:25] They have long addresses and what if they have a long note they need to be able to be
+[14:31] Expanded by clicking the arrow
+[14:35] Or a draw or an arrow down somewhere, right? Maybe underneath the time that then can let me just look at a glance without going into the entire
+[14:46] Card and opening the card maybe
+[14:49] Something over to the left side of the screen underneath the time like a down down little arrow that says, you know
+[14:55] You can look at it this way in addition to the arrow off to the right which would make it fully open
+[15:03] If I go to add something to the calendar all this looks good
+[15:10] But again, it has some of those things where if I click here
+[15:14] Yep, the
+[15:16] the
+[15:17] Text entry box is just right above the keyboard and I don't see the save at all
+[15:22] I need to be able to see that save feature
+[15:26] That's that's crucial. So
+[15:33] Let's get out of this screen and we'll show you a couple other high-level things. It's that
+[15:41] all of the text
+[15:43] is
+[15:46] for
+[15:48] agent cards
+[15:50] For suggestions, it's all hidden wrapped
+[15:53] I can't actually says what it what it's gonna do
+[15:55] Why would I click on something if I don't know exactly what it says it says what does the family's day look lie?
+[16:00] And it gets cut off this needs to be fully visible. So does the so do the chat?
+[16:08] Titles up above and
+[16:12] If I start a chat
+[16:14] It needs to intelligently name that chat just like chat GPT does with your chats or cloud does
+[16:21] Additionally when I click personal and I'm on personal
+[16:24] This should only be showing me that pink dot one if that's the only personal
+[16:28] Chat I've had if I click the family tab it should only be showing me the orange ones that way
+[16:34] I know that those the which section I'm in just by looking up there too
+[16:38] It's another visual to identify what section we're in currently the only way
+[16:43] If I'm inside of a chat
+[16:45] Personal the only way to get over to family is not to is
+[16:51] Is to create a new chat?
+[16:54] But I cannot click into family from here and it just showed me only the family ones and back to the main screen
+[17:00] I have to click new it keeps me on personal and then I can change over to family to see it
+[17:05] That's not the correct path for that
+[17:09] If I click into the agents tab moving on
+[17:13] Inside of the agents tab
+[17:15] You'll see that every agent. I can't read its actual title. I
+[17:20] Can read a one
+[17:22] Parsh part in some places one sentence about what it does, but I also have no idea what?
+[17:30] What tools it uses what connections it uses that should be easily?
+[17:36] displayed and
+[17:37] Visibly displayed there on that card
+[17:39] It doesn't have to be big, but so there's a visual reference like depth. That's the one
+[17:48] If I click into the agent, okay, I should have some options about this agent
+[17:52] I should be able to rename this agent. I should be able to to
+[17:57] Say what this agent does
+[17:59] Other than you know the only thing I have option do now is run it or pause it and change its space, okay
+[18:06] If I scroll down and say run the assigned it says how this agent works it runs the assigned use
+[18:14] case skill
+[18:16] Okay, what is that skill and always deliver deliver only to verify it allows us contact methods
+[18:23] Pause for approval on any sign off step, okay?
+[18:27] And there's no runs yet
+[18:29] That's that's great
+[18:30] But what again what connections does it use what skills does it actually is what are the actual names of them? What is
+[18:40] What are the current permissions set for for this will it will it run unattended?
+[18:47] Can I override it to run all the time no matter what?
+[18:52] When it's created by the chat I would like to be able to override it by saying don't ask for permission
+[18:59] You have approval things like this so it it can just bypass that
+[19:05] again on every screen though all of these cards are
+[19:11] not wrapped I can't read it and
+[19:15] Just very hard to read if I go to the new agent
+[19:18] I can see there's there's four from a template available however
+[19:23] I know there's there's many many templates available on the the web app version and that they're not available to choose from here
+[19:30] they need to be they need to be
+[19:33] coordinated into the sections and
+[19:37] Easily navigated quickly navigated to choose a template and start from there
+[19:43] And those those descriptions for those also would need to be
+[19:47] All of it visible all that text visible the wrapping however the cards are going to be formatted
+[19:56] If we move on real quick to the library this screen looks great under knowledge this one has memory and artifacts
+[20:06] one thing that I
+[20:08] Do notice here is that?
+[20:10] It'll give me run summary
+[20:13] What it did if I click into this that's all it really gives me though
+[20:18] It doesn't tell me really what was involved in that run there on that card and that is where I believe it should show that
+[20:24] It should give me the you know the the connectors
+[20:28] Really what went wrong to and why that happened
+[20:35] Notes don't in the same for notes in approved decisions as it gives a little more
+[20:39] Context and all the available information that it can really in that card when it drops down
+[20:45] If I go to new
+[20:51] This looks this looks good
+[20:55] When it says tags what is the intention of tags how are tags used online they're used to to identify
+[21:02] uploads by
+[21:04] by things inside of the images or or files and
+[21:09] Categorism properly is that what the intent of this is?
+[21:13] Will it do that? I'm not sure what the intent here is with the comma separated values and
+[21:22] Yeah, I'm not exactly sure if I go into the profile settings
+[21:30] Task list
+[21:31] Look good, but they're not they have their note. They're
+[21:35] The people on the right but they're they're not
+[21:39] Separated by person they don't say there's not a thing that says mine and then others and then additionally
+[21:45] If I add a task and I start typing is how I get to it again
+[21:49] It doesn't recenter me into there, but it gives me the do is today tomorrow or next week. This should work
+[21:54] Just like a calendar item. This should be
+[21:58] This should have a start date and time and an end date and time and a
+[22:04] When it comes to assigned to it should be able to say you assign it someone
+[22:09] But there needs to be a note a small note section with the task there needs to be more detail about what the task really is
+[22:16] You can't type that all into the task title
+[22:19] This is not how most things work on reminders is this one different it should be this should be a a
+[22:28] 15 minute beforehand
+[22:31] reminder of a certain task if if I add this task I mean it
+[22:37] printables for classroom
+[22:39] Okay, I should also be able to and at date in the time I should also be able to add a start date and end date and
+[22:47] times with those
+[22:50] To alert me 15 minutes before they start okay or 30 minutes before they start and it actually give me a notification
+[22:57] Just like an OR a reminder does you know tasks same way, okay?
+[23:06] This needs to operate more like schedule each one of these live separate from the schedule
+[23:12] But they would be in a consolidated view if they have a date and time
+[23:18] Associated with them it's not required, but if they do they need to also be appended to
+[23:24] The calendar they're part of things that are should be done on certain days
+[23:28] Just like a calendar item and push to that particular person's Google account
+[23:35] If I look into
+[23:40] Meals
+[23:42] This is similar, but how about an actual an actual time what time is dinner?
+[23:52] This needs to this needs to change as well
+[23:58] This needs to change as well
+[24:00] If I look into contacts
+[24:03] This looks good
+[24:07] One thing I would note is that I need to be able to edit one once I can just remove it
+[24:11] But can I just go back and and click this to edit it as well? It's verified, but let me edit one
+[24:19] Inside of automations the same thing the text is wrapped
+[24:23] I can't click on it to actually see what happened what it's using or any more details
+[24:29] I know that's available elsewhere, so I know it can be put on these cards
+[24:34] Inside of playbooks
+[24:36] This one looks better the title is text wrapped and
+[24:40] The full card is available. This is almost how every single card should look
+[24:47] Where they
+[24:48] Expand and a button down at the bottom underneath like use playbook that would collapse as well
+[24:54] That needs to be on like every single card throughout the application
+[24:58] AI providers
+[25:01] All this looks great, okay?
+[25:04] Those are some of the high-level things right now
+[25:09] Please make whatever changes you can to the UI to make these happen. Oh and one more thing
+[25:15] Similar to the login page each member here has just a generic
+[25:21] So what of a person has their icon they need their profile pictures here again?
+[25:26] Each one should be designated by color, so it's easily identifiable
