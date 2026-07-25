@@ -284,7 +284,12 @@ export default function SettingsScreen() {
           <Row icon="person.2" iconColor={colors.sky} iconBg={colors.skyBg} title="Contacts" chevron onPress={() => router.push("/contacts")} />
           <Row icon="clock" iconColor={colors.amber} iconBg={colors.amberBg} title="Automations" chevron onPress={() => router.push("/automations")} />
           <Row icon="doc.text" iconColor={colors.textMuted} iconBg={colors.surfaceSunken} title="Playbooks" chevron onPress={() => router.push("/playbooks")} />
-          <Row icon="cpu" iconColor={colors.ember} iconBg={colors.emberBg} title="AI Providers" chevron onPress={() => router.push("/ai")} last />
+          <Row icon="cpu" iconColor={colors.ember} iconBg={colors.emberBg} title="AI Providers" chevron onPress={() => router.push("/ai")} last={!session?.isOperator} />
+          {/* D5 — only the platform operator sees this row at all. "New households do not get
+              this," in his words: it isn't a household feature. */}
+          {session?.isOperator ? (
+            <Row icon="ticket" iconColor={colors.lavender} iconBg={colors.lavenderBg} title="Operator · invite codes" subtitle="Mint a join code for any household" chevron onPress={() => router.push("/operator")} last />
+          ) : null}
         </Card>
       </Rise>
 

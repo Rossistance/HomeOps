@@ -64,9 +64,11 @@ export function Lock() {
 
   const submitEmail = async () => {
     if (emailMode === "signin") { await loginWithEmail(email.trim(), password); return; }
+    // D3 [02:12] — the household name is required to CREATE one (the server enforces it too);
+    // joining by invite is not naming anything, so the code path keeps it out of the way.
     await signupHousehold({
       email: email.trim(), password, ownerName: ownerName.trim(),
-      ...(inviteToken.trim() ? { inviteToken: inviteToken.trim() } : { householdName: newHouseholdName.trim() || undefined }),
+      ...(inviteToken.trim() ? { inviteToken: inviteToken.trim() } : { householdName: newHouseholdName.trim() }),
     });
   };
 
@@ -226,7 +228,7 @@ export function Lock() {
                 ) : inviteToken.trim() ? (
                   <p className="mb-2 text-xs text-amber-600">That code doesn't look valid — check it or leave it blank to start fresh.</p>
                 ) : (
-                  <Field label="Household name (optional)">
+                  <Field label="Household name">
                     <TextInput value={newHouseholdName} placeholder="e.g. The Jordans" onChange={(e) => setNewHouseholdName(e.target.value)} />
                   </Field>
                 )}
@@ -242,7 +244,9 @@ export function Lock() {
               <TextInput type="password" value={password} placeholder="At least 8 characters" onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void submitEmail(); }} />
             </Field>
             <div className="mt-3 flex gap-2">
-              <Button variant="ember" disabled={authBusy || !email.trim() || password.length < 8 || (emailMode === "create" && !ownerName.trim())} onClick={() => void submitEmail()}>
+              <Button variant="ember" disabled={authBusy || !email.trim() || password.length < 8 || (emailMode === "create" && !ownerName.trim())
+                || /* D3 — a name is required to create a household; joining by code is not. */
+                   (emailMode === "create" && !inviteToken.trim() && !newHouseholdName.trim())} onClick={() => void submitEmail()}>
                 <Icon name={emailMode === "signin" ? "LogIn" : "Sparkles"} size={16} />
                 {emailMode === "signin" ? "Sign in" : inviteToken.trim() ? "Join household" : "Create household"}
               </Button>

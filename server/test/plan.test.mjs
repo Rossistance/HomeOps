@@ -13,7 +13,9 @@ after(async () => { await stopServer(ctx); });
 async function signup(email, ownerName) {
   const res = await ctx.fetch("/api/signup", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email, password: "plan test passphrase", ownerName }),
+    // A household name is required at signup now (D3) — creating one without a name was the
+    // path to the "Ross's household" fallback the owner asked us to remove.
+    body: JSON.stringify({ email, password: "plan test passphrase", ownerName, householdName: `${ownerName} household` }),
   });
   const cookie = (res.headers.get("set-cookie") || "").split(";")[0];
   const data = await res.json();

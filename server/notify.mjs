@@ -155,6 +155,42 @@ export async function sendVerificationCode({ session, method, code }) {
   });
 }
 
+/* ---- D1/D2: the recovery code, sent BEFORE anyone is signed in ----
+ * [01:32] "Forgot password — it should send an email with a recovery code."
+ * [01:46] "And forgot email, or forgot username."
+ *
+ * Both are pre-auth, so there is no session to send as. What there IS, on the identity
+ * record, is the household and actor the account belongs to — which is enough to reach that
+ * household's own connected Google account, the only email transport this deployment has.
+ *
+ * The caller must NOT change its response based on what happens here: telling someone
+ * "no account with that email" is account enumeration. So this reports honestly to the
+ * AUDIT LOG and lets the route answer the same 200 either way.
+ */
+export async function sendRecoveryCode({ householdId, actorId, email, code, kind = "password" }) {
+  const subject = kind === "email" ? "Your FamiliOS sign-in email" : "Your FamiliOS recovery code";
+  const body = kind === "email"
+    ? `You asked which email your FamiliOS account uses. It's ${email}.
+
+If you didn't ask for this, you can ignore it — nothing about your account has changed.`
+    : `Your FamiliOS recovery code is ${code}.
+
+It expires in 15 minutes and can be used once. If you didn't ask to reset your password, you can ignore this — your password hasn't changed.`;
+  const out = await deliverViaChannel({
+    session: { householdId, actorId },
+    channel: "email",
+    to: email,
+    subject,
+    body,
+    recipientActorId: actorId,
+  });
+  appendAudit({
+    type: "identity.recovery_send", kind, householdId, ok: !!out.ok,
+    ...(out.ok ? {} : { error: out.needsSetup ?? "send_failed", detail: out.message }),
+  });
+  return out;
+}
+
 /* ---- WP-002 slice 3 — in-app delivery fallback (item 16b follow-up) ----
  * homeops.notify_contact (internal-functions.mjs) used to hard-refuse whenever the
  * requested recipient had no REGISTERED contact method — there is nowhere off-device

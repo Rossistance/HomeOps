@@ -3,6 +3,7 @@
 // the starter-agent picker activates/pauses the household's real agents.
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, TextInput, View } from "react-native";
+import * as ImagePicker from "expo-image-picker";
 import { LinearGradient } from "expo-linear-gradient";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -11,9 +12,31 @@ import { useOnboarding } from "@/lib/prefs";
 import { useSession } from "@/lib/session";
 import { api, type AgentRec, type MemberRec } from "@/lib/api";
 import { HuddleMark, Wordmark, SPLASH_BG } from "@/components/brand";
+import { memberAccent } from "@/lib/member-colors";
+import { MemberAvatar } from "@/app/(home)/profile";
 import { T, Sym, SymTile, Card, PressableScale } from "@/components/ui";
 
 const ADMIN_ROLES = new Set(["Owner", "Adult Admin"]);
+
+/* D7 [03:59] — "There should be a walkthrough for a new household: set your profile, add a
+ * picture, pick an icon, pick a color, basic info — plus the starting agents, and some
+ * preferences, facts, knowledge."
+ *
+ * The agents step already existed. These two are the rest of it: a real profile (photo or
+ * emoji, and the colour every other screen then identifies you by), and a first pass at what
+ * the household wants the assistant to know. Both write through the same APIs the Settings
+ * screens use, so nothing here is a special onboarding-only shortcut that drifts later. */
+const ACCENTS = ["ink", "sage", "coral", "amber", "sky", "lavender"] as const;
+const EMOJIS = ["🦊", "🐻", "🦉", "🐙", "🌻", "🍀", "⭐️", "🌈", "🐝", "🦋", "🍕", "⚽️"] as const;
+const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+
+// Prompts, not pre-written facts: the content has to come from the family, or the assistant
+// starts out "knowing" things nobody told it.
+const KNOWLEDGE_PROMPTS = [
+  { key: "routine", title: "Our week", placeholder: "School nights, practice days, who does drop-off…" },
+  { key: "food", title: "Food and allergies", placeholder: "Anything the kitchen has to work around" },
+  { key: "prefs", title: "How we like to be helped", placeholder: "Ask before sending anything, keep it short, text not email…" },
+] as const;
 
 const TRUST_ROWS = [
   { icon: "cpu", title: "Agents watch and draft", desc: "Briefings, forms and bills — prepared quietly in the background" },
@@ -36,6 +59,14 @@ export function Onboarding() {
   const [saving, setSaving] = useState(false);
   const [householdName, setHouseholdName] = useState("");
   const isOwner = session?.role === "Owner";
+  // D7 — profile step
+  const [myName, setMyName] = useState("");
+  const [color, setColor] = useState<string | null>(null);
+  const [photoFileId, setPhotoFileId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [photoNote, setPhotoNote] = useState<string | null>(null);
+  // D7 — knowledge step
+  const [facts, setFacts] = useState<Record<string, string>>({});
 
   useEffect(() => {
     void (async () => {
@@ -43,6 +74,8 @@ export function Onboarding() {
       setMembers(m);
       setAgents(a);
       setHouseholdName(hh?.name ?? "");
+      const me = m.find((x) => x.isCurrentUser);
+      if (me) { setMyName(me.displayName); setColor(me.color ?? null); setPhotoFileId(me.photoFileId ?? null); }
       const initial: Record<string, boolean> = {};
       for (const ag of a) initial[ag.id] = ag.status === "Active";
       setPicked(initial);
@@ -50,15 +83,39 @@ export function Onboarding() {
   }, []);
 
   // Non-admins can't manage agents; they skip the picker.
-  const steps = useMemo(() => (isAdmin && agents.length > 0
-    ? ["welcome", "trust", "household", "agents", "ready"]
-    : ["welcome", "trust", "household", "ready"]) as string[], [isAdmin, agents.length]);
+  // D7 — the walkthrough he described, in his order: who you are, then the household, then
+  // what it should know, then which helpers start out running. Non-admins skip the two
+  // household-wide steps they can't act on rather than being shown dead controls.
+  const steps = useMemo(() => {
+    const out = ["welcome", "trust", "profile"];
+    out.push("household");
+    if (isAdmin) out.push("knowledge");
+    if (isAdmin && agents.length > 0) out.push("agents");
+    out.push("ready");
+    return out;
+  }, [isAdmin, agents.length]);
   const kind = steps[Math.min(step, steps.length - 1)];
   const pickedCount = Object.values(picked).filter(Boolean).length;
 
   async function finish() {
     if (saving) return;
     setSaving(true);
+    // D7 — the profile is saved through the SAME endpoint the Profile screen uses, so what
+    // onboarding sets and what Settings edits are one record with one shape.
+    if (session?.actorId && (myName.trim() || color || photoFileId)) {
+      await api.patchMember(session.actorId, {
+        ...(myName.trim() ? { displayName: myName.trim() } : {}),
+        color, photoFileId,
+      }).catch(() => null);
+    }
+    // D7 — whatever the family typed becomes real household knowledge, one item per prompt.
+    // Blank prompts write nothing: an empty "Food and allergies" note is worse than none,
+    // because the assistant would read it as "nothing to work around".
+    for (const prompt of KNOWLEDGE_PROMPTS) {
+      const content = (facts[prompt.key] ?? "").trim();
+      if (!content) continue;
+      await api.createKnowledge({ title: prompt.title, type: "fact", content, visibility: "household" }).catch(() => null);
+    }
     // Owner-typed household name persists server-side (appears on briefings/invites).
     if (isOwner && householdName.trim()) {
       await api.renameHousehold(householdName.trim()).catch(() => null);
@@ -82,10 +139,13 @@ export function Onboarding() {
     setStep(step + 1);
   }
 
+  const filledFacts = KNOWLEDGE_PROMPTS.filter((k) => (facts[k.key] ?? "").trim()).length;
   const ctaLabel =
     kind === "welcome" ? "Get started"
     : kind === "ready" ? "Enter FamiliOS"
     : kind === "agents" ? `Start with ${pickedCount} agent${pickedCount === 1 ? "" : "s"}`
+    // Naming what happens next, so skipping is a choice rather than an accident.
+    : kind === "knowledge" ? (filledFacts === 0 ? "Skip for now" : `Save ${filledFacts} note${filledFacts === 1 ? "" : "s"}`)
     : "Continue";
 
   return (
@@ -139,6 +199,154 @@ export function Onboarding() {
                 </View>
               ))}
             </Card>
+          </Animated.View>
+        )}
+
+        {/* D7 — "set your profile, add a picture, pick an icon, pick a color". The emoji IS
+            the icon: it's what the picker offers and what every avatar in the app renders. */}
+        {kind === "profile" && (
+          <Animated.View entering={FadeInDown.duration(320)} style={{ gap: spacing.lg }}>
+            <T kind="h1" style={{ fontSize: 26, lineHeight: 32 }}>Make it yours</T>
+            <T kind="body">A face and a colour — it&apos;s how your family picks you out on every screen.</T>
+
+            <View style={{ alignItems: "center", gap: spacing.md }}>
+              <MemberAvatar
+                member={{
+                  actorId: session?.actorId ?? "", displayName: myName || firstName, role: session?.role ?? "",
+                  relationship: null, spaceIds: [], isCurrentUser: true, color, photoFileId,
+                }}
+                size={92}
+              />
+              <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                <PressableScale
+                  haptic="select"
+                  onPress={() => void (async () => {
+                    setPhotoNote(null);
+                    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+                    if (!perm.granted) { setPhotoNote("Photo access was denied — an emoji works just as well."); return; }
+                    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], base64: true, quality: 0.7, allowsEditing: true, aspect: [1, 1] });
+                    if (res.canceled || !res.assets?.[0]?.base64) return;
+                    const a = res.assets[0];
+                    if (a.base64!.length * 0.75 > MAX_PHOTO_BYTES) { setPhotoNote("That photo is over the 5 MB cap."); return; }
+                    setUploading(true);
+                    const up = await api.uploadFile({ name: a.fileName ?? `avatar-${Date.now()}.jpg`, contentBase64: a.base64!, mime: a.mimeType ?? "image/jpeg", visibility: "private" });
+                    setUploading(false);
+                    if (!up.file) { setPhotoNote("Couldn't upload that one — try another, or pick an emoji."); return; }
+                    setPhotoFileId(up.file.id);
+                  })()}
+                  accessibilityRole="button" accessibilityLabel="Add a photo"
+                  style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 999, borderWidth: 1, borderColor: colors.border }}
+                >
+                  <Sym name="photo" size={13} color={colors.ember} />
+                  <T kind="subMedium" color={colors.ember}>{uploading ? "Uploading…" : "Add a photo"}</T>
+                </PressableScale>
+                {photoFileId ? (
+                  <PressableScale
+                    haptic="select" onPress={() => setPhotoFileId(null)}
+                    accessibilityRole="button" accessibilityLabel="Remove"
+                    style={{ paddingHorizontal: 14, paddingVertical: 9 }}
+                  >
+                    <T kind="subMedium" color={colors.textMuted}>Remove</T>
+                  </PressableScale>
+                ) : null}
+              </View>
+              {photoNote ? <T kind="caption" color={colors.amber}>{photoNote}</T> : null}
+            </View>
+
+            <View style={{ gap: 6 }}>
+              <T kind="eyebrow">Your name</T>
+              <View style={{ backgroundColor: colors.surfaceSunken, borderRadius: 16, borderCurve: "continuous" }}>
+                <TextInput
+                  value={myName}
+                  onChangeText={setMyName}
+                  placeholder="What the family calls you"
+                  placeholderTextColor={colors.textFaint}
+                  autoCapitalize="words"
+                  accessibilityLabel="Your name"
+                  style={{ paddingHorizontal: 16, paddingVertical: 14, fontSize: 16, color: colors.text }}
+                />
+              </View>
+            </View>
+
+            <View style={{ gap: 6 }}>
+              <T kind="eyebrow">Or pick an icon</T>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
+                {EMOJIS.map((e) => {
+                  const selected = photoFileId === `emoji:${e}`;
+                  return (
+                    <PressableScale
+                      key={e} haptic="select"
+                      onPress={() => setPhotoFileId(selected ? null : `emoji:${e}`)}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      accessibilityLabel={`Icon ${e}`}
+                      style={{
+                        width: 46, height: 46, borderRadius: 14, borderCurve: "continuous",
+                        alignItems: "center", justifyContent: "center",
+                        backgroundColor: selected ? colors.emberBg : colors.surfaceSunken,
+                        borderWidth: selected ? 2 : 0, borderColor: colors.ember,
+                      }}
+                    >
+                      <T style={{ fontSize: 22 }}>{e}</T>
+                    </PressableScale>
+                  );
+                })}
+              </View>
+            </View>
+
+            <View style={{ gap: 6 }}>
+              <T kind="eyebrow">Your colour</T>
+              <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                {ACCENTS.map((a) => {
+                  const tint = memberAccent(colors, a) ?? colors.ember;
+                  const selected = color === a;
+                  return (
+                    <PressableScale
+                      key={a} haptic="select"
+                      onPress={() => setColor(selected ? null : a)}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      accessibilityLabel={`Colour ${a}`}
+                      style={{
+                        width: 40, height: 40, borderRadius: 20, backgroundColor: tint,
+                        alignItems: "center", justifyContent: "center",
+                        borderWidth: selected ? 3 : 0, borderColor: colors.bg,
+                      }}
+                    >
+                      {selected ? <Sym name="checkmark" size={15} color={colors.surface} /> : null}
+                    </PressableScale>
+                  );
+                })}
+              </View>
+            </View>
+          </Animated.View>
+        )}
+
+        {/* D7 — "plus some preferences, facts, knowledge." Prompts only: the content has to
+            come from the family, or the assistant starts out "knowing" things nobody said. */}
+        {kind === "knowledge" && (
+          <Animated.View entering={FadeInDown.duration(320)} style={{ gap: spacing.lg }}>
+            <T kind="h1" style={{ fontSize: 26, lineHeight: 32 }}>What should it know?</T>
+            <T kind="body">
+              A few lines now save a lot of explaining later. Skip anything you&apos;d rather add as it
+              comes up — you can edit all of this in Files &amp; Knowledge.
+            </T>
+            {KNOWLEDGE_PROMPTS.map((k) => (
+              <View key={k.key} style={{ gap: 6 }}>
+                <T kind="eyebrow">{k.title}</T>
+                <View style={{ backgroundColor: colors.surfaceSunken, borderRadius: 16, borderCurve: "continuous" }}>
+                  <TextInput
+                    value={facts[k.key] ?? ""}
+                    onChangeText={(t) => setFacts((f) => ({ ...f, [k.key]: t }))}
+                    placeholder={k.placeholder}
+                    placeholderTextColor={colors.textFaint}
+                    multiline
+                    accessibilityLabel={k.title}
+                    style={{ paddingHorizontal: 16, paddingVertical: 14, minHeight: 76, fontSize: 15, color: colors.text, textAlignVertical: "top" }}
+                  />
+                </View>
+              </View>
+            ))}
           </Animated.View>
         )}
 

@@ -50,9 +50,10 @@ export function Onboarding() {
   const onCreateClaimed = async () => {
     setBusy(true);
     setAdvancedMode(false);
+    // D3 — required, so no "|| undefined" that lets the server invent a fallback name.
     await signupHousehold({
       email: email.trim(), password, ownerName: owner.trim(),
-      householdName: household.trim() || undefined, resetLocalData: true,
+      householdName: household.trim(), resetLocalData: true,
     });
     setBusy(false);
   };
@@ -103,13 +104,13 @@ export function Onboarding() {
             <h2 className="font-display text-xl font-semibold text-ink-900">Create your household</h2>
             <p className="mb-4 text-sm text-ink-500">This server already belongs to a different household. Create your own account and you'll get a completely separate, private space on it.</p>
             <div className="space-y-3">
-              <Field label="Household name (optional)"><TextInput value={household} placeholder="The Rivera Family" onChange={(e) => setHousehold(e.target.value)} /></Field>
+              <Field label="Household name"><TextInput value={household} placeholder="The Rivera Family" onChange={(e) => setHousehold(e.target.value)} /></Field>
               <Field label="Your name (owner)"><TextInput value={owner} placeholder="Your name" onChange={(e) => setOwner(e.target.value)} /></Field>
               <Field label="Email"><TextInput type="email" value={email} placeholder="you@example.com" onChange={(e) => setEmail(e.target.value)} /></Field>
               <Field label="Password"><TextInput type="password" value={password} placeholder="At least 8 characters" onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void onCreateClaimed(); }} /></Field>
             </div>
             <div className="mt-4 flex justify-end">
-              <Button variant="ember" disabled={busy || !owner.trim() || !email.trim() || password.length < 8} onClick={() => void onCreateClaimed()}>
+              <Button variant="ember" disabled={busy || !owner.trim() || !household.trim() || !email.trim() || password.length < 8} onClick={() => void onCreateClaimed()}>
                 <Icon name="Check" size={15} /> Create household
               </Button>
             </div>

@@ -67,15 +67,53 @@ export function consumeVerifyToken(t) {
 }
 
 const RESET_TTL_MS = 30 * 60 * 1000;
+/* D1 [01:32] — "Forgot password: it should send an email with a recovery code."
+ *
+ * A CODE, not only a link. On a phone, a link means leaving the app for a browser and coming
+ * back; a six-digit code is typed where you already are. Both work: the long token is still
+ * minted for the web's link flow, and the short code is what mobile asks for.
+ *
+ * Attempt-limited, because a 6-digit code is guessable in a million tries and a determined
+ * script does that in minutes. Five attempts, then the code is dead and a new one is needed —
+ * the same shape as the contact-verification challenge already in the app. */
+const RESET_MAX_ATTEMPTS = 5;
+const RESET_CODE_TTL_MS = 15 * 60 * 1000;
+
 export function beginPasswordReset(email) {
   const key = normEmail(email);
   const all = sysDoc(IDENTITIES, {});
   if (!all[key]) return null; // caller answers 200 regardless — no enumeration
-  all[key] = { ...all[key], resetToken: token(), resetExpiresAt: Date.now() + RESET_TTL_MS };
+  const code = String(crypto.randomInt(100000, 1000000));
+  all[key] = {
+    ...all[key],
+    resetToken: token(), resetExpiresAt: Date.now() + RESET_TTL_MS,
+    resetCode: code, resetCodeExpiresAt: Date.now() + RESET_CODE_TTL_MS, resetCodeAttempts: 0,
+  };
   putSysDoc(IDENTITIES, all);
   appendAudit({ type: "identity.reset_requested", email: key });
   return all[key];
 }
+
+/** Look up an identity by the code someone typed, honouring expiry and the attempt cap.
+ *  Returns { email, identity } or a reason — never a partial success. */
+export function findByResetCode(email, code) {
+  const key = normEmail(email);
+  const all = sysDoc(IDENTITIES, {});
+  const idn = all[key];
+  // Same answer for "no such account" and "wrong code": a different one would tell an
+  // attacker which emails are registered.
+  if (!idn || !idn.resetCode) return { error: "invalid_or_expired_code" };
+  if ((idn.resetCodeExpiresAt ?? 0) < Date.now()) return { error: "invalid_or_expired_code" };
+  if ((idn.resetCodeAttempts ?? 0) >= RESET_MAX_ATTEMPTS) return { error: "too_many_attempts" };
+  if (String(code).trim() !== idn.resetCode) {
+    all[key] = { ...idn, resetCodeAttempts: (idn.resetCodeAttempts ?? 0) + 1 };
+    putSysDoc(IDENTITIES, all);
+    appendAudit({ type: "identity.reset_code_wrong", email: key, attempts: all[key].resetCodeAttempts });
+    return { error: "invalid_or_expired_code", attemptsLeft: Math.max(0, RESET_MAX_ATTEMPTS - all[key].resetCodeAttempts) };
+  }
+  return { email: key, identity: idn };
+}
+
 export function completePasswordReset(t, newPassword) {
   if (!t) return null;
   const all = sysDoc(IDENTITIES, {});
@@ -83,10 +121,37 @@ export function completePasswordReset(t, newPassword) {
   if (!key) return null;
   if ((all[key].resetExpiresAt ?? 0) < Date.now()) return null;
   const salt = crypto.randomBytes(16).toString("hex");
-  all[key] = { ...all[key], salt, passHash: scryptHash(newPassword, salt), resetToken: null, resetExpiresAt: null };
+  // Both the link token and the code are cleared: a reset that succeeded must not leave a
+  // second working key to the same door.
+  all[key] = {
+    ...all[key], salt, passHash: scryptHash(newPassword, salt),
+    resetToken: null, resetExpiresAt: null,
+    resetCode: null, resetCodeExpiresAt: null, resetCodeAttempts: 0,
+  };
   putSysDoc(IDENTITIES, all);
   appendAudit({ type: "identity.reset_completed", email: key });
   return all[key];
+}
+
+/* D2 [01:46] — "forgot email, or forgot username."
+ *
+ * The only thing that can be done here honestly: given a household's JOIN CODE (which the
+ * family has, on paper or from another member) plus a display name, tell them which email
+ * that member signed up with — by emailing it TO that address. Nothing is revealed to
+ * whoever asked; the answer goes to the account's own inbox. A caller who already controls
+ * that inbox learns their own address, which is the whole point, and a caller who doesn't
+ * learns nothing at all.
+ */
+export function findIdentityForRecovery({ householdId, displayName }) {
+  const all = sysDoc(IDENTITIES, {});
+  const wanted = String(displayName ?? "").trim().toLowerCase();
+  if (!householdId || !wanted) return null;
+  for (const [email, idn] of Object.entries(all)) {
+    if (idn.householdId !== householdId) continue;
+    if (String(idn.displayName ?? "").trim().toLowerCase() !== wanted) continue;
+    return { ...idn, email };
+  }
+  return null;
 }
 
 /* ---- Household invites (join an EXISTING household by code) ----

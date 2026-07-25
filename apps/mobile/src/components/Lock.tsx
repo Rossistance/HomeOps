@@ -13,6 +13,8 @@ import { useTheme } from "@/theme";
 import {
   T, Card, PressableCard, Button, SkeletonCards, EmptyState, ErrorState, Notice, Rise, Sym,
 } from "@/components/ui";
+import { HuddleMark } from "@/components/brand";
+import { RecoverySheet, type RecoveryMode } from "@/components/RecoverySheet";
 
 export function Lock() {
   const { colors, spacing, radii, fonts } = useTheme();
@@ -40,6 +42,13 @@ export function Lock() {
   const [newHouseholdName, setNewHouseholdName] = useState("");
   const [inviteToken, setInviteToken] = useState("");
   const [invitePreview, setInvitePreview] = useState<{ householdName: string | null; role: string } | null>(null);
+  // D6 [03:04] — "collapse the invite code into a tappable Invite code row that expands. The
+  // default form should read name, household, email, password, Create." Most people creating
+  // an account do NOT have a code; showing the field by default made it look required and
+  // pushed the fields that ARE required further down.
+  const [inviteOpen, setInviteOpen] = useState(false);
+  // D1/D2 — forgot password, forgot which email.
+  const [recovery, setRecovery] = useState<RecoveryMode | null>(null);
 
   useEffect(() => {
     const t = inviteToken.trim();
@@ -61,6 +70,7 @@ export function Lock() {
         : r.error === "email_taken" ? "That email already has an account — sign in instead."
         : r.error === "invalid_invite" ? "That invite code is invalid, used, or expired."
         : r.error === "weak_password" ? "Use a password of at least 8 characters."
+        : r.error === "household_name_required" ? "Give your household a name — it's what the family sees everywhere."
         : r.error === "network" ? `Can't reach the server at ${api.url}.`
         : r.message ?? String(r.error));
       return;
@@ -146,9 +156,11 @@ export function Lock() {
           >
             <Rise index={0}>
               <View style={{ alignItems: "center", marginBottom: spacing.xxl }}>
-                <View style={{ width: 64, height: 64, borderRadius: 20, borderCurve: "continuous", backgroundColor: colors.emberBg, alignItems: "center", justifyContent: "center", marginBottom: spacing.lg }}>
-                  <Sym name="flame.fill" size={30} color={colors.ember} />
-                </View>
+                {/* B2 [00:48] — "the icon above Welcome home is not the FamiliOS icon." It was
+                    a generic SF flame in a tinted square. This is the actual app mark, the same
+                    HuddleMark the splash and onboarding use, so the first thing anyone sees is
+                    the product rather than a stand-in. */}
+                <HuddleMark size={72} style={{ marginBottom: spacing.lg }} />
                 <T kind="h1" center>Welcome home</T>
                 <T kind="sub" center style={{ marginTop: spacing.sm, maxWidth: 300 }}>
                   Pick your profile. Your role comes from the household&apos;s server — it decides what you can see and approve.
@@ -265,31 +277,73 @@ export function Lock() {
                       <T kind="caption" color={colors.textMuted}>{emailMode === "signin" ? "New here?" : "Have an account?"}</T>
                     </PressableCard>
                   </View>
+                  {/* D6 — the order he asked for: name, household, email, password, Create,
+                      with the invite code collapsed into a row you tap only if you have one. */}
                   {emailMode === "create" ? (
                     <>
-                      <TextInput value={ownerName} onChangeText={setOwnerName} placeholder="Your name" placeholderTextColor={colors.textFaint} autoCapitalize="words" style={{ marginTop: spacing.md, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} />
-                      <TextInput value={inviteToken} onChangeText={setInviteToken} placeholder="Invite code (optional)" placeholderTextColor={colors.textFaint} autoCapitalize="none" autoCorrect={false} style={{ marginTop: spacing.sm, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} />
-                      {invitePreview ? (
-                        <T kind="caption" color={colors.sage} style={{ marginTop: spacing.xs }}>Joining {invitePreview.householdName ?? "a household"} as {invitePreview.role}.</T>
-                      ) : inviteToken.trim() ? (
-                        <T kind="caption" color={colors.amber} style={{ marginTop: spacing.xs }}>That code doesn&apos;t look valid — check it or clear it to start fresh.</T>
-                      ) : (
-                        <TextInput value={newHouseholdName} onChangeText={setNewHouseholdName} placeholder="Household name (optional)" placeholderTextColor={colors.textFaint} autoCapitalize="words" style={{ marginTop: spacing.sm, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} />
-                      )}
+                      <TextInput value={ownerName} onChangeText={setOwnerName} placeholder="Your name" placeholderTextColor={colors.textFaint} autoCapitalize="words" style={{ marginTop: spacing.md, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} accessibilityLabel="Your name" />
+                      {/* D3 [02:12] — REQUIRED now, not "(optional)". The old fallback
+                          ("Ross's household") became the name the family then lived with
+                          everywhere the household is named. Hidden when joining, because
+                          someone joining a household is not naming one. */}
+                      {!invitePreview ? (
+                        <TextInput value={newHouseholdName} onChangeText={setNewHouseholdName} placeholder="Household name (e.g. The Hixons)" placeholderTextColor={colors.textFaint} autoCapitalize="words" style={{ marginTop: spacing.sm, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} accessibilityLabel="Household name, required" />
+                      ) : null}
                     </>
                   ) : null}
                   <TextInput value={email} onChangeText={setEmail} placeholder="you@example.com" placeholderTextColor={colors.textFaint} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" inputMode="email" style={{ marginTop: spacing.sm, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} />
                   <TextInput value={password} onChangeText={setPassword} placeholder="Password (8+ characters)" placeholderTextColor={colors.textFaint} secureTextEntry autoCapitalize="none" style={{ marginTop: spacing.sm, backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} />
+                  {/* D4 — the invite code stays OPTIONAL, and now looks it: one tappable
+                      row, expanded only by someone who actually has a code. */}
+                  {emailMode === "create" ? (
+                    <View style={{ marginTop: spacing.sm }}>
+                      {!inviteOpen && !inviteToken.trim() ? (
+                        <PressableCard
+                          onPress={() => setInviteOpen(true)}
+                          style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 12, paddingHorizontal: spacing.lg }}
+                          accessibilityRole="button"
+                          accessibilityLabel="Invite code, optional"
+                          accessibilityHint="Expands a field for a household invite code"
+                        >
+                          <Sym name="ticket" size={15} color={colors.textMuted} />
+                          <T kind="subMedium" color={colors.textSecondary} style={{ flex: 1 }}>Have an invite code?</T>
+                          <Sym name="chevron.down" size={12} color={colors.textFaint} />
+                        </PressableCard>
+                      ) : (
+                        <>
+                          <TextInput value={inviteToken} onChangeText={setInviteToken} placeholder="Invite code" placeholderTextColor={colors.textFaint} autoCapitalize="none" autoCorrect={false} style={{ backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous", paddingHorizontal: spacing.lg, paddingVertical: 12, fontSize: 16, color: colors.text, fontFamily: fonts.regular }} accessibilityLabel="Invite code" />
+                          {invitePreview ? (
+                            <T kind="caption" color={colors.sage} style={{ marginTop: spacing.xs }}>Joining {invitePreview.householdName ?? "a household"} as {invitePreview.role}.</T>
+                          ) : inviteToken.trim() ? (
+                            <T kind="caption" color={colors.amber} style={{ marginTop: spacing.xs }}>That code doesn&apos;t look valid — check it, or clear it to create your own household.</T>
+                          ) : (
+                            <TextLink onPress={() => { setInviteOpen(false); setInviteToken(""); }} label="I do not have one" />
+                          )}
+                        </>
+                      )}
+                    </View>
+                  ) : null}
                   <View style={{ marginTop: spacing.md, gap: spacing.sm }}>
                     <Button
-                      title={emailMode === "signin" ? "Sign in" : inviteToken.trim() ? "Join household" : "Create household"}
+                      title={emailMode === "signin" ? "Sign in" : invitePreview ? "Join household" : "Create household"}
                       variant="ember" full loading={busy}
-                      disabled={busy || !email.trim() || password.length < 8 || (emailMode === "create" && !ownerName.trim())}
+                      disabled={busy || !email.trim() || password.length < 8
+                        || (emailMode === "create" && !ownerName.trim())
+                        /* D3 — a household name is required to CREATE one. Joining is not. */
+                        || (emailMode === "create" && !invitePreview && !newHouseholdName.trim())}
                       onPress={() => void submitEmail()}
                     />
                     <Button title="Cancel" variant="ghost" full onPress={() => { setEmailMode(null); setErr(null); }} />
                   </View>
-                  {emailMode === "create" && !inviteToken.trim() ? (
+                  {/* D1/D2 — the two ways back in, on the screen where you find out you are
+                      locked out. */}
+                  {emailMode === "signin" ? (
+                    <View style={{ flexDirection: "row", justifyContent: "center", gap: spacing.lg, marginTop: spacing.md }}>
+                      <TextLink onPress={() => setRecovery("password")} label="Forgot password" />
+                      <TextLink onPress={() => setRecovery("email")} label="Forgot your email?" />
+                    </View>
+                  ) : null}
+                  {emailMode === "create" && !invitePreview ? (
                     <T kind="caption" color={colors.textFaint} style={{ marginTop: spacing.sm }}>
                       Your household gets its own private space — completely separate from every other family&apos;s.
                     </T>
@@ -301,9 +355,34 @@ export function Lock() {
             <T kind="caption" center selectable color={colors.textFaint} style={{ marginTop: spacing.xl }}>
               API · {api.url}
             </T>
+
+            <RecoverySheet
+              visible={!!recovery}
+              mode={recovery ?? "password"}
+              presetEmail={email}
+              onClose={() => setRecovery(null)}
+              onSignIn={(e) => { setEmail(e); setPassword(""); setEmailMode("signin"); setErr(null); }}
+            />
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
     </View>
+  );
+}
+
+/** A plain text action — used for the recovery links and "I do not have one". Deliberately not
+ *  a Button: these are escape hatches beside a primary action, and giving them button weight
+ *  makes the primary one harder to find. */
+function TextLink({ label, onPress }: { label: string; onPress: () => void }) {
+  const { colors, spacing } = useTheme();
+  return (
+    <PressableCard
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      style={{ paddingVertical: spacing.xs, paddingHorizontal: 0, borderWidth: 0, backgroundColor: "transparent" }}
+    >
+      <T kind="subMedium" color={colors.ember}>{label}</T>
+    </PressableCard>
   );
 }

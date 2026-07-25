@@ -46,9 +46,11 @@ test("signup creates a working, isolated household", async () => {
 });
 
 test("duplicate email is refused; weak password is refused", async () => {
-  const dup = await ctx.fetch("/api/signup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ross@example.com", password: "correct horse battery", ownerName: "Impostor" }) });
+  // Both carry a householdName: D3 makes it required, and these cases are about the EMAIL
+  // and the PASSWORD being refused — a 400 for the missing name would hide that.
+  const dup = await ctx.fetch("/api/signup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ross@example.com", password: "correct horse battery", ownerName: "Impostor", householdName: "Impostor House" }) });
   assert.equal(dup.status, 409);
-  const weak = await ctx.fetch("/api/signup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "weak@example.com", password: "short", ownerName: "W" }) });
+  const weak = await ctx.fetch("/api/signup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "weak@example.com", password: "short", ownerName: "W", householdName: "Weak House" }) });
   assert.equal(weak.status, 400);
 });
 

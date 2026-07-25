@@ -22,7 +22,16 @@ export async function setToken(t: string | null): Promise<void> {
   } catch { /* secure-store may be unavailable on web; keep in-memory */ }
 }
 
-export interface Session { actorId: string; actorName: string; role: string; csrf: string; householdId: string }
+export interface Session {
+  actorId: string; actorName: string; role: string; csrf: string; householdId: string;
+  /** D5 — the platform operator, derived server-side from a deployment env plus this
+   *  session's own registered email. Read-only: no client can assert it. */
+  isOperator?: boolean;
+}
+// D5 — the operator's cross-household view. Only ever populated for an operator session;
+// every other caller gets a 404 from these routes.
+export interface AdminHouseholdRec { id: string; name: string | null; memberCount: number; createdAt: number | null }
+export interface InviteRec { token: string; householdId: string; householdName: string | null; displayName: string; role: string; expiresAt: number }
 export interface ApprovalRec {
   id: string; connectorId: string | null; toolId: string; status: string; risk: string;
   category: string; preview: string; createdAt: number; expiresAt: number;
@@ -322,6 +331,38 @@ export const api = {
     try { await req("/session", { method: "DELETE" }); } finally { await setToken(null); }
   },
   /* ---- self-serve identity (C1.4): email sign-in, household create/join ---- */
+  /* ---- D5: operator-only, cross-household ------------------------------------------ */
+  async adminHouseholds(): Promise<AdminHouseholdRec[]> {
+    const r = await req<{ households?: AdminHouseholdRec[] }>("/admin/households");
+    return r.data?.households ?? [];
+  },
+  async adminCreateInvite(householdId: string, displayName: string, role: string): Promise<{ invite?: InviteRec; error?: string }> {
+    const r = await req<{ invite?: InviteRec; error?: string }>("/admin/invites", {
+      method: "POST", body: JSON.stringify({ householdId, displayName, role }),
+    });
+    return r.data ?? { error: "network" };
+  },
+
+  /* ---- D1/D2: recovery, before anyone is signed in ---------------------------------
+   * The responses are deliberately uninformative about whether an account exists — that
+   * would be account enumeration. So these never report "no such account"; the UI says what
+   * WILL happen if the address is real. */
+  async requestPasswordReset(email: string): Promise<{ ok?: boolean; message?: string; error?: string }> {
+    const r = await req<{ ok?: boolean; message?: string; error?: string }>("/password-reset/request", { method: "POST", body: JSON.stringify({ email }) });
+    return r.data ?? { error: "network" };
+  },
+  async verifyResetCode(email: string, code: string): Promise<{ ok?: boolean; token?: string; error?: string; message?: string; attemptsLeft?: number }> {
+    const r = await req<{ ok?: boolean; token?: string; error?: string; message?: string; attemptsLeft?: number }>("/password-reset/verify-code", { method: "POST", body: JSON.stringify({ email, code }) });
+    return r.data ?? { error: "network" };
+  },
+  async completePasswordReset(token: string, password: string): Promise<{ ok?: boolean; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; error?: string; message?: string }>("/password-reset/complete", { method: "POST", body: JSON.stringify({ token, password }) });
+    return r.data ?? { error: "network" };
+  },
+  async recoverEmail(inviteCode: string, displayName: string): Promise<{ ok?: boolean; message?: string; error?: string }> {
+    const r = await req<{ ok?: boolean; message?: string; error?: string }>("/email-recovery/request", { method: "POST", body: JSON.stringify({ inviteCode, displayName }) });
+    return r.data ?? { error: "network" };
+  },
   async loginEmail(email: string, password: string): Promise<{ session?: Session; token?: string; error?: string; message?: string }> {
     const r = await req<{ session?: Session; token?: string; error?: string; message?: string }>("/login", {
       method: "POST", headers: { "x-homeops-bearer": "1" }, body: JSON.stringify({ email, password }),

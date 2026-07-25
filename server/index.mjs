@@ -72,7 +72,7 @@ import {
   publicTrigger, listPublicTriggers, getTriggerSecret, tick, TRIGGER_TYPES, registerTriggerRunHooks, scheduleTextFor,
 } from "./triggers.mjs";
 import { getTrigger } from "./store.mjs";
-import { pushApprovalNotification, deliverNotification, sendVerificationCode, pushToMember } from "./notify.mjs";
+import { pushApprovalNotification, deliverNotification, sendVerificationCode, sendRecoveryCode, pushToMember } from "./notify.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
 import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast, sessionFromReq } from "./auth.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
@@ -98,6 +98,37 @@ const VERSION = "1.2.0";
 // must not conjure accounts for actors who never connected anything (the
 // sandbox-e2e "no conjure" invariant) — other actors stay truthfully
 // not_connected until seeded explicitly. Idempotent; a no-op in real mode.
+/* ---- D5 [02:25] — "I am the inventor and owner. I need an interface to generate invite
+ * codes for any household. New households do not get this."
+ *
+ * That is a PLATFORM role, not a household role: no value of `session.role` can express it,
+ * because every role is scoped to one household by design and inventing a role that reaches
+ * across tenants would put a cross-household capability inside the same field a household
+ * Owner controls.
+ *
+ * So it lives where no household can reach it: a deployment env listing the operator's own
+ * sign-in email(s). An empty env means NOBODY is an operator and the routes 404 — which is
+ * exactly right for the "new households do not get this" half of the ask, and it means a
+ * self-hosted copy of FamiliOS has the surface switched off unless its own operator turns it
+ * on. Every use is audited.
+ */
+function operatorEmails() {
+  return String(process.env.HOMEOPS_OPERATOR_EMAILS ?? "")
+    .split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+}
+/** The signed-in session's own email, read from the identity registry — never from a body. */
+function sessionEmail(session) {
+  if (!session?.householdId || !session?.actorId) return null;
+  const idn = listIdentitiesForHousehold(session.householdId).find((i) => i.actorId === session.actorId);
+  return idn?.email ? String(idn.email).toLowerCase() : null;
+}
+function isOperator(session) {
+  const allow = operatorEmails();
+  if (allow.length === 0) return false;
+  const email = sessionEmail(session);
+  return !!email && allow.includes(email);
+}
+
 // Break-glass recovery: the sha256 of HOMEOPS_BOOTSTRAP_PIN (operator-only env), or null when
 // unset. While present it is accepted as an alternative Owner/Adult-Admin PIN on both sign-in
 // paths — seeding the gate before a first PIN exists AND recovering a forgotten one. Every
@@ -319,8 +350,9 @@ function jobView(job) {
 import { runWithRequestContext } from "./tenant-context.mjs";
 import {
   createIdentity, verifyCredentials, consumeVerifyToken, beginPasswordReset, completePasswordReset,
+  findByResetCode, findIdentityForRecovery,
   deleteIdentity, deleteIdentitiesForHousehold, listIdentitiesForHousehold, validEmail, validPassword,
-  createInvite, getInvite, listInvites, revokeInvite, consumeInvite,
+  createInvite, getInvite, listInvites, revokeInvite, consumeInvite, INVITABLE_ROLES,
 } from "./identity.mjs";
 const server = http.createServer((req, res) => {
   runWithRequestContext(() => handleRequest(req, res)).catch(() => { try { res.writeHead(500); res.end(); } catch { /* socket gone */ } });
@@ -352,9 +384,12 @@ const handleRequest = async (req, res) => {
       _rateBuckets.set(k, arr);
       return false;
     };
-    const AUTH_LIMITED = new Set(["/api/household/claim", "/api/signup", "/api/login", "/api/verify-email", "/api/password-reset/request", "/api/password-reset/complete"]);
+    const AUTH_LIMITED = new Set(["/api/household/claim", "/api/signup", "/api/login", "/api/verify-email", "/api/password-reset/request", "/api/password-reset/verify-code", "/api/password-reset/complete", "/api/email-recovery/request"]);
     if ((path === "/api/session" && method === "POST") || AUTH_LIMITED.has(path)) {
-      if (rateLimited("auth", rlKeyIp, 20, 60_000)) {
+      // Tunable so an operator can loosen it for a shared-NAT deployment (or a test suite
+      // that legitimately signs up two dozen households in a row) without editing code.
+      const authLimit = Math.max(5, parseInt(process.env.HOMEOPS_AUTH_RATE_LIMIT ?? "20", 10) || 20);
+      if (rateLimited("auth", rlKeyIp, authLimit, 60_000)) {
         audit({ type: "rate.limited", route: path }, req);
         return json(res, 429, { error: "rate_limited", message: "Too many attempts — wait a minute and try again." }, req);
       }
@@ -557,7 +592,9 @@ const handleRequest = async (req, res) => {
         const g = gate(req, {});
         if (!g.ok || !g.session) return json(res, 200, { session: null }, req);
         const s = g.session;
-        return json(res, 200, { session: { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId } }, req);
+        // isOperator is derived server-side from the deployment env + this session's own
+        // registered email. The client can only ever READ it — it is not part of any body.
+        return json(res, 200, { session: { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId, isOperator: isOperator(s) } }, req);
       }
       if (method === "POST") {
         const body = await readBody(req);
@@ -829,6 +866,14 @@ const handleRequest = async (req, res) => {
       let householdId, actorId, role, relationship;
       const invite = body.inviteToken ? getInvite(body.inviteToken) : null;
       if (body.inviteToken && !invite) return json(res, 400, { error: "invalid_invite", message: "That invite code is invalid, used, or expired — ask for a new one." }, req);
+      // D3 [02:12] — "the household name should be REQUIRED." It was optional, and the
+      // fallback ("Ross's household") is the name the family then lived with everywhere the
+      // household is named. Enforced here as well as in the form, because the form is not
+      // the only caller. D4: the invite code stays optional — someone JOINING a household
+      // isn't naming it, so the requirement applies only to creating one.
+      if (!invite && !String(body.householdName ?? "").trim()) {
+        return json(res, 400, { error: "household_name_required", message: "Give your household a name — it's what the family sees everywhere." }, req);
+      }
       if (invite) {
         householdId = invite.householdId; actorId = "m-" + crypto.randomBytes(4).toString("hex");
         role = invite.role; relationship = "Invited member";
@@ -841,7 +886,7 @@ const handleRequest = async (req, res) => {
       if (invite) consumeInvite(invite.token);
       await runWithTenant(householdId, () => {
         putMember({ actorId, displayName: ownerName, role, relationship, householdId });
-        if (!invite) setSettings({ householdName: String(body.householdName ?? "").trim().slice(0, 60) || `${ownerName}'s household`, householdCreatedAt: Date.now() }, householdId);
+        if (!invite) setSettings({ householdName: String(body.householdName).trim().slice(0, 60), householdCreatedAt: Date.now() }, householdId);
         appendAudit({ type: invite ? "household.join" : "household.signup", email, actorId, role });
       });
       const s = createSession({ actorId, actorName: ownerName, role, householdId });
@@ -877,11 +922,63 @@ const handleRequest = async (req, res) => {
       if (!idn) return json(res, 400, { error: "invalid_token" }, req);
       return json(res, 200, { ok: true, email: idn.email, verified: true }, req);
     }
+    // D1 [01:32] — "Forgot password: it should send an email with a recovery code." The code
+    // is now actually SENT (notify.mjs sendRecoveryCode, through the account's own household
+    // Google connection — the only email transport this deployment has).
+    //
+    // The response is deliberately identical whether or not the account exists, and whether
+    // or not the send succeeded. Anything else is account enumeration: "no email transport
+    // configured for that household" tells an attacker the household is real. Failures are
+    // recorded in the audit log instead, which is where an operator can see them.
     if (path === "/api/password-reset/request" && method === "POST") {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      beginPasswordReset(String(body.email ?? "")); // 200 either way — no account enumeration
-      return json(res, 200, { ok: true, message: "If that email has an account, a reset link is on its way." }, req);
+      const email = String(body.email ?? "").trim();
+      const idn = beginPasswordReset(email);
+      if (idn?.resetCode) {
+        // Fire-and-forget: the response must not vary with delivery timing either.
+        void runWithTenant(idn.householdId, () => sendRecoveryCode({
+          householdId: idn.householdId, actorId: idn.actorId, email: idn.email ?? email,
+          code: idn.resetCode, kind: "password",
+        })).catch(() => {});
+      }
+      return json(res, 200, { ok: true, message: "If that email has an account, a recovery code is on its way. It expires in 15 minutes." }, req);
+    }
+    // Exchange the 6-digit code for the one-time token the completion step wants. Separate
+    // from /complete so the app can confirm the code BEFORE asking for a new password —
+    // typing a password twice only to be told the code was wrong is a bad way to find out.
+    if (path === "/api/password-reset/verify-code" && method === "POST") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const found = findByResetCode(String(body.email ?? ""), String(body.code ?? ""));
+      if (found.error) {
+        return json(res, 400, {
+          error: found.error,
+          message: found.error === "too_many_attempts"
+            ? "Too many tries with that code. Request a new one."
+            : "That code isn't right, or it's expired. Check the email or request a new code.",
+          ...(found.attemptsLeft != null ? { attemptsLeft: found.attemptsLeft } : {}),
+        }, req);
+      }
+      return json(res, 200, { ok: true, token: found.identity.resetToken }, req);
+    }
+    // D2 [01:46] — "forgot email, or forgot username." The answer is emailed TO the account,
+    // never returned in the response: a caller who controls that inbox learns their own
+    // address (the point), and a caller who doesn't learns nothing. Proof of belonging is the
+    // household's own join code, which a family has from another member.
+    if (path === "/api/email-recovery/request" && method === "POST") {
+      if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const inv = getInvite(String(body.inviteCode ?? "").trim());
+      if (inv?.householdId) {
+        const idn = findIdentityForRecovery({ householdId: inv.householdId, displayName: String(body.displayName ?? "") });
+        if (idn) {
+          void runWithTenant(idn.householdId, () => sendRecoveryCode({
+            householdId: idn.householdId, actorId: idn.actorId, email: idn.email, code: null, kind: "email",
+          })).catch(() => {});
+        }
+      }
+      return json(res, 200, { ok: true, message: "If that matches an account, we've emailed the address to itself." }, req);
     }
     if (path === "/api/password-reset/complete" && method === "POST") {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
@@ -896,6 +993,48 @@ const handleRequest = async (req, res) => {
     if (path === "/api/plan" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       return json(res, 200, { plan: getPlan(g.session.householdId) }, req);
+    }
+
+    /* ---- D5: operator-only, cross-household invite minting ----
+     * 404 (not 403) when the deployment has no operator configured, so the surface does not
+     * even announce itself on an install that has it switched off. */
+    if (path === "/api/admin/households" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!isOperator(g.session)) return json(res, 404, { error: "not_found" }, req);
+      const rows = [];
+      for (const id of tenantEngine().tenantIds()) {
+        if (!/^hh_[a-z0-9]+$/.test(id)) continue;   // skip "local" and "_system"
+        const info = runWithTenant(id, () => {
+          const members = listMembers(() => true);
+          return { name: getSettings(id).householdName ?? null, memberCount: members.length, createdAt: getSettings(id).householdCreatedAt ?? null };
+        });
+        rows.push({ id, ...info });
+      }
+      rows.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+      audit({ type: "admin.households_listed", count: rows.length, ok: true }, req, g.session);
+      return json(res, 200, { households: rows }, req);
+    }
+    if (path === "/api/admin/invites" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!isOperator(g.session)) return json(res, 404, { error: "not_found" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const householdId = String(body.householdId ?? "").trim();
+      if (!/^hh_[a-z0-9]+$/.test(householdId) || !tenantEngine().tenantIds().includes(householdId)) {
+        return json(res, 400, { error: "unknown_household" }, req);
+      }
+      // Owner is still not grantable by invite — the operator can seat anyone in a household,
+      // but not hand out its ownership. That stays with whoever created it.
+      const role = INVITABLE_ROLES.includes(body.role) ? body.role : "Adult Member";
+      const made = createInvite({
+        householdId,
+        householdName: runWithTenant(householdId, () => getSettings(householdId).householdName ?? null),
+        displayName: String(body.displayName ?? "").trim() || "Invited member",
+        role,
+        invitedBy: g.session.actorId,
+      });
+      if (made.error) return json(res, 400, { error: made.error }, req);
+      audit({ type: "admin.invite_created", householdId, role, ok: true }, req, g.session);
+      return json(res, 200, made, req);   // createInvite already returns { invite }
     }
 
     /* ---- Household invites: join codes for existing households ---- */
