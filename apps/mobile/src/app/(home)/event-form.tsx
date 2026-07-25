@@ -108,6 +108,12 @@ export default function EventFormScreen() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
+  /* Q2 — "it says edit at the source or copy it on the web app. Let me append to it here
+   * without syncing it back out." Read-only was answering the wrong question: the calendar
+   * this event came from owns its title, time and place, but who's coming, what to bring, a
+   * reminder and your own notes are FamiliOS's, and it can take those. So the form stops
+   * being all-or-nothing — the source's half stays locked, the household's half opens up. */
+  const [canAppend, setCanAppend] = useState(false);
   // Google-originated linked events are editable TWO-WAY: the server writes the
   // edit to Google first, then mirrors it locally. ICS-fed events stay read-only.
   const [linkedGoogle, setLinkedGoogle] = useState(false);
@@ -144,6 +150,9 @@ export default function EventFormScreen() {
   // WP-003/ISS-006: general notes — the server has stored EventRec.notes all
   // along (and Google description mirrors it); the editor finally exposes it.
   const [notes, setNotes] = useState("");
+  // Kept deliberately separate from `notes`: notes is the event's description and travels
+  // to Google on a push, this never leaves FamiliOS. Same screen, different promise.
+  const [localNotes, setLocalNotes] = useState("");
 
   const [busy, setBusy] = useState<"save" | "delete" | "push" | null>(null);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
@@ -179,10 +188,13 @@ export default function EventFormScreen() {
           const lg = e.layer === "linked" && !!e.provenance?.googleEventId && canEdit;
           setLinkedGoogle(lg);
           setReadOnly(!canEdit || (e.layer !== "canonical" && !lg));
+          // Q2 — a mirror you can't EDIT can still be added to. Two different questions.
+          setCanAppend(e.appendable !== false);
           setGoogleEventId(e.provenance?.googleEventId ?? null);
           setTitle(e.title);
           setLocation(e.location ?? "");
           setNotes(e.notes ?? "");
+          setLocalNotes(e.localNotes ?? "");
           setDriverId(e.driverId);
           // An event from before this feature has participantIds but no answers. Reading that
           // as "everyone accepted" would show a card claiming three people said yes when
@@ -282,7 +294,12 @@ export default function EventFormScreen() {
   const endInvalid = scheduled && hasEnd && (allDay
     ? +midnight(endDay) < +midnight(day)
     : +stamp(endDay, end) <= +stamp(day, start));
-  const canSave = canManage && !readOnly && title.trim().length > 0 && !endInvalid && busy === null;
+  // On a mirrored event there is nothing to validate — its title and times aren't ours to
+  // change — so Save turns on as soon as there's something of ours to keep.
+  const appendOnly = readOnly && canAppend;
+  const canSave = canManage && busy === null && (appendOnly || (!readOnly && title.trim().length > 0 && !endInvalid));
+  /** The household's half of the event — open even when the source owns the rest. */
+  const localEditable = canManage && (!readOnly || canAppend);
 
   const addBring = useCallback(() => {
     const items = bringInput.split(",").map((s) => s.trim()).filter(Boolean);
@@ -301,10 +318,14 @@ export default function EventFormScreen() {
     // Include anything still typed into the bring field so it isn't silently lost.
     const pendingBring = bringInput.split(",").map((s) => s.trim()).filter(Boolean).map((item) => ({ item, memberId: null as string | null }));
     const whatToBring = [...bring, ...pendingBring];
-    const body = { title: title.trim(), startAt, endAt, allDay: scheduled && allDay, notes: notes.trim(), location: location.trim(), driverId, whatToBring };
-    const r = isEdit
-      ? await api.updateEvent(id, body)
-      : await api.createEvent({ ...body, visibility: "household" });
+    const body = { title: title.trim(), startAt, endAt, allDay: scheduled && allDay, notes: notes.trim(), location: location.trim(), localNotes: localNotes.trim(), driverId, whatToBring };
+    /* Q2 — on a mirrored event, send only the half that's ours. Sending the title and times
+     * back unchanged would be refused by the server (correctly — it can't tell "unchanged"
+     * from "changed back"), and the append would go down with them. Attendees aren't here:
+     * they save on their own as they're tapped, because adding someone notifies them. */
+    const r = !isEdit
+      ? await api.createEvent({ ...body, visibility: "household" })
+      : await api.updateEvent(id, appendOnly ? { localNotes: localNotes.trim(), driverId, whatToBring } : body);
     setBusy(null);
     if (r.event) {
       tapHaptic("success");
@@ -444,7 +465,16 @@ export default function EventFormScreen() {
         <Notice text="Viewing only — creating and editing events needs Limited Member or higher." ok={false} />
       ) : null}
       {readOnly ? (
-        <Notice text="Read-only — this is synced from another calendar (you can only edit your own). Edit it at the source." ok={false} />
+        /* Q2 — the old copy sent him somewhere else ("edit it at the source, or copy it on
+         * the web app"), which is a strange thing for the app to say about an event it is
+         * already showing. Its time and place really do belong to the other calendar; the
+         * rest is ours, so say which is which and let him get on with it. */
+        <Notice
+          ok={canAppend}
+          text={canAppend
+            ? "From another calendar — its time, place and description change there. Everything below is yours: your notes, who's coming, what to bring. None of it syncs back out."
+            : "Read-only — this is synced from another calendar (you can only edit your own). Edit it at the source."}
+        />
       ) : null}
       {linkedGoogle ? (
         <Notice text="Synced from Google Calendar — changes you save here update it in Google too." ok />
@@ -573,6 +603,32 @@ export default function EventFormScreen() {
         />
       </Well>
 
+      {/* Q2 — "let me append to it here without syncing it back out." A second, separate
+          field rather than unlocking the one above, because the one above IS the event's
+          description: on a synced event it belongs to the other calendar, and on your own it
+          travels to Google on a push. This one never leaves, on any event, which is the
+          whole point — so it says so, and the promise is kept in the code (the Google body is
+          composed from `notes` and the Bring list only). */}
+      {isEdit && localEditable ? (
+        <>
+          <SectionHeader title={readOnly ? "Your notes" : "Just for us"} />
+          <Well style={{ gap: 6 }}>
+            <TextInput
+              style={[inputStyle, { minHeight: 60, textAlignVertical: "top" }]}
+              placeholder={readOnly ? "Pickup is at the side gate…" : "Anything that stays in FamiliOS"}
+              placeholderTextColor={colors.textFaint}
+              value={localNotes}
+              onChangeText={setLocalNotes}
+              multiline
+              accessibilityLabel="Your own notes, kept in FamiliOS"
+            />
+            <T kind="caption" color={colors.textFaint}>
+              Kept in FamiliOS. This never goes to the calendar this event came from.
+            </T>
+          </Well>
+        </>
+      ) : null}
+
       {/* E5/E6/E7 — who's attending, whether they've been told, and what they said. */}
       {isEdit ? (
         <>
@@ -587,7 +643,7 @@ export default function EventFormScreen() {
                     label={m.displayName.split(" ")[0]}
                     icon={row?.status === "accepted" ? "checkmark.circle.fill" : row?.status === "declined" ? "xmark.circle.fill" : row ? "person.fill" : "person"}
                     selected={!!row}
-                    onPress={readOnly || !canManage || attendeeBusy ? undefined : () => void (async () => {
+                    onPress={!localEditable || attendeeBusy ? undefined : () => void (async () => {
                       const next = row
                         ? attendees.filter((a) => a.memberId !== m.actorId).map((a) => a.memberId)
                         : [...attendees.map((a) => a.memberId), m.actorId];
@@ -675,14 +731,14 @@ export default function EventFormScreen() {
           different question from "who's coming", and a carpool needs both. */}
       <SectionHeader title="Driver" />
       <ChipRow>
-        <Chip label="No driver" selected={driverId === null} onPress={readOnly || !canManage ? undefined : () => setDriverId(null)} />
+        <Chip label="No driver" selected={driverId === null} onPress={!localEditable ? undefined : () => setDriverId(null)} />
         {members.map((m) => (
           <Chip
             key={m.actorId}
             label={m.displayName}
             icon="car.fill"
             selected={driverId === m.actorId}
-            onPress={readOnly || !canManage ? undefined : () => setDriverId(driverId === m.actorId ? null : m.actorId)}
+            onPress={!localEditable ? undefined : () => setDriverId(driverId === m.actorId ? null : m.actorId)}
           />
         ))}
       </ChipRow>
@@ -695,7 +751,7 @@ export default function EventFormScreen() {
             <PressableScale
               key={`${w.item}-${i}`}
               haptic="select"
-              disabled={readOnly || !canManage}
+              disabled={!localEditable}
               onPress={() => setBring((b) => b.filter((_, j) => j !== i))}
               accessibilityRole="button"
               accessibilityLabel={`Remove ${w.item}`}
@@ -707,12 +763,12 @@ export default function EventFormScreen() {
             >
               <Sym name="bag.fill" size={12} color={colors.amber} />
               <T kind="subMedium" color={colors.amber}>{w.item}</T>
-              {!readOnly && canManage ? <Sym name="xmark" size={10} color={colors.amber} /> : null}
+              {localEditable ? <Sym name="xmark" size={10} color={colors.amber} /> : null}
             </PressableScale>
           ))}
         </View>
       ) : null}
-      {!readOnly && canManage ? (
+      {localEditable ? (
         <Well
           style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}
           onLayout={(e) => { bringY.current = e.nativeEvent.layout.y; }}
@@ -798,10 +854,10 @@ export default function EventFormScreen() {
           changes should be closer to the text entry." Both are answered by taking the commit
           control out of the scrolling content: it's pinned, and it rides the keyboard up, so
           when a field is focused Save is directly above the keys. */}
-      {!readOnly && canManage ? (
+      {localEditable ? (
         <ActionBar>
           <Button
-            title={isEdit ? (alsoGoogle && !linkedGoogle ? "Save & update Google" : "Save changes") : "Add event"}
+            title={appendOnly ? "Save to FamiliOS" : isEdit ? (alsoGoogle && !linkedGoogle ? "Save & update Google" : "Save changes") : "Add event"}
             variant="ember"
             full
             loading={busy === "save" || (busy === "push" && !pushApproval)}
@@ -812,7 +868,7 @@ export default function EventFormScreen() {
               button and no explanation. */}
           {!canSave && busy === null ? (
             <T kind="caption" center color={colors.textFaint}>
-              {!title.trim() ? "Give it a title to save." : endInvalid ? "Fix the end time to save." : ""}
+              {appendOnly ? "" : !title.trim() ? "Give it a title to save." : endInvalid ? "Fix the end time to save." : ""}
             </T>
           ) : null}
         </ActionBar>

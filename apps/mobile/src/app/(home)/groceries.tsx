@@ -5,12 +5,12 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { Alert, StyleSheet, TextInput, View } from "react-native";
 import { useFocusEffect } from "expo-router";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
-import { api, type MemberRec, type TaskRec } from "@/lib/api";
+import { api, type MemberRec, type NestRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic, motion } from "@/theme";
 import {
-  T, Card, Well, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
+  T, Card, Chip, ChipRow, Well, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
   Sym, PressableScale, HSheet, SheetCTA, Notice, useConfirmFlash,
 } from "@/components/ui";
 
@@ -34,7 +34,7 @@ export default function GroceriesScreen() {
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [items, setItems] = useState<TaskRec[]>([]);
+  const [allItems, setItems] = useState<TaskRec[]>([]);
   const [members, setMembers] = useState<MemberRec[]>([]);
   const [smsLive, setSmsLive] = useState(false);
   const [draft, setDraft] = useState("");
@@ -42,11 +42,17 @@ export default function GroceriesScreen() {
   const [sharePhone, setSharePhone] = useState("");
   const [shareNote, setShareNote] = useState<string | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
+  /* T1 — "keep their own grocery list… between the two of them, and yet still isolated from
+   * the broader family group." A grocery item is a task, so a nest list is the family list
+   * filtered to that nest — same screen, same habits, different room. */
+  const [nests, setNests] = useState<NestRec[]>([]);
+  const [nestId, setNestId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [h, tks, mem, conns] = await Promise.all([api.health(), api.tasks(), api.members(), api.connectors()]);
+    const [h, tks, mem, conns, ns] = await Promise.all([api.health(), api.tasks(), api.members(), api.connectors(), api.nests().catch(() => ({ nests: [] as NestRec[], invitations: [] as NestRec[] }))]);
     setOffline(!h);
     if (h) {
+      setNests(ns.nests);
       // Null listName defaults to Groceries — matching the Meals screens, so an item
       // whose POST didn't persist listName still shows up here.
       setItems(tks.filter((t) => t.type === "list" && (t.listName ?? "Groceries") === "Groceries"));
@@ -59,6 +65,11 @@ export default function GroceriesScreen() {
   useRevSync(useCallback(() => { void load(); }, [load]));
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
+  // The family list deliberately does NOT include nest items — that's the whole promise.
+  const items = useMemo(
+    () => allItems.filter((t) => (nestId ? t.nestId === nestId : t.visibility !== "nest")),
+    [allItems, nestId],
+  );
   const done = useMemo(() => items.filter((t) => t.status === "done").length, [items]);
   const open = items.filter((t) => t.status !== "done");
   const checked = items.filter((t) => t.status === "done");
@@ -68,7 +79,7 @@ export default function GroceriesScreen() {
     if (!title) return;
     setDraft("");
     tapHaptic("light");
-    const r = await api.createTask({ title, type: "list", listName: "Groceries" });
+    const r = await api.createTask({ title, type: "list", listName: "Groceries", ...(nestId ? { visibility: "nest", nestId } : {}) });
     // POST may not persist listName — patch it after, like the Tasks screen does.
     if (r.task && (r.task as TaskRec).listName !== "Groceries") {
       await api.updateTask((r.task as TaskRec).id, { listName: "Groceries" });
@@ -208,6 +219,17 @@ export default function GroceriesScreen() {
               </PressableScale>
             </View>
           </Rise>
+
+          {nests.length > 0 ? (
+            <Rise index={1}>
+              <ChipRow>
+                <Chip label="Family" icon="house.fill" selected={nestId === null} onPress={() => setNestId(null)} />
+                {nests.map((n) => (
+                  <Chip key={n.id} label={n.label} icon="person.2.fill" selected={nestId === n.id} onPress={() => setNestId(n.id)} />
+                ))}
+              </ChipRow>
+            </Rise>
+          ) : null}
 
           <Rise index={1}>
             <Card style={{ gap: 10 }}>

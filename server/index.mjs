@@ -155,6 +155,28 @@ function badTimestamp(v) {
   return v != null && v !== "" && isNaN(+new Date(v));
 }
 
+/* The half of a mirrored event that belongs to the calendar it came from (Q2).
+ *
+ * These are the fields a re-sync overwrites, and the fields everyone else on that invite
+ * is also reading — so changing them here would either be undone without warning or make
+ * this household quietly disagree with the source. Everything NOT in this set is a
+ * FamiliOS concept the sync has never heard of (who's coming, what to bring, reminders,
+ * your own notes), so it is appendable on any event, mirrored or not, and never leaves. */
+const SOURCE_OWNED_FIELDS = new Set([
+  "title", "startAt", "endAt", "allDay", "location", "notes",
+  "recurrence", "rrule", "status", "layer", "source", "provenance",
+]);
+const FIELD_LABELS = {
+  title: "title", startAt: "start time", endAt: "end time", allDay: "all-day setting",
+  location: "location", notes: "description", recurrence: "repeat", rrule: "repeat",
+  status: "status", layer: "calendar", source: "calendar", provenance: "calendar",
+};
+const fieldLabel = (k) => FIELD_LABELS[k] ?? k;
+const andList = (xs) => {
+  const u = [...new Set(xs)];
+  return u.length <= 1 ? (u[0] ?? "") : `${u.slice(0, -1).join(", ")} and ${u[u.length - 1]}`;
+};
+
 // Per-member accent color: one of the app accent names, or a hex string. Optional and
 // back-compat — an unrecognized value is ignored (never stored) rather than erroring.
 const MEMBER_COLORS = ["ink", "sage", "coral", "amber", "sky", "lavender"];
@@ -1083,13 +1105,23 @@ function isAdultMemberOnly(session) {
 /** May this session create or change THIS agent? Admins: any. Adult Member: only their own,
  *  and only while it stays personal. Anyone else: no. */
 function mayWriteAgent(session, agent, nextVisibility) {
+  /* T1 — a nest helper belongs to the nest, and role is not a way in. An Owner who isn't in
+   * it has no more claim on it than anyone else, or "isolated from the broader family group"
+   * would mean isolated from everyone except the person who can already see everything. */
+  if (agent?.visibility === "nest" && !canSeeNest(agent.nestId, session?.householdId, session?.actorId)) {
+    return { ok: false, error: "forbidden", message: "That helper belongs to a nest you're not part of." };
+  }
   if (roleAtLeast(session?.role, "Adult Admin")) return { ok: true };
   if (!isAdultMemberOnly(session)) return { ok: false, error: "insufficient_role" };
   const vis = nextVisibility ?? agent?.visibility ?? "household";
-  if (vis !== "personal") {
+  // A nest helper is not a household helper — it runs for the two people who agreed to it,
+  // so the silo has no reason to block it. createAgent verifies the membership.
+  if (vis !== "personal" && vis !== "nest") {
     return { ok: false, error: "personal_only", message: "You can create helpers for yourself. A helper that runs for the whole household needs an Owner or Adult Admin." };
   }
-  if (agent && agent.createdBy && agent.createdBy !== session.actorId) {
+  // …but inside a nest it's "their own agents", plural and shared: membership was already
+  // verified above, so a nest helper is editable by anyone in that nest, not only its author.
+  if (agent && agent.createdBy && agent.createdBy !== session.actorId && agent.visibility !== "nest") {
     return { ok: false, error: "forbidden", message: "That helper belongs to someone else." };
   }
   if (agent && agent.system) return { ok: false, error: "forbidden" };
@@ -1844,6 +1876,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
           editable: e.layer === "canonical"
             ? (isAdultRole(g.session.role) || e.ownerId === g.session.actorId)
             : isEditableLinkedGoogle(e, g.session.householdId, g.session.actorId),
+          /* Q2 — "can I change this event" and "can I add to it" are different questions,
+           * so they get different answers. A mirror you can't edit can still be added to:
+           * who's coming, what to bring, a reminder, your own notes. */
+          appendable: isAdultRole(g.session.role) || e.ownerId === g.session.actorId,
           ...(staleSource ? { staleSource } : {}),
         };
       });
@@ -1989,7 +2025,6 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // connected that Google account. Another member's synced event (or an ICS mirror)
       // is read-only here — you can see it and it syncs, but you can't edit or push it.
       const linkedGoogle = ev.layer === "linked" && isEditableLinkedGoogle(ev, g.session.householdId, g.session.actorId);
-      if (ev.layer && ev.layer !== "canonical" && !linkedGoogle) return json(res, 409, { error: "read_only_layer", message: "This event is synced from another calendar and can't be edited here — copy it to a FamiliOS event first." }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const { id, householdId, createdBy, createdAt, ifUpdatedAt, ...patch } = body; // never reassign identity/ownership-of-record
       // ISS-105: the same guard on edit — a bad stamp here would make an event that
@@ -1998,6 +2033,31 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (badTimestamp(patch.endAt)) return json(res, 400, { error: "invalid_endAt", message: "That end date/time isn't a valid timestamp." }, req);
       if (ifUpdatedAt && ev.updatedAt && ifUpdatedAt !== ev.updatedAt) {
         return json(res, 409, { error: "stale_write", message: "This event changed on another device — refresh and try again.", current: ev }, req);
+      }
+      /* Q2 — "it says edit at the source or copy it on the web app. Let me append to it
+       * here in FamiliOS without syncing it back out."
+       *
+       * A mirrored event has two halves. The calendar it came from owns WHEN and WHERE it
+       * is — change those here and the next sync silently overwrites you, or worse, doesn't,
+       * and this household is reading a different event from everyone else on that invite.
+       * But who's going, what to bring, the reminder, the pickup note — the source calendar
+       * has never heard of those. They're FamiliOS's own, the sync never writes them, and
+       * there is no reason to refuse them.
+       *
+       * So refuse the source's half by name and take the rest, instead of turning away the
+       * whole edit and telling him to go use a different app. */
+      if (ev.layer && ev.layer !== "canonical" && !linkedGoogle) {
+        const claimed = Object.keys(patch).filter((k) => SOURCE_OWNED_FIELDS.has(k) && patch[k] !== undefined);
+        if (claimed.length > 0) {
+          return json(res, 409, {
+            error: "read_only_layer", fields: claimed,
+            message: `This event comes from a calendar outside FamiliOS, so its ${andList(claimed.map(fieldLabel))} can only change there. Anything you add here — your notes, who's going, what to bring, a reminder — stays in FamiliOS.`,
+          }, req);
+        }
+        const updated = patchEvent(ev.id, patch);
+        audit({ type: "event.append", eventId: ev.id, fields: Object.keys(patch), ok: true }, req, g.session);
+        // localOnly is the honest part: nothing left this app.
+        return json(res, 200, { event: updated, localOnly: true }, req);
       }
       if (linkedGoogle) {
         // Google-owned fields only — participants/checklists etc. stay FamiliOS-local
@@ -2089,7 +2149,15 @@ function mayWriteAgent(session, agent, nextVisibility) {
         id: "tk_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         title: String(body.title).trim(), type: body.type ?? "task", status: body.status ?? "todo",
         dueAt: body.dueAt ?? null, assignedMemberId: body.assignedMemberId ?? null, spaceId: body.spaceId ?? "sp-family",
-        priority: body.priority ?? "medium", amount: body.amount ?? null, visibility: body.visibility ?? "household",
+        priority: body.priority ?? "medium",
+        amount: body.amount ?? null,
+        /* T1 — "their own grocery list and task list… isolated from the broader family
+         * group." Grocery items ARE tasks (type:"list", listName:"Groceries"), so scoping
+         * tasks to a nest gives him both lists in one move. Membership is checked here:
+         * naming a nest you aren't in doesn't put your task in it, it just makes it yours. */
+        ...(body.visibility === "nest" && body.nestId && canSeeNest(String(body.nestId), g.session.householdId, g.session.actorId)
+          ? { visibility: "nest", nestId: String(body.nestId) }
+          : { visibility: body.visibility === "nest" ? "private" : (body.visibility ?? "household") }),
         listName: body.listName ?? undefined,
         startAt: body.startAt ?? null, endAt: body.endAt ?? null,
         remindMinutesBefore: body.remindMinutesBefore ?? null, reminderSentAt: null,
@@ -2124,6 +2192,20 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // pushed from Tuesday to Friday keeps a spent stamp and silently never nudges again.
       const timingChanged = ["startAt", "dueAt", "remindMinutesBefore"].some((k) => k in patch && patch[k] !== tk[k]);
       if (timingChanged) patch.reminderSentAt = null;
+      /* T1 — a task may be moved into a nest you're in, or back out of one (unlike a chat: a
+       * task is a line you wrote, not a history other people would suddenly be able to read).
+       * What's refused is naming a nest you're NOT in, which would otherwise be a way to
+       * push an item into a private space you can't see. */
+      if ("nestId" in patch || patch.visibility === "nest") {
+        const target = patch.nestId ?? tk.nestId;
+        if (patch.visibility === "nest" || target) {
+          if (!canSeeNest(String(target ?? ""), g.session.householdId, g.session.actorId)) {
+            return json(res, 403, { error: "not_in_nest", message: "You can only move this into a nest you're part of." }, req);
+          }
+          patch.visibility = "nest"; patch.nestId = String(target);
+        }
+      }
+      if ("visibility" in patch && patch.visibility !== "nest") patch.nestId = null; // leaving a nest scope clears the pointer
       const updated = patchTask(tk.id, patch);
       audit({ type: "task.update", taskId: tk.id, ok: true }, req, g.session);
       return json(res, 200, { task: updated }, req);

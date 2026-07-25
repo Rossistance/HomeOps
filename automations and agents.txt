@@ -1,0 +1,221 @@
+📬 Cross-Platform Communications & Inbox Triage
+1. School Correspondence Organizer
+Plain English Prompt: "Every weekday morning, look through my personal inbox for updates from the school district, see how my sorting tags are set up, and automatically sort those messages out of my main feed so I can look at them later."
+
+Tools & Skills Needed:
+
+Search inbox (Google · Read)
+
+List Gmail labels (Google · Read)
+
+Label / move messages (Google · Write)
+
+2. Emergency Work-to-Home Forwarder
+Plain English Prompt: "Monitor my corporate account for any urgent messages regarding 'Kid Sick' or 'School Closure.' If one comes in, immediately duplicate and forward it to my primary Google account so I don't miss it while away from my desk."
+
+Tools & Skills Needed:
+
+Search mail (Microsoft 365 · Read)
+
+Send email (Google · Send)
+
+3. Urgent Slack Escalation
+Plain English Prompt: "Keep an eye on my work Outlook mail. If a high-priority message arrives from my spouse's email domain, scan our available internal chat channels and post a direct alert into the #household-sync channel."
+
+Tools & Skills Needed:
+
+Search mail (Microsoft 365 · Read)
+
+List channels (Slack · Read)
+
+Post message (Slack · Send)
+
+4. Grandparent Weekly Digest
+Plain English Prompt: "Every Friday at 4 PM, draft and send an outgoing email to the grandparents' email address detailing our weekly family highlights."
+
+Tools & Skills Needed:
+
+Send mail (Microsoft 365 · Send)
+
+📅 Unified Calendar & File Coordination
+5. Cross-Calendar Conflict Sync
+Plain English Prompt: "Every Sunday evening, look at all my scheduled entries on my corporate Outlook calendar, cross-reference them with my existing Google calendar events, and copy any new work commitments over to the family calendar so we stay aligned."
+
+Tools & Skills Needed:
+
+List events (Microsoft 365 · Read)
+
+List events (Google · Read)
+
+Create event (Google · Write)
+
+6. Corporate Hold Generator
+Plain English Prompt: "When a critical family commitment pops up, automatically add a placeholder event directly onto my Microsoft 365 work calendar to block that time off as busy."
+
+Tools & Skills Needed:
+
+Create event (Microsoft 365 · Write)
+
+7. Secure Document Cloud Sync
+Plain English Prompt: "Scan the most recent files I've opened or edited in my Google Drive workspace. Find anything labeled 'Home Maintenance' or 'Tax Receipts' and ensure a copy is backed up within my personal OneDrive storage directory."
+
+Tools & Skills Needed:
+
+List recent files (Google · Read)
+
+List OneDrive files (Microsoft 365 · Read)
+
+8. Secure Archive Builder
+Plain English Prompt: "Check my primary Dropbox folder for newly added family documents. If you don't find a dedicated storage directory named '2026 Medical Records', build a new folder with that name and move the files there."
+
+Tools & Skills Needed:
+
+List files (Dropbox · Read)
+
+Create folder (Dropbox · Write)
+
+📋 Project, Task & Goal Tracking
+9. Database-to-Checklist Pipeline
+Plain English Prompt: "Search through my family organization pages in Notion for any items marked 'Home Improvement Tasks.' For every item you find, automatically populate it as a brand new action item on my active Todoist list."
+
+Tools & Skills Needed:
+
+Search pages (Notion · Read)
+
+Create task (Todoist · Write)
+
+10. Vacation Project Onboarding
+Plain English Prompt: "When I create a brand new planning page in Notion for an upcoming family trip, look over my active project categories in TickTick and immediately generate a primary task called 'Book Lodging and Travel'."
+
+Tools & Skills Needed:
+
+Create page (Notion · Write)
+
+List projects (TickTick · Read)
+
+Create task (TickTick · Write)
+
+11. Overdue Chore Auditor
+Plain English Prompt: "Pull a complete list of all active pending tasks from my backlog so I can review what household chores are currently running behind schedule."
+
+Tools & Skills Needed:
+
+List tasks (Todoist · Read)
+
+🏠 Ambient Smart Home Control
+12. Smart Climate Night-Mode
+Plain English Prompt: "Scan all connected smart hardware profiles across the house to ensure everything is online, then automatically adjust the central living room thermostat down to 68 degrees at 10:00 PM every night."
+
+Tools & Skills Needed:
+
+List Google Home devices (Google · Read)
+
+Set thermostat (Google · Write)
+
+13. Smart Speaker Dinner Bell
+Plain English Prompt: "At 6:00 PM on weekdays, detect all active smart speakers set up throughout the home and broadcast an audio announcement saying: 'Dinner is ready, time to wrap up homework!'"
+
+Tools & Skills Needed:
+
+List Alexa devices (Amazon Alexa · Read)
+
+Announce on Alexa (Amazon Alexa · Send)
+
+🌐 Weather, Feeds & Web Scraping
+14. Morning Status Text
+Plain English Prompt: "Every morning at 6:30 AM, fetch the current local outdoor weather conditions alongside the newest articles published to our family meal-prep RSS feed, compile the summary, and send it as a text message directly to my phone."
+
+Tools & Skills Needed:
+
+Current conditions (Weather · Read)
+
+Latest items (RSS / Feed · Read)
+
+Send text (Text Messaging · Send)
+
+15. Family Dashboard API Bridge
+Plain English Prompt: "Every Sunday night, trigger a web hook to read the latest metrics from our custom family budget tracking endpoint, then securely push an updated data payload back to our external tracking spreadsheet."
+
+Tools & Skills Needed:
+
+GET request (Custom HTTP · Read)
+
+POST request (Custom HTTP · Write)
+
+16. School Menu Data Harvester
+Plain English Prompt: "Locate the local school calendar spreadsheet saved on my hard drive, run an automated browser script to log into the school portal to pull the monthly nutritional information, and download the finished breakdown document directly to my local drive."
+
+Tools & Skills Needed:
+
+Import file (Local Files · Read)
+
+Open & extract (Browser Automation · Browser Action)
+
+Download document (Browser Automation · Download)
+
+17. Smart Recipe Extractor
+Plain English Prompt: "Search the web for 'quick kid-friendly weeknight dinner recipes', open and read the top-ranked result page, and cleanly isolate the ingredients and preparation steps while stripping out the ads."
+
+Tools & Skills Needed:
+
+Search the web (Web Search & Reading · Read)
+
+Read a page (Web Search & Reading · Read)
+
+Extract recipe (Web Search & Reading · Read)
+
+🍏 FamiliOS Native Core Workflows
+18. Digital Memory Scrapbooker
+Plain English Prompt: "Take the text highlights and photos from our weekend family outing, log it permanently into our internal family journal, and automatically compile those assets into a formatted digital keepsake artifact."
+
+Tools & Skills Needed:
+
+Write memory (FamiliOS · Write)
+
+Create artifact (FamiliOS · Write)
+
+19. Event Coordinator & Logistics Assigner
+Plain English Prompt: "Draft a family event for next month's 'Family Reunion Picnic', generate the primary preparation checklist with a line item for 'Pick up ice', assign a designated driver for the event logistics, and assign who is responsible for bringing the side dishes."
+
+Tools & Skills Needed:
+
+Draft a family event (FamiliOS · Write)
+
+Update event checklist (FamiliOS · Write)
+
+Assign a driver (FamiliOS · Write)
+
+Assign what-to-bring (FamiliOS · Write)
+
+20. Chore Manager & Document Linker
+Plain English Prompt: "Create a household task called 'Fix Backyard Fence', append a sub-item to our weekend action list called 'Buy wood screws', and attach our digital home insurance policy reference guide directly to the task card."
+
+Tools & Skills Needed:
+
+Create a task (FamiliOS · Write)
+
+Add a list item (FamiliOS · Write)
+
+Attach a note or file reference (FamiliOS · Write)
+
+21. Multi-Channel Meal Planner & Sign-Off Workflow
+Plain English Prompt: "Initialize the family dinner planner to map out next week's grocery list and calendar slots, draft a notification overview of the menu, dispatch it across our family's preferred contact methods, and send an official request asking everyone to sign off on the plan."
+
+Tools & Skills Needed:
+
+Plan a meal (planner + groceries + calendar) (FamiliOS · Write)
+
+Draft a notification (FamiliOS · Write)
+
+Send to a contact method (FamiliOS · Send)
+
+Request household sign-off (FamiliOS · Send)
+
+22. Internal System Sync (Functions)
+Plain English Prompt: "Take the audio transcription from our family meeting and parse it directly into our internal memory logs, then analyze our recent notification history to output a rapid dashboard digest of today's incoming alerts."
+
+Tools & Skills Needed:
+
+Note to family memory (internal)
+
+Recent inbox digest (internal)

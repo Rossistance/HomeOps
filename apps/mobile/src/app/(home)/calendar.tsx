@@ -886,9 +886,18 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
         {/* Read-only layers expand inline with full detail (they have no edit sheet). */}
         {!canonical && expanded ? (
           <View style={{ marginTop: spacing.md, gap: spacing.sm, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: spacing.md }}>
+            {/* Q2 — this used to end the conversation ("edit it at the source or copy it on
+                the web app"). Its time and place genuinely aren't ours; everything else is,
+                so offer that instead of a dead end. */}
             <T kind="sub" color={colors.textFaint}>
-              Synced from an external calendar — read-only here. Edit it at the source or copy it on the web app.
+              From {e.source || "another calendar"} — its time and place change there. You can still add your own details here.
             </T>
+            {e.localNotes ? (
+              <View style={{ flexDirection: "row", gap: 6 }}>
+                <Sym name="text.bubble" size={12} color={colors.lavender} />
+                <T kind="sub" style={{ flex: 1 }}>{e.localNotes}</T>
+              </View>
+            ) : null}
             {e.participantIds.length > 0 ? (
               <T kind="sub">Participants: {e.participantIds.map((id) => nameOf(id) ?? id).join(", ")}</T>
             ) : null}
@@ -899,6 +908,13 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
               <T kind="sub">{e.checklist.map((c) => `${c.done ? "☑" : "☐"} ${c.text}`).join("\n")}</T>
             ) : null}
             <T kind="caption" color={colors.textFaint}>{e.layer} layer · {e.category || "event"}</T>
+            {e.appendable !== false && canManage ? (
+              <Button
+                small variant="neutral" icon="square.and.pencil"
+                title={e.localNotes || (e.whatToBring ?? []).length > 0 ? "Edit your details" : "Add your details"}
+                onPress={() => router.push({ pathname: "/event-form", params: { id: e.id } })}
+              />
+            ) : null}
           </View>
         ) : null}
       </PressableCard>

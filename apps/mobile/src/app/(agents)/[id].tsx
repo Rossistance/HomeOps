@@ -18,7 +18,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Alert, View } from "react-native";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
-import { api, type AgentContextRec, type AgentRec, type ApprovalRec, type RunRec, type TriggerRec } from "@/lib/api";
+import { api, type AgentContextRec, type AgentRec, type ApprovalRec, type NestRec, type RunRec, type TriggerRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { canManageHousehold } from "@/lib/roles";
 import { useTheme, statusColor, tapHaptic, type HearthColors } from "@/theme";
@@ -67,6 +67,8 @@ export default function AgentDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [agent, setAgent] = useState<AgentRec | null>(null);
+  // The nests this person is in — the third answer in the Space control below.
+  const [myNests, setMyNests] = useState<NestRec[]>([]);
   const [ctx, setCtx] = useState<AgentContextRec | null>(null);
   const [triggers, setTriggers] = useState<TriggerRec[]>([]);
   const [runs, setRuns] = useState<RunX[]>([]);
@@ -76,12 +78,14 @@ export default function AgentDetailScreen() {
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
-    const [ags, tg, rn, aps, context] = await Promise.all([
+    const [ags, tg, rn, aps, context, ns] = await Promise.all([
       api.agents(), api.triggers(), api.runs(), api.approvals(),
       id ? api.agentContext(id).catch(() => null) : Promise.resolve(null),
+      api.nests().catch(() => ({ nests: [] as NestRec[], invitations: [] as NestRec[] })),
     ]);
     const a = ags.find((x) => x.id === id) ?? null;
     setAgent(a);
+    setMyNests(ns.nests);
     setCtx(context);
     setTriggers(tg.filter((t) => t.agentId === id));
     const mine = (rn as RunX[]).filter((r) =>
@@ -476,20 +480,31 @@ export default function AgentDetailScreen() {
       {isAdmin && (
         <Rise index={9}>
           <SectionHeader title="Space" />
-          <Card style={{ flexDirection: "row", gap: spacing.sm }}>
-            {([["household", "Family", colors.ember], ["personal", "Personal", colors.lavender]] as const).map(([key, label, tintC]) => {
-              const active = (agent.visibility ?? "household") === key;
+          <Card style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
+            {([
+              ["household", "Family", colors.ember] as const,
+              // T1 — "their own agents… available between the two of them." A nest is the
+              // third answer to "who is this for", so it sits in the same control.
+              ...myNests.map((n) => [`nest:${n.id}`, n.label, colors.sky] as const),
+              ["personal", "Personal", colors.lavender] as const,
+            ]).map(([key, label, tintC]) => {
+              const active = key.startsWith("nest:")
+                ? agent.nestId === key.slice(5) && agent.visibility === "nest"
+                : (agent.visibility ?? "household") === key && agent.visibility !== "nest";
               return (
                 <PressableScale
                   key={key}
                   haptic="select"
                   onPress={() => void (async () => {
                     if (active) return;
-                    const prev = agent.visibility;
-                    setAgent({ ...agent, visibility: key });
-                    const r = await api.patchAgent(agent.id, { visibility: key });
+                    const prev = { visibility: agent.visibility, nestId: agent.nestId };
+                    const next: Pick<AgentRec, "visibility" | "nestId"> = key.startsWith("nest:")
+                      ? { visibility: "nest", nestId: key.slice(5) }
+                      : { visibility: key as "household" | "personal", nestId: null };
+                    setAgent({ ...agent, ...next });
+                    const r = await api.patchAgent(agent.id, next);
                     if (r.error) {
-                      setAgent({ ...agent, visibility: prev });
+                      setAgent({ ...agent, ...prev });
                       Alert.alert("Couldn't move the agent", r.error === "insufficient_role" ? "Only an Owner or Adult Admin can do that." : "Something went wrong.");
                     }
                   })()}
@@ -497,8 +512,8 @@ export default function AgentDetailScreen() {
                   accessibilityState={{ selected: active }}
                   accessibilityLabel={`${label} space`}
                   style={{
-                    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
-                    paddingVertical: 10, borderRadius: 12, borderCurve: "continuous",
+                    flexGrow: 1, flexBasis: 100, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+                    paddingVertical: 10, paddingHorizontal: 8, borderRadius: 12, borderCurve: "continuous",
                     backgroundColor: active ? tintC : colors.surfaceSunken,
                   }}
                 >
@@ -509,7 +524,10 @@ export default function AgentDetailScreen() {
             })}
           </Card>
           <T kind="caption" color={colors.textFaint}>
-            {(agent.visibility ?? "household") === "personal" ? "Only you can see and use this agent." : "Everyone in the household can see and use this agent."}
+            {agent.visibility === "nest"
+              ? `Only the people in ${myNests.find((n) => n.id === agent.nestId)?.label ?? "this nest"} can see and use it — not even the household's owner.`
+              : (agent.visibility ?? "household") === "personal" ? "Only you can see and use this agent."
+              : "Everyone in the household can see and use this agent."}
           </T>
         </Rise>
       )}

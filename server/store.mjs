@@ -468,7 +468,27 @@ export function canSeeEntity(entity, { role, actorId } = {}) {
   const vis = entity.visibility ?? "household";
   if (vis === "private") return false;
   if (vis === "adults") return isAdultRole(role);
+  // T1 — "their own agents and grocery list and task list… still isolated from the broader
+  // family group." A nest-scoped thing is visible to the nest and to nobody else: not the
+  // Owner, not an Adult Admin. Role grants no way in, which is the entire point of it.
+  if (vis === "nest") return actorInNest(entity.nestId, entity.householdId, actorId);
   return true; // household | childVisible
+}
+
+/**
+ * Is this actor a joined member of that nest?
+ *
+ * The single definition. It lives here, beside the visibility gate that depends on it,
+ * rather than in nests.mjs — so the gate can't drift from the model, and a nest can never
+ * come to mean one thing to the store and another to the feature. An invitation is not
+ * membership: only "joined" counts.
+ */
+export function actorInNest(nestId, householdId, actorId) {
+  if (!nestId || !actorId) return false;
+  const n = getNest(nestId);
+  if (!n || n.archived) return false;
+  if (householdId && n.householdId !== householdId) return false;
+  return (n.members ?? []).some((m) => m.actorId === actorId && m.status === "joined");
 }
 export function putMember(member) {
   const all = readJSON("members.json", {});

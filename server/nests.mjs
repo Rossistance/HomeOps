@@ -26,7 +26,7 @@
 //   Leaving does not delete. A thread or a list someone made stays with the nest for whoever
 //   is left; if the nest empties out it is archived, not erased.
 import crypto from "node:crypto";
-import { listNests, getNest, putNest, deleteNestRec, listMembers, appendAudit } from "./store.mjs";
+import { listNests, getNest, putNest, deleteNestRec, listMembers, appendAudit, actorInNest } from "./store.mjs";
 
 const nid = () => "nest_" + crypto.randomBytes(8).toString("hex");
 const now = () => new Date().toISOString();
@@ -58,10 +58,9 @@ export function nestInvitesFor(householdId, actorId) {
  * space he described, and "isolated from the broader family group" has to mean isolated.
  */
 export function canSeeNest(nestId, householdId, actorId) {
-  if (!nestId) return false;
-  const n = getNest(nestId);
-  if (!n || n.householdId !== householdId || n.archived) return false;
-  return isInNest(n, actorId);
+  // One definition, in store.mjs beside the visibility gate that also depends on it — so a
+  // nest can never mean one thing to a route and another to the store.
+  return actorInNest(nestId, householdId, actorId);
 }
 
 /** A display name for the space switcher: "GPop + Beannie", in his own example. */

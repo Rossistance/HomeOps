@@ -161,6 +161,13 @@ export interface EventRec {
   /** Server-computed: may the current member edit this event? Canonical → adult/owner;
    *  linked Google → only the member who connected that account (edit-own-calendar-only). */
   editable?: boolean;
+  /** Q2: may the current member ADD to this event? A different question from `editable` —
+   *  a mirrored event's time and place belong to the calendar it came from, but who's
+   *  coming, what to bring and your own notes are FamiliOS's and are always appendable. */
+  appendable?: boolean;
+  /** Q2: the household's own note on this event. Never sent to Google or any source
+   *  calendar — unlike `notes`, which IS the event's description. */
+  localNotes?: string;
   /** ISS-121: set when this event came from a connected account that can no longer refresh
    *  (needs_reconnect / revoked / expired), so a disconnected calendar can never contribute
    *  silently. Server-derived per request — it clears itself once the account reconnects. */
@@ -188,6 +195,8 @@ export interface TaskRec {
   /** Set once the task has been added to the calendar. */
   eventId?: string | null;
   createdBy?: string | null;
+  /** T1: when visibility is "nest", the nest this task (or grocery item) belongs to. */
+  nestId?: string | null;
 }
 // Meal plan + the read-only "linked" calendar layer (ICS/Google subscriptions) —
 // same shapes as the web client (src/connectors/api.ts).
@@ -973,7 +982,7 @@ export const api = {
   },
 
   /* ---- Tasks (create/edit come to mobile with the redesign) ---- */
-  async createTask(body: { title: string; type?: string; dueAt?: string | null; assignedMemberId?: string | null; priority?: string; listName?: string }): Promise<{ task?: TaskRec; error?: string }> {
+  async createTask(body: { title: string; type?: string; dueAt?: string | null; assignedMemberId?: string | null; priority?: string; listName?: string; visibility?: string; nestId?: string }): Promise<{ task?: TaskRec; error?: string }> {
     const r = await req<{ task?: TaskRec; error?: string }>("/tasks", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
@@ -1133,7 +1142,9 @@ export const api = {
 export interface AgentRec {
   id: string; name: string; purpose?: string; status: string; instructions?: string;
   /** Agent space: "household" (family — shared, the default) or "personal" (only its creator sees/uses it). */
-  visibility?: "household" | "personal";
+  visibility?: "household" | "personal" | "nest";
+  /** T1: when visibility is "nest", the nest this helper belongs to. */
+  nestId?: string | null;
   createdBy?: string | null;
   lastRunAt?: string | null; runCount?: number; toolIds?: string[]; createdAt?: string; updatedAt?: string;
   approvalPolicy?: {

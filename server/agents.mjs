@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import {
   listAgents, getAgent, putAgent, patchAgent, deleteAgentRec,
   readJSON, writeJSON, listContactMethods, patchContactMethod,
-  getSettings, getRiskOverride, getSkill,
+  getSettings, getRiskOverride, getSkill, actorInNest,
 } from "./store.mjs";
 import { resolveEffectivePolicy } from "./policy.mjs";
 import { toolCatalog } from "./planner.mjs";
@@ -82,7 +82,19 @@ function normalizeAgent(body, base = {}, session = null) {
     spaceType: body.spaceType ?? base.spaceType ?? "Family",
     // Personal-space agents are visible/usable only by their creator; family
     // (household) agents — the default — are shared with everyone.
-    visibility: body.visibility === "personal" ? "personal" : body.visibility === "household" ? "household" : (base.visibility ?? "household"),
+    /* T1 — "their own agents… available between the two of them, and yet still isolated from
+     * the broader family group." A helper can belong to a nest, which is a third answer to
+     * "who is this for" alongside personal and household. Membership is checked, not
+     * claimed: name a nest you aren't in and the helper stays personal — yours, which is the
+     * safe direction to fail. */
+    ...(body.visibility === "nest"
+      ? (actorInNest(body.nestId ?? base.nestId, session?.householdId, session?.actorId)
+        ? { visibility: "nest", nestId: String(body.nestId ?? base.nestId) }
+        : { visibility: "personal", nestId: null })
+      : {
+        visibility: body.visibility === "personal" ? "personal" : body.visibility === "household" ? "household" : (base.visibility ?? "household"),
+        ...(body.visibility ? { nestId: null } : (base.nestId ? { nestId: base.nestId } : {})),
+      }),
     skillIds: Array.isArray(body.skillIds) ? body.skillIds : (base.skillIds ?? []),
     allowedToolIds: Array.isArray(body.allowedToolIds) ? body.allowedToolIds : (base.allowedToolIds ?? []),
     allowedFunctionIds: Array.isArray(body.allowedFunctionIds) ? body.allowedFunctionIds : (base.allowedFunctionIds ?? []),
@@ -369,6 +381,11 @@ export function isToolStepAllowed(agent, toolId, _session) {
 /** Personal agents exist only for the member who created them. */
 export function agentVisibleTo(a, session) {
   if (!a) return false;
+  // A nest helper is visible to the nest and to nobody else — not the Owner, not an Adult
+  // Admin. Its creator keeps it either way, so leaving a nest doesn't lose you your own work.
+  if (a.visibility === "nest") {
+    return a.createdBy === session?.actorId || actorInNest(a.nestId, session?.householdId, session?.actorId);
+  }
   return !(a.visibility === "personal" && a.createdBy && a.createdBy !== session?.actorId);
 }
 

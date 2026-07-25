@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, TextInput, View } from "react-native";
 import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withSequence, withSpring } from "react-native-reanimated";
-import { api, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
+import { api, type HelpRequestRec, type MemberRec, type NestRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic } from "@/theme";
@@ -175,6 +175,11 @@ export default function TasksScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
   const [activeList, setActiveList] = useState("All");
+  /* T1 — "their own… task list, available between the two of them, and yet still isolated
+   * from the broader family group." A second axis on the same screen: which SPACE, then
+   * which list within it. Family is the default and never shows a nest's items. */
+  const [nests, setNests] = useState<NestRec[]>([]);
+  const [nestId, setNestId] = useState<string | null>(null);
   const [doneOpen, setDoneOpen] = useState(false);
   // H1 [21:31] — "group the tasks by person: mine, and everybody else's." A household list
   // that mixes everyone's chores together is a list nobody reads as theirs.
@@ -193,11 +198,15 @@ export default function TasksScreen() {
   const composerY = useRef(0);
 
   const load = useCallback(async () => {
-    const [tks, mems, hrs] = await Promise.all([api.tasks(), api.members(), api.helpRequests()]);
+    const [tks, mems, hrs, ns] = await Promise.all([
+      api.tasks(), api.members(), api.helpRequests(),
+      api.nests().catch(() => ({ nests: [] as NestRec[], invitations: [] as NestRec[] })),
+    ]);
     if (mems.length === 0 && !(await api.health())) {
       setError("The FamiliOS server didn't answer.");
     } else {
       setError(null);
+      setNests(ns.nests);
       setTasks(tks);
       setMembers(mems);
       setHelpRequests(hrs);
@@ -229,9 +238,11 @@ export default function TasksScreen() {
     if (who === "mine") return !t.assignedMemberId || t.assignedMemberId === me;
     return !!t.assignedMemberId && t.assignedMemberId !== me;
   }, [who, me]);
-  const open = useMemo(() => tasks.filter((t) => t.status !== "done" && mineFilter(t)), [tasks, mineFilter]);
-  const done = useMemo(() => tasks.filter((t) => t.status === "done" && mineFilter(t)), [tasks, mineFilter]);
-  const listNames = useMemo(() => [...new Set(tasks.map(groupOf))].sort((a, b) => a.localeCompare(b)), [tasks]);
+  // The space comes first: Family never shows a nest's work, which is the whole promise.
+  const inSpace = useCallback((t: TaskRec) => (nestId ? t.nestId === nestId : t.visibility !== "nest"), [nestId]);
+  const open = useMemo(() => tasks.filter((t) => t.status !== "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
+  const done = useMemo(() => tasks.filter((t) => t.status === "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
+  const listNames = useMemo(() => [...new Set(tasks.filter(inSpace).map(groupOf))].sort((a, b) => a.localeCompare(b)), [tasks, inSpace]);
 
   const byDue = (a: TaskRec, b: TaskRec) => (a.dueAt ?? "9999").localeCompare(b.dueAt ?? "9999") || a.title.localeCompare(b.title);
   const groups = useMemo(() => {
@@ -293,6 +304,7 @@ export default function TasksScreen() {
     const r = await api.createTask({
       title: name, type: target.type, dueAt: dueFromQuick(quickDue),
       assignedMemberId: assignee, listName: target.listName,
+      ...(nestId ? { visibility: "nest", nestId } : {}),
     });
     if (r.task) {
       let created = r.task;
@@ -346,6 +358,17 @@ export default function TasksScreen() {
               );
             })}
           </View>
+        </Rise>
+      ) : null}
+
+      {nests.length > 0 ? (
+        <Rise index={riseIdx++}>
+          <ChipRow>
+            <Chip label="Family" icon="house.fill" selected={nestId === null} onPress={() => setNestId(null)} />
+            {nests.map((n) => (
+              <Chip key={n.id} label={n.label} icon="person.2.fill" selected={nestId === n.id} onPress={() => setNestId(n.id)} />
+            ))}
+          </ChipRow>
         </Rise>
       ) : null}
 
