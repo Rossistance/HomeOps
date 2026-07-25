@@ -2,7 +2,8 @@
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
-import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods } from "./store.mjs";
+import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods, listAgents, getAgent } from "./store.mjs";
+import { partialUpdateAgent } from "./agents.mjs";
 import { mealEventNotes, pushEventToGoogle } from "./calendar.mjs";
 import { deliverNotification, deliverInAppFallback } from "./notify.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
@@ -12,6 +13,101 @@ const eid = (p) => p + "_" + crypto.randomBytes(8).toString("hex");
 const nowISO = () => new Date().toISOString();
 
 export const INTERNAL_FUNCTIONS = {
+  /* ---- Helper (agent) inspection + iteration --------------------------------------
+   * The assistant could not read or change a helper. It had 13 tools and all of them
+   * moved DATA — not one touched an agent. So when a family asked it to fix the briefing
+   * helper, it answered "Update agent · ag-briefing", said the change was made, and
+   * nothing happened: there was no such capability to call. Ten minutes of a recorded
+   * session went into iterating against a control that did not exist.
+   *
+   * That is the whole point of connecting a model: the intelligence layer is supposed to
+   * be able to look at a helper, understand what it is doing wrong, and change it. These
+   * three tools give it eyes and hands on the helpers themselves.
+   *
+   * Editing a helper's standing instructions changes what it will do UNATTENDED later, so
+   * update is approval-gated — the family sees the before/after and signs off. Reading is
+   * free.
+   */
+  "homeops.list_agents": {
+    id: "homeops.list_agents",
+    name: "List helpers",
+    action: "Read",
+    risk: "Low",
+    requiresApproval: false,
+    delivers: false,
+    connectorId: "homeops",
+    connectorName: "FamiliOS",
+    async run(ctx) {
+      const rows = listAgents((a) => a.householdId === ctx.householdId || a.householdId === "local")
+        .map((a) => ({ id: a.id, name: a.name, purpose: a.purpose ?? "", status: a.status ?? "Active" }));
+      return { ok: true, result: { agents: rows, count: rows.length } };
+    },
+  },
+  "homeops.get_agent": {
+    id: "homeops.get_agent",
+    name: "Read a helper's setup",
+    action: "Read",
+    risk: "Low",
+    requiresApproval: false,
+    delivers: false,
+    connectorId: "homeops",
+    connectorName: "FamiliOS",
+    // The full instructions, so the model can reason about WHY a helper behaves as it does
+    // instead of guessing from its name.
+    async run(ctx, input) {
+      const id = String(input?.agentId ?? "").trim();
+      if (!id) return { ok: false, error: "agent_id_required", message: "Which helper? Pass its agentId (use list_agents first)." };
+      const a = getAgent(id);
+      if (!a || (a.householdId !== ctx.householdId && a.householdId !== "local")) {
+        return { ok: false, error: "unknown_agent", message: `There's no helper "${id}" in this household.` };
+      }
+      return { ok: true, result: {
+        id: a.id, name: a.name, purpose: a.purpose ?? "", instructions: a.instructions ?? "",
+        status: a.status ?? "Active", version: a.version ?? 1, system: a.system === true,
+        allowedToolIds: a.allowedToolIds ?? [], deniedToolIds: a.deniedToolIds ?? [],
+      } };
+    },
+  },
+  "homeops.update_agent": {
+    id: "homeops.update_agent",
+    name: "Change a helper's setup",
+    action: "Write",
+    risk: "Medium",
+    // Approval-gated: this rewrites what a helper will do on its own, later, unattended.
+    // The family should see that change before it takes effect — not discover it in a
+    // briefing next week.
+    requiresApproval: true,
+    delivers: false,
+    connectorId: "homeops",
+    connectorName: "FamiliOS",
+    async run(ctx, input) {
+      const id = String(input?.agentId ?? "").trim();
+      if (!id) return { ok: false, error: "agent_id_required", message: "Which helper? Pass its agentId." };
+      const a = getAgent(id);
+      if (!a || (a.householdId !== ctx.householdId && a.householdId !== "local")) {
+        return { ok: false, error: "unknown_agent", message: `There's no helper "${id}" in this household.` };
+      }
+      // Only these fields — a chat turn must not be able to widen a helper's permissions
+      // (allowedToolIds/deniedToolIds stay with the policy screens, where WP-105's
+      // effective-policy view can explain them).
+      const patch = {};
+      for (const f of ["name", "purpose", "instructions", "status"]) {
+        if (typeof input?.[f] === "string" && input[f].trim()) patch[f] = input[f].trim();
+      }
+      if (Object.keys(patch).length === 0) {
+        return { ok: false, error: "nothing_to_change", message: "Say what to change — name, purpose, instructions, or status." };
+      }
+      const before = { name: a.name, purpose: a.purpose ?? "", instructions: a.instructions ?? "", status: a.status ?? "Active" };
+      const next = partialUpdateAgent(id, patch);
+      if (!next) return { ok: false, error: "update_failed", message: "Couldn't save that change." };
+      // before/after travels back so the chat can show what actually changed — and so a
+      // claim of having edited a helper is backed by a diff, not by assertion.
+      return { ok: true, result: {
+        id: next.id, name: next.name, version: next.version,
+        changed: Object.keys(patch), before, after: { ...before, ...patch },
+      } };
+    },
+  },
   "homeops.write_memory": {
     id: "homeops.write_memory",
     name: "Write memory",

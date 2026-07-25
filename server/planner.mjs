@@ -388,6 +388,13 @@ Be state-aware before scheduling ANYTHING:
 - When the user states a durable household fact or preference ("we're vegetarian", "Grandma visits Sundays", "we're a family of 4"), remember it: include a homeops.write_memory step (scope "household") in your next plan, or propose a one-step plan for it — so every future conversation already knows.
 - Roster changes (add/remove/merge members) are human actions by design: point the user to Settings → Household (long-press a member to remove) or the web Members tab — never claim you can't help without saying where it IS done.
 
+Fixing and improving the family's HELPERS (agents) — you can actually do this now:
+- When a helper gets something wrong ("the briefing missed tonight's event", "make the morning agent include X"), DIAGNOSE AND FIX IT rather than describing what they should change themselves. context.existingAgents lists them; "homeops.get_agent" {agentId} returns a helper's real instructions; "homeops.update_agent" {agentId, instructions|purpose|name|status} rewrites them.
+- Read the helper's CURRENT instructions with get_agent BEFORE editing. Then rewrite the whole instructions text with your correction folded in — update_agent replaces the field, so send the complete new version, not a fragment or a diff.
+- update_agent is approval-gated on purpose: it changes what that helper will do on its own, unattended, later. Plan the step and let the family sign it off; the approval card shows them the change.
+- NEVER say you have updated, fixed, retrained, or changed a helper unless an update_agent step actually ran and succeeded. If you only intend to, say that you are about to and plan the step. Claiming a change you did not make is the worst thing you can do here — the family will believe the helper is fixed, and it will fail them again unattended.
+- If the family's complaint is really about DATA rather than the helper (an event you can see in upcomingEvents, a task already in openTasks), say so and answer directly instead of editing a helper that isn't at fault.
+
 Meal planning ("plan N meals", "what's for dinner this week"):
 - Research candidate recipes with web.search + web.recipe, then PRESENT the suggestions inline in "answer" (name, why it fits, source URL) so the family can approve or swap each one in chat.
 - For EACH approved meal, use "homeops.plan_meal" with {title, date (YYYY-MM-DD), slot, recipeUrl, ingredients (full list), instructions (steps), servings}. That single tool adds the meal to the Meal Planner, puts missing ingredients on the shared Groceries list (grocery mini app), creates the calendar event with the recipe + ingredients + instructions in its body, and — when calendar auto-sync is on — pushes it straight to Google Calendar. Do not duplicate those steps with separate tools.
@@ -416,16 +423,52 @@ For a plan or build, "answer" is one friendly sentence summarizing what you'll s
  * authoritative, and a child's assistant never sees adults-only items. The client
  * context (if any) is kept only as a low-priority hint.
  */
+/** Start of the local day containing `nowISO`, as an ISO stamp. */
+export function startOfLocalDay(nowISO) {
+  const d = nowISO ? new Date(nowISO) : new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString();
+}
+
+/**
+ * Is this event still worth showing the assistant, given the current instant?
+ *
+ * Exported and pure so the boundary that caused the "I can't see your calendar" failure is
+ * directly testable, rather than a filter buried in a 90-line context builder.
+ */
+export function isUpcomingForContext(e, nowISO) {
+  if (!e?.startAt) return true;                       // undated items are always relevant
+  if (e.startAt >= startOfLocalDay(nowISO)) return true; // anything today or later
+  return !!(e.endAt && e.endAt >= nowISO);            // started earlier, still running
+}
+
 export async function buildServerContext(session, clientContext, { goal } = {}) {
   if (!session) return clientContext ?? {};
   const hh = session.householdId;
   const now = new Date().toISOString();
+  // "Upcoming" is measured from the START OF TODAY, not from this instant.
+  //
+  // This filter used to be `startAt >= now`, and it is why the assistant kept insisting it
+  // could not see events the family could see plainly on their calendar ("I definitely see
+  // it, it says all school movie and it's on my calendar for today at 5 PM"). Two ways it
+  // silently hid today:
+  //   • a timed event at 5 PM, asked about at 6 PM, is already in the past by instant;
+  //   • an ALL-DAY event today starts at local midnight, so it was excluded from one
+  //     minute past midnight onward — i.e. for the entire day it was happening.
+  // The model is instructed to answer only from this context, so a dropped event doesn't
+  // read as "missing data" — it reads as the assistant flatly denying reality.
+  //
+  // A day-scoped window matches how a household actually thinks ("until 12 PM tonight it
+  // is still upcoming"), and the extra clause keeps multi-day events that began earlier
+  // but haven't finished yet.
   const events = listEvents((e) => e.householdId === hh)
     .filter((e) => canSeeEntity(e, session))
-    .filter((e) => !e.startAt || e.startAt >= now)
+    .filter((e) => isUpcomingForContext(e, now))
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
-    .slice(0, 8)
-    .map((e) => ({ id: e.id, title: e.title, startAt: e.startAt, location: e.location, driverId: e.driverId, participants: e.participantIds }));
+    .slice(0, 12)
+    // endAt/allDay ride along so the assistant can say "All day" or "until 8pm" instead of
+    // inventing a time, and can reason about what is happening RIGHT NOW.
+    .map((e) => ({ id: e.id, title: e.title, startAt: e.startAt, endAt: e.endAt ?? null, allDay: e.allDay === true, location: e.location, driverId: e.driverId, participants: e.participantIds }));
   const tasks = listTasks((t) => t.householdId === hh)
     .filter((t) => canSeeEntity(t, session))
     .filter((t) => t.status !== "done")
