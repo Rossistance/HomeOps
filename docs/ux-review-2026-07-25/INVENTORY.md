@@ -143,3 +143,26 @@ throughout the application.**"
   never reached them.
 - **A13 is the single highest-leverage item**: one shared card primitive modelled on
   Playbooks retires A1–A12 together and is what the owner asked for in the clearest terms.
+
+---
+
+# Addendum — agent chat recordings (3 videos, ~11.6 min, 2026-07-25)
+
+Sources: `RecordIt-F532B85D` (2m29s), `RPReplay_Final1784939671` (3m59s),
+`RecordIt-FF5F9C21` (5m10s). No narration — the content is the on-screen conversation.
+Two supplied files were byte-identical; deduped.
+
+## THEME K — the assistant announces work it then doesn't deliver
+
+| # | Item | Evidence |
+|---|---|---|
+| K1 | **"Here's the list:" with NO list.** Verbatim exchange: *"you didnt return anything"* → "You're right — here's the member-by-member task list from the household context I have, with overdue items marked." → *"still nothing"* → "Here's the family task list I can see from your household context, grouped by member…" → *"still nothing"*. Three consecutive turns announcing content that never rendered. Same root as the Jam-3 "Review upcoming schedule · Already on it — results land right here in the chat" card that delivered nothing. | chat2 |
+| K2 | **Results must render as CARDS, inline.** Typed verbatim: *"still not returned in line, in chat, results as cards"*. Restaurant answers came back as prose plus Yelp/OpenTable links instead of structured, comparable cards. | chat3 |
+| K3 | **It defers instead of acting.** "If you want, I can still help by narrowing this down to: best-rated / open now / casual / closest to 526 Shadow Parkway" and "If you want, I can also help sort these by easiest-to-finish". The user already asked; offering to do the thing is not doing the thing. | chat2, chat3 |
+| K4 | **Live local data is missing.** The ask: *"give me a list of the 5 best restaurants near me, sort them by highest to lowest and for each give me the results on whether it is often busy or not right now, estimated wait time"* — plus distance and drive-time. Answer: "no live busy status, wait time, distance, or drive-time data was provided." He wants this pulled from each place's Google page using precise location. | chat1, chat3 |
+| K5 | Confirms A4/A5 from the walkthrough: suggestion cards ("Plan this week's meals and build a g…") and chat title chips ("give me a list of the 5…", "What can you do for…") are truncated. | all three |
+
+**K1 is the single most damaging defect in the product.** The assistant is not merely
+unhelpful — it states that it has produced something and then produces nothing, repeatedly,
+while the user says "still nothing." It is the same false-success class as the fabricated
+"Update agent · ag-briefing", and it makes every other answer untrustworthy.
