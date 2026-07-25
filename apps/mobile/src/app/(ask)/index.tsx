@@ -2,15 +2,16 @@
 // drafts executable plans (run via the durable run flow), and builds helpers
 // (skills/agents/automations) straight from conversation. Streams via
 // /api/assistant/stream with a silent fallback to POST /api/assistant.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import { readAsStringAsync } from "expo-file-system/legacy";
 import Animated, {
-  FadeInDown, ReduceMotion, cancelAnimation,
-  useAnimatedStyle, useSharedValue, withDelay, withRepeat, withSequence, withTiming,
+  FadeInDown, ReduceMotion, cancelAnimation, clamp, runOnJS,
+  useAnimatedStyle, useSharedValue, withDelay, withRepeat, withSequence, withSpring, withTiming,
 } from "react-native-reanimated";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
@@ -89,6 +90,31 @@ export default function AskScreen() {
   const [space, setSpace] = useState<"personal" | "household">("personal");
   const [recent, setRecent] = useState<ConversationRec[]>([]);
   const [movingSpace, setMovingSpace] = useState(false);
+  // M1/M7 — the header condenses once a thread is going, and drags back open.
+  const [headerOpen, setHeaderOpen] = useState(true);
+  // M6 — the composer's ceiling, dragged by the grabber above it.
+  const [composerMax, setComposerMax] = useState(120);
+  const composerMaxRef = useRef(120);
+  const setComposerMaxJS = useCallback((v: number) => { composerMaxRef.current = v; setComposerMax(v); }, []);
+  const composerDrag = useMemo(() => Gesture.Pan()
+    .onUpdate((e) => {
+      // Dragging UP (negative y) makes it taller. Bounded so it can't swallow the thread.
+      const next = Math.max(88, Math.min(360, composerMaxRef.current - e.translationY));
+      runOnJS(setComposerMaxJS)(next);
+    }), [setComposerMaxJS]);
+  const headerT = useSharedValue(1);          // 1 = open, 0 = condensed
+  const headerStyle = useAnimatedStyle(() => ({ opacity: 0.55 + 0.45 * headerT.value }));
+  const setHeaderOpenJS = useCallback((v: boolean) => setHeaderOpen(v), []);
+  const headerDrag = useMemo(() => Gesture.Pan()
+    .activeOffsetY([-12, 12])
+    .onUpdate((e) => { headerT.value = clamp(headerT.value + e.velocityY / 6000, 0, 1); })
+    .onEnd((e) => {
+      // Downward flick opens, upward condenses; otherwise settle to whichever is nearer.
+      const open = e.velocityY > 250 ? true : e.velocityY < -250 ? false : headerT.value > 0.5;
+      headerT.value = withSpring(open ? 1 : 0, { damping: 18, stiffness: 220, reduceMotion: ReduceMotion.System });
+      runOnJS(setHeaderOpenJS)(open);
+    }), [headerT, setHeaderOpenJS]);
+  useEffect(() => { headerT.value = withSpring(headerOpen ? 1 : 0, { damping: 18, stiffness: 220, reduceMotion: ReduceMotion.System }); }, [headerOpen, headerT]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [kbVisible, setKbVisible] = useState(false);
   // One pending attachment (uploaded immediately; referenced on the next send).
@@ -348,6 +374,8 @@ export default function AskScreen() {
     setText("");
     setPhase("thinking");
     justSentRef.current = true;
+    // The room is needed for reading the moment a conversation starts.
+    setHeaderOpen(false);
     setMsgs((m) => [...m, { id: uid, role: "user", text: t }]);
     setBusy(true);
     // First turn creates the durable server thread; later turns reuse it.
@@ -534,7 +562,9 @@ export default function AskScreen() {
   // the composer only needs the inset + a hair of breathing room — no guessed
   // tab-bar clearance (expo-router NativeTabs has no useBottomTabBarHeight).
   // When the keyboard is up the bar is covered and the composer hugs the keyboard.
-  const composerPadBottom = kbVisible ? spacing.sm : insets.bottom + 8;
+  /* M5 [05:52] — "the bottom of this message family is way too close to the top of the
+   * keyboard. It needs to have a little more spacing." */
+  const composerPadBottom = kbVisible ? spacing.md + 4 : insets.bottom + 8;
 
   // Child members chat only when an adult flipped on aiEnabled (server 403s too).
   const caps = me ? capabilitiesFor(me) : null;
@@ -582,13 +612,23 @@ export default function AskScreen() {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={insets.top + 44}
       >
-        {/* Pinned header: space toggle + recent chats stay fixed while the
-            messages scroll beneath them. */}
-        <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.sm, gap: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border, backgroundColor: colors.bg }}>
+        {/* M1/M7 — "make the Ask Family section slightly smaller and more condensed, that way
+            there is some room to fit some of this information down below all in one screen",
+            and "the personal/family needs to be condensed — just show an orange dot so it's
+            obvious what section you're in, but also be able to be dragged back down, and then
+            snap back."
+
+            So the header has two states and you drag between them. Collapsed it is a single
+            row: a coloured dot naming the space, and the chat chips. Expanded it is the full
+            toggle with its explanation. It collapses itself the moment a conversation starts —
+            which is exactly when the room is needed for reading — and a downward drag brings
+            it back. The spring is what makes it feel like a thing rather than a state flip. */}
+        <GestureDetector gesture={headerDrag}>
+        <Animated.View style={[{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.sm, gap: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border, backgroundColor: colors.bg }, headerStyle]}>
           {/* Space toggle: where THIS chat lives. Personal = private to you;
               Family = shared with the household. Locked once a thread exists
               (the server owns the record's visibility from creation). */}
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, display: headerOpen ? "flex" : "none" }}>
             {/* An Adult Member's chats are private to them (the silo), so the Family option
                 isn't offered — a toggle that always refuses is worse than no toggle. */}
             {([["personal", "Personal", colors.lavender], ["household", "Family", colors.ember]] as const)
@@ -631,6 +671,20 @@ export default function AskScreen() {
             </T>
           </View>
 
+          {/* Collapsed: just the dot, so you still know which space you are in. */}
+          {!headerOpen ? (
+            <PressableScale
+              haptic="select"
+              onPress={() => setHeaderOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel={`${space === "household" ? "Family" : "Personal"} space. Expand`}
+              style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
+            >
+              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: space === "household" ? colors.ember : colors.lavender }} />
+              <T kind="caption" color={colors.textFaint}>{space === "household" ? "Family" : "Personal"}</T>
+            </PressableScale>
+          ) : null}
+
           {/* I2 [16:21] — "the Personal tab should show ONLY personal chats, and Family only
               family. The dot colour is the section cue." They were all listed together under
               both, which made the toggle above look decorative. */}
@@ -656,7 +710,12 @@ export default function AskScreen() {
               ))}
             </ScrollView>
           ) : null}
-        </View>
+          {/* The grab handle — the affordance that says this can move. */}
+          <View style={{ alignItems: "center", paddingTop: 2 }}>
+            <View style={{ width: 34, height: 4, borderRadius: 2, backgroundColor: colors.border }} />
+          </View>
+        </Animated.View>
+        </GestureDetector>
 
         <ScrollView
           ref={scroller}
@@ -892,20 +951,33 @@ export default function AskScreen() {
               ? <ActivityIndicator size="small" color={colors.textMuted} />
               : <Sym name="plus" size={18} color={colors.textSecondary} />}
           </PressableScale>
-          <TextInput
-            value={text}
-            onChangeText={setText}
-            placeholder="Message Famili"
-            placeholderTextColor={colors.textFaint}
-            multiline
-            accessibilityLabel="Message"
-            style={{
-              flex: 1, minHeight: 44, maxHeight: 120,
-              backgroundColor: colors.surfaceSunken, borderRadius: 22, borderCurve: "continuous",
-              paddingHorizontal: 16, paddingTop: 12, paddingBottom: 12,
-              ...type.body, color: colors.text,
-            }}
-          />
+          {/* M6 [06:03] — "if I start typing out a really long response this moves up to a
+              certain height, but it needs to expand. I need to be able to drag it up or down."
+              It grew to a fixed 120pt ceiling and stopped. Now the ceiling itself is
+              draggable: pull the grabber up for room to write, push it back down when done. */}
+          <View style={{ flex: 1 }}>
+            {composerMax > 120 || text.length > 80 ? (
+              <GestureDetector gesture={composerDrag}>
+                <View style={{ alignItems: "center", paddingVertical: 5 }} accessible accessibilityLabel="Drag to resize the message box">
+                  <View style={{ width: 30, height: 4, borderRadius: 2, backgroundColor: colors.border }} />
+                </View>
+              </GestureDetector>
+            ) : null}
+            <TextInput
+              value={text}
+              onChangeText={setText}
+              placeholder="Message Famili"
+              placeholderTextColor={colors.textFaint}
+              multiline
+              accessibilityLabel="Message"
+              style={{
+                minHeight: 44, maxHeight: composerMax,
+                backgroundColor: colors.surfaceSunken, borderRadius: 22, borderCurve: "continuous",
+                paddingHorizontal: 16, paddingTop: 12, paddingBottom: 12,
+                ...type.body, color: colors.text,
+              }}
+            />
+          </View>
           <PressableScale
             onPress={() => void send()}
             disabled={!text.trim() || busy}

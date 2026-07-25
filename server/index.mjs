@@ -2222,6 +2222,41 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const visible = listMeals((m) => m.householdId === g.session.householdId).filter((m) => canSeeEntity(m, g.session));
       return json(res, 200, { meals: visible }, req);
     }
+    /* P2 [09:20] — "are these ingredients automatically added to the grocery list? If not,
+     * they need to be."
+     *
+     * They were, but only when the ASSISTANT planned the meal (homeops.plan_meal). A meal a
+     * person typed in themselves never reached the list — the same recipe, added by hand,
+     * silently produced no groceries. Same behaviour both ways now.
+     *
+     * Only ingredients not already marked `have`, deduped against what is already open on the
+     * list so re-saving a meal doesn't stack a third "eggs", and linked by mealId so the
+     * grocery item can be traced back to the meal that asked for it. */
+    const syncMealGroceries = (meal, session) => {
+      const wanted = (meal.ingredients ?? []).filter((i) => i?.item && !i.have);
+      if (wanted.length === 0) return 0;
+      const norm = (x) => String(x ?? "").trim().toLowerCase();
+      const open = new Set(
+        listTasks((t) => t.householdId === session.householdId && t.type === "list" && t.listName === "Groceries" && t.status !== "done")
+          .map((t) => norm(t.title)),
+      );
+      let added = 0;
+      for (const ing of wanted) {
+        if (open.has(norm(ing.item))) continue;
+        open.add(norm(ing.item));
+        putTask({
+          id: "tk_" + crypto.randomBytes(8).toString("hex"), householdId: session.householdId,
+          title: String(ing.item).trim(), type: "list", listName: "Groceries", status: "todo",
+          dueAt: null, assignedMemberId: null, spaceId: "sp-family", priority: "low",
+          amount: null, visibility: meal.visibility ?? "household", mealId: meal.id,
+          notes: `For ${meal.title}`, source: "meal", createdBy: session.actorId,
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        });
+        added++;
+      }
+      return added;
+    };
+
     if (path === "/api/meals" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
@@ -2242,8 +2277,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
         instructions: Array.isArray(body.instructions) ? body.instructions.map((s) => String(s).trim()).filter(Boolean).slice(0, 60) : [],
         source: "user", createdBy: g.session.actorId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
-      audit({ type: "meal.create", mealId: meal.id, ok: true }, req, g.session);
-      return json(res, 200, { meal }, req);
+      const groceriesAdded = syncMealGroceries(meal, g.session);
+      audit({ type: "meal.create", mealId: meal.id, groceriesAdded, ok: true }, req, g.session);
+      // The count travels so the app can SAY what happened rather than the family finding
+      // out later, or not at all.
+      return json(res, 200, { meal, groceriesAdded }, req);
     }
     const mealOne = path.match(/^\/api\/meals\/([^/]+)$/);
     if (mealOne && (method === "PATCH" || method === "POST")) {
@@ -2299,20 +2337,17 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const m = getMeal(mealGrocery[1]);
       if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
-      // Add each not-yet-have ingredient to the shared Groceries list (reusing list-tasks).
-      // mealId is a real back-reference (the notes string is just human-readable context).
-      const added = [];
-      for (const ing of (m.ingredients ?? []).filter((i) => !i.have && i.item)) {
-        const tk = putTask({
-          id: "tk_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-          title: ing.item, type: "list", status: "todo", listName: "Groceries", spaceId: "sp-family",
-          priority: "low", visibility: "household", source: "user", createdBy: g.session.actorId,
-          notes: `For ${m.title}`, mealId: m.id, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-        });
-        added.push(tk.id);
-      }
-      audit({ type: "meal.to_grocery", mealId: m.id, added: added.length, ok: true }, req, g.session);
-      return json(res, 200, { ok: true, added: added.length }, req);
+      /* Shares ONE implementation with the automatic add on meal create (syncMealGroceries).
+       * This route used to add unconditionally, so once creating a meal also added its
+       * ingredients, pressing this button put a second "beans" on the list. Two code paths
+       * writing the same list will always drift; now there is one, and it dedupes.
+       *
+       * Which makes this button a RE-SYNC rather than an add: press it after editing a meal
+       * and only genuinely new ingredients appear. Adding nothing is the correct, common
+       * answer, and `added: 0` says so honestly. */
+      const added = syncMealGroceries(m, g.session);
+      audit({ type: "meal.to_grocery", mealId: m.id, added, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, added }, req);
     }
     // Push a meal onto the household calendar as a CANONICAL event (item 5). Linked by
     // mealId (same back-reference pattern as groceries); idempotent — re-pushing updates

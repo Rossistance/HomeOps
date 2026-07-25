@@ -28,14 +28,19 @@ test("an adult plans a meal; the whole household can see it", async () => {
 });
 
 test("sending a meal to groceries adds only the not-yet-have ingredients as list tasks", async () => {
-  const meal = (await adult.req("/api/meals", { method: "POST", body: JSON.stringify({ title: "Spaghetti", ingredients: ["pasta", { item: "olive oil", have: true }, "tomatoes"] }) })).data.meal;
+  // Creating the meal is what adds them now (P2), so the count is measured from BEFORE that —
+  // the behaviour under test is which ingredients get shopped for, not which call does it.
   const before = (await adult.req("/api/tasks")).data.tasks.filter((t) => t.type === "list" && t.listName === "Groceries").length;
-  const r = await adult.req(`/api/meals/${meal.id}/to-grocery`, { method: "POST" });
-  assert.equal(r.status, 200);
-  assert.equal(r.data.added, 2, "only pasta + tomatoes (olive oil is have:true)");
+  const created = await adult.req("/api/meals", { method: "POST", body: JSON.stringify({ title: "Spaghetti", ingredients: ["pasta", { item: "olive oil", have: true }, "tomatoes"] }) });
+  assert.equal(created.data.groceriesAdded, 2, "only pasta + tomatoes (olive oil is have:true)");
   const after = (await adult.req("/api/tasks")).data.tasks.filter((t) => t.type === "list" && t.listName === "Groceries");
   assert.equal(after.length, before + 2);
   assert.ok(after.some((t) => t.title === "pasta"));
+  assert.ok(!after.some((t) => t.title === "olive oil"), "we already have it");
+  // And the explicit button is now an idempotent re-sync over the same implementation.
+  const r = await adult.req(`/api/meals/${created.data.meal.id}/to-grocery`, { method: "POST" });
+  assert.equal(r.status, 200);
+  assert.equal(r.data.added, 0);
 });
 
 test("a child cannot delete an adult's meal", async () => {
@@ -62,8 +67,11 @@ test("meal recipe metadata: servings + recipeUrl persist; garbage servings becom
 
 test("groceries carry a real mealId back-reference, and deleting the meal unlinks (never deletes) them", async () => {
   const meal = (await adult.req("/api/meals", { method: "POST", body: JSON.stringify({ title: "Chili night", ingredients: ["beans", "beef"] }) })).data.meal;
+  // Creating the meal now ALREADY adds its ingredients (P2 — "are these automatically added
+  // to the grocery list? If not, they need to be"), so this button is a re-sync: it shares one
+  // deduping implementation with the create path, and correctly adds nothing the second time.
   const groc = await adult.req(`/api/meals/${meal.id}/to-grocery`, { method: "POST" });
-  assert.equal(groc.data.added, 2);
+  assert.equal(groc.data.added, 0, "already on the list — a second press must not duplicate");
   const tasksBefore = (await adult.req("/api/tasks")).data.tasks.filter((t) => t.mealId === meal.id);
   assert.equal(tasksBefore.length, 2, "grocery tasks carry the real mealId");
   assert.ok(tasksBefore.every((t) => t.notes === `For ${meal.title}`));
@@ -129,17 +137,19 @@ test("a dateless meal cannot be pushed; deleting a meal deletes its calendar eve
 
 test("deleting a meal keeps groceries by default, deletes them with ?groceries=delete", async () => {
   // Default: unlink — items survive with the stale meal link cleared.
-  const keep = (await adult.req("/api/meals", { method: "POST", body: JSON.stringify({ title: "Chili", date: "2026-07-09", ingredients: [{ item: "Beans", have: false }] }) })).data.meal;
-  await adult.req(`/api/meals/${keep.id}/to-grocery`, { method: "POST" });
+  /* Distinct ingredient names on purpose. Groceries dedupe by name across the whole open
+   * list — you buy beans once, however many meals want them — so reusing "Beans" here would
+   * collide with an earlier test's leftovers and this meal would (correctly) link to nothing. */
+  const keep = (await adult.req("/api/meals", { method: "POST", body: JSON.stringify({ title: "Chili", date: "2026-07-09", ingredients: [{ item: "Cannellini beans", have: false }] }) })).data.meal;
+  // (creating the meal already put it on the list — P2)
   const delKeep = await adult.req(`/api/meals/${keep.id}`, { method: "DELETE" });
   assert.equal(delKeep.data.unlinkedGroceries, 1);
   assert.equal(delKeep.data.removedGroceries, 0);
-  const beans = (await adult.req("/api/tasks")).data.tasks.find((t) => t.title === "Beans");
+  const beans = (await adult.req("/api/tasks")).data.tasks.find((t) => t.title === "Cannellini beans");
   assert.ok(beans, "grocery item survives by default");
 
   // Opt-in cascade: the meal's ingredients leave the list with it.
   const drop = (await adult.req("/api/meals", { method: "POST", body: JSON.stringify({ title: "Curry", date: "2026-07-10", ingredients: [{ item: "Coconut milk", have: false }] }) })).data.meal;
-  await adult.req(`/api/meals/${drop.id}/to-grocery`, { method: "POST" });
   const delDrop = await adult.req(`/api/meals/${drop.id}?groceries=delete`, { method: "DELETE" });
   assert.equal(delDrop.data.removedGroceries, 1);
   const milk = (await adult.req("/api/tasks")).data.tasks.find((t) => t.title === "Coconut milk");

@@ -415,10 +415,14 @@ function AdminToday() {
           <Rise index={4}>
             <Card style={{ gap: spacing.md }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-                <SymTile name="hand.raised.fill" color={colors.lavender} bg={colors.lavenderBg} size={36} iconSize={17} />
-                <View style={{ flex: 1, gap: 2 }}>
-                  <T kind="rowTitle">Ask or offer help</T>
-                  <T kind="detail">Hand something off to — or pitch in for — a grandparent, sitter or family member</T>
+                <SymTile name="hand.raised.fill" color={colors.lavender} bg={colors.lavenderBg} size={44} iconSize={21} />
+                <View style={{ flex: 1, gap: 3 }}>
+                  {/* [v2 01:37] "this text on here, ask or offer for help, it's very
+                      inconspicuous. Too small. You can't actually tell what's going on there."
+                      It was a row title over a caption; on a grandparent's home it was the
+                      main thing on screen and read as fine print. */}
+                  <T kind="h3" color={colors.text}>Ask or offer help</T>
+                  <T kind="sub">Hand something off to — or pitch in for — a grandparent, sitter or family member</T>
                 </View>
               </View>
               <View style={{ flexDirection: "row", gap: spacing.sm }}>
@@ -426,7 +430,10 @@ function AdminToday() {
                   <Button small variant="ember" icon="hand.raised.fill" title="Ask for help" onPress={() => router.push({ pathname: "/help", params: { mode: "ask" } })} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button small variant="neutral" icon="hand.thumbsup" title="Offer help" onPress={() => router.push({ pathname: "/help", params: { mode: "offer" } })} />
+                  {/* S6/the "Offer help" complaint — neutral read as unavailable, so the two
+                      halves of one choice looked like an action and a dead control. Outlined
+                      ember is its peer: same weight, opposite fill. */}
+                  <Button small variant="emberOutline" icon="hand.thumbsup" title="Offer help" onPress={() => router.push({ pathname: "/help", params: { mode: "offer" } })} />
                 </View>
               </View>
             </Card>

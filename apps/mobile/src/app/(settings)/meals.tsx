@@ -27,6 +27,19 @@ import { Sym, SymTile } from "@/components/ui/symbol";
 import { T } from "@/components/ui/text";
 
 const MANAGE_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member"];
+/* P3 [09:26] — "they don't need to be comma separated. It'd be better to be able to type a
+ * list out and it populate to bullet points."
+ *
+ * So one ingredient per LINE is the primary way in, and commas still work for anyone who
+ * types that way — splitting on both means neither habit is wrong. Bullet and dash prefixes
+ * are stripped, because pasting a recipe's own list should just work. */
+function parseIngredients(text: string): string[] {
+  return text
+    .split(/[\n,;]+/)
+    .map((x) => x.replace(/^\s*[-*•·\d.)]+\s*/, "").trim())
+    .filter(Boolean);
+}
+
 const SLOTS = ["breakfast", "lunch", "dinner", "snack"] as const;
 /* E8 — the same defaults the server applies when pushing a meal to the calendar
  * (server/index.mjs mealCal SLOT_TIMES). Kept in step deliberately: showing 6pm here and
@@ -111,7 +124,7 @@ export default function MealsScreen() {
   const add = async () => {
     if (!title.trim()) return;
     setBusy("add"); setNotice(null);
-    const ing = ingredients.split(",").map((s) => s.trim()).filter(Boolean);
+    const ing = parseIngredients(ingredients);
     const r = await api.createMeal({ title: title.trim(), date: mDate, slot, ingredients: ing });
     setBusy(null);
     if (r.meal) {
@@ -303,13 +316,20 @@ export default function MealsScreen() {
               ))}
             </ChipRow>
             <TextInput
-              style={[type.body, { color: colors.text, backgroundColor: colors.surface, borderRadius: 12, borderCurve: "continuous", paddingHorizontal: spacing.md, paddingVertical: 10 }]}
-              placeholder="Ingredients, comma-separated"
+              style={[type.body, { color: colors.text, backgroundColor: colors.surface, borderRadius: 12, borderCurve: "continuous", paddingHorizontal: spacing.md, paddingVertical: 10, minHeight: 84, textAlignVertical: "top" }]}
+              placeholder={"Ingredients — one per line\neggs\nmilk\nbread"}
               placeholderTextColor={colors.textFaint}
               value={ingredients}
               onChangeText={setIngredients}
-              accessibilityLabel="Ingredients"
+              multiline
+              accessibilityLabel="Ingredients, one per line"
             />
+            {/* Say what will happen before it happens: these land on the grocery list. */}
+            {parseIngredients(ingredients).length > 0 ? (
+              <T kind="caption" color={colors.textFaint}>
+                {parseIngredients(ingredients).length} ingredient{parseIngredients(ingredients).length === 1 ? "" : "s"} — added to Groceries when you save.
+              </T>
+            ) : null}
             <Button title="Add meal" variant="ember" full loading={busy === "add"} disabled={!title.trim()} onPress={() => void add()} />
           </Well>
         </Rise>
@@ -447,7 +467,8 @@ function MealEditSheet({ meal, visible, week, todayKey, onClose, onSaved }: {
     setSlot((SLOTS as readonly string[]).includes(meal.slot) ? (meal.slot as Slot) : "dinner");
     setTime(meal.time ?? "");
     setServings(meal.servings != null ? String(meal.servings) : "");
-    setIngredients(meal.ingredients.map((i) => i.item).join(", "));
+    // One per line, matching how they are typed in (P3).
+    setIngredients(meal.ingredients.map((i) => i.item).join("\n"));
     setRecipeUrl(meal.recipeUrl ?? "");
     setNotes(meal.notes ?? "");
     setErr(null);
@@ -460,7 +481,7 @@ function MealEditSheet({ meal, visible, week, todayKey, onClose, onSaved }: {
     setBusy(true); setErr(null);
     // Preserve `have` flags for ingredients whose names didn't change.
     const prev = new Map(meal.ingredients.map((i) => [i.item, !!i.have]));
-    const names = ingredients.split(",").map((s) => s.trim()).filter(Boolean);
+    const names = parseIngredients(ingredients);
     const ing = names.map((item) => ({ item, have: prev.get(item) ?? false }));
     const t = time.trim();
     const s = parseInt(servings, 10);
@@ -559,7 +580,21 @@ function MealEditSheet({ meal, visible, week, todayKey, onClose, onSaved }: {
 
         <View style={{ gap: 6 }}>
           <T kind="eyebrow">Ingredients</T>
-          <TextInput style={inputStyle} placeholder="Comma-separated" placeholderTextColor={colors.textFaint} value={ingredients} onChangeText={setIngredients} accessibilityLabel="Ingredients, comma-separated" />
+          {/* P3 — one per line, same as the quick composer. Commas still parse. */}
+          <TextInput
+            style={[inputStyle, { minHeight: 100, textAlignVertical: "top" }]}
+            placeholder={"One per line\neggs\nmilk"}
+            placeholderTextColor={colors.textFaint}
+            value={ingredients}
+            onChangeText={setIngredients}
+            multiline
+            accessibilityLabel="Ingredients, one per line"
+          />
+          {parseIngredients(ingredients).length > 0 ? (
+            <T kind="caption" color={colors.textFaint}>
+              {parseIngredients(ingredients).length} ingredient{parseIngredients(ingredients).length === 1 ? "" : "s"} — anything new lands on Groceries.
+            </T>
+          ) : null}
         </View>
 
         <View style={{ gap: 6 }}>

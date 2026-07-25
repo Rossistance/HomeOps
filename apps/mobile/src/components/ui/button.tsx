@@ -6,7 +6,11 @@ import { PressableScale } from "./pressable-scale";
 import { T } from "./text";
 import { Sym } from "./symbol";
 
-type Variant = "ember" | "neutral" | "ghost" | "success" | "danger";
+/* `emberOutline` is the PEER of `ember`, not a lesser thing — filled and outlined read as two
+ * halves of one choice. Added for "Offer help needs to have another colour. Right now it looks
+ * like it's not available; it doesn't look like the opposite of Ask for Help… maybe orange
+ * lettering, white background and an orange border." That is exactly this. */
+type Variant = "ember" | "emberOutline" | "neutral" | "ghost" | "success" | "danger";
 
 export interface ButtonProps {
   title: string;
@@ -25,12 +29,13 @@ export function Button({ title, onPress, variant = "neutral", icon, loading, dis
     ember: { bg: colors.ember, fg: colors.onEmber },
     success: { bg: colors.sage, fg: dark ? "#10160f" : "#ffffff" },
     danger: { bg: colors.coral, fg: dark ? "#1a0e08" : "#ffffff" },
+    emberOutline: { bg: colors.surface, fg: colors.ember, border: colors.ember },
     neutral: { bg: colors.surface, fg: colors.textSecondary, border: dark ? colors.rim : colors.border },
     ghost: { bg: "transparent", fg: colors.textMuted },
   };
   const p = palette[variant];
   const inactive = disabled || loading;
-  const haptic = variant === "danger" ? "warning" : variant === "ember" || variant === "success" ? "light" : "select";
+  const haptic = variant === "danger" ? "warning" : variant === "ember" || variant === "emberOutline" || variant === "success" ? "light" : "select";
   return (
     <PressableScale
       onPress={onPress}
@@ -44,7 +49,7 @@ export function Button({ title, onPress, variant = "neutral", icon, loading, dis
         borderRadius: small ? 12 : 14,
         borderCurve: "continuous",
         backgroundColor: p.bg,
-        borderWidth: p.border ? 1 : 0,
+        borderWidth: p.border ? (variant === "emberOutline" ? 1.5 : 1) : 0,
         borderColor: p.border,
         alignItems: "center",
         justifyContent: "center",

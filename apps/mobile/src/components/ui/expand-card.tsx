@@ -118,8 +118,13 @@ export function ExpandCard({
           <T kind="h3" color={colors.text}>{title}</T>
         </View>
         {badge ? <Badge label={badge.label} icon={badge.icon} fg={badge.fg ?? colors.textMuted} bg={badge.bg ?? colors.surfaceSunken} /> : null}
-        {expandable ? <Sym name={open ? "chevron.up" : "chevron.down"} size={13} color={colors.textFaint} style={{ marginTop: 6 }} />
-          : onPress ? <Sym name="chevron.right" size={13} color={colors.textFaint} style={{ marginTop: 6 }} /> : null}
+        {/* N1 — the affordance has to look like one. A 13pt grey glyph reads as decoration;
+            people were tapping it instead of the card and missing. */}
+        {expandable || onPress ? (
+          <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: colors.surfaceSunken, alignItems: "center", justifyContent: "center", marginTop: 2 }}>
+            <Sym name={expandable ? (open ? "chevron.up" : "chevron.down") : "chevron.right"} size={15} color={colors.textSecondary} />
+          </View>
+        ) : null}
       </View>
 
       {summary ? (
@@ -140,17 +145,25 @@ export function ExpandCard({
         <Animated.View entering={FadeIn.duration(180).reduceMotion(ReduceMotion.System)} style={{ gap: spacing.lg, marginTop: spacing.xs }}>
           {children}
           {/* RULE 3: the action lives at the bottom and goes away with the card. */}
+          {/* RULE 3, refined by N2 [07:15]: "those need to swap places — Open helper should be
+              on the RIGHT and the More should be small and down to the left of each one of
+              these cards."
+
+              The primary action now sits on the right where a thumb ends up, and takes the
+              width. The secondary is small and left — present, clearly not the main thing.
+              Changed HERE rather than at one call site, so every card in the app agrees. */}
           {action || secondaryAction ? (
-            <View style={{ flexDirection: "row", gap: spacing.sm }}>
-              {action ? (
-                <View style={{ flex: 1 }}>
-                  <Button title={action.label} icon={action.icon} variant={action.variant ?? "ember"} full small
-                    loading={action.loading} disabled={action.disabled} onPress={action.onPress} />
+            <View style={{ flexDirection: "row", gap: spacing.sm, alignItems: "center" }}>
+              {secondaryAction ? (
+                <View style={{ flexShrink: 0 }}>
+                  <Button title={secondaryAction.label} icon={secondaryAction.icon} variant="ghost" small onPress={secondaryAction.onPress} />
                 </View>
               ) : null}
-              {secondaryAction ? (
-                <View style={{ flex: 1 }}>
-                  <Button title={secondaryAction.label} icon={secondaryAction.icon} variant="ghost" full small onPress={secondaryAction.onPress} />
+              <View style={{ flex: 1 }} />
+              {action ? (
+                <View style={{ flexGrow: 1, flexBasis: "58%" }}>
+                  <Button title={action.label} icon={action.icon} variant={action.variant ?? "ember"} full small
+                    loading={action.loading} disabled={action.disabled} onPress={action.onPress} />
                 </View>
               ) : null}
             </View>

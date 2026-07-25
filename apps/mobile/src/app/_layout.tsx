@@ -6,6 +6,7 @@ import { router } from "expo-router";
 import { NativeTabs } from "expo-router/unstable-native-tabs";
 import { ThemeProvider, DarkTheme, DefaultTheme } from "expo-router/react-navigation";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { StatusBar } from "expo-status-bar";
 import { useFonts } from "expo-font";
 import { Newsreader_600SemiBold } from "@expo-google-fonts/newsreader";
@@ -187,6 +188,11 @@ export default function RootLayout() {
     // ErrorBoundary is the OUTERMOST wrapper on purpose: a provider that throws during
     // render would otherwise take the whole tree down to a white screen with no report.
     <ErrorBoundary screen="root">
+      {/* Gestures need this at the root or they silently never fire — which is how a
+          drag-to-resize ships looking like it simply doesn't work. It sits INSIDE the error
+          boundary (so a throw is still caught) and OUTSIDE the providers, because everything
+          below it may want a gesture. */}
+      <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <ThemePrefProvider>
           <OnboardingProvider>
@@ -196,6 +202,7 @@ export default function RootLayout() {
           </OnboardingProvider>
         </ThemePrefProvider>
       </SafeAreaProvider>
+      </GestureHandlerRootView>
     </ErrorBoundary>
   );
 }

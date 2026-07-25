@@ -49,7 +49,15 @@ export function Row({ title, subtitle, icon, iconColor, iconBg, leading, trailin
         {subtitle ? <T kind="sub">{subtitle}</T> : null}
       </View>
       {trailing}
-      {chevron ? <Sym name="chevron.right" size={13} color={colors.textFaint} /> : null}
+      {/* N1 [06:43] — "all of these little arrows need to be bigger and more prominent and
+          pronounced… the user will try to click that tiny little arrow only, which is hard to
+          hit." Bigger, darker, and in a tap target you can actually land on. The whole row is
+          still pressable; this makes that look true. */}
+      {chevron ? (
+        <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: colors.surfaceSunken, alignItems: "center", justifyContent: "center" }}>
+          <Sym name="chevron.right" size={15} color={colors.textSecondary} />
+        </View>
+      ) : null}
     </View>
   );
   if (!onPress && !onLongPress) return body;
