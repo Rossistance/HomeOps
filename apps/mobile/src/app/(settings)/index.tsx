@@ -175,7 +175,9 @@ export default function SettingsScreen() {
           <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
             <View style={{ flex: 1, gap: 2 }}>
               <T kind="rowTitle">Dark mode</T>
-              <T kind="detail">{pref === "system" ? "Matching your device" : "Set manually"}</T>
+              {/* Not "Set manually" any more: dark is what the app ships as, so on a fresh
+                  install that line claimed a choice nobody had made. State what it IS. */}
+              <T kind="detail">{pref === "system" ? "Matching your device" : pref === "dark" ? "Dark" : "Light"}</T>
             </View>
             {pref !== "system" && (
               <PressableScale onPress={() => setPref("system")} haptic="select" hitSlop={8}>

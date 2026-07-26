@@ -9,7 +9,13 @@ const ONBOARDED_KEY = "familios_onboarded";
 const ADVANCED_KEY = "familios_advanced_mode";
 
 export function ThemePrefProvider({ children }: { children: ReactNode }) {
-  const [pref, setPrefState] = useState<ThemePref>("system");
+  /* Dark is what FamiliOS ships as. Asked for directly, and it's the right default for what
+   * this is: a household app people open in the evening, at the kitchen table, in bed — a
+   * full-brightness cream page at 11pm is a worse first impression than a dark one at noon.
+   *
+   * Still only a DEFAULT. Anyone who picks light, dark or system in Settings gets what they
+   * picked, forever; this is the answer before anyone has answered. */
+  const [pref, setPrefState] = useState<ThemePref>("dark");
   useEffect(() => {
     void (async () => {
       try {
