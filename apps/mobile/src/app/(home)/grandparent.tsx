@@ -13,7 +13,7 @@ import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec }
 import { coversDay, eventTimeLabel } from "@/lib/event-days";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
-import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale, Button } from "@/components/ui";
+import { T, Coach, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale, Button } from "@/components/ui";
 import { MemberAvatar } from "./profile";
 
 const fmtEventTime = (e: EventRec) => {
@@ -272,7 +272,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
           {reminders.length > 0 && (
             <Rise index={2}>
               <SectionHeader title={`For you, ${first}`} />
-              <Card padded={false}>
+              <Coach id="scoped.mine"><Card padded={false}>
                 {reminders.map((t, i) => (
                   <PressableScale
                     key={t.id}
@@ -294,7 +294,7 @@ export function GrandparentHome({ memberId, preview = false }: { memberId: strin
                     </View>
                   </PressableScale>
                 ))}
-              </Card>
+              </Card></Coach>
             </Rise>
           )}
 

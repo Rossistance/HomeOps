@@ -12,7 +12,7 @@ import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec }
 import { coversDay, eventTimeLabel } from "@/lib/event-days";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic, motion } from "@/theme";
-import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
+import { T, Card, Coach, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
 import { MemberAvatar } from "./profile";
 
 const CHORE_ICONS: [RegExp, string][] = [
@@ -136,13 +136,15 @@ export function KidHome({ memberId, preview = false }: { memberId: string; previ
                 </Card>
               </Animated.View>
             ) : (
-              <Card style={{ gap: 10 }}>
-                <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                  <T kind="rowTitle">Today's chores</T>
-                  <T kind="subMedium" color={colors.textMuted}>{doneCount} of {chores.length} done</T>
-                </View>
-                <Progress pct={chores.length ? doneCount / chores.length : 0} />
-              </Card>
+              <Coach id="scoped.mine">
+                <Card style={{ gap: 10 }}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                    <T kind="rowTitle">Today's chores</T>
+                    <T kind="subMedium" color={colors.textMuted}>{doneCount} of {chores.length} done</T>
+                  </View>
+                  <Progress pct={chores.length ? doneCount / chores.length : 0} />
+                </Card>
+              </Coach>
             )}
           </Rise>
 

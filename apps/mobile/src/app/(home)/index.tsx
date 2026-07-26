@@ -19,7 +19,7 @@ import { pickPrompt } from "@/lib/ask-prompts";
 import { AskShimmer } from "@/components/ask-shimmer";
 import { useTheme, riskColor, tapHaptic } from "@/theme";
 import {
-  T, Bloom, Card, Badge, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
+  T, Bloom, Coach, Card, Badge, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
   Sym, SymTile, PressableScale, PressableCard, Button,
 } from "@/components/ui";
 import { ApprovalSheet } from "@/components/sheets/approval-sheet";
@@ -331,6 +331,7 @@ function AdminToday() {
               because that's the word you're actually being shown. A quarter-second apart
               doesn't read as sequence, it reads as emphasis. Wrapped in a row so they stay on
               one line and can still be animated separately. */}
+          <Coach id="today.greeting">
           <View style={{ flexDirection: "row", alignItems: "flex-end", flexWrap: "wrap" }}>
             <Bloom>
               <T kind="h1" style={{ fontSize: 32, lineHeight: 40 }}>Good {part}, </T>
@@ -339,6 +340,7 @@ function AdminToday() {
               <T kind="h1" style={{ fontSize: 32, lineHeight: 40 }}>{first}</T>
             </Bloom>
           </View>
+          </Coach>
           <T kind="body">
             {offline ? "Can't reach your household right now."
               : pending.length > 0 ? `${pending.length} thing${pending.length === 1 ? "" : "s"} need${pending.length === 1 ? "s" : ""} your approval today.`
@@ -380,6 +382,7 @@ function AdminToday() {
                   here. Adding someone lives in Settings, next to the roster and the roles it
                   belongs with ("Invite someone — add a family member or helper"), which is
                   also where you'd go looking for it. */}
+              <Coach id="today.members">
               <View style={{ marginHorizontal: -spacing.lg }}>
               <ScrollView
                 horizontal
@@ -434,6 +437,7 @@ function AdminToday() {
                 />
               ) : null}
               </View>
+              </Coach>
             </Rise>
           )}
 
@@ -442,6 +446,7 @@ function AdminToday() {
               Calendar card"): the padding drops from xl to lg and the question sets in h2
               rather than the display face, which is what was taking three lines. */}
           <Rise index={2}>
+            <Coach id="today.ask">
             <PressableScale onPress={() => router.push("/(ask)")} accessibilityRole="button" accessibilityLabel="Ask Famili">
               <LinearGradient
                 colors={[colors.hero1, colors.hero2]}
@@ -468,11 +473,13 @@ function AdminToday() {
                 </View>
               </LinearGradient>
             </PressableScale>
+            </Coach>
           </Rise>
 
           {/* Calendar key card — today's plans at a glance, color-coded per member,
               directly under the Ask hero. Tap anywhere to open the full calendar. */}
           <Rise index={3}>
+            <Coach id="today.calendar">
             <PressableCard
               onPress={() => router.push("/calendar")}
               accessibilityRole="button"
@@ -506,11 +513,13 @@ function AdminToday() {
                 </View>
               ) : null}
             </PressableCard>
+            </Coach>
           </Rise>
 
           {/* Ask OR offer help — hand a task off to, or pitch in for, a
               grandparent, sitter or family member. */}
           <Rise index={4}>
+            <Coach id="today.help">
             <Card style={{ gap: spacing.sm }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                 <SymTile name="hand.raised.fill" color={colors.lavender} bg={colors.lavenderBg} size={36} iconSize={17} />
@@ -539,6 +548,7 @@ function AdminToday() {
                 </View>
               </View>
             </Card>
+            </Coach>
           </Rise>
 
           {/* quick actions — 2×3 grid; Meals + Tasks lead */}

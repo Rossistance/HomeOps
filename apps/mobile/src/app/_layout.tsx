@@ -14,6 +14,8 @@ import { Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } f
 import { SessionProvider, useSession } from "@/lib/session";
 import { capabilitiesFor, type Capabilities } from "@/lib/roles";
 import { RunProvider } from "@/lib/run-context";
+import { TutorialProvider } from "@/lib/tutorial";
+import { CoachMarks } from "@/components/CoachMarks";
 import { ThemePrefProvider, OnboardingProvider, AdvancedModeProvider, useOnboarding } from "@/lib/prefs";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { installCrashReporting } from "@/lib/crash-reporter";
@@ -146,6 +148,8 @@ function Gate() {
     <>
       <TabsNav caps={caps} />
       <PushRegistrar />
+      {/* Last, so it draws over the tabs. Renders nothing unless a walkthrough is running. */}
+      <CoachMarks />
     </>
   );
 }
@@ -172,7 +176,11 @@ function Shell() {
       <StatusBar style={dark || !splashDone ? "light" : "dark"} />
       <SessionProvider>
         <RunProvider>
-          <Gate />
+          {/* Inside SessionProvider because the walkthrough scopes itself by role, and above
+              the navigator because the spotlight is drawn over whatever screen you're on. */}
+          <TutorialProvider>
+            <Gate />
+          </TutorialProvider>
         </RunProvider>
       </SessionProvider>
       {!splashDone && <Splash onDone={() => setSplashDone(true)} />}

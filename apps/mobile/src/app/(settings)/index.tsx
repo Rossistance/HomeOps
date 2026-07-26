@@ -12,15 +12,17 @@ import { useSession } from "@/lib/session";
 import { useTheme, useThemePref, tapHaptic } from "@/theme";
 import { HuddleMark } from "@/components/brand";
 import {
-  T, Card, Chip, ChipRow, Row, SectionHeader, SkeletonCards, Rise, HScreen, Button, PressableScale,
+  T, Card, Chip, ChipRow, Coach, Row, SectionHeader, SkeletonCards, Rise, HScreen, Button, PressableScale,
   HSheet, SheetCTA, Notice, Sym, Well,
 } from "@/components/ui";
 import { ConnectionSheet, type ConnectionService } from "@/components/sheets/connection-sheet";
 import { InviteSheet } from "@/components/sheets/invite-sheet";
 import { MemberAvatar } from "@/app/(home)/profile";
+import { useTutorial } from "@/lib/tutorial";
 
 export default function SettingsScreen() {
   const { colors, dark, spacing } = useTheme();
+  const { start: startTour } = useTutorial();
   const { pref, setPref } = useThemePref();
   const { session, signOut } = useSession();
   const [loading, setLoading] = useState(true);
@@ -196,6 +198,7 @@ export default function SettingsScreen() {
                 </PressableScale>
               ) : undefined}
             />
+            <Coach id="settings.household">
             <Card padded={false}>
               {members.map((m) => {
                 const removable = canInvite && !m.isCurrentUser && m.role !== "Owner";
@@ -243,10 +246,12 @@ export default function SettingsScreen() {
                 last
               />
             </Card>
+            </Coach>
           </Rise>
 
           <Rise index={3}>
             <SectionHeader title="Connections" />
+            <Coach id="settings.connections">
             <Card padded={false}>
               {services.map((s) => (
                 <Row
@@ -272,11 +277,32 @@ export default function SettingsScreen() {
                 last
               />
             </Card>
+            </Coach>
           </Rise>
         </>
       )}
 
       <Rise index={4}>
+        {/* Show me around — the walkthrough's front door, and the last stop on it. Above
+            "More" rather than buried in it: this is the row a lost person is looking for, and
+            everything below it is the stuff they'd be lost among. */}
+        <Coach id="settings.tutorial">
+        <Card padded={false} style={{ marginBottom: spacing.md }}>
+          <Row
+            icon="hand.tap"
+            iconColor={colors.ember}
+            iconBg={colors.emberBg}
+            title="Show me around"
+            subtitle="A short walkthrough, pointing at the real thing"
+            chevron
+            /* No navigation here — the tour owns routing, and pushing Today first would leave
+               an extra screen on the stack for it to walk back out of. */
+            onPress={startTour}
+            last
+          />
+        </Card>
+        </Coach>
+
         <SectionHeader title="More" />
         <Card padded={false}>
           <Row icon="checklist" iconColor={colors.lavender} iconBg={colors.lavenderBg} title="Tasks & Lists" chevron onPress={() => router.push("/tasks")} />

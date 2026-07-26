@@ -11,7 +11,7 @@ import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec }
 import { coversDay, eventTimeLabel } from "@/lib/event-days";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
-import { T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
+import { T, Coach, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
 import { HelpRequestsSection } from "./grandparent";
 import { MemberAvatar } from "./profile";
 
@@ -109,7 +109,7 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
           {assigned.length > 0 && (
             <Rise index={2}>
               <SectionHeader title="Assigned to you" />
-              <Card padded={false}>
+              <Coach id="scoped.mine"><Card padded={false}>
                 {assigned.map((t, i) => (
                   <PressableScale
                     key={t.id}
@@ -132,7 +132,7 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
                     <T kind="detail" color={colors.textFaint}>Tap when done</T>
                   </PressableScale>
                 ))}
-              </Card>
+              </Card></Coach>
             </Rise>
           )}
 
