@@ -12,7 +12,7 @@ import { Glyph, hasGlyph } from "./glyph";
  * One call site, one name, so the set can grow a glyph at a time without a flag day and
  * without every screen having to know which kind it's getting.
  */
-export function Sym({ name, size = 20, color, style }: { name: string; size?: number; color?: string; style?: object }) {
+export function Sym({ name, size = 22, color, style }: { name: string; size?: number; color?: string; style?: object }) {
   const { colors } = useTheme();
   const tint = color ?? colors.textMuted;
   if (hasGlyph(name)) return <Glyph name={name} size={size} color={tint} style={style} />;
@@ -39,7 +39,7 @@ export function Sym({ name, size = 20, color, style }: { name: string; size?: nu
  * alongside). "A little larger and more noticeable" was the note, and a 17px glyph in a 36px
  * well was reading as a decoration rather than a symbol.
  */
-export function SymTile({ name, color, bg, size = 36, iconSize }: { name: string; color: string; bg: string; size?: number; iconSize?: number }) {
+export function SymTile({ name, color, bg, size = 40, iconSize }: { name: string; color: string; bg: string; size?: number; iconSize?: number }) {
   const { colors, dark } = useTheme();
   return (
     <View style={{
@@ -47,7 +47,7 @@ export function SymTile({ name, color, bg, size = 36, iconSize }: { name: string
       backgroundColor: bg, alignItems: "center", justifyContent: "center",
       boxShadow: depth(size >= 40 ? "insetDeep" : "inset", colors, dark),
     }}>
-      <Sym name={name} size={iconSize ?? Math.round(size * 0.6)} color={color} />
+      <Sym name={name} size={iconSize ?? Math.round(size * 0.62)} color={color} />
     </View>
   );
 }

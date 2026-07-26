@@ -135,7 +135,7 @@ export default function TodayScreen() {
 }
 
 function AdminToday() {
-  const { colors, spacing } = useTheme();
+  const { colors, spacing, dark } = useTheme();
   const { session } = useSession();
   const { advanced } = useAdvancedMode();
   const insets = useSafeAreaInsets();
@@ -327,11 +327,18 @@ function AdminToday() {
               ) : null}
             </View>
           </View>
-          {/* The one moment on this screen worth marking: your own name, the first time you
-              see it after opening the app. Bloom runs once per launch, not once per visit. */}
-          <Bloom>
-            <T kind="h1" style={{ fontSize: 32, lineHeight: 38 }}>Good {part}, {first}</T>
-          </Bloom>
+          {/* Two beats: the greeting opens, then your name lands — later, larger, springier,
+              because that's the word you're actually being shown. A quarter-second apart
+              doesn't read as sequence, it reads as emphasis. Wrapped in a row so they stay on
+              one line and can still be animated separately. */}
+          <View style={{ flexDirection: "row", alignItems: "flex-end", flexWrap: "wrap" }}>
+            <Bloom>
+              <T kind="h1" style={{ fontSize: 32, lineHeight: 40 }}>Good {part}, </T>
+            </Bloom>
+            <Bloom big delay={360}>
+              <T kind="h1" style={{ fontSize: 32, lineHeight: 40 }}>{first}</T>
+            </Bloom>
+          </View>
           <T kind="body">
             {offline ? "Can't reach your household right now."
               : pending.length > 0 ? `${pending.length} thing${pending.length === 1 ? "" : "s"} need${pending.length === 1 ? "s" : ""} your approval today.`
@@ -445,7 +452,7 @@ function AdminToday() {
                 }}
                 onLayout={(e) => setHeroH(e.nativeEvent.layout.height)}
               >
-                <View style={st.heroGlow} pointerEvents="none" />
+                <View style={dark ? st.heroGlowDark : st.heroGlow} pointerEvents="none" />
                 {/* The living surface — see components/ask-shimmer. Behind the text, ahead of
                     the base gradient, and it stops on its own. */}
                 {heroH > 0 ? <AskShimmer height={heroH} /> : null}
@@ -775,9 +782,17 @@ function AdminToday() {
 
 const st = StyleSheet.create({
   avatar: { width: 48, height: 48, borderRadius: 24, alignItems: "center", justifyContent: "center" },
+  /* The ember bloom in the hero's bottom-right corner. It was one fixed value for both
+   * themes, which is why it looked wrong in the dark: 25% ember plus a 35px spread reads as a
+   * soft warmth against a light page and as a lamp switched on against a near-black one.
+   * Dark mode gets roughly half of it and a tighter spread — see heroGlowDark. */
   heroGlow: {
     position: "absolute", right: -50, bottom: -50, width: 160, height: 160, borderRadius: 160,
-    backgroundColor: "rgba(224,102,44,0.25)", boxShadow: "0 0 50px 35px rgba(224,102,44,0.25)",
+    backgroundColor: "rgba(224,102,44,0.22)", boxShadow: "0 0 50px 32px rgba(224,102,44,0.22)",
+  },
+  heroGlowDark: {
+    position: "absolute", right: -56, bottom: -56, width: 150, height: 150, borderRadius: 150,
+    backgroundColor: "rgba(224,102,44,0.10)", boxShadow: "0 0 44px 18px rgba(224,102,44,0.09)",
   },
   heroInput: {
     flexDirection: "row", alignItems: "center", gap: 10, marginTop: 4,

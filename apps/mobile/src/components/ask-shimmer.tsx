@@ -63,13 +63,18 @@ export function AskShimmer({ height }: { height: number }) {
     /* The arrival: two passes, then it stops. `withRepeat(…, 2)` rather than -1 — this is a
      * greeting, not a loading state, and a card that shimmers forever is a card you learn to
      * ignore. */
+    /* Reported: "too fast — more of a ripple across." Roughly two and a half times slower,
+     * and the easing changed with it. `inOut` accelerated into the middle of the card and
+     * braked at the far edge, which is what made it read as a sweep going somewhere; a ripple
+     * doesn't do that. Linear on the leading band and a gentle `out` on the trailing one
+     * means the two drift apart as they cross, the way one ring outruns the next on water. */
     sweep.value = 0;
-    sweep.value = withRepeat(withTiming(1, { duration: 2600, easing: Easing.inOut(Easing.quad), reduceMotion: ReduceMotion.System }), 2, false);
+    sweep.value = withRepeat(withTiming(1, { duration: 6800, easing: Easing.linear, reduceMotion: ReduceMotion.System }), 2, false);
     sweep2.value = 0;
-    sweep2.value = withDelay(600, withRepeat(withTiming(1, { duration: 3400, easing: Easing.inOut(Easing.sin), reduceMotion: ReduceMotion.System }), 2, false));
+    sweep2.value = withDelay(1600, withRepeat(withTiming(1, { duration: 8600, easing: Easing.out(Easing.sin), reduceMotion: ReduceMotion.System }), 2, false));
     glow.value = withSequence(
-      withTiming(1, { duration: 700, reduceMotion: ReduceMotion.System }),
-      withDelay(4200, withTiming(0.16, { duration: 1400, reduceMotion: ReduceMotion.System })),
+      withTiming(1, { duration: 1400, reduceMotion: ReduceMotion.System }),
+      withDelay(11000, withTiming(0.16, { duration: 2600, reduceMotion: ReduceMotion.System })),
     );
     return () => { cancelAnimation(sweep); cancelAnimation(sweep2); cancelAnimation(glow); };
   }, [calm, sweep, sweep2, glow]);
@@ -96,15 +101,17 @@ export function AskShimmer({ height }: { height: number }) {
        * clip whenever it's jostled. */
       const strength = Math.min(1, force / 1.1);
       const forward = dx + dy >= 0;
+      // Slower here too, to match: heavier damping and a softer spring, so a tilt sends a
+      // swell across the card rather than snapping the highlight to the other side.
       sweep.value = withSpring(forward ? 1 : 0, {
-        damping: 14, stiffness: 42 + strength * 60, reduceMotion: ReduceMotion.System,
+        damping: 22, stiffness: 12 + strength * 20, mass: 1.4, reduceMotion: ReduceMotion.System,
       });
       sweep2.value = withSpring(forward ? 0.85 : 0.15, {
-        damping: 17, stiffness: 30 + strength * 40, reduceMotion: ReduceMotion.System,
+        damping: 26, stiffness: 9 + strength * 14, mass: 1.6, reduceMotion: ReduceMotion.System,
       });
       glow.value = withSequence(
-        withTiming(0.35 + strength * 0.65, { duration: 180, reduceMotion: ReduceMotion.System }),
-        withTiming(0.16, { duration: 1100, reduceMotion: ReduceMotion.System }),
+        withTiming(0.3 + strength * 0.55, { duration: 420, reduceMotion: ReduceMotion.System }),
+        withTiming(0.16, { duration: 2200, reduceMotion: ReduceMotion.System }),
       );
     });
     return () => { live = false; sub.remove(); };
@@ -136,15 +143,15 @@ export function AskShimmer({ height }: { height: number }) {
           not a white gloss. A white sheen would read as glass; this reads as Famili. */}
       <AnimatedGradient
         colors={[fade(colors.sky, 0), fade(colors.sky, 0.35), fade(colors.ember, 0.30), fade(colors.ember, 0)]}
-        locations={[0, 0.38, 0.62, 1]}
+        locations={[0, 0.42, 0.58, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
-        style={[{ position: "absolute", width: travel * 0.55, height: height * 2.4, top: 0, left: 0 }, bandA]}
+        style={[{ position: "absolute", width: travel * 0.85, height: height * 2.4, top: 0, left: 0 }, bandA]}
       />
       <AnimatedGradient
         colors={[fade(colors.ember, 0), fade(colors.ember, 0.22), fade(colors.sky, 0.18), fade(colors.sky, 0)]}
         locations={[0, 0.42, 0.58, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
-        style={[{ position: "absolute", width: travel * 0.8, height: height * 2.6, top: 0, left: 0 }, bandB]}
+        style={[{ position: "absolute", width: travel * 1.15, height: height * 2.6, top: 0, left: 0 }, bandB]}
       />
     </View>
   );

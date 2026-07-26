@@ -12,7 +12,7 @@
 import type { ReactNode } from "react";
 import { View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from "react-native";
 import { useTheme } from "@/theme";
-import { depth, softSurface, softRadii } from "@/theme/neumorph";
+import { depth, rimColor, rimGlow, softSurface, softRadii } from "@/theme/neumorph";
 import { PressableScale, type PressableScaleProps } from "./pressable-scale";
 
 export function cardStyle(colors: ReturnType<typeof useTheme>["colors"], dark: boolean): ViewStyle {
@@ -21,8 +21,13 @@ export function cardStyle(colors: ReturnType<typeof useTheme>["colors"], dark: b
     borderRadius: softRadii.card,
     borderCurve: "continuous",
     borderWidth: 1,
-    borderColor: colors.border,
-    boxShadow: depth("raised", colors, dark),
+    /* Ember, not neutral. On a page where the card and the background are the same colour,
+     * this hairline is carrying most of the separation that a different fill used to carry
+     * for free — "I can't tell the front from the back in some cases" was exactly that gap. A
+     * grey rim reads as a stroke somebody drew; a warm one reads as light catching the edge,
+     * which is the same fiction the shadows are already telling. */
+    borderColor: rimColor(colors, dark),
+    boxShadow: `${rimGlow(colors, dark)}, ${depth("raised", colors, dark)}`,
   };
 }
 
@@ -51,6 +56,8 @@ export function Well({ children, style, onLayout }: { children: ReactNode; style
         borderRadius: softRadii.control,
         borderCurve: "continuous",
         boxShadow: depth("inset", colors, dark),
+        borderWidth: 1,
+        borderColor: rimColor(colors, dark),
         padding: spacing.md,
       }, style]}
     >

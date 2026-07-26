@@ -52,9 +52,37 @@ export function depthTones(colors: HearthColors, dark: boolean) {
     // Warm lift, not white: on a near-black surface a white highlight reads as a rendering
     // artifact. The dark side goes almost to black, which is where the depth actually
     // comes from in dark mode.
-    ? { light: rgba("#4A4032", 0.5), dark: rgba("#000000", 0.55) }
-    // Warm porcelain: a brighter warm white above, the surface's own clay below.
-    : { light: rgba("#FFFDF8", 0.9), dark: rgba("#C7BCA8", 0.5) };
+    ? { light: rgba("#4A4032", 0.5), dark: rgba("#000000", 0.6) }
+    /* Warm porcelain. The cast shadow is deeper and warmer than the first pass: reported as
+     * "the light mode is too bright… I can't tell the front from the back in some cases",
+     * which is the honest failure mode of same-colour cards on a same-colour page. A cream
+     * card on a cream page separates ONLY by shadow, so the shadow has to do more work here
+     * than it does on the reference's mid-grey, where the surface is already darker than
+     * white to begin with. */
+    : { light: rgba("#FFFFFF", 1), dark: rgba("#B7A88E", 0.72) };
+}
+
+/**
+ * The warm rim that says "this is a thing, and it's in front".
+ *
+ * "It needs to have some of the orange glow somehow ringing around objects, cards, features,
+ *  so it's more pronounced where each section is."
+ *
+ * A hairline of ember at low alpha around every raised surface. Not decoration — it's the
+ * edge, and on a page where card and background are the same colour it's carrying most of the
+ * separation that a different fill colour used to carry for free. Deliberately warm rather
+ * than neutral: a grey rim on cream reads as a stroke someone drew, an ember one reads as the
+ * light in the room catching the edge, which is the same fiction the shadows are telling.
+ */
+export function rimColor(colors: HearthColors, dark: boolean): string {
+  return dark ? rgba("#E9823D", 0.16) : rgba("#CE5D1D", 0.22);
+}
+
+/** A soft ember halo under a raised surface, layered beneath the depth shadows. */
+export function rimGlow(colors: HearthColors, dark: boolean): string {
+  return dark
+    ? `0 2px 14px ${rgba("#E9823D", 0.07)}`
+    : `0 2px 16px ${rgba("#CE5D1D", 0.11)}`;
 }
 
 export type Depth = "raised" | "raisedSm" | "raisedLg" | "inset" | "insetDeep" | "insetSm" | "flat";
