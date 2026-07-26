@@ -24,7 +24,6 @@ import {
 } from "@/components/ui";
 import { ApprovalSheet } from "@/components/sheets/approval-sheet";
 import { ChoreSheet } from "@/components/sheets/chore-sheet";
-import { InviteSheet } from "@/components/sheets/invite-sheet";
 import { useRevSync } from "@/lib/rev-sync";
 import { KidHome } from "./kid";
 import { GrandparentHome } from "./grandparent";
@@ -153,7 +152,6 @@ function AdminToday() {
   const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
   const [openApproval, setOpenApproval] = useState<ApprovalRec | null>(null);
   const [choreOpen, setChoreOpen] = useState(false);
-  const [inviteOpen, setInviteOpen] = useState(false);
   /* One of twenty questions, a different one each time you open the app. The card is a text
    * field, so every one of them is answerable — see lib/ask-prompts. Picked once per mount:
    * re-rolling on every render would change the question under your thumb mid-read. */
@@ -168,19 +166,21 @@ function AdminToday() {
   const [stripContentW, setStripContentW] = useState(0);
   const [stripX, setStripX] = useState(0);
   const stripOverflow = stripContentW > stripW + 4 && stripX < stripContentW - stripW - 4;
-  const [householdName, setHouseholdName] = useState<string | null>(null);
   const [helpBusyId, setHelpBusyId] = useState<string | null>(null);
   // WP-001: calm confirmation after accepting help that transferred a task to me.
   const [justHelped, setJustHelped] = useState<{ name: string; taskTitle: string | null } | null>(null);
 
   const load = useCallback(async () => {
-    const [h, aps, evts, tks, mem, hh, memries, evos, rns, hrs] = await Promise.all([
-      api.health(), api.approvals(), api.events(), api.tasks(), api.members(), api.household(),
+    // api.household() went with the invite sheet — Today never showed the household's name,
+    // it only needed it to caption an invite that now lives in Settings. One fewer request
+    // on the first screen after login.
+    const [h, aps, evts, tks, mem, memries, evos, rns, hrs] = await Promise.all([
+      api.health(), api.approvals(), api.events(), api.tasks(), api.members(),
       api.memory(), api.evolutions(), api.runs(), api.helpRequests(),
     ]);
     setOffline(!h);
     if (h) {
-      setApprovals(aps); setEvents(evts); setTasks(tks); setMembers(mem); setHouseholdName(hh?.name ?? null);
+      setApprovals(aps); setEvents(evts); setTasks(tks); setMembers(mem);
       setMemory(memries); setEvolutions(evos); setRuns(rns); setHelpRequests(hrs);
     }
     setLoading(false);
@@ -365,10 +365,15 @@ function AdminToday() {
                   grows. The strip scrolls horizontally instead and each cell is sized by its
                   own name, so the name is never the thing that has to give. Six members fit on
                   screen; a seventh scrolls rather than truncating anyone. */}
-              {/* Invite is PINNED outside the scroller (see the note on it below), so the strip
-                  gets the space that's left and the fade rides its own right edge. */}
-              <View style={{ flexDirection: "row", alignItems: "flex-start", marginHorizontal: -spacing.lg }}>
-                <View style={{ flex: 1 }}>
+              {/* No invite control here any more.
+                  It was inside the strip (cut off), then pinned beside it — and pinned still
+                  didn't look right, because a dashed placeholder cell sitting among five
+                  photographs of actual people reads as a missing face rather than as a button.
+                  There was never a good spot for it in a row whose subject is who's already
+                  here. Adding someone lives in Settings, next to the roster and the roles it
+                  belongs with ("Invite someone — add a family member or helper"), which is
+                  also where you'd go looking for it. */}
+              <View style={{ marginHorizontal: -spacing.lg }}>
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -376,7 +381,7 @@ function AdminToday() {
                 onContentSizeChange={(w) => setStripContentW(w)}
                 onScroll={(e) => setStripX(e.nativeEvent.contentOffset.x)}
                 scrollEventThrottle={32}
-                contentContainerStyle={{ paddingLeft: spacing.lg, paddingRight: spacing.sm, gap: spacing.lg, alignItems: "flex-start" }}
+                contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: spacing.lg, alignItems: "flex-start" }}
               >
                 {members.map((m) => {
                   const dest = isChild(m) ? "/kid" : isGrandparent(m) ? "/grandparent" : isHelper(m) ? "/sitter" : null;
@@ -411,8 +416,8 @@ function AdminToday() {
                   </PressableScale>
                 ) : null}
               </ScrollView>
-              {/* The strip runs UNDER the pinned Invite, and this fade is what says so. Without
-                  it a scrollable row of avatars just looks like a row that stops. */}
+              {/* The fade still earns its place: it's the only thing that says a roster wider
+                  than the screen keeps going, rather than stopping at the last visible face. */}
               {stripOverflow ? (
                 <LinearGradient
                   pointerEvents="none"
@@ -421,27 +426,6 @@ function AdminToday() {
                   style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 28 }}
                 />
               ) : null}
-              </View>
-              {/* Invite lives OUTSIDE the scroll view.
-                  Reported: "the + sign which is add a new member is visibly cut off and not on
-                  the screen." It was inside the strip, so with five members and a photo each it
-                  sat past the right edge — reachable only if you happened to guess that a row
-                  of faces scrolls. Adding someone to your household is not a thing to hide
-                  behind a swipe, and it's the one control here that must not move as the
-                  roster grows. So it's pinned, and the roster scrolls beneath it. */}
-              <View style={{ paddingRight: spacing.lg, paddingLeft: 2 }}>
-                <PressableScale
-                  onPress={() => setInviteOpen(true)}
-                  haptic="select"
-                  style={{ alignItems: "center", gap: 5, minWidth: 56 }}
-                  accessibilityLabel="Invite someone to the household"
-                >
-                  <View style={[st.avatar, { borderWidth: 1.5, borderStyle: "dashed", borderColor: colors.textFaint }]}>
-                    <Sym name="plus" size={18} color={colors.textMuted} />
-                  </View>
-                  <T kind="detail">Invite</T>
-                </PressableScale>
-              </View>
               </View>
             </Rise>
           )}
@@ -785,7 +769,6 @@ function AdminToday() {
         onDecided={() => void load()}
       />
       <ChoreSheet visible={choreOpen} onClose={() => setChoreOpen(false)} members={members} onAssigned={() => void load()} />
-      <InviteSheet visible={inviteOpen} onClose={() => setInviteOpen(false)} householdName={householdName} onInvited={() => void load()} />
     </HScreen>
   );
 }
