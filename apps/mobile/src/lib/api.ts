@@ -303,6 +303,9 @@ export interface AppSettingsRec {
    *  elevated sign-in — a single shared secret that opens every Owner and Adult Admin
    *  account. Surfaced so a household can see it rather than be told about it. */
   breakGlassActive?: boolean;
+  /** "google" once a Places key is configured, "nominatim" on the keyless fallback (addresses
+   *  only — no ratings, prices or opening hours). */
+  placesProvider?: "google" | "nominatim";
   aiActiveProvider: string | null; calendarAutoSync: boolean;
   autoApproveImprovements: boolean;
 }

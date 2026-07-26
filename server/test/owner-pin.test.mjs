@@ -43,6 +43,15 @@ test("the app says when a PIN set in the ENVIRONMENT is also being accepted", as
     "a shared secret that opens every elevated account must not be invisible from inside the app");
 });
 
+test("the app can tell you which places provider is actually answering", async () => {
+  // You set a Places key and then had no way to know it took, short of noticing weeks later
+  // that a restaurant had no rating. Authenticated, deliberately: an unauthenticated endpoint
+  // should not enumerate which third-party keys a deployment holds.
+  const r = await getSettings(admin);
+  assert.ok(["google", "nominatim"].includes(r.data.settings.placesProvider));
+  assert.equal(r.data.settings.placesProvider, "nominatim", "no key in the test env — the honest fallback");
+});
+
 /* ---- setting your own ---- */
 
 test("an Owner can set the household's own PIN", async () => {

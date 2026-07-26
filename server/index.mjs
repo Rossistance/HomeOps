@@ -55,7 +55,7 @@ import {
 } from "./agents.mjs";
 import { agentTemplateSections } from "./agent-templates.mjs";
 import { nameConversation } from "./planner.mjs";
-import { suggestAddresses } from "./places.mjs";
+import { suggestAddresses, placesProvider } from "./places.mjs";
 import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
 import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
@@ -3953,7 +3953,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
        * and Adult Admin account in the resident household, and while it's set there is no
        * way to tell from inside the app that your sign-in went through it. A household
        * shouldn't have to take my word for who can get in. */
-      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, breakGlassActive: !!hasBootstrapPin() && g.session.householdId === CURRENT_TENANT, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof s.autoApproveImprovements !== "boolean", timezone: s.timezone ?? null, hideProfilesPreAuth: s.hideProfilesPreAuth === true } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, breakGlassActive: !!hasBootstrapPin() && g.session.householdId === CURRENT_TENANT,
+        /* Which places provider is actually answering. There was no way to tell from inside
+         * the app whether a Places key had taken — you set one, and then found out later by
+         * noticing that a restaurant had no rating. It's here rather than on /api/health
+         * because an unauthenticated endpoint should not enumerate which third-party keys a
+         * deployment holds. */
+        placesProvider: placesProvider(), aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof s.autoApproveImprovements !== "boolean", timezone: s.timezone ?? null, hideProfilesPreAuth: s.hideProfilesPreAuth === true } }, req);
     }
     if (path === "/api/settings" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
