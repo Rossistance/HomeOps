@@ -56,6 +56,7 @@ import {
 import { agentTemplateSections } from "./agent-templates.mjs";
 import { nameConversation } from "./planner.mjs";
 import { suggestAddresses } from "./places.mjs";
+import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
 import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, sweepTaskReminders } from "./reminders.mjs";
@@ -136,9 +137,30 @@ function isOperator(session) {
 // unset. While present it is accepted as an alternative Owner/Adult-Admin PIN on both sign-in
 // paths — seeding the gate before a first PIN exists AND recovering a forgotten one. Every
 // break-glass sign-in is audited (session.login.breakglass); the operator clears the env after.
-function pinHashOfBootstrap() {
-  const bp = process.env.HOMEOPS_BOOTSTRAP_PIN;
-  return bp ? crypto.createHash("sha256").update(String(bp)).digest("hex") : null;
+function bootstrapPin() {
+  return process.env.HOMEOPS_BOOTSTRAP_PIN || null;
+}
+/** Is a break-glass PIN configured? There is no digest to keep — the env var IS the secret. */
+function hasBootstrapPin() {
+  return !!bootstrapPin();
+}
+
+/**
+ * Re-store a PIN we just verified, in the current format.
+ *
+ * Called only on a SUCCESSFUL sign-in, so the plaintext is known to be right and the write
+ * can't lock anyone out. A failure here is swallowed on purpose: the sign-in already
+ * succeeded, and turning a storage hiccup into a refused login would be a worse outcome than
+ * upgrading on the next attempt instead.
+ */
+async function upgradeStoredPin(householdId, pin) {
+  try {
+    const next = await hashPin(pin);
+    setSettings({ ownerPinHash: next }, householdId);
+    appendAudit({ type: "settings.pin.rehash", household: householdId, ok: true });
+  } catch {
+    /* keep the working legacy hash and try again next time */
+  }
 }
 function maybeSeedSandbox(s) {
   if (!sandboxEnabled() || !s?.actorId || s.role !== "Owner") return;
@@ -722,17 +744,20 @@ const handleRequest = async (req, res) => {
           // Owner locked out by a forgotten PIN or a lost email password can regain elevated entry,
           // reset a real PIN in Settings, then clear the env var. It is a STANDING override only
           // while the env is present; every break-glass use is audited. Remove after recovery.
-          const bootHash = pinHashOfBootstrap();
+          const boot = bootstrapPin();
           if (hRole === "Owner" || hRole === "Adult Admin") {
-            if (!hPinHash && !bootHash && IS_PROD) {
+            if (!hPinHash && !boot && IS_PROD) {
               audit({ type: "session.login", ok: false, error: "pin_not_configured", actorId, household: sHint }, req);
               return json(res, 403, { error: "pin_not_configured", message: "Elevated sign-in is locked until this household sets an Owner PIN (or the deployment sets HOMEOPS_BOOTSTRAP_PIN)." }, req);
             }
-            if (hPinHash || bootHash) {
-              const given = crypto.createHash("sha256").update(String(body.pin ?? "")).digest("hex");
-              const ownPinOk = hPinHash && given === hPinHash;
-              const bootOk = bootHash && given === bootHash;
+            if (hPinHash || boot) {
+              const ownPinOk = hPinHash ? await verifyPin(body.pin, hPinHash) : false;
+              const bootOk = matchesPlainSecret(body.pin, boot);
               if (!ownPinOk && !bootOk) { audit({ type: "session.login", ok: false, error: "bad_pin", actorId, household: sHint }, req); return json(res, 403, { error: "pin_required" }, req); }
+              // Transparent upgrade: a PIN stored in the old format is re-hashed the first time
+              // it's used. Nobody is asked to reset anything, and a household that never signs
+              // in again keeps working exactly as it did.
+              if (ownPinOk && needsRehash(hPinHash)) await upgradeStoredPin(sHint, body.pin);
               if (bootOk && !ownPinOk) audit({ type: "session.login.breakglass", actorId, household: sHint }, req);
             }
           }
@@ -761,17 +786,17 @@ const handleRequest = async (req, res) => {
         // Same break-glass as the hint path: HOMEOPS_BOOTSTRAP_PIN is an alternative to the
         // resident household's own PIN while set (seeds the gate before a first PIN exists AND
         // recovers a forgotten one). Break-glass uses are audited; clear the env after recovery.
-        const bootHashR = pinHashOfBootstrap();
+        const bootR = bootstrapPin();
         if (role === "Owner" || role === "Adult Admin") {
-          if (!pinHash && !bootHashR && IS_PROD) {
+          if (!pinHash && !bootR && IS_PROD) {
             audit({ type: "session.login", ok: false, error: "pin_not_configured", actorId }, req);
             return json(res, 403, { error: "pin_not_configured", message: "Elevated sign-in is locked until an Owner PIN exists. Set HOMEOPS_BOOTSTRAP_PIN in the deployment's environment, then sign in with it." }, req);
           }
-          if (pinHash || bootHashR) {
-            const given = crypto.createHash("sha256").update(String(body.pin ?? "")).digest("hex");
-            const ownPinOk = pinHash && given === pinHash;
-            const bootOk = bootHashR && given === bootHashR;
+          if (pinHash || bootR) {
+            const ownPinOk = pinHash ? await verifyPin(body.pin, pinHash) : false;
+            const bootOk = matchesPlainSecret(body.pin, bootR);
             if (!ownPinOk && !bootOk) { audit({ type: "session.login", ok: false, error: "bad_pin", actorId }, req); return json(res, 403, { error: "pin_required" }, req); }
+            if (ownPinOk && needsRehash(pinHash)) await upgradeStoredPin(CURRENT_TENANT, body.pin);
             if (bootOk && !ownPinOk) audit({ type: "session.login.breakglass", actorId, household: CURRENT_TENANT }, req);
           }
         }
@@ -3928,7 +3953,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
        * and Adult Admin account in the resident household, and while it's set there is no
        * way to tell from inside the app that your sign-in went through it. A household
        * shouldn't have to take my word for who can get in. */
-      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, breakGlassActive: !!pinHashOfBootstrap() && g.session.householdId === CURRENT_TENANT, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof s.autoApproveImprovements !== "boolean", timezone: s.timezone ?? null, hideProfilesPreAuth: s.hideProfilesPreAuth === true } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, breakGlassActive: !!hasBootstrapPin() && g.session.householdId === CURRENT_TENANT, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof s.autoApproveImprovements !== "boolean", timezone: s.timezone ?? null, hideProfilesPreAuth: s.hideProfilesPreAuth === true } }, req);
     }
     if (path === "/api/settings" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -3952,7 +3977,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         if (!/^\d{4,12}$/.test(body.ownerPin)) {
           return json(res, 400, { error: "bad_pin", message: "A sign-in PIN is 4 to 12 digits." }, req);
         }
-        patch.ownerPinHash = crypto.createHash("sha256").update(body.ownerPin).digest("hex");
+        patch.ownerPinHash = await hashPin(body.ownerPin);
       }
       // Household timezone: an IANA zone name (e.g. "America/New_York") that anchors
       // "every day at 7 AM" triggers to a real wall-clock time (server/triggers.mjs
@@ -3966,7 +3991,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       }
       const next = setSettings(patch, g.session.householdId);
       audit({ type: "settings.update", ok: true, changed: Object.keys(patch), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
-      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, breakGlassActive: !!pinHashOfBootstrap() && g.session.householdId === CURRENT_TENANT, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true, autoApproveImprovements: next.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof next.autoApproveImprovements !== "boolean", timezone: next.timezone ?? null, hideProfilesPreAuth: next.hideProfilesPreAuth === true } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, breakGlassActive: !!hasBootstrapPin() && g.session.householdId === CURRENT_TENANT, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true, autoApproveImprovements: next.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof next.autoApproveImprovements !== "boolean", timezone: next.timezone ?? null, hideProfilesPreAuth: next.hideProfilesPreAuth === true } }, req);
     }
 
     /* ---- AI providers ---- */
