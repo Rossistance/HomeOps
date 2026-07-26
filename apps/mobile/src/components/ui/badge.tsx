@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { View } from "react-native";
 import { useTheme, tapHaptic } from "@/theme";
+import { depth, softSurface } from "@/theme/neumorph";
 import { PressableScale } from "./pressable-scale";
 import { T } from "./text";
 import { Sym } from "./symbol";
@@ -27,11 +28,17 @@ export function Chip({ label, selected, onPress, icon }: { label: string; select
       style={{
         flexDirection: "row", alignItems: "center", gap: 6,
         paddingHorizontal: 13, paddingVertical: 8, borderRadius: 999,
-        backgroundColor: selected ? colors.ember : colors.surface,
+        backgroundColor: selected ? colors.ember : softSurface(colors, dark),
         borderWidth: 1, borderColor: selected ? colors.ember : dark ? colors.rim : colors.border,
+        /* Selected reads as pressed IN, unselected as raised out — the same on/off physics as
+         * every other control here, so "which one is chosen" is answered by depth as well as
+         * by colour. That matters where the chip row is the whole navigation. */
+        boxShadow: selected
+          ? depth("insetSm", colors, dark)
+          : depth("raisedSm", colors, dark),
       }}
     >
-      {icon ? <Sym name={icon} size={13} color={selected ? colors.onEmber : colors.textMuted} /> : null}
+      {icon ? <Sym name={icon} size={14} color={selected ? colors.onEmber : colors.textMuted} /> : null}
       <T kind="subMedium" color={selected ? colors.onEmber : colors.textSecondary}>{label}</T>
     </PressableScale>
   );

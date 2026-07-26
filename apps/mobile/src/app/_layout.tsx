@@ -72,7 +72,11 @@ function TabsNav({ caps }: { caps: Capabilities }) {
   if (fullNav) {
     triggers.push(
       <NativeTabs.Trigger key="(agents)" name="(agents)">
-        <NativeTabs.Trigger.Icon sf="cpu" md="smart_toy" />
+        {/* NativeTabs renders a real UITabBar, so its icons must be SF Symbol or Material
+            names — custom art can't go here, unlike everywhere else in the app (ui/glyph).
+            What it CAN be is a better-chosen symbol: `cpu` drew a literal microchip, which
+            said "hardware" about the one part of the app that's meant to feel like help. */}
+        <NativeTabs.Trigger.Icon sf="wand.and.stars" md="auto_fix_high" />
         <NativeTabs.Trigger.Label>Agents</NativeTabs.Trigger.Label>
       </NativeTabs.Trigger>,
       <NativeTabs.Trigger key="(library)" name="(library)">

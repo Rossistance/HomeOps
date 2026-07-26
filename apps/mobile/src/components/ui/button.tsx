@@ -2,6 +2,7 @@
 // neutral/ghost. Built-in loading state so screens never hand-roll spinners.
 import { ActivityIndicator, View } from "react-native";
 import { useTheme } from "@/theme";
+import { depth, softRadii, softSurface } from "@/theme/neumorph";
 import { PressableScale } from "./pressable-scale";
 import { T } from "./text";
 import { Sym } from "./symbol";
@@ -29,8 +30,8 @@ export function Button({ title, onPress, variant = "neutral", icon, loading, dis
     ember: { bg: colors.ember, fg: colors.onEmber },
     success: { bg: colors.sage, fg: dark ? "#10160f" : "#ffffff" },
     danger: { bg: colors.coral, fg: dark ? "#1a0e08" : "#ffffff" },
-    emberOutline: { bg: colors.surface, fg: colors.ember, border: colors.ember },
-    neutral: { bg: colors.surface, fg: colors.textSecondary, border: dark ? colors.rim : colors.border },
+    emberOutline: { bg: softSurface(colors, dark), fg: colors.ember, border: colors.ember },
+    neutral: { bg: softSurface(colors, dark), fg: colors.textSecondary, border: dark ? colors.rim : colors.border },
     ghost: { bg: "transparent", fg: colors.textMuted },
   };
   const p = palette[variant];
@@ -46,7 +47,7 @@ export function Button({ title, onPress, variant = "neutral", icon, loading, dis
       style={{
         minHeight: small ? 36 : 48,
         paddingHorizontal: small ? 14 : 20,
-        borderRadius: small ? 12 : 14,
+        borderRadius: small ? softRadii.inner : softRadii.control,
         borderCurve: "continuous",
         backgroundColor: p.bg,
         borderWidth: p.border ? (variant === "emberOutline" ? 1.5 : 1) : 0,
@@ -57,7 +58,14 @@ export function Button({ title, onPress, variant = "neutral", icon, loading, dis
         gap: 8,
         opacity: inactive ? 0.55 : 1,
         alignSelf: full ? "stretch" : "auto",
-        boxShadow: variant === "ember" && !dark ? `0 4px 14px rgba(210,100,32,0.35)` : "none",
+        /* Buttons are raised out of the page, per the reference's "no flat buttons". The
+         * coloured variants keep their own coloured glow — a two-tone neutral shadow under a
+         * saturated fill reads as grime, not depth, which is why the reference gives its
+         * primary button a separate treatment too. */
+        boxShadow: variant === "ghost" ? "none"
+          : variant === "ember" ? (dark ? "0 4px 14px rgba(0,0,0,0.4)" : "0 4px 14px rgba(210,100,32,0.35)")
+          : variant === "success" || variant === "danger" ? (dark ? "0 4px 12px rgba(0,0,0,0.35)" : "0 3px 10px rgba(32,28,21,0.18)")
+          : depth(small ? "raisedSm" : "raised", colors, dark),
       }}
     >
       {loading ? (

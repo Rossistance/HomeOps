@@ -18,7 +18,14 @@ export const PressableScale = forwardRef<View, PressableScaleProps>(function Pre
   { haptic = "light", scaleTo = 0.97, onPressIn, onPressOut, style, ...rest }, ref,
 ) {
   const scale = useSharedValue(1);
-  const animated = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+  /* Soft UI presses DOWN. The reference's pressed state is translate-y plus an inset shadow;
+   * box-shadow can't be animated on the UI thread here, so the press is carried by the two
+   * things that can — a compress and a real downward shift. Half a point is enough: what
+   * sells a press is that the surface moves toward the finger, not how far. */
+  const sink = useSharedValue(0);
+  const animated = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }, { translateY: sink.value }],
+  }));
   return (
     <AnimatedPressable
       ref={ref}
@@ -26,11 +33,13 @@ export const PressableScale = forwardRef<View, PressableScaleProps>(function Pre
       style={[animated, style as object]}
       onPressIn={(e) => {
         scale.value = withSpring(scaleTo, { damping: 20, stiffness: 400, reduceMotion: ReduceMotion.System });
+        sink.value = withSpring(1, { damping: 20, stiffness: 420, reduceMotion: ReduceMotion.System });
         if (haptic) tapHaptic(haptic);
         onPressIn?.(e);
       }}
       onPressOut={(e) => {
         scale.value = withSpring(1, { damping: 16, stiffness: 320, reduceMotion: ReduceMotion.System });
+        sink.value = withSpring(0, { damping: 15, stiffness: 300, reduceMotion: ReduceMotion.System });
         onPressOut?.(e);
       }}
     />
