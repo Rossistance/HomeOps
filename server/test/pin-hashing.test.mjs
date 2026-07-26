@@ -101,7 +101,11 @@ const storedPin = () => readStoreDoc(ctx, "settings.json", {})?.ownerPinHash ?? 
 test("MIGRATION: a household on the old format signs in, and is upgraded on the way through", async () => {
   // Exactly the state every existing household is in right now.
   const before = readStoreDoc(ctx, "settings.json", {});
-  writeStoreDoc(ctx, "settings.json", { ...before, ownerPinHash: legacy("246810") });
+  // A marker that must survive: the upgrade writes through setSettings, and a rewrite that
+  // replaced the document instead of merging into it would take the household's timezone,
+  // kill switch and auto-sync consent with it. That is the kind of thing a migration does
+  // once, quietly, to everyone.
+  writeStoreDoc(ctx, "settings.json", { ...before, timezone: "America/New_York", externalActionsEnabled: false, ownerPinHash: legacy("246810") });
   assert.ok(isLegacyHash(storedPin()), "starts legacy");
 
   const ok = await signIn("m-alex", "246810");
@@ -111,6 +115,10 @@ test("MIGRATION: a household on the old format signs in, and is upgraded on the 
   assert.ok(!isLegacyHash(after), "and it was rewritten");
   assert.match(after, /^scrypt\$/);
   assert.equal(await verifyPin("246810", after), true, "to the SAME pin, not a new one");
+
+  const settings = readStoreDoc(ctx, "settings.json", {});
+  assert.equal(settings.timezone, "America/New_York", "and nothing else in settings was touched");
+  assert.equal(settings.externalActionsEnabled, false);
 });
 
 test("…and the upgraded hash is what the next sign-in uses", async () => {
