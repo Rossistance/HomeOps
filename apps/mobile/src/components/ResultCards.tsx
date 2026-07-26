@@ -101,7 +101,15 @@ function ResultCard({ card, icon }: { card: ResultCardRec; icon: string }) {
     : card.url
       ? { label: "Open", icon: "safari", onPress: () => void Linking.openURL(card.url!) }
       : card.refId && /^evt|^task/.test(card.refId)
-        ? { label: "Open", icon: "chevron.right", onPress: () => router.push(card.refId!.startsWith("task") ? "/(home)" : "/(home)") }
+        /* Both branches of this ternary used to be "/(home)", so "Open" on a card pointing at a
+         * real event or task just dumped you on Today and left you to find it. An event has a
+         * detail screen; a task lives in the task list. */
+        ? {
+            label: "Open", icon: "chevron.right",
+            onPress: () => (card.refId!.startsWith("task")
+              ? router.push("/tasks")
+              : router.push({ pathname: "/event-form", params: { id: card.refId! } })),
+          }
         : undefined;
   const secondaryAction = cand
     ? undefined
