@@ -152,7 +152,7 @@ export default function SettingsScreen() {
   };
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
       <Rise index={0}>
         <Card style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
           <LinearGradient

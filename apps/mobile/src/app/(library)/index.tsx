@@ -188,7 +188,7 @@ export default function LibraryScreen() {
   const spaceLabel = (k: SpaceKey) => SPACE_DEFS.find((s) => s.key === k)?.label ?? "Home";
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
       <Rise index={0}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
           {/* Files / Knowledge segmented */}

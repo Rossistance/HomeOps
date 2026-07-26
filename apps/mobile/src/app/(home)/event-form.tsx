@@ -435,7 +435,7 @@ export default function EventFormScreen() {
 
   if (loading) {
     return (
-      <HScreen>
+      <HScreen keyboardAware>
         {header}
         <SkeletonCards count={3} lines={1} />
       </HScreen>
@@ -444,7 +444,7 @@ export default function EventFormScreen() {
 
   if (notFound) {
     return (
-      <HScreen>
+      <HScreen keyboardAware>
         {header}
         <EmptyState
           icon="calendar.badge.exclamationmark"
@@ -458,7 +458,7 @@ export default function EventFormScreen() {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
-      <HScreen bottomPad={ACTION_BAR_HEIGHT + 24} scrollRef={scroller}>
+      <HScreen bottomPad={ACTION_BAR_HEIGHT + 24} scrollRef={scroller} keyboardAware>
       {header}
 
       {!canManage ? (

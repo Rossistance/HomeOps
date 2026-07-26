@@ -127,7 +127,7 @@ export default function SettingsScreen() {
   };
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
       <SectionHeader title="AI providers" />
       <Rise index={0} style={{ gap: 4 }}>
         <T kind="sub">

@@ -296,14 +296,14 @@ export default function TasksScreen() {
   };
 
   /* ------------------------------- render ------------------------------ */
-  if (loading) return <HScreen><SkeletonCards count={4} /></HScreen>;
-  if (error) return <HScreen refreshing={refreshing} onRefresh={onRefresh}><ErrorState message={error} onRetry={() => void load()} /></HScreen>;
+  if (loading) return <HScreen keyboardAware><SkeletonCards count={4} /></HScreen>;
+  if (error) return <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware><ErrorState message={error} onRetry={() => void load()} /></HScreen>;
 
   const composerTarget = activeList === "All" ? "Tasks" : activeList;
   let riseIdx = 0;
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh} scrollRef={scroller}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} scrollRef={scroller} keyboardAware>
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
 
       {/* H1 — mine vs everybody else's. Shown only when there IS someone else in the

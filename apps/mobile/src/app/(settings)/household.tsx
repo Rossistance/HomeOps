@@ -102,14 +102,14 @@ export default function HouseholdScreen() {
 
   if (!loaded) {
     return (
-      <HScreen>
+      <HScreen keyboardAware>
         <SkeletonCards count={4} />
       </HScreen>
     );
   }
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
       <SectionHeader title="Members" />
       {members.length === 0 ? (
         <ErrorState message="Can't load the roster — is the backend reachable?" onRetry={() => void load()} />

@@ -268,7 +268,7 @@ export default function ContactsScreen() {
   };
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
       <Rise index={0} style={{ gap: spacing.sm }}>
         <T kind="sub">How the family gets reached. Agents can only message a method that's verified and opted-in.</T>
         {!isAdult ? <T kind="caption" color={colors.textFaint}>You can manage your own methods; changing someone else's needs an adult.</T> : null}

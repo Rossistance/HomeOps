@@ -196,7 +196,7 @@ export default function GroceriesScreen() {
   };
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
       {loading ? <SkeletonCards count={3} /> : offline ? (
         <ErrorState message={`Can't reach the backend at ${api.url}.`} onRetry={() => { setLoading(true); void load(); }} />
       ) : (

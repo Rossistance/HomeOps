@@ -211,7 +211,7 @@ export default function MealsScreen() {
 
   if (phase === "loading") {
     return (
-      <HScreen>
+      <HScreen keyboardAware>
         {header}
         <SkeletonCards count={4} lines={2} />
       </HScreen>
@@ -219,7 +219,7 @@ export default function MealsScreen() {
   }
   if (phase === "error") {
     return (
-      <HScreen refreshing={refreshing} onRefresh={() => void onRefresh()}>
+      <HScreen refreshing={refreshing} onRefresh={() => void onRefresh()} keyboardAware>
         {header}
         <ErrorState onRetry={() => { setPhase("loading"); void load(); }} />
       </HScreen>
@@ -227,7 +227,7 @@ export default function MealsScreen() {
   }
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={() => void onRefresh()}>
+    <HScreen refreshing={refreshing} onRefresh={() => void onRefresh()} keyboardAware>
       {header}
 
       {/* Week strip — dots mark days with meals; tap toggles a one-day focus. */}

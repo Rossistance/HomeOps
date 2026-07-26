@@ -28,6 +28,7 @@
 // until it's mounted, so "is this on screen for this person" is answered by measurement rather
 // than by assumption.
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { Dimensions } from "react-native";
 import { router } from "expo-router";
 import { useSession } from "@/lib/session";
 import { capabilitiesFor } from "@/lib/roles";
@@ -55,6 +56,8 @@ interface TutorialApi {
   stop: () => void;
   /** Called by <Coach> to register where it is. Returns an unregister fn. */
   register: (id: string, measure: Measurer) => () => void;
+  /** Called by HScreen so the tour can bring an off-screen target into view before pointing. */
+  registerScroller: (scrollTo: (y: number) => void) => () => void;
 }
 
 const Ctx = createContext<TutorialApi | null>(null);
@@ -82,8 +85,15 @@ export function TutorialProvider({ children }: { children: ReactNode }) {
   const runId = useRef(0);
   // The route the tour last navigated to, so it doesn't re-push the one it's already on.
   const routeRef = useRef<string | null>(null);
+  // The scroll view of whatever screen is mounted, so a target below the fold can be brought up.
+  const scrollerRef = useRef<((y: number) => void) | null>(null);
 
   const steps = useMemo(() => tourFor(caps.viewMode), [caps.viewMode]);
+
+  const registerScroller = useCallback((scrollTo: (y: number) => void) => {
+    scrollerRef.current = scrollTo;
+    return () => { if (scrollerRef.current === scrollTo) scrollerRef.current = null; };
+  }, []);
 
   const register = useCallback((id: string, measure: Measurer) => {
     targets.current.set(id, measure);
@@ -119,13 +129,34 @@ export function TutorialProvider({ children }: { children: ReactNode }) {
         await new Promise((r) => setTimeout(r, attempt === 0 ? 220 : 120));
         if (runId.current !== myRun) return; // stopped, or restarted underneath us
         const m = targets.current.get(s.target);
-        const r = m ? await m() : null;
-        if (r && r.width > 0 && r.height > 0) {
-          setIndex(i);
-          setRect(r);
-          setShown((n) => n + 1);
-          return;
+        let r = m ? await m() : null;
+        if (!r || r.width <= 0 || r.height <= 0) continue;
+
+        /* MISALIGNMENT, both causes. Reported: "the tour is nice, however it seems to be
+         * misaligned in some places."
+         *
+         * One: a target below the fold measures to a y beyond the screen, so the spotlight was
+         * drawn off the bottom — pointing confidently at nothing. Scroll it up first.
+         *
+         * Two: the first measurement lands while Rise's entrance springs are still moving the
+         * card, so the rect is where the card was passing through rather than where it settles.
+         * Measuring once more after everything has stopped is cheap and self-correcting. */
+        const scrollTo = scrollerRef.current;
+        const screenH = Dimensions.get("window").height;
+        if (scrollTo && (r.y < 90 || r.y + r.height > screenH - 240)) {
+          scrollTo(Math.max(0, r.y - 140));
+          await new Promise((res) => setTimeout(res, 320));
+          if (runId.current !== myRun) return;
+          r = (m ? await m() : null) ?? r;
         }
+        await new Promise((res) => setTimeout(res, 260));
+        if (runId.current !== myRun) return;
+        r = (m ? await m() : null) ?? r;
+
+        setIndex(i);
+        setRect(r);
+        setShown((n) => n + 1);
+        return;
       }
       // Not on this person's screen — that's the role scoping doing its job. Try the next.
     }
@@ -156,8 +187,8 @@ export function TutorialProvider({ children }: { children: ReactNode }) {
     onLast: index >= 0 && index >= steps.length - 1,
     rect,
     empty,
-    start, next, stop, register,
-  }), [index, steps, shown, rect, empty, start, next, stop, register]);
+    start, next, stop, register, registerScroller,
+  }), [index, steps, shown, rect, empty, start, next, stop, register, registerScroller]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }

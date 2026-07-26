@@ -236,7 +236,7 @@ export default function ConnectionsScreen() {
   };
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh} scrollRef={scroller}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} scrollRef={scroller} keyboardAware>
       {/* F4 — Connections lives in the Settings stack, so the default Back always went to
           Settings no matter where you came from. When a caller tells us where it sent us
           from, Back says so and goes there. */}

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
+import { prepareImage } from "@/lib/prepare-image";
 import { readAsStringAsync } from "expo-file-system/legacy";
 import Animated, {
   FadeInDown, ReduceMotion, cancelAnimation, clamp, runOnJS,
@@ -55,6 +56,17 @@ interface Msg {
 }
 
 interface Suggestion { text: string; icon: string }
+
+/** One picked file on its way to (or arrived in) the library. `id` exists once uploaded. */
+interface Attachment {
+  /** Local, stable for the life of the bubble — the server id arrives later. */
+  key: string;
+  name: string;
+  id?: string;
+  status: "uploading" | "ready" | "failed";
+  /** Why it failed, in the words we'd show a person. */
+  error?: string;
+}
 
 /** "personal" | "household" | "nest:<id>" — the three places a chat can live. */
 type SpaceKey = "personal" | "household" | `nest:${string}`;
@@ -126,8 +138,19 @@ export default function AskScreen() {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [kbVisible, setKbVisible] = useState(false);
   // One pending attachment (uploaded immediately; referenced on the next send).
-  const [attached, setAttached] = useState<{ id: string; name: string } | null>(null);
-  const [attaching, setAttaching] = useState(false);
+  /* Attachments, plural, each carrying its own state.
+   *
+   * Reported: "the toast that indicates an image is being uploaded is not apparent enough. It
+   * needs to go ahead and attach the image name as a bubble above the chat like it normally
+   * does, but then the loading sign needs to be on the individual item so you know which ones
+   * have fully loaded."
+   *
+   * The old shape made that impossible: one nullable attachment that only came into existence
+   * AFTER its upload finished. So during the slow part there was nothing on screen but a
+   * disabled paperclip, and "which ones have fully loaded" had no answer because there was only
+   * ever one and it was already done. The bubble now appears the instant you pick, with its own
+   * spinner, and each one resolves independently. */
+  const [attached, setAttached] = useState<Attachment[]>([]);
   // Current member record → child AI gating (server enforces 403 ai_disabled too).
   const [me, setMe] = useState<MemberRec | null>(null);
 
@@ -140,11 +163,23 @@ export default function AskScreen() {
 
   const scroller = useRef<ScrollView>(null);
   const instantScroll = useRef(false);
-  // Scroll intents: scroll-to-end exactly once after the user sends; anchor the
-  // TOP of the next assistant reply once, then leave the position alone while
-  // the reveal timer grows the text.
   const justSentRef = useRef(false);
-  const pendingAnchorId = useRef<string | null>(null);
+  /* Follow the bottom while a reply is arriving.
+   *
+   * Reported: "the response does not cause the viewport for the chat to scroll down, so the
+   * response can be visible automatically."
+   *
+   * The old rule was "anchor the TOP of the reply once, then don't touch the scroll position
+   * while the reveal grows the text" — trying not to yank the view around on a long answer. But
+   * the anchoring happened when the bubble mounted EMPTY, so it measured a zero-height bubble,
+   * often scrolled nowhere at all, and then every word of the actual answer appeared below the
+   * fold with nothing following it.
+   *
+   * This is the behaviour every chat has instead: while you're at the bottom, stay at the
+   * bottom. The moment you scroll up to read something, following stops — which is the same
+   * protection the old rule was reaching for, except it's driven by what you're doing rather
+   * than guessed in advance. */
+  const followRef = useRef(false);
   const revealRef = useRef<{ timer: ReturnType<typeof setInterval>; msgId: string; full: string } | null>(null);
 
   /* ---------- progressive reveal (client-side; the server streams progress
@@ -325,48 +360,64 @@ export default function AskScreen() {
   /* I3 — move THIS chat between Personal and Family. With no thread yet it's just a choice
    * about where the next one lands; with a thread it's a real visibility change, so the
    * publishing direction asks first. */
-  const switchSpace = useCallback(async (next: SpaceKey) => {
+  /* Switching space switches the SPACE. It does not move the chat you happen to have open.
+   *
+   * Reported: "I went on a personal message and tried to switch over and look at family
+   * messages. It asks if you want to share it with the family and that's not how that should
+   * operate. It should just switch over to Family. The message should stay inside of personal
+   * and vice versa unless the individual message is pressed and held, and an option would be
+   * presented to move to Family."
+   *
+   * Exactly right, and the old behaviour was a category error: it read a navigation control as
+   * an edit. Tapping "Family" is you asking to LOOK somewhere, and the app answered by offering
+   * to publish something you'd written in private. Moving a thread is now where moving belongs —
+   * a press and hold on the thread itself.
+   */
+  const switchSpace = useCallback((next: SpaceKey) => {
     const toNest = next.startsWith("nest:") ? next.slice(5) : null;
-    // With no thread yet this is just a choice about where the NEXT one lands.
-    if (!conversationId) {
-      setNestId(toNest);
-      setSpace(toNest ? "personal" : (next as "personal" | "household"));
-      return;
-    }
-    /* Moving an EXISTING thread into or out of a nest would change who can read everything
-     * already in it, and the people it would become visible to never agreed to that. So it
-     * isn't offered: start a new chat in the nest instead. Said plainly rather than silently
-     * doing nothing. */
-    if (toNest || nestId) {
+    tapHaptic("select");
+    setNestId(toNest);
+    setSpace(toNest ? "personal" : (next as "personal" | "household"));
+    // Close whatever was open: it lives in the space you just left, and leaving it on screen
+    // under the other space's chip is how you end up believing you moved it.
+    setConversationId(null);
+    setMsgs([]);
+  }, []);
+
+  /** Move ONE thread to another space — from a press and hold, where an edit belongs. */
+  const moveConversation = useCallback((c: ConversationRec) => {
+    // A nest thread is not movable in either direction: everyone in the nest, or everyone in the
+    // household, would gain the ability to read what came before, and nobody agreed to that.
+    if (c.visibility === "nest") {
       Alert.alert(
-        "Start a new chat instead",
-        "A chat can't be moved into or out of a nest — everyone in it would suddenly be able to read what came before. Tap New, then pick the space.",
+        "Nest chats stay in their nest",
+        "Moving this would let people read everything already said in it. Start a new chat in the space you want instead.",
       );
       return;
     }
-    // Past the guards above, this can only be one of the two fixed spaces.
-    const fixed = next as "personal" | "household";
+    const toHousehold = c.visibility !== "household";
     const commit = async () => {
       setMovingSpace(true);
-      const r = await api.patchConversation(conversationId, { visibility: fixed });
+      const r = await api.patchConversation(c.id, { visibility: toHousehold ? "household" : "personal" });
       setMovingSpace(false);
       if (!r.conversation) {
         Alert.alert("Couldn't move this chat", r.message ?? "Something went wrong.");
         return;
       }
       tapHaptic("success");
-      setSpace(fixed);
-      setRecent((rs) => rs.map((c) => (c.id === conversationId ? r.conversation! : c)));
+      setRecent((rs) => rs.map((x) => (x.id === c.id ? r.conversation! : x)));
+      // It has left the space you're looking at, so it shouldn't stay open in front of you.
+      if (conversationId === c.id) { setConversationId(null); setMsgs([]); }
     };
-    if (fixed === "household") {
+    if (toHousehold) {
       Alert.alert(
         "Share this chat with the family?",
-        "Everyone in the household will be able to read it — including everything already said.",
+        `Everyone in the household will be able to read “${c.title}” — including everything already said.`,
         [{ text: "Cancel", style: "cancel" }, { text: "Share", onPress: () => void commit() }],
       );
       return;
     }
-    await commit();
+    void commit();
   }, [conversationId]);
 
   const newChat = useCallback(() => {
@@ -377,6 +428,22 @@ export default function AskScreen() {
     setNestId(null);
     void loadHome();
   }, [busy, flushReveal, loadHome]);
+
+  /* Press and hold on a thread. Delete used to be the ONLY thing here, which is why moving had
+   * been bolted onto the space chips — the gesture that should own "do something to this one
+   * thread" was already spoken for by the most destructive option in the app. */
+  const conversationActions = useCallback((c: ConversationRec) => {
+    tapHaptic("select");
+    const canMove = c.visibility !== "nest";
+    Alert.alert(c.title, undefined, [
+      ...(canMove ? [{
+        text: c.visibility === "household" ? "Make it private" : "Move to Family",
+        onPress: () => moveConversation(c),
+      }] : []),
+      { text: "Delete", style: "destructive" as const, onPress: () => confirmDeleteConversation(c) },
+      { text: "Cancel", style: "cancel" as const },
+    ]);
+  }, [moveConversation]);
 
   const confirmDeleteConversation = useCallback((c: ConversationRec) => {
     tapHaptic("warning");
@@ -398,11 +465,14 @@ export default function AskScreen() {
     const t0 = (preset ?? text).trim();
     if (!t0 || busy) return;
     flushReveal();
-    // A pending attachment rides along: named in the message text and passed as
-    // context so the planner can read the uploaded file.
-    const att = attached;
-    setAttached(null);
-    const t = att ? `[Attached: ${att.name}]\n${t0}` : t0;
+    /* Attachments ride along: named in the message text and passed as context so the planner
+     * can read them. Only the ones that FINISHED — sending mid-upload would hand the server an
+     * id that doesn't exist yet, and the answer to "I attached a photo, why can't you see it"
+     * must never be "because we sent it before it arrived". Anything still uploading stays in
+     * the tray for the next message rather than being silently dropped. */
+    const ready = attached.filter((a) => a.status === "ready" && a.id);
+    setAttached((as) => as.filter((a) => a.status === "uploading"));
+    const t = ready.length ? `[Attached: ${ready.map((a) => a.name).join(", ")}]\n${t0}` : t0;
     const uid = String(Date.now());
     setText("");
     setPhase("thinking");
@@ -427,7 +497,14 @@ export default function AskScreen() {
     const location = await getLocationContext();
     const ctx: Record<string, unknown> = {};
     if (location) ctx.location = location;
-    if (att) { ctx.attachedFileId = att.id; ctx.attachedFileName = att.name; }
+    /* The first attachment is the one the server reads (attachFileContext takes one file). Any
+     * others are NAMED so the assistant can say what it has and hasn't looked at, rather than
+     * quietly ignoring them. */
+    if (ready.length) {
+      ctx.attachedFileId = ready[0].id;
+      ctx.attachedFileName = ready[0].name;
+      if (ready.length > 1) ctx.attachedAlsoNames = ready.slice(1).map((a) => a.name);
+    }
     const context = Object.keys(ctx).length ? ctx : undefined;
     let r: AssistantResult;
     try {
@@ -448,7 +525,6 @@ export default function AskScreen() {
       void api.conversations().then((cs) => setRecent(cs.slice(0, 8))).catch(() => null);
     }
     const aid = uid + "a";
-    pendingAnchorId.current = aid;
     if (r.ok) {
       const full =
         r.kind === "plan" && r.plan ? (r.answer || r.plan.summary || "On it.")
@@ -474,52 +550,85 @@ export default function AskScreen() {
     }
   }, [attached, busy, conversationId, flushReveal, revealInto, space, text, watchServerRun]);
 
-  /* ---------- attachments: pick → upload now → chip → context on next send ---------- */
-  const finishAttach = useCallback(async (name: string, base64: string, mime: string) => {
-    setAttaching(true);
+  /* ---------- attachments ----------
+   * The bubble appears the moment you pick, carrying its own spinner, and resolves on its own.
+   * Everything before this was: disabled paperclip, long silence, bubble appears already done.
+   */
+  const putAttachment = useCallback((key: string, patch: Partial<Attachment>) => {
+    setAttached((as) => as.map((a) => (a.key === key ? { ...a, ...patch } : a)));
+  }, []);
+
+  /** Upload one already-prepared file and settle its bubble either way. */
+  const uploadAttachment = useCallback(async (key: string, name: string, base64: string, mime: string) => {
     const r = await api.uploadFile({ name, contentBase64: base64, mime, visibility: "household" });
-    setAttaching(false);
     if (!r.file) {
-      Alert.alert("Couldn't attach", r.error === "too_large" ? "That file is over the 25 MB cap."
-        : r.error === "insufficient_role" ? "Attaching files needs Limited Member or higher."
-        : r.message ?? r.error ?? "Try again.");
+      // Failure lands ON the bubble rather than in an alert that dismisses and leaves you
+      // wondering which of three photos didn't make it.
+      putAttachment(key, {
+        status: "failed",
+        error: r.error === "too_large" ? "Over the 25 MB cap"
+          : r.error === "insufficient_role" ? "Not allowed for your role"
+          : r.message ?? "Upload failed",
+      });
       return;
     }
     tapHaptic("success");
-    setAttached({ id: r.file.id, name: r.file.name });
-  }, []);
+    putAttachment(key, { status: "ready", id: r.file.id, name: r.file.name });
+  }, [putAttachment]);
 
   const attachFromDocument = useCallback(async () => {
     try {
-      const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false });
-      if (res.canceled || !res.assets?.[0]) return;
-      const a = res.assets[0];
-      if ((a.size ?? 0) > MAX_ATTACH_BYTES) { Alert.alert("Too large", "That file is over the 25 MB cap."); return; }
-      const b64 = await readAsStringAsync(a.uri, { encoding: "base64" });
-      await finishAttach(a.name ?? "document", b64, a.mimeType ?? "application/octet-stream");
+      const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: true });
+      if (res.canceled || !res.assets?.length) return;
+      for (const a of res.assets) {
+        const key = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+        const name = a.name ?? "document";
+        if ((a.size ?? 0) > MAX_ATTACH_BYTES) {
+          setAttached((as) => [...as, { key, name, status: "failed", error: "Over the 25 MB cap" }]);
+          continue;
+        }
+        setAttached((as) => [...as, { key, name, status: "uploading" }]);
+        try {
+          const b64 = await readAsStringAsync(a.uri, { encoding: "base64" });
+          await uploadAttachment(key, name, b64, a.mimeType ?? "application/octet-stream");
+        } catch (e) {
+          putAttachment(key, { status: "failed", error: String((e as Error)?.message ?? "Couldn't read that file") });
+        }
+      }
     } catch (e) {
       Alert.alert("Couldn't attach", String((e as Error)?.message ?? e));
     }
-  }, [finishAttach]);
+  }, [putAttachment, uploadAttachment]);
 
   const attachFromPhotos = useCallback(async () => {
     try {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) { Alert.alert("Photos access was denied"); return; }
-      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], base64: true, quality: 0.8 });
-      const a = res.canceled ? null : res.assets?.[0];
-      if (!a) return;
-      if (!a.base64) { Alert.alert("Couldn't read that photo"); return; }
-      if (a.base64.length * 0.75 > MAX_ATTACH_BYTES) { Alert.alert("Too large", "That photo is over the 25 MB cap."); return; }
-      await finishAttach(a.fileName ?? `photo-${Date.now()}.jpg`, a.base64, a.mimeType ?? "image/jpeg");
+      /* base64 is NOT requested from the picker any more. It used to hand back a multi-megabyte
+       * string of a full-resolution photo, which is most of why "images take forever to upload
+       * even small images" — the encode happened before we'd even looked at the file. We take
+       * the uri and do our own resize + JPEG re-encode instead (see lib/prepare-image), which is
+       * also what makes vision work at all: iPhones shoot HEIC, and vision APIs reject it. */
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 1, allowsMultipleSelection: true, selectionLimit: 4 });
+      if (res.canceled || !res.assets?.length) return;
+      for (const a of res.assets) {
+        const key = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+        const name = a.fileName ?? `photo-${Date.now()}.jpg`;
+        setAttached((as) => [...as, { key, name, status: "uploading" }]);
+        const prepped = await prepareImage(a.uri, { name, width: a.width, height: a.height });
+        if (!prepped) { putAttachment(key, { status: "failed", error: "Couldn't read that photo" }); continue; }
+        if (prepped.bytes > MAX_ATTACH_BYTES) { putAttachment(key, { status: "failed", error: "Over the 25 MB cap" }); continue; }
+        putAttachment(key, { name: prepped.name });
+        await uploadAttachment(key, prepped.name, prepped.base64, prepped.mime);
+      }
     } catch (e) {
       Alert.alert("Couldn't attach", String((e as Error)?.message ?? e));
     }
-  }, [finishAttach]);
+  }, [putAttachment, uploadAttachment]);
 
   const pickAttachment = useCallback(() => {
     tapHaptic("light");
-    Alert.alert("Attach a file", "It uploads to the household library and rides along with your next message.", [
+    Alert.alert("Attach", "Photos are resized before they're sent, so they upload quickly and the assistant can read them.", [
       { text: "Choose from Photos", onPress: () => void attachFromPhotos() },
       { text: "Browse Files", onPress: () => void attachFromDocument() },
       { text: "Cancel", style: "cancel" },
@@ -688,13 +797,12 @@ export default function AskScreen() {
                 <PressableScale
                   key={key}
                   haptic="select"
-                  disabled={movingSpace}
                   /* I3 [16:45] — "from inside a chat I can't switch between Personal and
                      Family without starting a new chat. That's not the correct path." It used
                      to be disabled the moment a thread existed. Now it MOVES the thread —
                      with a confirmation on the direction that publishes it, because making a
                      personal chat family-visible exposes everything already said in it. */
-                  onPress={() => { if (!active) void switchSpace(key as SpaceKey); }}
+                  onPress={() => { if (!active) switchSpace(key as SpaceKey); }}
                   accessibilityRole="button"
                   accessibilityState={{ selected: active }}
                   accessibilityLabel={`${label} space`}
@@ -704,7 +812,6 @@ export default function AskScreen() {
                     paddingHorizontal: 11, paddingVertical: 6, borderRadius: 999,
                     backgroundColor: active ? tint : "transparent",
                     borderWidth: 1, borderColor: active ? tint : colors.border,
-                    opacity: movingSpace && !active ? 0.4 : 1,
                   }}
                 >
                   <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: active ? colors.surface : tint }} />
@@ -713,7 +820,9 @@ export default function AskScreen() {
               );
             })}
             <T kind="caption" color={colors.textFaint} style={{ flex: 1 }} numberOfLines={1}>
-              {movingSpace ? "Moving…"
+              {/* The hint describes where you ARE, not what a tap would do to the open chat —
+                  the chips don't touch it any more. */}
+              {movingSpace ? "Moving that chat…"
                 : nestId ? `Only ${myNests.find((n) => n.id === nestId)?.label ?? "your nest"} can see this`
                 : space === "household" ? "Shared with the household"
                 : isAdmin ? "Only you can see this chat"
@@ -754,7 +863,7 @@ export default function AskScreen() {
                   dot={c.visibility === "household" ? colors.ember : colors.lavender}
                   selected={c.id === conversationId}
                   onPress={() => void openConversation(c.id)}
-                  onLongPress={() => confirmDeleteConversation(c)}
+                  onLongPress={() => conversationActions(c)}
                   hint="Long press to delete"
                 />
               ))}
@@ -774,18 +883,31 @@ export default function AskScreen() {
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"
           contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.lg, gap: spacing.sm, flexGrow: 1 }}
+          scrollEventThrottle={32}
+          onScroll={(e) => {
+            // "Am I at the bottom?" — the only input the follow rule needs. 48pt of slack so a
+            // half-finished flick or a rubber-band still counts as being at the bottom.
+            const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+            const fromBottom = contentSize.height - contentOffset.y - layoutMeasurement.height;
+            followRef.current = fromBottom < 48;
+          }}
           onContentSizeChange={() => {
-            // Auto-scroll intents only — the reveal timer mutating the assistant
-            // text must NOT drag the view to the bottom of long answers.
+            // Opening a thread: jump, don't animate through the whole history.
             if (instantScroll.current) {
               instantScroll.current = false;
+              followRef.current = true;
               scroller.current?.scrollToEnd({ animated: false });
               return;
             }
             if (justSentRef.current) {
               justSentRef.current = false;
+              followRef.current = true;
               scroller.current?.scrollToEnd({ animated: true });
+              return;
             }
+            // Growing while you're at the bottom — the reply revealing, an attachment bubble
+            // appearing, a result card expanding. Follow it.
+            if (followRef.current) scroller.current?.scrollToEnd({ animated: true });
           }}
         >
           {msgs.length === 0 ? (
@@ -862,13 +984,9 @@ export default function AskScreen() {
                 key={m.id}
                 entering={FadeInDown.duration(200).reduceMotion(ReduceMotion.System)}
                 style={{ alignItems: "flex-start" }}
-                onLayout={(e) => {
-                  // Fresh assistant reply: scroll ONCE so its TOP is visible,
-                  // then leave the position alone while the text reveals.
-                  if (pendingAnchorId.current !== m.id) return;
-                  pendingAnchorId.current = null;
-                  scroller.current?.scrollTo({ y: Math.max(0, e.nativeEvent.layout.y - spacing.sm), animated: true });
-                }}
+                /* No onLayout scroll here any more: the reply's arrival is handled by the
+                   follow rule on the scroll view (see followRef). Measuring from here fired
+                   while the bubble was still empty, which is why it scrolled nowhere. */
               >
                 <View style={{ maxWidth: "94%", alignSelf: "stretch", gap: spacing.sm }}>
                   {m.text.trim() ? (
@@ -973,33 +1091,59 @@ export default function AskScreen() {
 
         {/* Composer */}
         <View style={{ paddingBottom: composerPadBottom, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bg }}>
-          {attached ? (
-            <View style={{ flexDirection: "row", paddingHorizontal: spacing.md, paddingTop: spacing.sm }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.surfaceSunken, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6, maxWidth: "80%" }}>
-                <Sym name="paperclip" size={12} color={colors.textMuted} />
-                <T kind="subMedium" color={colors.textSecondary} numberOfLines={1} style={{ flexShrink: 1 }}>{attached.name}</T>
-                <PressableScale onPress={() => setAttached(null)} hitSlop={10} haptic="select" accessibilityRole="button" accessibilityLabel={`Remove attachment ${attached.name}`}>
-                  <Sym name="xmark" size={11} color={colors.textFaint} />
-                </PressableScale>
-              </View>
+          {/* One bubble per attachment, each showing its OWN state — spinner while it uploads,
+              a tick when it's there, the reason on the bubble if it failed. "The loading sign
+              needs to be on the individual item so you know which ones have fully loaded." */}
+          {attached.length ? (
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingHorizontal: spacing.md, paddingTop: spacing.sm }}>
+              {attached.map((a) => {
+                const tone = a.status === "failed" ? colors.coral : a.status === "ready" ? colors.sage : colors.textMuted;
+                return (
+                  <View
+                    key={a.key}
+                    style={{
+                      flexDirection: "row", alignItems: "center", gap: 6,
+                      backgroundColor: colors.surfaceSunken, borderRadius: 999,
+                      paddingHorizontal: 12, paddingVertical: 6, maxWidth: "100%",
+                      borderWidth: 1, borderColor: a.status === "failed" ? colors.coral : "transparent",
+                    }}
+                  >
+                    {a.status === "uploading"
+                      ? <ActivityIndicator size="small" color={colors.textMuted} />
+                      : <Sym name={a.status === "failed" ? "exclamationmark.triangle" : "checkmark"} size={12} color={tone} />}
+                    <T kind="subMedium" color={colors.textSecondary} numberOfLines={1} style={{ flexShrink: 1 }}>{a.name}</T>
+                    {a.status === "failed" && a.error ? (
+                      <T kind="caption" color={colors.coral} numberOfLines={1}>· {a.error}</T>
+                    ) : null}
+                    <PressableScale
+                      onPress={() => setAttached((as) => as.filter((x) => x.key !== a.key))}
+                      hitSlop={10} haptic="select"
+                      accessibilityRole="button" accessibilityLabel={`Remove attachment ${a.name}`}
+                    >
+                      <Sym name="xmark" size={11} color={colors.textFaint} />
+                    </PressableScale>
+                  </View>
+                );
+              })}
             </View>
           ) : null}
           <View style={{ flexDirection: "row", alignItems: "flex-end", gap: spacing.sm, paddingHorizontal: spacing.md, paddingTop: spacing.sm }}>
           <PressableScale
             onPress={pickAttachment}
-            disabled={attaching || busy}
+            disabled={busy}
             haptic={null}
             accessibilityRole="button"
             accessibilityLabel="Attach a file"
             style={{
               width: 44, height: 44, borderRadius: 22,
               backgroundColor: colors.surfaceSunken, alignItems: "center", justifyContent: "center",
-              opacity: attaching || busy ? 0.45 : 1,
+              opacity: busy ? 0.45 : 1,
             }}
           >
-            {attaching
-              ? <ActivityIndicator size="small" color={colors.textMuted} />
-              : <Sym name="plus" size={18} color={colors.textSecondary} />}
+            {/* Never a spinner: progress belongs on the individual bubbles above, and this
+                button staying live is what lets you queue a second photo while the first
+                uploads. */}
+            <Sym name="plus" size={18} color={colors.textSecondary} />
           </PressableScale>
           {/* M6 [06:03] — "if I start typing out a really long response this moves up to a
               certain height, but it needs to expand. I need to be able to drag it up or down."

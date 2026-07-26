@@ -142,7 +142,7 @@ export default function ProfileScreen() {
   }, [session, busy, name, color, photoFileId]);
 
   if (!me) {
-    return <HScreen><SkeletonCards count={3} /></HScreen>;
+    return <HScreen keyboardAware><SkeletonCards count={3} /></HScreen>;
   }
 
   // Live preview member: whatever is currently picked, not yet saved.
@@ -152,7 +152,7 @@ export default function ProfileScreen() {
   const hasPhoto = !!photoFileId && !currentEmoji;
 
   return (
-    <HScreen>
+    <HScreen keyboardAware>
       {note ? <Notice text={note.text} ok={note.ok} /> : null}
 
       {/* Live preview */}

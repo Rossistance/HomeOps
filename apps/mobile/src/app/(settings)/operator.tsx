@@ -56,7 +56,7 @@ export default function OperatorScreen() {
   // rendering an empty shell.
   if (!session?.isOperator) {
     return (
-      <HScreen>
+      <HScreen keyboardAware>
         <EmptyState
           icon="lock"
           title="Not available"
@@ -67,10 +67,10 @@ export default function OperatorScreen() {
     );
   }
 
-  if (!households) return <HScreen><SkeletonCards count={3} /></HScreen>;
+  if (!households) return <HScreen keyboardAware><SkeletonCards count={3} /></HScreen>;
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh}>
+    <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
       <Rise index={0}>
         <Notice
           ok

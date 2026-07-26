@@ -180,14 +180,14 @@ export default function HelpScreen() {
   }, [toActorId, busy, message, eventId, taskId, mode]);
 
   if (loading) {
-    return <HScreen><SkeletonCards count={3} /></HScreen>;
+    return <HScreen keyboardAware><SkeletonCards count={3} /></HScreen>;
   }
 
   const offer = mode === "offer";
   const firstName = toMember?.displayName.split(" ")[0] ?? "";
 
   return (
-    <HScreen>
+    <HScreen keyboardAware>
       {note ? <Notice text={note} ok={false} /> : null}
 
       {/* direction toggle — Ask ↔ Offer */}
