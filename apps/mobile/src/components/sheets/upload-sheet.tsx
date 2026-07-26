@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ScrollView, Switch, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
+import { prepareImage } from "@/lib/prepare-image";
 import { readAsStringAsync } from "expo-file-system/legacy";
 import { api, type FileRec } from "@/lib/api";
 import { decideSpace, explicitTagOf, spaceLabelOf } from "@/lib/spaces";
@@ -59,14 +60,15 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
   }
 
   // Convert a picked image asset into a Picked (or set a note + return null on failure).
-  function toPicked(a: ImagePicker.ImagePickerAsset, label: string): Picked | null {
-    if (!a.base64) { setNote("Couldn't read that photo."); return null; }
-    if (a.base64.length * 0.75 > MAX_BYTES) { setNote("That photo is over the 25 MB cap."); return null; }
-    return {
-      name: a.fileName ?? `${label}-${Date.now()}.jpg`,
-      base64: a.base64, mime: a.mimeType ?? "image/jpeg",
-      size: Math.round(a.base64.length * 0.75),
-    };
+  /* Resized and re-encoded, exactly like a chat attachment (lib/prepare-image). Two reasons,
+   * and the second is the one that matters: a full-resolution photo is megabytes of base64 to
+   * push over a home connection, and an iPhone's native HEIC is rejected outright by every
+   * vision model — so a document scanned into the Library was landing there unreadable. */
+  async function toPicked(a: ImagePicker.ImagePickerAsset, label: string): Promise<Picked | null> {
+    const prepped = await prepareImage(a.uri, { name: a.fileName ?? `${label}-${Date.now()}.jpg`, width: a.width, height: a.height });
+    if (!prepped) { setNote("Couldn't read that photo."); return null; }
+    if (prepped.bytes > MAX_BYTES) { setNote("That photo is over the 25 MB cap."); return null; }
+    return { name: prepped.name, base64: prepped.base64, mime: prepped.mime, size: prepped.bytes };
   }
 
   // Camera captures one page; the library allows selecting up to two at once (multi).
@@ -79,7 +81,7 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
       if (!perm.granted) { setNote("Photo library access was denied."); return null; }
     }
     const opts: ImagePicker.ImagePickerOptions = {
-      mediaTypes: ["images"], base64: true, quality: 0.8,
+      mediaTypes: ["images"], quality: 1,
       allowsMultipleSelection: !camera && multi, selectionLimit: 2,
     };
     const res = camera
@@ -95,11 +97,11 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
     try {
       const assets = await pickImages(camera, true);
       if (!assets) return;
-      const first = toPicked(assets[0], camera ? "scan" : "photo");
+      const first = await toPicked(assets[0], camera ? "scan" : "photo");
       if (!first) return;
       setFile(first);
       setCustomName(first.name);
-      const second = assets[1] ? toPicked(assets[1], "back") : null;
+      const second = assets[1] ? await toPicked(assets[1], "back") : null;
       setBackPage(second);
     } catch (e) {
       setNote(`Couldn't read that photo: ${String((e as Error)?.message ?? e)}`);
@@ -112,7 +114,7 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
     try {
       const assets = await pickImages(camera, false);
       if (!assets) return;
-      const back = toPicked(assets[0], "back");
+      const back = await toPicked(assets[0], "back");
       if (back) setBackPage(back);
     } catch (e) {
       setNote(`Couldn't read that photo: ${String((e as Error)?.message ?? e)}`);

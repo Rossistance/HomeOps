@@ -626,14 +626,51 @@ export default function AskScreen() {
     }
   }, [putAttachment, uploadAttachment]);
 
+  /* Take one now, rather than "go take one, come back, and find it in your library".
+   *
+   * The Info.plist string for this has been declared since the picker was configured — the app
+   * simply never asked. Requesting at the moment of use is the point: a camera prompt that
+   * appears when you tap "Take a photo" explains itself, where one fired at launch is a thing
+   * people deny on principle. Denial is handled honestly too, with the one sentence that
+   * actually helps: where to turn it back on. */
+  const attachFromCamera = useCallback(async () => {
+    try {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert(
+          "Camera access is off",
+          perm.canAskAgain
+            ? "FamiliOS needs the camera to photograph something straight into the chat."
+            : "Turn it on in iOS Settings → FamiliOS → Camera, then try again.",
+        );
+        return;
+      }
+      const res = await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 1 });
+      const a = res.canceled ? null : res.assets?.[0];
+      if (!a) return;
+      const key = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+      const name = a.fileName ?? `photo-${Date.now()}.jpg`;
+      setAttached((as) => [...as, { key, name, status: "uploading" }]);
+      // Same path as a picked photo: resized and re-encoded as JPEG, so a camera capture is
+      // just as readable and just as quick to upload.
+      const prepped = await prepareImage(a.uri, { name, width: a.width, height: a.height });
+      if (!prepped) { putAttachment(key, { status: "failed", error: "Couldn't read that photo" }); return; }
+      putAttachment(key, { name: prepped.name });
+      await uploadAttachment(key, prepped.name, prepped.base64, prepped.mime);
+    } catch (e) {
+      Alert.alert("Couldn't use the camera", String((e as Error)?.message ?? e));
+    }
+  }, [putAttachment, uploadAttachment]);
+
   const pickAttachment = useCallback(() => {
     tapHaptic("light");
     Alert.alert("Attach", "Photos are resized before they're sent, so they upload quickly and the assistant can read them.", [
+      { text: "Take a Photo", onPress: () => void attachFromCamera() },
       { text: "Choose from Photos", onPress: () => void attachFromPhotos() },
       { text: "Browse Files", onPress: () => void attachFromDocument() },
       { text: "Cancel", style: "cancel" },
     ]);
-  }, [attachFromDocument, attachFromPhotos]);
+  }, [attachFromCamera, attachFromDocument, attachFromPhotos]);
 
   /* ---------- plan + build actions ---------- */
   // Runs stay IN the chat: live progress renders inline below the messages and

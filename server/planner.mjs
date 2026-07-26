@@ -463,7 +463,7 @@ DO THE THING, DON'T OFFER TO DO IT:
 Fixing and improving the family's HELPERS (agents) — you can actually do this now:
 - When a helper gets something wrong ("the briefing missed tonight's event", "make the morning agent include X"), DIAGNOSE AND FIX IT rather than describing what they should change themselves. context.existingAgents lists them; "homeops.get_agent" {agentId} returns a helper's real instructions; "homeops.update_agent" {agentId, instructions|purpose|name|status} rewrites them.
 - context.attachedAlsoNames lists files attached alongside the one you were given. You have NOT read those. If they matter to the answer, say which one you read and offer to read the next — never imply you looked at all of them.
-- context.attachedFileText is the CONTENTS of a file the person just attached — a photo they took, a document, a schedule. It is really there; read it and answer from it. If context.attachedFileError is set instead, the file could not be read: say what it says, plainly, and suggest the alternative it names. Never tell someone you cannot see an attachment when attachedFileText is present, and never claim to have read one when it is not.
+- An "ATTACHED …" section may appear after the tool list. That is the REAL CONTENTS of a file the person just attached — a photo they took, a document, a schedule — read on the server moments ago. Answer from it directly. If context.attachedFileError is set instead, the file could not be read: say what it says, plainly, and suggest the alternative it names. Never tell someone you cannot see an attachment when that section is present, and never claim to have read one when it is not. If context.attachedFileName exists but there is no ATTACHED section and no attachedFileError, say honestly that the file did not come through — never invent a reason or ask them to re-upload it in another format.
 - When an attachment (or a file in the library) plausibly CONTAINS things the family would want in the app — a schedule, an invitation, a class list, a permission slip, a receipt — use "homeops.extract_from_file" {fileId}. It returns candidates as cards for them to pick from. Say what you found and that nothing has been added yet. Do NOT create events or tasks yourself from a file; the whole point is that they choose.
 - To answer a question about a specific file without proposing anything, use "homeops.read_file" {fileId, question}.
 - "restaurants near me", "a pharmacy that's open", "coffee close by" — use "homeops.find_places" {query, lat, lng, limit}. Pass the lat/lng from context.location when it is there. Never answer a "near me" question from memory or with a search link: that tool returns the real rows, and they render as cards. It also returns "limitations" — say those out loud. Google publishes no live busy-ness and no wait-time estimate through any API, so if someone asked for those, tell them plainly that part is unavailable and give them everything you DO have. Do not approximate it.
@@ -646,8 +646,55 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
     existingAgents, existingSkills, existingAutomations,
     ...(familyChats.length ? { familyChats } : {}),
     ...(location ? { location } : {}),
+    /* THE ATTACHMENT BUG, half one. The client's context was tucked entirely under
+     * `clientHints`, so a photo's details landed at context.clientHints.attachedFileName while
+     * the system prompt told the model to look at context.attachedFileName. It looked, found
+     * nothing, and reported — accurately — that it had only been given a filename.
+     *
+     * The metadata is small and lifts to where it was always documented. The CONTENTS do not
+     * travel through here at all any more; see attachmentSection below. */
+    ...(clientContext?.attachedFileName ? { attachedFileName: clientContext.attachedFileName } : {}),
+    ...(clientContext?.attachedFileKind ? { attachedFileKind: clientContext.attachedFileKind } : {}),
+    ...(clientContext?.attachedFileError ? { attachedFileError: clientContext.attachedFileError } : {}),
+    ...(clientContext?.attachedFileTruncated ? { attachedFileTruncated: true } : {}),
+    ...(clientContext?.attachedAlsoNames ? { attachedAlsoNames: clientContext.attachedAlsoNames } : {}),
     clientHints: clientContext ?? undefined,
   };
+}
+
+/**
+ * The attached file's contents, as their own labelled section of the user message.
+ *
+ * THE ATTACHMENT BUG, half two, and the worse half. The household context is serialised and cut
+ * at 4000 characters — `JSON.stringify(serverCtx).slice(0, 4000)`. A page of transcribed text
+ * from a photo is longer than that on its own, and it sat at the END of the object, so it was
+ * sliced off entirely. Worse: cutting a JSON string mid-way leaves invalid JSON, so the part
+ * that DID survive was garbage to the model too.
+ *
+ * So the contents never travel inside that blob. They get their own section, with their own
+ * budget, after the context and before the question — which also makes the boundary between
+ * "what the household looks like" and "what this photo says" legible to the model instead of
+ * being two different things inside one JSON object.
+ */
+function attachmentSection(clientContext) {
+  const text = clientContext?.attachedFileText;
+  if (!text || typeof text !== "string" || !text.trim()) return "";
+  const name = clientContext.attachedFileName ?? "the attached file";
+  const kind = String(clientContext.attachedFileKind ?? "file").toUpperCase();
+  // 12k characters: a dense page of transcription fits, and one attachment still can't crowd
+  // the household context and the tool catalog out of the window.
+  const body = text.length > 12000 ? `${text.slice(0, 12000)}
+…(truncated)` : text;
+  const also = Array.isArray(clientContext.attachedAlsoNames) && clientContext.attachedAlsoNames.length
+    ? `
+Also attached but NOT read: ${clientContext.attachedAlsoNames.join(", ")}. Say so if it matters; never imply you looked at them.`
+    : "";
+  return `
+
+ATTACHED ${kind} — "${name}". This is its real contents, read on the server moments ago. Answer from it:
+"""
+${body}
+"""${also}`;
 }
 
 /* ---- One-turn live lookups ----
@@ -712,7 +759,7 @@ export async function assistantRespond({ message, context, session, providerId, 
   const compact = pruneCatalogForPrompt(catalog, { agent, goal: String(message), providerId: id });
   const serverCtx = await buildServerContext(session, context, { goal: message });
   const ctxStr = JSON.stringify(serverCtx).slice(0, 4000);
-  const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nUser message: ${String(message).trim()}`;
+  const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}${attachmentSection(context)}\n\nUser message: ${String(message).trim()}`;
   // Conversation memory: without prior turns the assistant is amnesiac — a fact
   // stated one message ago ("we're a family of 4") was already forgotten. The
   // last few turns ride along as real chat messages, truncated per turn.
@@ -808,7 +855,7 @@ export async function assistantStream({ message, context, session, providerId, h
   const compact = pruneCatalogForPrompt(catalog, { agent, goal: String(message), providerId: id });
   const serverCtx = await buildServerContext(session, context, { goal: message });
   const ctxStr = JSON.stringify(serverCtx).slice(0, 4000);
-  const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}\n\nUser message: ${String(message).trim()}`;
+  const user = `Household context (JSON): ${ctxStr}\n\nAvailable tools (JSON): ${JSON.stringify(compact)}\n\nAllowed trigger types: ${TRIGGERS.join(", ")}\nAllowed space types: ${SPACE_TYPES.join(", ")}\nAllowed icons: ${ICONS.join(", ")}${attachmentSection(context)}\n\nUser message: ${String(message).trim()}`;
   // Same conversation memory as assistantRespond (the chat UIs always stream).
   const priorTurns = (Array.isArray(history) ? history : [])
     .filter((m) => m && (m.role === "user" || m.role === "assistant") && m.text)
