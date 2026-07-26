@@ -12,7 +12,7 @@ import { useTheme, tapHaptic } from "@/theme";
 import { memberTone } from "@/lib/member-colors";
 // "ui/index" (not "ui"): the legacy src/components/ui.tsx still shadows the ui/
 // directory until the old screens are all ported — this resolves the new system.
-import { Badge, Button, Card, CheckCircle, Chip, ChipRow, EmptyState, ErrorState, HScreen, Notice, Rise, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
+import { Badge, Button, Card, CheckCircle, Chip, ChipRow, Coach, EmptyState, ErrorState, HScreen, Notice, Rise, ScreenTour, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
 import { TaskSheet } from "@/components/sheets/task-sheet";
 
 /* ------------------------------ grouping ------------------------------ */
@@ -336,12 +336,13 @@ export default function TasksScreen() {
 
       {nests.length > 0 ? (
         <Rise index={riseIdx++}>
-          <ChipRow>
+          <ScreenTour route="/tasks" />
+          <Coach id="tasks.spaces"><ChipRow>
             <Chip label="Family" icon="house.fill" selected={nestId === null} onPress={() => setNestId(null)} />
             {nests.map((n) => (
               <Chip key={n.id} label={n.label} icon="person.2.fill" selected={nestId === n.id} onPress={() => setNestId(n.id)} />
             ))}
-          </ChipRow>
+          </ChipRow></Coach>
         </Rise>
       ) : null}
 
@@ -358,7 +359,7 @@ export default function TasksScreen() {
 
       {canAdd ? (
         <Rise index={riseIdx++}>
-          <Card style={{ gap: spacing.md }}>
+          <Coach id="tasks.composer"><Card style={{ gap: spacing.md }}>
             <Well
               style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 2 }}
               onLayout={(e) => { composerY.current = e.nativeEvent.layout.y; }}
@@ -407,7 +408,7 @@ export default function TasksScreen() {
                 ) : null}
               </>
             ) : null}
-          </Card>
+          </Card></Coach>
         </Rise>
       ) : null}
 

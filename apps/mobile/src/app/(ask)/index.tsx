@@ -27,7 +27,7 @@ import { useTheme, useCalmMotion, riskColor, tapHaptic } from "@/theme";
 import { humanDetail } from "@/lib/format";
 // NOTE: explicit /index path — the legacy src/components/ui.tsx (old design
 // system, deleted with the old screens) shadows the ui/ directory otherwise.
-import { Badge, Button, Card, EmptyState, MarkdownText, Notice, PressableScale, Sym, SymTile, T } from "@/components/ui";
+import { Badge, Button, Card, Coach, EmptyState, MarkdownText, Notice, PressableScale, ScreenTour, Sym, SymTile, T } from "@/components/ui";
 
 // The server returns richer creation data than the shared BuildResult/ChatBuild
 // types declare (WP-006): created.agent carries its REAL post-build `status` —
@@ -780,7 +780,8 @@ export default function AskScreen() {
           {/* Space toggle: where THIS chat lives. Personal = private to you;
               Family = shared with the household. Locked once a thread exists
               (the server owns the record's visibility from creation). */}
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, display: headerOpen ? "flex" : "none" }}>
+          <Coach id="ask.spaces" style={{ display: headerOpen ? "flex" : "none" }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             {/* An Adult Member's chats are private to them (the silo), so the Family option
                 isn't offered — a toggle that always refuses is worse than no toggle. */}
             {([
@@ -798,15 +799,16 @@ export default function AskScreen() {
                   key={key}
                   haptic="select"
                   /* I3 [16:45] — "from inside a chat I can't switch between Personal and
-                     Family without starting a new chat. That's not the correct path." It used
-                     to be disabled the moment a thread existed. Now it MOVES the thread —
-                     with a confirmation on the direction that publishes it, because making a
-                     personal chat family-visible exposes everything already said in it. */
+                     Family without starting a new chat. That's not the correct path." First it
+                     was disabled once a thread existed; then it MOVED the thread, which turned a
+                     navigation control into an edit and offered to publish something written in
+                     private. It switches which chats you're LOOKING at. Moving one is a press
+                     and hold on the thread itself — see conversationActions. */
                   onPress={() => { if (!active) switchSpace(key as SpaceKey); }}
                   accessibilityRole="button"
                   accessibilityState={{ selected: active }}
                   accessibilityLabel={`${label} space`}
-                  accessibilityHint={conversationId && !active ? `Moves this chat to ${label}` : undefined}
+                  accessibilityHint={`Shows your ${label} chats`}
                   style={{
                     flexDirection: "row", alignItems: "center", gap: 6,
                     paddingHorizontal: 11, paddingVertical: 6, borderRadius: 999,
@@ -829,6 +831,12 @@ export default function AskScreen() {
                 : "Your chats are private to you"}
             </T>
           </View>
+          </Coach>
+
+          {/* "What's this screen?" — renders nothing unless this route has a chapter, so it can
+              never be a button that apologises. Only in the expanded header: the collapsed one
+              is deliberately a single row. */}
+          {headerOpen ? <ScreenTour route="/(ask)" /> : null}
 
           {/* Collapsed: just the dot, so you still know which space you are in. */}
           {!headerOpen ? (
@@ -848,6 +856,7 @@ export default function AskScreen() {
               family. The dot colour is the section cue." They were all listed together under
               both, which made the toggle above look decorative. */}
           {visibleRecent.length > 0 ? (
+            <Coach id="ask.threads">
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
@@ -864,10 +873,11 @@ export default function AskScreen() {
                   selected={c.id === conversationId}
                   onPress={() => void openConversation(c.id)}
                   onLongPress={() => conversationActions(c)}
-                  hint="Long press to delete"
+                  hint="Long press to move or delete"
                 />
               ))}
             </ScrollView>
+            </Coach>
           ) : null}
           {/* The grab handle — the affordance that says this can move. */}
           <View style={{ alignItems: "center", paddingTop: 2 }}>
@@ -1128,6 +1138,7 @@ export default function AskScreen() {
             </View>
           ) : null}
           <View style={{ flexDirection: "row", alignItems: "flex-end", gap: spacing.sm, paddingHorizontal: spacing.md, paddingTop: spacing.sm }}>
+          <Coach id="ask.attach">
           <PressableScale
             onPress={pickAttachment}
             disabled={busy}
@@ -1145,10 +1156,12 @@ export default function AskScreen() {
                 uploads. */}
             <Sym name="plus" size={18} color={colors.textSecondary} />
           </PressableScale>
+          </Coach>
           {/* M6 [06:03] — "if I start typing out a really long response this moves up to a
               certain height, but it needs to expand. I need to be able to drag it up or down."
               It grew to a fixed 120pt ceiling and stopped. Now the ceiling itself is
               draggable: pull the grabber up for room to write, push it back down when done. */}
+          <Coach id="ask.composer" style={{ flex: 1 }}>
           <View style={{ flex: 1 }}>
             {composerMax > 120 || text.length > 80 ? (
               <GestureDetector gesture={composerDrag}>
@@ -1172,6 +1185,7 @@ export default function AskScreen() {
               }}
             />
           </View>
+          </Coach>
           <PressableScale
             onPress={() => void send()}
             disabled={!text.trim() || busy}

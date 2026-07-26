@@ -84,6 +84,73 @@ const SCOPED: TourStep[] = [
   },
 ];
 
+/* ---------------------------- per-screen chapters ----------------------------
+ * "Show me around" answers "what is this app". A chapter answers "what is THIS SCREEN", which
+ * is the question you actually have while standing on it — and it's a different question, so
+ * it gets a different entry point rather than a longer spine.
+ *
+ * Each chapter is keyed by the route it belongs to, so a screen can offer its own walkthrough
+ * without knowing anything about the tour that runs across the whole app. Adding one is adding
+ * a key here and wrapping a couple of controls in <Coach>.
+ */
+export const CHAPTERS: Record<string, { label: string; steps: TourStep[] }> = {
+  "/(ask)": {
+    label: "Asking Famili",
+    steps: [
+      {
+        target: "ask.spaces", place: "below",
+        title: "Personal, or the whole family",
+        body: "These switch which chats you're looking at — they don't move the one you have open. To move a single chat, press and hold it in the row below.",
+      },
+      {
+        target: "ask.threads", place: "below",
+        title: "Your chats",
+        body: "Tap one to pick it back up. Press and hold to move it between Personal and Family, or to delete it.",
+      },
+      {
+        target: "ask.attach", place: "above",
+        title: "Photos and files",
+        body: "Attach a photo of a schedule, a letter, a form. It's read, not just stored — ask about what's in it and you'll get answers from the page.",
+      },
+      {
+        target: "ask.composer", place: "above",
+        title: "Just say it plainly",
+        body: "No commands to learn. Anything that changes the world outside this app is shown to you first and waits for a yes.",
+      },
+    ],
+  },
+  "/calendar": {
+    label: "The calendar",
+    steps: [
+      {
+        target: "calendar.strip", place: "below",
+        title: "The week, at a glance",
+        body: "Each day carries a dot per person who has something on it, in their own colour.",
+      },
+      {
+        target: "calendar.list", place: "above",
+        title: "Synced and yours",
+        body: "Events from a connected calendar show here alongside the ones made in FamiliOS. You can add your own notes and who's coming to either — what came from elsewhere stays as it is at the source.",
+      },
+    ],
+  },
+  "/tasks": {
+    label: "Tasks & lists",
+    steps: [
+      {
+        target: "tasks.spaces", place: "below",
+        title: "Family, or a nest",
+        body: "A nest is a small group inside the household. Its lists are only visible to the people in it — not to everyone, and not to the Owner.",
+      },
+      {
+        target: "tasks.composer", place: "below",
+        title: "Add anything",
+        body: "A task with a date becomes a real reminder, and can go straight onto the calendar of whoever it's assigned to.",
+      },
+    ],
+  },
+};
+
 /**
  * Which tour. Not a filter over one list: a child, grandparent or sitter gets a DIFFERENT
  * SCREEN, not the adult Today with pieces removed, so the spine's targets are absent rather
@@ -94,4 +161,9 @@ const SCOPED: TourStep[] = [
  */
 export function tourFor(viewMode: string): TourStep[] {
   return viewMode === "owner" || viewMode === "adult" ? SPINE : SCOPED;
+}
+
+/** The chapter for a route, if that screen has one. */
+export function chapterFor(route: string): { label: string; steps: TourStep[] } | null {
+  return CHAPTERS[route] ?? null;
 }

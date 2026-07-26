@@ -16,6 +16,8 @@ import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
 // still shadows the ui/ directory until old screens are deleted centrally.
 import { Badge } from "@/components/ui/badge";
+import { Coach } from "@/components/ui/coach";
+import { ScreenTour } from "@/components/ui/screen-tour";
 import { Button } from "@/components/ui/button";
 import { Card, PressableCard } from "@/components/ui/card";
 import { Row, SectionHeader } from "@/components/ui/list";
@@ -437,6 +439,8 @@ export default function CalendarScreen() {
       {/* 14-day strip — dots mark days with plans; tap toggles a one-day focus. */}
       {view === "agenda" ? (
       <Rise index={0}>
+        <ScreenTour route="/calendar" />
+        <Coach id="calendar.strip">
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -478,6 +482,7 @@ export default function CalendarScreen() {
             );
           })}
         </ScrollView>
+        </Coach>
       </Rise>
       ) : null}
 
@@ -552,7 +557,9 @@ export default function CalendarScreen() {
           />
         ) : (
           <Rise index={1}>
+            <Coach id="calendar.list">
             <SectionHeader title={dayTitle(selectedDay, todayKey)} />
+            </Coach>
             <View style={{ gap: spacing.sm }}>
               {byDayAll[selectedDay].map((e) => (
                 <EventItem

@@ -27,12 +27,12 @@
 // actually is. The walkthrough asks for a position when it needs one. Nothing is registered
 // until it's mounted, so "is this on screen for this person" is answered by measurement rather
 // than by assumption.
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Dimensions } from "react-native";
 import { router } from "expo-router";
 import { useSession } from "@/lib/session";
 import { capabilitiesFor } from "@/lib/roles";
-import { tourFor, type TourStep } from "@/lib/tour-steps";
+import { chapterFor, tourFor, type TourStep } from "@/lib/tour-steps";
 
 export interface CoachRect { x: number; y: number; width: number; height: number }
 type Measurer = () => Promise<CoachRect | null>;
@@ -52,6 +52,10 @@ interface TutorialApi {
   /** A start that found nothing to point at. The overlay says so instead of nothing happening. */
   empty: boolean;
   start: () => void;
+  /** Walk just this screen's chapter, if it has one. Returns false when it doesn't. */
+  startChapter: (route: string) => boolean;
+  /** Does this route have a chapter? For a screen deciding whether to offer the button. */
+  hasChapter: (route: string) => boolean;
   next: () => void;
   stop: () => void;
   /** Called by <Coach> to register where it is. Returns an unregister fn. */
@@ -88,7 +92,13 @@ export function TutorialProvider({ children }: { children: ReactNode }) {
   // The scroll view of whatever screen is mounted, so a target below the fold can be brought up.
   const scrollerRef = useRef<((y: number) => void) | null>(null);
 
-  const steps = useMemo(() => tourFor(caps.viewMode), [caps.viewMode]);
+  /* Either the app-wide spine, or one screen's chapter. Same engine, same measurement, same
+   * skipping — a chapter is just a shorter list that doesn't navigate anywhere, because you're
+   * already standing on the screen it describes. */
+  const [chapter, setChapter] = useState<TourStep[] | null>(null);
+  const [pendingStart, setPendingStart] = useState(false);
+  const spine = useMemo(() => tourFor(caps.viewMode), [caps.viewMode]);
+  const steps = chapter ?? spine;
 
   const registerScroller = useCallback((scrollTo: (y: number) => void) => {
     scrollerRef.current = scrollTo;
@@ -169,7 +179,31 @@ export function TutorialProvider({ children }: { children: ReactNode }) {
     if (from === 0) setEmpty(true);
   }, [steps]);
 
+  const startChapter = useCallback((route: string) => {
+    const c = chapterFor(route);
+    if (!c) return false;
+    setEmpty(false); setRect(null); setShown(0);
+    // A chapter never navigates: its steps carry no route, and the tour is already here.
+    routeRef.current = route;
+    setChapter(c.steps);
+    /* Deliberately not calling go() here. `go` closes over `steps`, and at this instant that's
+     * still the spine — starting now would walk the wrong list. The effect below fires once the
+     * new chapter is actually the current one. */
+    setPendingStart(true);
+    return true;
+  }, []);
+
+  const hasChapter = useCallback((route: string) => !!chapterFor(route), []);
+
+  // See startChapter: this is where a chapter actually begins, once `steps` is the chapter's.
+  useEffect(() => {
+    if (!pendingStart) return;
+    setPendingStart(false);
+    void go(0);
+  }, [pendingStart, go]);
+
   const start = useCallback(() => {
+    setChapter(null);
     setEmpty(false); setRect(null); setShown(0);
     // Forget where the tour last was. Between runs the user may have navigated anywhere, so a
     // stale value here would skip the navigation that the first step actually needs.
@@ -177,7 +211,9 @@ export function TutorialProvider({ children }: { children: ReactNode }) {
     void go(0);
   }, [go]);
   const next = useCallback(() => { void go(index + 1); }, [go, index]);
-  const stop = useCallback(() => { runId.current++; setIndex(-1); setRect(null); setEmpty(false); setShown(0); }, []);
+  const stop = useCallback(() => {
+    runId.current++; setIndex(-1); setRect(null); setEmpty(false); setShown(0); setChapter(null);
+  }, []);
 
   const api = useMemo<TutorialApi>(() => ({
     running: index >= 0,
@@ -187,8 +223,8 @@ export function TutorialProvider({ children }: { children: ReactNode }) {
     onLast: index >= 0 && index >= steps.length - 1,
     rect,
     empty,
-    start, next, stop, register, registerScroller,
-  }), [index, steps, shown, rect, empty, start, next, stop, register, registerScroller]);
+    start, startChapter, hasChapter, next, stop, register, registerScroller,
+  }), [index, steps, shown, rect, empty, start, startChapter, hasChapter, next, stop, register, registerScroller]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }

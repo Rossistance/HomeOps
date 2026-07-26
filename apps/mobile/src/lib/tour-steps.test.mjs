@@ -10,7 +10,7 @@
 // around" is a button that does nothing. That's the failure this file exists to prevent.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { tourFor } from "./tour-steps.ts";
+import { CHAPTERS, chapterFor, tourFor } from "./tour-steps.ts";
 
 const targets = (mode) => tourFor(mode).map((s) => s.target);
 
@@ -67,5 +67,45 @@ test("no target is pointed at twice", () => {
   for (const mode of ["owner", "child"]) {
     const t = targets(mode);
     assert.equal(new Set(t).size, t.length, "a repeated target reads as the tour glitching");
+  }
+});
+
+/* ------------------------------ per-screen chapters ------------------------------ */
+
+test("a chapter exists only for routes that have one, and never guesses", () => {
+  assert.equal(chapterFor("/(ask)")?.label, "Asking Famili");
+  // The button renders off this answer, so a false positive is a control that does nothing.
+  assert.equal(chapterFor("/nowhere"), null);
+  assert.equal(chapterFor(""), null);
+});
+
+test("a chapter never navigates — it describes the screen you're already on", () => {
+  for (const [route, c] of Object.entries(CHAPTERS)) {
+    for (const s of c.steps) {
+      assert.equal(s.route, undefined,
+        `${route}: a chapter step with a route would walk you off the screen it's explaining`);
+    }
+  }
+});
+
+test("every chapter step points at a target on its own screen", () => {
+  // The prefix convention is what keeps a chapter honest: /(ask) steps target ask.*, so a
+  // copy-paste from another chapter is visible here rather than at runtime as a skipped step.
+  const prefix = { "/(ask)": "ask.", "/calendar": "calendar.", "/tasks": "tasks." };
+  for (const [route, c] of Object.entries(CHAPTERS)) {
+    for (const s of c.steps) {
+      assert.ok(s.target.startsWith(prefix[route]), `${route}: "${s.target}" belongs to another screen`);
+    }
+  }
+});
+
+test("every chapter is short, labelled, and says something real", () => {
+  for (const [route, c] of Object.entries(CHAPTERS)) {
+    assert.ok(c.label && c.label.length > 0, `${route} needs a label`);
+    assert.ok(c.steps.length >= 1 && c.steps.length <= 5, `${route}: a chapter is a look around, not a manual`);
+    for (const s of c.steps) {
+      assert.ok(s.title && s.body && s.body.length > 20, `${route}: "${s.title}" needs a real explanation`);
+    }
+    assert.equal(new Set(c.steps.map((s) => s.target)).size, c.steps.length, `${route}: repeated target`);
   }
 });
