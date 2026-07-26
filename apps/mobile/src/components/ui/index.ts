@@ -1,5 +1,6 @@
 export { PressableScale } from "./pressable-scale";
 export { CheckCircle } from "./check-circle";
+export { Bloom } from "./bloom";
 export { T } from "./text";
 export { Sym, SymTile } from "./symbol";
 export { BrandIcon } from "./brand-icon";

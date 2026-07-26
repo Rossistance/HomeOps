@@ -11,13 +11,15 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type ApprovalRec, type EventRec, type EvolutionRec, type HelpRequestRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
 import { coversDay, eventTimeLabel } from "@/lib/event-days";
-import { memberColor } from "@/lib/member-colors";
+import { fade, memberColor } from "@/lib/member-colors";
 import { isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
 import { useAdvancedMode } from "@/lib/prefs";
+import { pickPrompt } from "@/lib/ask-prompts";
+import { AskShimmer } from "@/components/ask-shimmer";
 import { useTheme, riskColor, tapHaptic } from "@/theme";
 import {
-  T, Card, Badge, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
+  T, Bloom, Card, Badge, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
   Sym, SymTile, PressableScale, PressableCard, Button,
 } from "@/components/ui";
 import { ApprovalSheet } from "@/components/sheets/approval-sheet";
@@ -34,6 +36,63 @@ function SeeAll({ label = "See all", onPress }: { label?: string; onPress: () =>
   return (
     <PressableScale onPress={onPress} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel={label}>
       <T kind="subMedium" color={colors.ember}>{label}</T>
+    </PressableScale>
+  );
+}
+
+/**
+ * One event, as a card inside the Calendar card.
+ *
+ * Reported: "the upcoming item reads like 'Next: …' in the same format as the card titles.
+ * That section should be like a card within a card, like a button… using a faded gradient
+ * version of the colour to whom that calendar item belongs, and is clickable to redirect
+ * immediately to the actual event detail."
+ *
+ * The gradient runs from the owner's colour at the leading edge out to nothing, so the colour
+ * reads as belonging to the event rather than as a decorative fill — and the solid bar at the
+ * left is what your eye actually matches against the avatar strip above. Whose event it is is
+ * the first thing you should be able to tell, at arm's length, without reading a word.
+ */
+function EventChip({ event, members, showDay }: { event: EventRec; members: MemberRec[]; showDay?: boolean }) {
+  const { colors, spacing } = useTheme();
+  // Whose event is it: the first named participant, else whoever owns the record. An event
+  // with neither belongs to the household, and gets the neutral edge rather than a stranger's
+  // colour — guessing here would put someone's name on a thing that isn't theirs.
+  const tone = memberColor(colors, members.find((m) => m.actorId === event.participantIds?.[0]))
+    ?? memberColor(colors, members.find((m) => m.actorId === event.ownerId))
+    ?? colors.textFaint;
+  const day = event.startAt
+    ? new Date(event.startAt).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+    : null;
+  return (
+    <PressableScale
+      onPress={() => router.push({ pathname: "/event-form", params: { id: event.id } })}
+      haptic="select"
+      accessibilityRole="button"
+      accessibilityLabel={`${event.title}${day ? `, ${day}` : ""} ${eventTimeLabel(event)}. Open it`}
+      style={{ borderRadius: 12, borderCurve: "continuous", overflow: "hidden" }}
+    >
+      <LinearGradient
+        colors={[fade(tone, 0.22), fade(tone, 0.04)]}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+        style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, paddingRight: spacing.md, paddingVertical: 10 }}
+      >
+        <View style={{ width: 4, alignSelf: "stretch", backgroundColor: tone }} />
+        <View style={{ flex: 1, gap: 1 }}>
+          <T kind="subMedium" color={colors.text} numberOfLines={1}>{event.title}</T>
+          <T kind="detail" numberOfLines={1}>
+            {[showDay ? day : null, eventTimeLabel(event), event.location || null].filter(Boolean).join(" · ")}
+          </T>
+        </View>
+        {/* The people on it, in their own colours — the same dots as everywhere else. */}
+        <View style={{ flexDirection: "row", gap: 4 }}>
+          {(event.participantIds ?? []).slice(0, 4).map((pid) => {
+            const c = memberColor(colors, members.find((m) => m.actorId === pid));
+            return c ? <View key={pid} style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: c }} /> : null;
+          })}
+        </View>
+        <Sym name="chevron.right" size={11} color={colors.textFaint} />
+      </LinearGradient>
     </PressableScale>
   );
 }
@@ -95,6 +154,20 @@ function AdminToday() {
   const [openApproval, setOpenApproval] = useState<ApprovalRec | null>(null);
   const [choreOpen, setChoreOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
+  /* One of twenty questions, a different one each time you open the app. The card is a text
+   * field, so every one of them is answerable — see lib/ask-prompts. Picked once per mount:
+   * re-rolling on every render would change the question under your thumb mid-read. */
+  const [prompt] = useState(() => pickPrompt());
+  // The shimmer needs the card's real height to know how far to travel; it draws nothing until
+  // it has one, rather than guessing and jumping on the first layout pass.
+  const [heroH, setHeroH] = useState(0);
+  /* The member strip scrolls; these three tell us whether there is anything left to scroll
+   * TO, so the edge fade only appears when it means something. A permanent fade would be
+   * decoration; one that comes and goes is a readable answer to "is that everyone?". */
+  const [stripW, setStripW] = useState(0);
+  const [stripContentW, setStripContentW] = useState(0);
+  const [stripX, setStripX] = useState(0);
+  const stripOverflow = stripContentW > stripW + 4 && stripX < stripContentW - stripW - 4;
   const [householdName, setHouseholdName] = useState<string | null>(null);
   const [helpBusyId, setHelpBusyId] = useState<string | null>(null);
   // WP-001: calm confirmation after accepting help that transferred a task to me.
@@ -137,6 +210,9 @@ function AdminToday() {
     .filter((e) => e.startAt && !isToday(e.startAt) && new Date(e.startAt).getTime() > now.getTime())
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
     .slice(0, 3);
+  // What the Calendar card actually shows: today if there is a today, otherwise what's next.
+  // Three either way — a card that shows one thing and calls it "Next" was the complaint.
+  const cardEvents = todayEvents.length > 0 ? todayEvents.slice(0, 3) : upcoming.slice(0, 3);
   const bills = tasks.filter((t) => t.type === "bill" && t.status !== "done").slice(0, 4);
 
   // Help requests to/from me — the "needs your attention" companions.
@@ -251,7 +327,11 @@ function AdminToday() {
               ) : null}
             </View>
           </View>
-          <T kind="h1" style={{ fontSize: 32, lineHeight: 38 }}>Good {part}, {first}</T>
+          {/* The one moment on this screen worth marking: your own name, the first time you
+              see it after opening the app. Bloom runs once per launch, not once per visit. */}
+          <Bloom>
+            <T kind="h1" style={{ fontSize: 32, lineHeight: 38 }}>Good {part}, {first}</T>
+          </Bloom>
           <T kind="body">
             {offline ? "Can't reach your household right now."
               : pending.length > 0 ? `${pending.length} thing${pending.length === 1 ? "" : "s"} need${pending.length === 1 ? "s" : ""} your approval today.`
@@ -285,11 +365,18 @@ function AdminToday() {
                   grows. The strip scrolls horizontally instead and each cell is sized by its
                   own name, so the name is never the thing that has to give. Six members fit on
                   screen; a seventh scrolls rather than truncating anyone. */}
+              {/* Invite is PINNED outside the scroller (see the note on it below), so the strip
+                  gets the space that's left and the fade rides its own right edge. */}
+              <View style={{ flexDirection: "row", alignItems: "flex-start", marginHorizontal: -spacing.lg }}>
+                <View style={{ flex: 1 }}>
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
-                style={{ marginHorizontal: -spacing.lg }}
-                contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: spacing.lg, alignItems: "flex-start" }}
+                onLayout={(e) => setStripW(e.nativeEvent.layout.width)}
+                onContentSizeChange={(w) => setStripContentW(w)}
+                onScroll={(e) => setStripX(e.nativeEvent.contentOffset.x)}
+                scrollEventThrottle={32}
+                contentContainerStyle={{ paddingLeft: spacing.lg, paddingRight: spacing.sm, gap: spacing.lg, alignItems: "flex-start" }}
               >
                 {members.map((m) => {
                   const dest = isChild(m) ? "/kid" : isGrandparent(m) ? "/grandparent" : isHelper(m) ? "/sitter" : null;
@@ -308,35 +395,78 @@ function AdminToday() {
                     </PressableScale>
                   );
                 })}
+                {/* A big roster gets a way out of the strip rather than a longer swipe.
+                    Nobody is hidden — this is a shortcut to the full list, not a truncation. */}
+                {members.length > 8 ? (
+                  <PressableScale
+                    onPress={() => router.push("/household")}
+                    haptic="select"
+                    style={{ alignItems: "center", gap: 5, minWidth: 56, paddingHorizontal: 2 }}
+                    accessibilityLabel={`See all ${members.length} members`}
+                  >
+                    <View style={[st.avatar, { backgroundColor: colors.surfaceSunken }]}>
+                      <T kind="subMedium" color={colors.textSecondary}>{members.length}</T>
+                    </View>
+                    <T kind="detail">All</T>
+                  </PressableScale>
+                ) : null}
+              </ScrollView>
+              {/* The strip runs UNDER the pinned Invite, and this fade is what says so. Without
+                  it a scrollable row of avatars just looks like a row that stops. */}
+              {stripOverflow ? (
+                <LinearGradient
+                  pointerEvents="none"
+                  colors={[fade(colors.bg, 0), colors.bg]}
+                  start={{ x: 0, y: 0.5 }} end={{ x: 1, y: 0.5 }}
+                  style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 28 }}
+                />
+              ) : null}
+              </View>
+              {/* Invite lives OUTSIDE the scroll view.
+                  Reported: "the + sign which is add a new member is visibly cut off and not on
+                  the screen." It was inside the strip, so with five members and a photo each it
+                  sat past the right edge — reachable only if you happened to guess that a row
+                  of faces scrolls. Adding someone to your household is not a thing to hide
+                  behind a swipe, and it's the one control here that must not move as the
+                  roster grows. So it's pinned, and the roster scrolls beneath it. */}
+              <View style={{ paddingRight: spacing.lg, paddingLeft: 2 }}>
                 <PressableScale
                   onPress={() => setInviteOpen(true)}
                   haptic="select"
-                  style={{ alignItems: "center", gap: 5, minWidth: 56, paddingHorizontal: 2 }}
-                  accessibilityLabel="Invite someone"
+                  style={{ alignItems: "center", gap: 5, minWidth: 56 }}
+                  accessibilityLabel="Invite someone to the household"
                 >
                   <View style={[st.avatar, { borderWidth: 1.5, borderStyle: "dashed", borderColor: colors.textFaint }]}>
                     <Sym name="plus" size={18} color={colors.textMuted} />
                   </View>
                   <T kind="detail">Invite</T>
                 </PressableScale>
-              </ScrollView>
+              </View>
+              </View>
             </Rise>
           )}
 
-          {/* Ask Famili hero */}
+          {/* Ask Famili hero.
+              Smaller than it was ("the Ask Famili card could be smaller, about the size of the
+              Calendar card"): the padding drops from xl to lg and the question sets in h2
+              rather than the display face, which is what was taking three lines. */}
           <Rise index={2}>
             <PressableScale onPress={() => router.push("/(ask)")} accessibilityRole="button" accessibilityLabel="Ask Famili">
               <LinearGradient
                 colors={[colors.hero1, colors.hero2]}
                 start={{ x: 0.1, y: 0 }} end={{ x: 0.75, y: 1 }}
                 style={{
-                  borderRadius: 22, borderCurve: "continuous", padding: spacing.xl, gap: 10, overflow: "hidden",
+                  borderRadius: 22, borderCurve: "continuous", padding: spacing.lg, gap: 8, overflow: "hidden",
                   boxShadow: "0 18px 40px -20px rgba(21,26,38,0.55)",
                 }}
+                onLayout={(e) => setHeroH(e.nativeEvent.layout.height)}
               >
                 <View style={st.heroGlow} pointerEvents="none" />
+                {/* The living surface — see components/ask-shimmer. Behind the text, ahead of
+                    the base gradient, and it stops on its own. */}
+                {heroH > 0 ? <AskShimmer height={heroH} /> : null}
                 <T kind="eyebrow" color="rgba(245,241,233,0.55)">Ask Famili</T>
-                <T kind="hero" color={colors.heroText}>What can I take off your plate today?</T>
+                <T kind="h2" color={colors.heroText}>{prompt}</T>
                 <View style={st.heroInput}>
                   <T kind="sub" color="rgba(245,241,233,0.5)" style={{ flex: 1 }} numberOfLines={1}>
                     Plan a birthday, draft an email…
@@ -370,59 +500,40 @@ function AdminToday() {
                 </View>
                 <Sym name="chevron.right" size={13} color={colors.textFaint} />
               </View>
-              {todayEvents.length === 0 ? (
-                upcoming.length > 0 ? (
-                  <T kind="sub">
-                    Next: {upcoming[0].title} · {new Date(upcoming[0].startAt!).toLocaleDateString(undefined, { weekday: "short" })}{" "}
-                    {eventTimeLabel(upcoming[0])}
-                  </T>
-                ) : null
-              ) : (
-                <View style={{ gap: 8 }}>
-                  {todayEvents.slice(0, 3).map((e) => {
-                    const stripe = memberColor(colors, members.find((m) => m.actorId === e.participantIds?.[0]))
-                      ?? memberColor(colors, members.find((m) => m.actorId === e.ownerId))
-                      ?? colors.textFaint;
-                    return (
-                      <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-                        <View style={{ width: 3, alignSelf: "stretch", borderRadius: 2, backgroundColor: stripe }} />
-                        <View style={{ flex: 1, gap: 1 }}>
-                          <T kind="subMedium" color={colors.text} numberOfLines={1}>{e.title}</T>
-                          {!!e.location && <T kind="detail" numberOfLines={1}>{e.location}</T>}
-                        </View>
-                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                          {(e.participantIds ?? []).slice(0, 4).map((pid) => {
-                            const c = memberColor(colors, members.find((m) => m.actorId === pid));
-                            return c ? <View key={pid} style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c }} /> : null;
-                          })}
-                          <T kind="detail" color={colors.textMuted}>
-                            {eventTimeLabel(e)}
-                          </T>
-                        </View>
-                      </View>
-                    );
-                  })}
-                  {todayEvents.length > 3 && (
+              {/* Reported: the next event read as "Next: …" in the same type as the card
+                  titles, so a real appointment looked like a heading. It's a THING now — a card
+                  inside the card, in the colour of whoever it belongs to, that opens the event
+                  when you tap it. Today's plans if there are any; otherwise what's coming. */}
+              {cardEvents.length > 0 ? (
+                <View style={{ gap: 6 }}>
+                  {cardEvents.map((e) => (
+                    <EventChip key={e.id} event={e} members={members} showDay={todayEvents.length === 0} />
+                  ))}
+                  {todayEvents.length > 3 ? (
                     <T kind="detail" color={colors.ember}>+{todayEvents.length - 3} more today</T>
-                  )}
+                  ) : null}
                 </View>
-              )}
+              ) : null}
             </PressableCard>
           </Rise>
 
           {/* Ask OR offer help — hand a task off to, or pitch in for, a
               grandparent, sitter or family member. */}
           <Rise index={4}>
-            <Card style={{ gap: spacing.md }}>
+            <Card style={{ gap: spacing.sm }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-                <SymTile name="hand.raised.fill" color={colors.lavender} bg={colors.lavenderBg} size={44} iconSize={21} />
-                <View style={{ flex: 1, gap: 3 }}>
+                <SymTile name="hand.raised.fill" color={colors.lavender} bg={colors.lavenderBg} size={36} iconSize={17} />
+                <View style={{ flex: 1, gap: 2 }}>
                   {/* [v2 01:37] "this text on here, ask or offer for help, it's very
                       inconspicuous. Too small. You can't actually tell what's going on there."
                       It was a row title over a caption; on a grandparent's home it was the
                       main thing on screen and read as fine print. */}
                   <T kind="h3" color={colors.text}>Ask or offer help</T>
-                  <T kind="sub">Hand something off to — or pitch in for — a grandparent, sitter or family member</T>
+                  {/* Reported: too long, and it broke badly — the em-dash landed at the start of
+                      a line and "member" was left stranded on its own below. Em-dash pairs are
+                      the problem: they can't be hyphenated or kept with their clause, so they
+                      go wherever the wrap falls. Two short lines that can't break wrong. */}
+                  <T kind="sub">Hand something off, or pitch in for someone else.</T>
                 </View>
               </View>
               <View style={{ flexDirection: "row", gap: spacing.sm }}>
