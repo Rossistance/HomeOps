@@ -6,7 +6,12 @@ import Animated, { FadeInDown, ReduceMotion } from "react-native-reanimated";
 export function Rise({ index = 0, children, style }: { index?: number; children: ReactNode; style?: object }) {
   return (
     <Animated.View
-      entering={FadeInDown.duration(300).delay(Math.min(index, 8) * 45).reduceMotion(ReduceMotion.System)}
+      /* Springified rather than eased. A cubic curve arrives and stops; a spring arrives and
+       * settles, and at this distance (10pt) the difference is most of what separates
+       * "animated" from "physical". Damping is high enough that it doesn't visibly bounce —
+       * the overshoot is a few tenths of a point, felt rather than seen. Entrance only: this
+       * is not `layout`, which is what caused the runaway scroll described below. */
+      entering={FadeInDown.springify().damping(19).stiffness(190).delay(Math.min(index, 8) * 45).reduceMotion(ReduceMotion.System)}
       /* `layout={LinearTransition}` used to be here, on EVERY section of EVERY screen.
        *
        * Reported: "when I scroll down to the very bottom, sometimes this just keeps going. It

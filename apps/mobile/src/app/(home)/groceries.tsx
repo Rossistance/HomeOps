@@ -10,7 +10,7 @@ import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic, motion } from "@/theme";
 import {
-  T, Card, Chip, ChipRow, Well, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
+  T, Card, CheckCircle, Chip, ChipRow, Well, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
   Sym, PressableScale, HSheet, SheetCTA, Notice, useConfirmFlash,
 } from "@/components/ui";
 
@@ -161,18 +161,9 @@ export default function GroceriesScreen() {
           borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator,
         }}
       >
-        <PressableScale onPress={() => void toggle(t)} haptic={null} hitSlop={10} disabled={editing} accessibilityRole="checkbox" accessibilityState={{ checked: isDone }} accessibilityLabel={t.title}>
-          <View
-            style={{
-              width: 26, height: 26, borderRadius: 13, alignItems: "center", justifyContent: "center",
-              borderWidth: isDone ? 0 : 1.5, borderColor: colors.textFaint,
-              backgroundColor: isDone ? colors.ember : "transparent",
-              opacity: editing ? 0.4 : 1,
-            }}
-          >
-            {isDone && <Sym name="checkmark" size={14} color={colors.onEmber} />}
-          </View>
-        </PressableScale>
+        {/* The same check-off as Tasks — it was an instant colour flip here and a spring
+            there, for the gesture people make most in this app. */}
+        <CheckCircle done={isDone} onPress={() => void toggle(t)} disabled={editing} size={26} tone={colors.ember} label={t.title} />
         {editing ? (
           <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
             <TextInput

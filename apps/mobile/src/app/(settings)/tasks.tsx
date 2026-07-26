@@ -5,7 +5,6 @@
 // visibility; we only surface friendly messages when it says no.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, TextInput, View } from "react-native";
-import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withSequence, withSpring } from "react-native-reanimated";
 import { api, type HelpRequestRec, type MemberRec, type NestRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
@@ -13,7 +12,7 @@ import { useTheme, tapHaptic } from "@/theme";
 import { memberTone } from "@/lib/member-colors";
 // "ui/index" (not "ui"): the legacy src/components/ui.tsx still shadows the ui/
 // directory until the old screens are all ported — this resolves the new system.
-import { Badge, Button, Card, Chip, ChipRow, EmptyState, ErrorState, HScreen, Notice, Rise, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
+import { Badge, Button, Card, CheckCircle, Chip, ChipRow, EmptyState, ErrorState, HScreen, Notice, Rise, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
 import { TaskSheet } from "@/components/sheets/task-sheet";
 
 /* ------------------------------ grouping ------------------------------ */
@@ -59,34 +58,8 @@ function friendly(error?: string, message?: string): string {
   }
 }
 
-/* --------------------------- animated checkbox ------------------------- */
-function TaskCheck({ done, onPress }: { done: boolean; onPress: () => void }) {
-  const { colors } = useTheme();
-  const scale = useSharedValue(1);
-  const first = useRef(true);
-  useEffect(() => {
-    if (first.current) { first.current = false; return; }
-    scale.value = withSequence(
-      withSpring(1.2, { damping: 12, stiffness: 420, reduceMotion: ReduceMotion.System }),
-      withSpring(1, { damping: 15, stiffness: 320, reduceMotion: ReduceMotion.System }),
-    );
-  }, [done, scale]);
-  const a = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
-  return (
-    <Pressable onPress={onPress} hitSlop={10} accessibilityRole="checkbox" accessibilityState={{ checked: done }} accessibilityLabel={done ? "Mark as open" : "Mark as done"}>
-      <Animated.View
-        style={[{
-          width: 24, height: 24, borderRadius: 12, borderWidth: 2,
-          borderColor: done ? colors.sage : colors.textFaint,
-          backgroundColor: done ? colors.sage : "transparent",
-          alignItems: "center", justifyContent: "center",
-        }, a]}
-      >
-        {done ? <Sym name="checkmark" size={13} color={colors.surface} /> : null}
-      </Animated.View>
-    </Pressable>
-  );
-}
+/* The check-off lives in the UI kit now (components/ui/check-circle), because Groceries
+ * needed exactly this and had a plain colour flip instead. Same gesture, same feel. */
 
 /* -------------------------------- row ---------------------------------- */
 function TaskRow({ t, members, last, showGroup, helping, onToggle, onLongPress, onOpen }: {
@@ -106,7 +79,7 @@ function TaskRow({ t, members, last, showGroup, helping, onToggle, onLongPress, 
   return (
     <Pressable onPress={onOpen} onLongPress={onLongPress} delayLongPress={350} accessibilityLabel={t.title} accessibilityHint="Opens the task">
       <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: 12, borderBottomWidth: last ? 0 : 1, borderBottomColor: colors.border }}>
-        <TaskCheck done={done} onPress={onToggle} />
+        <CheckCircle done={done} onPress={onToggle} />
         <View style={{ flex: 1, gap: 4 }}>
           <T
             kind="bodyMedium"
