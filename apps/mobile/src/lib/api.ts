@@ -299,6 +299,10 @@ export interface EvolutionReviewRec {
 /** Household settings the mobile client can read/toggle. */
 export interface AppSettingsRec {
   externalActionsEnabled: boolean; ownerPinSet: boolean;
+  /** True when a PIN set in the deployment's ENVIRONMENT is also being accepted for
+   *  elevated sign-in — a single shared secret that opens every Owner and Adult Admin
+   *  account. Surfaced so a household can see it rather than be told about it. */
+  breakGlassActive?: boolean;
   aiActiveProvider: string | null; calendarAutoSync: boolean;
   autoApproveImprovements: boolean;
 }
@@ -1131,8 +1135,8 @@ export const api = {
     const r = await req<{ settings: AppSettingsRec }>("/settings");
     return r.data?.settings ?? null;
   },
-  async updateSettings(patch: Partial<Pick<AppSettingsRec, "externalActionsEnabled" | "calendarAutoSync" | "autoApproveImprovements">>): Promise<{ settings?: AppSettingsRec; error?: string }> {
-    const r = await req<{ settings?: AppSettingsRec; error?: string }>("/settings", { method: "POST", body: JSON.stringify(patch) });
+  async updateSettings(patch: Partial<Pick<AppSettingsRec, "externalActionsEnabled" | "calendarAutoSync" | "autoApproveImprovements">> & { ownerPin?: string }): Promise<{ settings?: AppSettingsRec; error?: string; message?: string }> {
+    const r = await req<{ settings?: AppSettingsRec; error?: string; message?: string }>("/settings", { method: "POST", body: JSON.stringify(patch) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },

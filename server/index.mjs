@@ -3923,7 +3923,12 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (path === "/api/settings" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const s = getSettings(g.session.householdId);
-      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof s.autoApproveImprovements !== "boolean", timezone: s.timezone ?? null, hideProfilesPreAuth: s.hideProfilesPreAuth === true } }, req);
+      /* breakGlassActive — say out loud that a PIN set in the deployment's environment is
+       * ALSO being accepted right now. It's a single shared secret that opens every Owner
+       * and Adult Admin account in the resident household, and while it's set there is no
+       * way to tell from inside the app that your sign-in went through it. A household
+       * shouldn't have to take my word for who can get in. */
+      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, breakGlassActive: !!pinHashOfBootstrap() && g.session.householdId === CURRENT_TENANT, aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof s.autoApproveImprovements !== "boolean", timezone: s.timezone ?? null, hideProfilesPreAuth: s.hideProfilesPreAuth === true } }, req);
     }
     if (path === "/api/settings" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -3940,7 +3945,15 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // WP-010 pre-auth privacy (ISS-015): when ON, this household's roster is hidden from
       // the pre-auth profile picker to anyone without a session for it (see /api/profiles).
       if (typeof body.hideProfilesPreAuth === "boolean") patch.hideProfilesPreAuth = body.hideProfilesPreAuth;
-      if (typeof body.ownerPin === "string" && body.ownerPin) patch.ownerPinHash = crypto.createHash("sha256").update(body.ownerPin).digest("hex");
+      /* The household's own sign-in PIN. Refuse a too-short one HERE rather than in the
+       * form: this is the gate on every Owner and Adult Admin sign-in, and a client that
+       * skips its own validation must not be able to set a one-digit PIN on it. */
+      if (typeof body.ownerPin === "string" && body.ownerPin) {
+        if (!/^\d{4,12}$/.test(body.ownerPin)) {
+          return json(res, 400, { error: "bad_pin", message: "A sign-in PIN is 4 to 12 digits." }, req);
+        }
+        patch.ownerPinHash = crypto.createHash("sha256").update(body.ownerPin).digest("hex");
+      }
       // Household timezone: an IANA zone name (e.g. "America/New_York") that anchors
       // "every day at 7 AM" triggers to a real wall-clock time (server/triggers.mjs
       // nextAnchorOccurrence). Without this, a scheduled trigger silently falls back to
@@ -3953,7 +3966,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       }
       const next = setSettings(patch, g.session.householdId);
       audit({ type: "settings.update", ok: true, changed: Object.keys(patch), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
-      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true, autoApproveImprovements: next.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof next.autoApproveImprovements !== "boolean", timezone: next.timezone ?? null, hideProfilesPreAuth: next.hideProfilesPreAuth === true } }, req);
+      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, breakGlassActive: !!pinHashOfBootstrap() && g.session.householdId === CURRENT_TENANT, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true, autoApproveImprovements: next.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof next.autoApproveImprovements !== "boolean", timezone: next.timezone ?? null, hideProfilesPreAuth: next.hideProfilesPreAuth === true } }, req);
     }
 
     /* ---- AI providers ---- */
