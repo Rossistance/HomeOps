@@ -9,20 +9,21 @@ services:
     # build time on Render, and a bare `npm ci` would omit the devDependencies
     # that the build itself needs (vite, tsc, tailwind).
     # T4 — "how am I intended to run browser automation with Playwright or something similar
-    # from the server? Is that stored and ran from the server? We need to make this be able to
-    # work." From the server, yes — and the reason it said "runtime offline" is right here: the
-    # playwright PACKAGE was installed, but its Chromium BINARY never was. server/browser.mjs
-    # would try to launch, fail, and mark itself unavailable for the life of the process, so the
-    # connector honestly reported a runtime that genuinely wasn't there.
+    # from the server? We need to make this be able to work."
     #
-    # `--with-deps` because a bare Linux container lacks the shared libraries Chromium needs
-    # (libnss3, libatk, …), and without them the install succeeds and the launch still fails —
-    # the worst of both. Render's build runs as root, so it can install them.
+    # From the server, and it was one line short of working. `postinstall` already downloads
+    # Chromium into node_modules (scripts/postinstall-browser.mjs, matching the
+    # PLAYWRIGHT_BROWSERS_PATH=0 that server/browser.mjs sets before launching) — but a bare
+    # Linux container has none of the shared libraries Chromium links against, so the download
+    # succeeded, the launch failed, and browser.mjs stickily marked the runtime unavailable for
+    # the life of the process. The connector then honestly reported "runtime offline" about a
+    # browser that really was sitting there on disk, unable to start.
     #
-    # Honest cost: this adds roughly 400 MB and a couple of minutes to every build. Worth it for
-    # a capability that was advertised in the UI and could not work; not worth it silently, so
-    # it's written down here.
-    buildCommand: npm ci --include=dev && npx playwright install --with-deps chromium && npm run build
+    # `install-deps` installs exactly those system packages and nothing else — the browser is
+    # already handled, so this deliberately does not re-download it. Render's build runs as
+    # root, which is what apt needs. Non-fatal on purpose: if this ever fails, web.read still
+    # degrades to plain HTML fetching rather than the deploy falling over.
+    buildCommand: npm ci --include=dev && (npx playwright install-deps chromium || echo "[familios] browser deps unavailable — web.read will use plain HTML fetching") && npm run build
     startCommand: npm start
     autoDeploy: true
     healthCheckPath: /api/health
