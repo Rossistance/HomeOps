@@ -5,7 +5,10 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": ["familios", "homeops"],
+    "scheme": [
+      "familios",
+      "homeops"
+    ],
     "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "ai.familios.app",
@@ -60,7 +63,8 @@
             "backgroundColor": "#10141E"
           }
         }
-      ]
+      ],
+      "expo-speech-recognition"
     ],
     "experiments": {
       "typedRoutes": false,

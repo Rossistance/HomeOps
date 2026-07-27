@@ -4,6 +4,8 @@ export { Bloom } from "./bloom";
 export { Coach } from "./coach";
 export { ScreenTour } from "./screen-tour";
 export { Expander, GoArrow } from "./expander";
+export { DictateButton, useDictation } from "./dictate";
+export { FamiliMark } from "./famili-mark";
 export { T } from "./text";
 export { Sym, SymTile } from "./symbol";
 export { BrandIcon } from "./brand-icon";

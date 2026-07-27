@@ -7,6 +7,7 @@ import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pre
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import { prepareImage } from "@/lib/prepare-image";
+import { AttachmentTile } from "@/components/AttachmentTile";
 import { readAsStringAsync } from "expo-file-system/legacy";
 import Animated, {
   FadeInDown, ReduceMotion, cancelAnimation, clamp, runOnJS,
@@ -25,9 +26,10 @@ import { useSession } from "@/lib/session";
 import { useRun } from "@/lib/run-context";
 import { useTheme, useCalmMotion, riskColor, tapHaptic } from "@/theme";
 import { humanDetail } from "@/lib/format";
+import { depth, rimColor } from "@/theme/neumorph";
 // NOTE: explicit /index path — the legacy src/components/ui.tsx (old design
 // system, deleted with the old screens) shadows the ui/ directory otherwise.
-import { Badge, Button, Card, Coach, EmptyState, MarkdownText, Notice, PressableScale, ScreenTour, Sym, SymTile, T } from "@/components/ui";
+import { Badge, Button, Card, Coach, DictateButton, EmptyState, FamiliMark, GoArrow, MarkdownText, Notice, PressableScale, ScreenTour, Sym, SymTile, T, useDictation } from "@/components/ui";
 
 // The server returns richer creation data than the shared BuildResult/ChatBuild
 // types declare (WP-006): created.agent carries its REAL post-build `status` —
@@ -53,6 +55,25 @@ interface Msg {
   // K2 — what the run actually fetched, as cards, in line. "still not returned in line, in
   // chat, results as cards."
   resultGroups?: ResultGroupRec[];
+  /** What rode along with this message, so the bubble can show it rather than name it. */
+  attachments?: { key: string; name: string; uri?: string; mime?: string }[];
+}
+
+/**
+ * Strip the "[Attached: …]" line the send path prepends.
+ *
+ * That prefix is addressed to the MODEL — it's how the server knows what rode along with the
+ * turn. With a real thumbnail above the bubble it would be the same fact told twice, the second
+ * time worse, so the bubble shows only what the person actually typed. Written out rather than
+ * inlined because it's needed in two places and a regex duplicated is a regex that drifts.
+ */
+function withoutAttachmentPrefix(text: string): string {
+  const t = String(text ?? "");
+  if (!t.startsWith("[Attached:")) return t;
+  const close = t.indexOf("]");
+  if (close === -1) return t;
+  const rest = t.slice(close + 1);
+  return rest.startsWith("\n") ? rest.slice(1) : rest;
 }
 
 interface Suggestion { text: string; icon: string }
@@ -66,6 +87,12 @@ interface Attachment {
   status: "uploading" | "ready" | "failed";
   /** Why it failed, in the words we'd show a person. */
   error?: string;
+  /* L2/L4 — "I need to see a very small box that depicts it, whether it's an image, a document
+   * or any sort of file… a miniature thumbnail of them, just like you would see in ChatGPT."
+   * The local uri is kept so a picked photo appears the instant you pick it, rather than after
+   * a round trip — the thumbnail is the receipt for the tap. */
+  uri?: string;
+  mime?: string;
 }
 
 /** "personal" | "household" | "nest:<id>" — the three places a chat can live. */
@@ -332,7 +359,7 @@ export default function AskScreen() {
 
   // Deep link support: the Inbox screen links with /(ask)?c=<conversation id>;
   // the Approval sheet links with ?prefill=<draft message> (filled, not sent).
-  const params = useLocalSearchParams<{ c?: string; prefill?: string; draft?: string }>();
+  const params = useLocalSearchParams<{ c?: string; prefill?: string; draft?: string; dictate?: string }>();
   const handledC = useRef<string | null>(null);
   useEffect(() => {
     const id = typeof params.c === "string" && params.c ? params.c : null;
@@ -383,6 +410,25 @@ export default function AskScreen() {
     setConversationId(null);
     setMsgs([]);
   }, []);
+
+  /* The space pill's label and colour, and the picker behind it. One control replacing the
+   * row of chips — see the note at its render site. Adult Members are silo'd, so Family isn't
+   * offered to them: a menu entry that always refuses is worse than no entry. */
+  const spaceLabel = nestId
+    ? (myNests.find((n) => n.id === nestId)?.label ?? "Nest")
+    : space === "household" ? "Family" : "Personal";
+  const spaceTint = nestId ? colors.sky : space === "household" ? colors.ember : colors.lavender;
+
+  const openSpacePicker = useCallback(() => {
+    const options: { text: string; onPress?: () => void; style?: "cancel" }[] = [
+      { text: "Personal", onPress: () => switchSpace("personal") },
+      ...myNests.map((n) => ({ text: n.label, onPress: () => switchSpace(`nest:${n.id}` as SpaceKey) })),
+      ...(isAdmin ? [{ text: "Family", onPress: () => switchSpace("household") }] : []),
+      { text: "Cancel", style: "cancel" as const },
+    ];
+    Alert.alert("Show chats from", "Switching only changes which chats you're looking at. To move one, press and hold it.", options);
+  }, [isAdmin, myNests, switchSpace]);
+
 
   /** Move ONE thread to another space — from a press and hold, where an edit belongs. */
   const moveConversation = useCallback((c: ConversationRec) => {
@@ -461,9 +507,31 @@ export default function AskScreen() {
   }, [conversationId, loadHome]);
 
   /* ---------- send: stream first, silently fall back to POST /api/assistant ---------- */
+  /* E2 — "we need to add the dictation right near the send button down here that allows for
+   * users to dictate." Words land in the composer as they're spoken, so you can see it working
+   * and edit before sending rather than trusting it blind. */
+  const inputRef = useRef<TextInput>(null);
+  const { listening, toggle: toggleDictation } = useDictation(setText);
+
+  /* E1's other half — Today's Ask card sends people here with ?dictate=1, meaning "I tapped the
+   * microphone over there". Start listening on arrival so the tap does what it looked like it
+   * would, rather than depositing them in a chat with a keyboard up. */
+  const dictateParam = params.dictate;
+  const dictateArmed = useRef(false);
+  useEffect(() => {
+    if (dictateParam !== "1" || dictateArmed.current) return;
+    dictateArmed.current = true;
+    const t = setTimeout(() => void toggleDictation(""), 350);
+    return () => clearTimeout(t);
+  }, [dictateParam, toggleDictation]);
+
   const send = useCallback(async (preset?: string) => {
     const t0 = (preset ?? text).trim();
-    if (!t0 || busy) return;
+    /* L3 — "I should be able to send, in an existing chat and a new chat, just an image with no
+     * text. However right now it is greyed out if I do not have text inside of the body."
+     * A photo IS the message when what you're asking is "what's in this", so an attachment
+     * counts as content. Nothing and nothing is still nothing to send. */
+    if ((!t0 && !attached.some((a) => a.status === "ready" && a.id)) || busy) return;
     flushReveal();
     /* Attachments ride along: named in the message text and passed as context so the planner
      * can read them. Only the ones that FINISHED — sending mid-upload would hand the server an
@@ -472,14 +540,33 @@ export default function AskScreen() {
      * the tray for the next message rather than being silently dropped. */
     const ready = attached.filter((a) => a.status === "ready" && a.id);
     setAttached((as) => as.filter((a) => a.status === "uploading"));
-    const t = ready.length ? `[Attached: ${ready.map((a) => a.name).join(", ")}]\n${t0}` : t0;
+    const names = ready.map((a) => a.name).join(", ");
+    // A photo with no words still needs a message body, or the turn has nothing to persist.
+    const t = ready.length ? (t0 ? `[Attached: ${names}]\n${t0}` : `[Attached: ${names}]`) : t0;
     const uid = String(Date.now());
     setText("");
+    /* M1/M2/M4 — "the assistant's response is hidden down here… when I send this, this entire
+     * section of keyboard needs to come all the way down. I just need to see 'Message Famili'.
+     * I should be able to read the entire response, I should not have to manually scroll."
+     *
+     * The keyboard was staying up after send, so the reply arrived into the ~40% of the screen
+     * it wasn't covering. Dismissing it is what actually gives the answer room — following the
+     * scroll alone can't, because there was nowhere to follow it TO.
+     *
+     * M3 — "my cursor should stay active." Dismissing the keyboard normally blurs the field,
+     * so the composer keeps focus explicitly: type again and the keyboard returns without a
+     * tap, which is the difference between dismissing a keyboard and losing your place. */
+    Keyboard.dismiss();
+    // Focus survives the dismissal, so typing again brings the keyboard straight back.
+    setTimeout(() => inputRef.current?.focus(), 400);
     setPhase("thinking");
     justSentRef.current = true;
     // The room is needed for reading the moment a conversation starts.
     setHeaderOpen(false);
-    setMsgs((m) => [...m, { id: uid, role: "user", text: t }]);
+    setMsgs((m) => [...m, {
+      id: uid, role: "user", text: t,
+      attachments: ready.map((a) => ({ key: a.key, name: a.name, uri: a.uri, mime: a.mime })),
+    }]);
     setBusy(true);
     // First turn creates the durable server thread; later turns reuse it.
     let convId = conversationId;
@@ -587,7 +674,7 @@ export default function AskScreen() {
           setAttached((as) => [...as, { key, name, status: "failed", error: "Over the 25 MB cap" }]);
           continue;
         }
-        setAttached((as) => [...as, { key, name, status: "uploading" }]);
+        setAttached((as) => [...as, { key, name, status: "uploading", mime: a.mimeType ?? undefined }]);
         try {
           const b64 = await readAsStringAsync(a.uri, { encoding: "base64" });
           await uploadAttachment(key, name, b64, a.mimeType ?? "application/octet-stream");
@@ -614,7 +701,7 @@ export default function AskScreen() {
       for (const a of res.assets) {
         const key = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
         const name = a.fileName ?? `photo-${Date.now()}.jpg`;
-        setAttached((as) => [...as, { key, name, status: "uploading" }]);
+        setAttached((as) => [...as, { key, name, status: "uploading", uri: a.uri, mime: "image/jpeg" }]);
         const prepped = await prepareImage(a.uri, { name, width: a.width, height: a.height });
         if (!prepped) { putAttachment(key, { status: "failed", error: "Couldn't read that photo" }); continue; }
         if (prepped.bytes > MAX_ATTACH_BYTES) { putAttachment(key, { status: "failed", error: "Over the 25 MB cap" }); continue; }
@@ -650,7 +737,7 @@ export default function AskScreen() {
       if (!a) return;
       const key = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
       const name = a.fileName ?? `photo-${Date.now()}.jpg`;
-      setAttached((as) => [...as, { key, name, status: "uploading" }]);
+      setAttached((as) => [...as, { key, name, status: "uploading", uri: a.uri, mime: "image/jpeg" }]);
       // Same path as a picked photo: resized and re-encoded as JPEG, so a camera capture is
       // just as readable and just as quick to upload.
       const prepped = await prepareImage(a.uri, { name, width: a.width, height: a.height });
@@ -780,6 +867,27 @@ export default function AskScreen() {
           headerTransparent: false,
           headerStyle: { backgroundColor: colors.bg },
           headerShadowVisible: false,
+          /* K1 — "the icon on the Ask Famili screen is not the FamiliOS icon; it needs to be."
+             The title carries the app's own spark rather than a bare word. */
+          headerTitle: () => (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
+              <FamiliMark size={24} />
+              <T kind="h3" color={colors.text}>Ask Famili</T>
+            </View>
+          ),
+          /* K2 — "there needs to be a back button added to the top here." This screen is the
+             root of its tab, so there is no stack entry to pop; back means Today, which is
+             where the Ask card that sends people here lives. */
+          headerLeft: () => (
+            <Pressable
+              onPress={() => { tapHaptic("select"); router.navigate("/(home)"); }}
+              hitSlop={12}
+              accessibilityRole="button"
+              accessibilityLabel="Back to Today"
+            >
+              <Sym name="chevron.left" size={22} color={colors.ember} />
+            </Pressable>
+          ),
           headerRight: () => (
             <Pressable
               onPress={() => { tapHaptic("light"); newChat(); }}
@@ -817,105 +925,62 @@ export default function AskScreen() {
           {/* Space toggle: where THIS chat lives. Personal = private to you;
               Family = shared with the household. Locked once a thread exists
               (the server owns the record's visibility from creation). */}
-          <Coach id="ask.spaces" style={{ display: headerOpen ? "flex" : "none" }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            {/* An Adult Member's chats are private to them (the silo), so the Family option
-                isn't offered — a toggle that always refuses is worse than no toggle. */}
-            {([
-              ["personal", "Personal", colors.lavender] as const,
-              // One chip per nest this person is actually in, between Personal and Family —
-              // which is the order he described, and matches how private each one is.
-              ...myNests.map((n) => [`nest:${n.id}`, n.label, colors.sky] as const),
-              ["household", "Family", colors.ember] as const,
-            ])
-              .filter(([key]) => isAdmin || key !== "household")
-              .map(([key, label, tint]) => {
-              const active = key.startsWith("nest:") ? nestId === key.slice(5) : (space === key && !nestId);
-              return (
-                <PressableScale
-                  key={key}
-                  haptic="select"
-                  /* I3 [16:45] — "from inside a chat I can't switch between Personal and
-                     Family without starting a new chat. That's not the correct path." First it
-                     was disabled once a thread existed; then it MOVED the thread, which turned a
-                     navigation control into an edit and offered to publish something written in
-                     private. It switches which chats you're LOOKING at. Moving one is a press
-                     and hold on the thread itself — see conversationActions. */
-                  onPress={() => { if (!active) switchSpace(key as SpaceKey); }}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: active }}
-                  accessibilityLabel={`${label} space`}
-                  accessibilityHint={`Shows your ${label} chats`}
-                  style={{
-                    flexDirection: "row", alignItems: "center", gap: 6,
-                    paddingHorizontal: 11, paddingVertical: 6, borderRadius: 999,
-                    backgroundColor: active ? tint : "transparent",
-                    borderWidth: 1, borderColor: active ? tint : colors.border,
-                  }}
+          {/* K4/K5 — "all of these historical chats will move up a line and be in line with
+              Personal… if I needed to change to Family there could be a small dropdown near a
+              single bubble that lets me change in between personal and family."
+              So the space toggle stopped being a row of chips and became ONE pill at the head
+              of the chat row. That is the whole row he wanted back: the toggle and the threads
+              now share a line, and the pill stays put while the threads scroll past it. */}
+          <Coach id="ask.spaces">
+          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+            <PressableScale
+              onPress={openSpacePicker}
+              haptic="select"
+              accessibilityRole="button"
+              accessibilityLabel={`${spaceLabel} chats. Change space`}
+              style={{
+                flexDirection: "row", alignItems: "center", gap: 6,
+                paddingLeft: 11, paddingRight: 8, paddingVertical: 7, borderRadius: 999,
+                backgroundColor: colors.surfaceSunken,
+                borderWidth: 1, borderColor: rimColor(colors, dark),
+                boxShadow: depth("raisedSm", colors, dark),
+              }}
+            >
+              <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: spaceTint }} />
+              <T kind="detail" color={colors.text} style={{ fontWeight: "600" }}>{spaceLabel}</T>
+              <Sym name="chevron.down" size={11} color={colors.textMuted} />
+            </PressableScale>
+
+            {visibleRecent.length > 0 ? (
+              <Coach id="ask.threads" style={{ flex: 1 }}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={{ flexGrow: 0 }}
+                  contentContainerStyle={{ paddingRight: spacing.lg, gap: spacing.sm, alignItems: "center" }}
+                  keyboardShouldPersistTaps="handled"
                 >
-                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: active ? colors.surface : tint }} />
-                  <T kind="detail" color={active ? colors.surface : colors.textSecondary} style={{ fontWeight: "600" }}>{label}</T>
-                </PressableScale>
-              );
-            })}
-            <T kind="caption" color={colors.textFaint} style={{ flex: 1 }} numberOfLines={1}>
-              {/* The hint describes where you ARE, not what a tap would do to the open chat —
-                  the chips don't touch it any more. */}
-              {movingSpace ? "Moving that chat…"
-                : nestId ? `Only ${myNests.find((n) => n.id === nestId)?.label ?? "your nest"} can see this`
-                : space === "household" ? "Shared with the household"
-                : isAdmin ? "Only you can see this chat"
-                : "Your chats are private to you"}
-            </T>
+                  {visibleRecent.map((c) => (
+                    <ConvChip
+                      key={c.id}
+                      label={c.title || "Untitled chat"}
+                      dot={c.visibility === "household" ? colors.ember : colors.lavender}
+                      selected={c.id === conversationId}
+                      onPress={() => void openConversation(c.id)}
+                      onLongPress={() => conversationActions(c)}
+                      hint="Long press to move or delete"
+                    />
+                  ))}
+                </ScrollView>
+              </Coach>
+            ) : (
+              <T kind="caption" color={colors.textFaint} numberOfLines={1} style={{ flex: 1 }}>
+                {nestId ? "Only your nest can see this" : space === "household" ? "Shared with the household" : "Private to you"}
+              </T>
+            )}
           </View>
           </Coach>
 
-          {/* "What's this screen?" — renders nothing unless this route has a chapter, so it can
-              never be a button that apologises. Only in the expanded header: the collapsed one
-              is deliberately a single row. */}
-          {headerOpen ? <ScreenTour route="/(ask)" /> : null}
-
-          {/* Collapsed: just the dot, so you still know which space you are in. */}
-          {!headerOpen ? (
-            <PressableScale
-              haptic="select"
-              onPress={() => setHeaderOpen(true)}
-              accessibilityRole="button"
-              accessibilityLabel={`${space === "household" ? "Family" : "Personal"} space. Expand`}
-              style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
-            >
-              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: space === "household" ? colors.ember : colors.lavender }} />
-              <T kind="caption" color={colors.textFaint}>{space === "household" ? "Family" : "Personal"}</T>
-            </PressableScale>
-          ) : null}
-
-          {/* I2 [16:21] — "the Personal tab should show ONLY personal chats, and Family only
-              family. The dot colour is the section cue." They were all listed together under
-              both, which made the toggle above look decorative. */}
-          {visibleRecent.length > 0 ? (
-            <Coach id="ask.threads">
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={{ marginHorizontal: -spacing.lg, flexGrow: 0 }}
-              contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: spacing.sm, alignItems: "center" }}
-              keyboardShouldPersistTaps="handled"
-            >
-              <ConvChip icon="plus" label="New" onPress={newChat} />
-              {visibleRecent.map((c) => (
-                <ConvChip
-                  key={c.id}
-                  label={c.title || "Untitled chat"}
-                  dot={c.visibility === "household" ? colors.ember : colors.lavender}
-                  selected={c.id === conversationId}
-                  onPress={() => void openConversation(c.id)}
-                  onLongPress={() => conversationActions(c)}
-                  hint="Long press to move or delete"
-                />
-              ))}
-            </ScrollView>
-            </Coach>
-          ) : null}
           {/* The grab handle — the affordance that says this can move. */}
           <View style={{ alignItems: "center", paddingTop: 2 }}>
             <View style={{ width: 34, height: 4, borderRadius: 2, backgroundColor: colors.border }} />
@@ -1019,10 +1084,26 @@ export default function AskScreen() {
             if (m.role === "user") {
               // Handoff: user bubbles are fixed ink-navy in BOTH modes (18/18/4/18).
               return (
-                <Animated.View key={m.id} entering={FadeInDown.duration(200).reduceMotion(ReduceMotion.System)} style={{ alignItems: "flex-end" }}>
-                  <View style={{ backgroundColor: "#2A3147", borderRadius: 18, borderBottomRightRadius: 4, borderCurve: "continuous", paddingHorizontal: 14, paddingVertical: 10, maxWidth: "86%" }}>
-                    <T selectable color="#F3EDE1">{m.text}</T>
-                  </View>
+                <Animated.View key={m.id} entering={FadeInDown.duration(200).reduceMotion(ReduceMotion.System)} style={{ alignItems: "flex-end", gap: 6 }}>
+                  {/* L1 — "the way it was attached and previewed to me was just as text. It
+                      needs to be a LIVE PREVIEW in the chat, just like any other chat interface
+                      would have." The bubble carried the filename in square brackets, which is
+                      a description of a photo rather than the photo. */}
+                  {m.attachments?.length ? (
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, justifyContent: "flex-end", maxWidth: "86%" }}>
+                      {m.attachments.map((a) => (
+                        <AttachmentTile key={a.key} name={a.name} uri={a.uri} mime={a.mime} size={92} />
+                      ))}
+                    </View>
+                  ) : null}
+                  {withoutAttachmentPrefix(m.text).trim() ? (
+                    <View style={{ backgroundColor: "#2A3147", borderRadius: 18, borderBottomRightRadius: 4, borderCurve: "continuous", paddingHorizontal: 14, paddingVertical: 10, maxWidth: "86%" }}>
+                      {/* The "[Attached: …]" prefix is for the model, not for you — it's how the
+                          server knows what rode along. With a real thumbnail above it, showing
+                          it as well would be saying the same thing twice, worse. */}
+                      <T selectable color="#F3EDE1">{withoutAttachmentPrefix(m.text)}</T>
+                    </View>
+                  ) : null}
                 </Animated.View>
               );
             }
@@ -1155,9 +1236,14 @@ export default function AskScreen() {
                       borderWidth: 1, borderColor: a.status === "failed" ? colors.coral : "transparent",
                     }}
                   >
+                    {/* The thumbnail, not a paperclip: "I need to see a very small box that
+                        depicts it… a miniature thumbnail of them, just like ChatGPT." */}
+                    <AttachmentTile name={a.name} uri={a.uri} mime={a.mime} size={28} />
                     {a.status === "uploading"
                       ? <ActivityIndicator size="small" color={colors.textMuted} />
-                      : <Sym name={a.status === "failed" ? "exclamationmark.triangle" : "checkmark"} size={12} color={tone} />}
+                      : a.status === "failed"
+                        ? <Sym name="exclamationmark.triangle" size={12} color={tone} />
+                        : null}
                     <T kind="subMedium" color={colors.textSecondary} numberOfLines={1} style={{ flexShrink: 1 }}>{a.name}</T>
                     {a.status === "failed" && a.error ? (
                       <T kind="caption" color={colors.coral} numberOfLines={1}>· {a.error}</T>
@@ -1208,6 +1294,7 @@ export default function AskScreen() {
               </GestureDetector>
             ) : null}
             <TextInput
+              ref={inputRef}
               value={text}
               onChangeText={setText}
               placeholder="Message Famili"
@@ -1223,9 +1310,14 @@ export default function AskScreen() {
             />
           </View>
           </Coach>
+          <DictateButton
+            listening={listening}
+            onPress={() => void toggleDictation(text)}
+            size={44}
+          />
           <PressableScale
             onPress={() => void send()}
-            disabled={!text.trim() || busy}
+            disabled={(!text.trim() && !attached.some((a) => a.status === "ready" && a.id)) || busy}
             haptic="light"
             accessibilityRole="button"
             accessibilityLabel="Send"
