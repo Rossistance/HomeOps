@@ -193,6 +193,12 @@ const SPACE_PATTERNS = [
   { tag: "medical-ids", re: /medic|health|passport|ids?|insurance|prescription|doctor|dental/gi },
   { tag: "bills-receipts", re: /receipt|invoice|bill|billing|utilit|statement|subtotal|total\s*\$|order\s*#|purchase/gi },
 ];
+/* Every tag that means "which space is this filed in" — including `home`, which is NOT scored
+ * above (its pattern matches everything, so it can only ever be the fallback) but IS a filing
+ * tag the client sends. Auto-filing replaces whatever is in this set and leaves every other
+ * tag alone. Must stay in step with EXPLICIT_TAG in apps/mobile/src/lib/spaces.ts, which is
+ * what reads them back. */
+const SPACE_TAGS = new Set(["home", "school", "medical-ids", "bills-receipts"]);
 function decideSpaceFromText(text, name = "") {
   const body = `${String(text ?? "").slice(0, 6000)} ${name}`;
   let best = null;
@@ -3487,7 +3493,21 @@ function mayWriteAgent(session, agent, nextVisibility) {
           if (read.ok && read.text) {
             const decided = decideSpaceFromText(read.text, name);
             if (decided) {
-              const tagged = putFileRec({ ...rec, tags: [...new Set([...(rec.tags ?? []), decided])] });
+              /* REPLACE the client's space tag, don't sit next to it.
+               *
+               * "Let Famili decide" still sends a filename guess as a fallback for a file
+               * that can't be read — and for `IMG_3011.pdf` that guess is `home`, because
+               * home's pattern matches everything. Appending `bills-receipts` to it left the
+               * record tagged BOTH, and every reader takes the first space tag it finds
+               * (apps/mobile/src/lib/spaces.ts spaceOf), which is still `home`. The response
+               * said bills-receipts, the audit said bills-receipts, and the toast said
+               * "Saved to Home" — the original complaint, intact, behind a green tick.
+               *
+               * Once the file has been READ the guess is superseded, so it goes. Everything
+               * that isn't a space tag — `sensitive` above all — has nothing to do with this
+               * decision and stays exactly where it was. */
+              const kept = (rec.tags ?? []).filter((t) => !SPACE_TAGS.has(String(t).toLowerCase()));
+              const tagged = putFileRec({ ...rec, tags: [...new Set([decided, ...kept])] });
               audit({ type: "file.autofile", fileId: rec.id, space: decided, ok: true }, req, g.session);
               return json(res, 200, { file: tagged, autoFiled: decided }, req);
             }
