@@ -449,12 +449,45 @@ export function getMember(actorId) {
 export function isAdultRole(role) {
   return role === "Owner" || role === "Adult Admin" || role === "Adult Member";
 }
-// Object-level visibility for family data (events/tasks). The owner and any
-// participant/assignee always see it; otherwise the entity's `visibility` scope decides:
-//   household    → everyone in the household (shared family calendar, the default)
-//   childVisible → everyone (explicitly surfaced to kids)
-//   adults       → adult roles only (bills, medical, sensitive coordination)
-//   private      → owner + participants only
+/* ONE vocabulary for who can see a thing.
+ *
+ * "The actual logic of who sees what needs to extend throughout the app."
+ *
+ * It didn't. There were three vocabularies. Tasks and files came through here. Knowledge
+ * items had their own inline filter using the word `personal`, which meant "the creator OR
+ * any adult" — behind a chip labelled "Just me" and a badge with a padlock on it. And
+ * `personal` isn't a word this function knows, so anything else reading a knowledge item
+ * fell through to the household default and showed it to everyone.
+ *
+ * So `personal` is now an alias of `private` rather than a fourth state, because that is
+ * what every screen that writes it has always claimed it means. Records already stored with
+ * it keep working and start being honoured.
+ *
+ * The scopes, in the order the app now offers them (Just me → My Nest → Everyone):
+ *   private / personal → owner + participants only
+ *   nest               → the members of that nest, and NOBODY else — role grants no way in
+ *   household          → everyone in the household (the default)
+ *   childVisible       → everyone (explicitly surfaced to kids)
+ *   adults             → adult roles only (bills, medical, sensitive coordination)
+ */
+/** The one place a stored visibility string is turned into a scope this app understands.
+ *
+ * `personal` is the Library's old spelling of `private`; anything unrecognised is the
+ * household default, which is what an absent value has always meant. Exported because
+ * WRITES have to normalise too — storing `personal` again would just reopen the gap
+ * between what a chip says and what the gate does. */
+const VISIBILITY_ALIASES = {
+  private: "private",
+  personal: "private",   // the Library's old spelling
+  nest: "nest",
+  adults: "adults",
+  childvisible: "childVisible",
+  household: "household",
+};
+export function normalizeVisibility(vis) {
+  return VISIBILITY_ALIASES[String(vis ?? "").toLowerCase()] ?? "household";
+}
+
 export function canSeeEntity(entity, { role, actorId } = {}) {
   if (!entity) return false;
   // `uploadedBy` is the file collection's name for the same idea as ownerId/createdBy. Without
@@ -465,7 +498,7 @@ export function canSeeEntity(entity, { role, actorId } = {}) {
   const members = entity.participantIds ?? entity.memberIds ?? [];
   const isParticipant = (Array.isArray(members) && members.includes(actorId)) || entity.assignedMemberId === actorId;
   if (isOwner || isParticipant) return true;
-  const vis = entity.visibility ?? "household";
+  const vis = normalizeVisibility(entity.visibility);
   if (vis === "private") return false;
   if (vis === "adults") return isAdultRole(role);
   // T1 — "their own agents and grocery list and task list… still isolated from the broader

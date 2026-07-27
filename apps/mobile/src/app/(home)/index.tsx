@@ -37,20 +37,35 @@ import { MemberAvatar } from "./profile";
  * means tappable in this app. A pill you can see is a smaller ask. */
 function SeeAll({ label = "See all", onPress }: { label?: string; onPress: () => void }) {
   const { colors, dark } = useTheme();
+  /* The pill is gone — he crossed it out and drew an arrow to the circled chevron on the
+   * event row above it.
+   *
+   * "I asked for the see all and close buttons to be made into real buttons, however that
+   *  removes swipe down to dismiss a pop-up menu and doesn't really align with the rest of
+   *  the features in the app… use the arrow buttons with circles that are used for expand and
+   *  retract in other places in the app."
+   *
+   * He's right, and the earlier fix over-corrected. "Make it look clickable" got answered with
+   * a NEW shape — a labelled ember pill — when the app already had a shape that means "there
+   * is more this way", on every event row and every expandable card. A second vocabulary for
+   * the same idea is worse than the plain text was: now there are two things to learn.
+   *
+   * The words move to the accessibility label rather than disappearing. On screen the circle
+   * is the affordance; to VoiceOver it is still "See all", because a bare chevron announced as
+   * "button" tells you nothing about where it goes. */
   return (
     <PressableScale
-      onPress={onPress} haptic="select" hitSlop={8}
+      onPress={onPress} haptic="select" hitSlop={12}
       accessibilityRole="button" accessibilityLabel={label}
       style={{
-        flexDirection: "row", alignItems: "center", gap: 5,
-        paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
-        backgroundColor: colors.emberBg,
+        width: 30, height: 30, borderRadius: 15,
+        alignItems: "center", justifyContent: "center",
+        backgroundColor: dark ? colors.surfaceSunken : colors.bg,
         borderWidth: 1, borderColor: rimColor(colors, dark),
         boxShadow: depth("raisedSm", colors, dark),
       }}
     >
-      <T kind="subMedium" color={colors.ember}>{label}</T>
-      <Sym name="chevron.right" size={12} color={colors.ember} />
+      <Sym name="chevron.right" size={15} color={colors.textSecondary} />
     </PressableScale>
   );
 }

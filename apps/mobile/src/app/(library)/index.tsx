@@ -5,12 +5,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, ScrollView, Switch, TextInput, View } from "react-native";
 import { Image } from "expo-image";
 import { useLocalSearchParams } from "expo-router";
-import { api, type RunRec, type ArtifactRec, type FileRec, type KnowledgeRec, type MemoryRec } from "@/lib/api";
+import { api, type RunRec, type ArtifactRec, type FileRec, type KnowledgeRec, type MemoryRec, type NestRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 import {
   Badge, Button, Card, Chip, ChipRow, CollapsibleSection, EmptyState, HScreen, HSheet, MarkdownText, Notice, PressableScale, Rise,
-  SectionHeader, SheetCTA, SkeletonCards, Sym, SymTile, T, Well,
+  SectionHeader, SheetCTA, SkeletonCards, Sym, SymTile, T, VisibilityPicker, normalizeVisibility, type Visibility, Well,
 } from "@/components/ui";
 import { UploadSheet } from "@/components/sheets/upload-sheet";
 // Categorization is pure + unit-tested (WP-002/ISS-002): explicit space tags win,
@@ -403,7 +403,10 @@ export default function LibraryScreen() {
                 <Card style={{ gap: spacing.sm }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
                     <Badge label={k.type || "note"} fg={colors.sky} bg={colors.skyBg} />
-                    {k.visibility === "personal" ? <Badge label="Personal" fg={colors.textMuted} bg={colors.surfaceSunken} icon="lock" /> : null}
+                    {/* The badge has to track the same normalisation the server does, or an item stored under
+                        the old spelling would look shared while being private. */}
+                    {normalizeVisibility(k.visibility) === "private" ? <Badge label="Just me" fg={colors.textMuted} bg={colors.surfaceSunken} icon="lock" /> : null}
+                    {normalizeVisibility(k.visibility) === "nest" ? <Badge label="My Nest" fg={colors.textMuted} bg={colors.surfaceSunken} icon="person.2.fill" /> : null}
                     {k.sensitive ? <Badge label="Sensitive" fg={colors.lavender} bg={colors.lavenderBg} icon="checkmark.shield" /> : null}
                     <View style={{ flex: 1 }} />
                     <PressableScale onPress={() => { setEditingK(k); setKOpen(true); }} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel={`Edit ${k.title}`} style={{ padding: 4 }}>
@@ -539,18 +542,25 @@ function KnowledgeSheet({ item, visible, onClose, onSaved, suggestedTags = [] }:
   const [ktype, setKtype] = useState<string>("note");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState("");
-  const [visibility, setVisibility] = useState<"household" | "personal">("household");
+  const [visibility, setVisibility] = useState<Visibility>("household");
+  const [nestId, setNestId] = useState<string | null>(null);
   const [sensitive, setSensitive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  /* Loaded here rather than passed down: "My Nest" is only offered when there IS one, and the
+   * only honest answer to that comes from the server. A stale prop would show the chip to
+   * someone who has since left their last nest. */
+  const [nests, setNests] = useState<NestRec[]>([]);
 
   useEffect(() => {
     if (!visible) return;
+    void api.nests().then((r) => setNests(r.nests ?? [])).catch(() => setNests([]));
     setTitle(item?.title ?? "");
     setKtype(item?.type ?? "note");
     setContent(item?.content ?? "");
     setTags((item?.tags ?? []).join(", "));
-    setVisibility(item?.visibility ?? "household");
+    setVisibility(normalizeVisibility(item?.visibility));
+    setNestId(item?.nestId ?? null);
     setSensitive(item?.sensitive ?? false);
     setErr(null);
   }, [visible, item]);
@@ -561,7 +571,7 @@ function KnowledgeSheet({ item, visible, onClose, onSaved, suggestedTags = [] }:
     if (!title.trim() || busy) return;
     setBusy(true); setErr(null);
     const tagList = tags.split(",").map((s) => s.trim()).filter(Boolean);
-    const body = { title: title.trim(), type: ktype, content: content.trim(), tags: tagList, visibility, sensitive };
+    const body = { title: title.trim(), type: ktype, content: content.trim(), tags: tagList, visibility, nestId, sensitive };
     const r = item
       ? await api.patchKnowledge(item.id, { ...body, ifUpdatedAt: item.updatedAt })
       : await api.createKnowledge(body);
@@ -649,13 +659,18 @@ function KnowledgeSheet({ item, visible, onClose, onSaved, suggestedTags = [] }:
             </View>
           ) : null}
         </View>
-        <View style={{ gap: 6 }}>
-          <T kind="eyebrow">Who can see this</T>
-          <ChipRow>
-            <Chip label="Everyone" selected={visibility === "household"} onPress={() => setVisibility("household")} />
-            <Chip label="Just me" selected={visibility === "personal"} onPress={() => setVisibility("personal")} />
-          </ChipRow>
-        </View>
+        {/* Was "Everyone · Just me", which puts the widest audience under your thumb as the
+            first thing you can hit. Narrowest first, and it sends a word the server actually
+            recognises — "personal" wasn't in the visibility gate's vocabulary, so a note
+            marked Just me was readable by every adult through one path and by everyone
+            through another. */}
+        <VisibilityPicker
+          label="Who can see this"
+          value={visibility}
+          nestId={nestId}
+          nests={nests.map((n) => ({ id: n.id, label: n.label }))}
+          onChange={(next) => { setVisibility(next.visibility); setNestId(next.nestId); }}
+        />
         <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
           <SymTile name="checkmark.shield" color={colors.lavender} bg={colors.lavenderBg} size={36} iconSize={16} />
           <View style={{ flex: 1 }}>

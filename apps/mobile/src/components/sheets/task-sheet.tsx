@@ -16,9 +16,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Alert, ScrollView, Switch, TextInput, View } from "react-native";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
-import { api, type MemberRec, type TaskRec } from "@/lib/api";
+import { api, type MemberRec, type NestRec, type TaskRec } from "@/lib/api";
 import { useTheme, tapHaptic } from "@/theme";
-import { Chip, ChipRow, HSheet, SheetCTA, Sym, T, Well, PressableScale } from "@/components/ui";
+import { Chip, ChipRow, HSheet, SheetCTA, Sym, T, VisibilityPicker, normalizeVisibility, type Visibility, Well, PressableScale } from "@/components/ui";
 
 /** The offsets the server will accept (server/reminders.mjs REMINDER_CHOICES). */
 const REMINDERS: { minutes: number | null; label: string }[] = [
@@ -69,6 +69,11 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
   const [hasEnd, setHasEnd] = useState(false);
   const [end, setEnd] = useState<Date>(() => { const d = nextHalfHour(); d.setHours(d.getHours() + 1); return d; });
   const [remind, setRemind] = useState<number | null>(null);
+  /* "The privacy option needs to extend to tasks and lists for NEW OR PRE-EXISTING tasks."
+   * A privacy control that only exists at creation is a privacy control you can't correct —
+   * and the thing people most want to change afterwards is exactly who can see something. */
+  const [scope, setScope] = useState<{ visibility: Visibility; nestId: string | null }>({ visibility: "household", nestId: null });
+  const [nests, setNests] = useState<NestRec[]>([]);
   const [busy, setBusy] = useState<"save" | "calendar" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -85,6 +90,8 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
     const e = task.endAt ? new Date(task.endAt) : null;
     if (e && !Number.isNaN(+e)) { setHasEnd(true); setEnd(e); } else { setHasEnd(false); }
     setRemind(task.remindMinutesBefore ?? null);
+    setScope({ visibility: normalizeVisibility(task.visibility), nestId: task.nestId ?? null });
+    void api.nests().then((r) => setNests(r.nests ?? [])).catch(() => setNests([]));
   }, [visible, task]);
 
   const endInvalid = scheduled && hasEnd && +end <= +start;
@@ -106,6 +113,8 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
       // keeps working — this sheet adds a start/end, it doesn't replace the deadline model.
       dueAt: startAt,
       remindMinutesBefore: remind,
+      visibility: scope.visibility,
+      nestId: scope.visibility === "nest" ? scope.nestId : null,
     });
     setBusy(null);
     if (!r.task) {
@@ -297,6 +306,15 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
             ))}
           </ChipRow>
         </View>
+
+        {canEdit ? (
+          <VisibilityPicker
+            value={scope.visibility}
+            nestId={scope.nestId}
+            nests={nests.map((n) => ({ id: n.id, label: n.label }))}
+            onChange={setScope}
+          />
+        ) : null}
 
         {/* H7 — onto the calendar, and from there into that person's Google. */}
         {canEdit ? (

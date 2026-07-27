@@ -13,7 +13,7 @@ import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import { memberTone } from "@/lib/member-colors";
 // "ui/index" (not "ui"): the legacy src/components/ui.tsx still shadows the ui/
 // directory until the old screens are all ported — this resolves the new system.
-import { Badge, Button, Card, CheckCircle, Chip, ChipRow, Coach, EmptyState, ErrorState, HScreen, Notice, PressableScale, Rise, ScreenTour, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
+import { Badge, Button, Card, CheckCircle, Chip, ChipRow, Coach, EmptyState, ErrorState, HScreen, Notice, PressableScale, Rise, ScreenTour, SectionHeader, SkeletonCards, Sym, T, VisibilityPicker, type Visibility, Well } from "@/components/ui";
 import { titleCase } from "@/theme/categories";
 import { TaskSheet } from "@/components/sheets/task-sheet";
 
@@ -159,7 +159,11 @@ export default function TasksScreen() {
    * it — this keeps it on screen and selected so the very next thing you type goes into it,
    * which is what "create a list" means to a person. */
   const [pendingList, setPendingList] = useState<string | null>(null);
-  const [shared, setShared] = useState(false);
+  /* Was a boolean: shared or not. Nest scope existed on the server the whole time but was
+   * inferred from which SPACE chip happened to be selected, so the one scope people most
+   * want — "just the two of us" — wasn't in the privacy control at all. Now it's a real
+   * three-way choice, narrowest first, and the space chip only seeds the default. */
+  const [scope, setScope] = useState<{ visibility: Visibility; nestId: string | null }>({ visibility: "private", nestId: null });
   const [startAt, setStartAt] = useState<Date>(() => { const d = new Date(); d.setMinutes(d.getMinutes() < 30 ? 30 : 60, 0, 0); return d; });
   const [dueAt, setDueAt] = useState<Date>(() => { const d = new Date(); d.setHours(d.getHours() + 1, 0, 0, 0); return d; });
   const [nests, setNests] = useState<NestRec[]>([]);
@@ -223,6 +227,14 @@ export default function TasksScreen() {
     return !!t.assignedMemberId && t.assignedMemberId !== me;
   }, [who, me]);
   // The space comes first: Family never shows a nest's work, which is the whole promise.
+  /* Picking a nest space seeds the default scope — creating a task inside "Mum & Dad" almost
+   * always means it belongs to Mum & Dad, and making someone say so twice is the kind of
+   * friction that gets a feature ignored. It's a DEFAULT, not a lock: the picker below still
+   * has the final word, so a private note written inside a nest space stays private. */
+  useEffect(() => {
+    setScope({ visibility: nestId ? "nest" : "private", nestId });
+  }, [nestId]);
+
   const inSpace = useCallback((t: TaskRec) => (nestId ? t.nestId === nestId : t.visibility !== "nest"), [nestId]);
   const open = useMemo(() => tasks.filter((t) => t.status !== "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
   const done = useMemo(() => tasks.filter((t) => t.status === "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
@@ -318,11 +330,10 @@ export default function TasksScreen() {
       dueAt: quickDue === "custom" ? dueAt.toISOString() : dueFromQuick(quickDue),
       startAt: quickDue === "custom" ? startAt.toISOString() : undefined,
       assignedMemberId: assignee, listName: target.listName,
-      ...(nestId
-        ? { visibility: "nest", nestId }
-        // Private unless he said otherwise. "Not everybody wants everyone in the family to see
-        // a task they have and offer help for it."
-        : { visibility: shared ? "household" : "private" }),
+      // Whatever the picker says. Private is still the default it starts on: "not everybody
+      // wants everyone in the family to see a task they have and offer help for it."
+      visibility: scope.visibility,
+      ...(scope.visibility === "nest" && scope.nestId ? { nestId: scope.nestId } : {}),
     });
     if (r.task) {
       let created = r.task;
@@ -332,7 +343,8 @@ export default function TasksScreen() {
         if (p.task) created = p.task;
       }
       setTasks((arr) => [created, ...arr]);
-      setTitle(""); setQuickDue(null); setAssignee(null); setShared(false);
+      setTitle(""); setQuickDue(null); setAssignee(null);
+      setScope({ visibility: nestId ? "nest" : "private", nestId });
       tapHaptic("success");
     } else {
       setNotice({ ok: false, text: r.error === "insufficient_role" ? "Adding tasks needs Limited Member or higher." : friendly(r.error) });
@@ -492,16 +504,12 @@ export default function TasksScreen() {
                     unless indicated. That could be down here at the bottom somewhere in this
                     card, not after creation but during the initial creation."
                     Private is the default, and the choice is made here, before it exists. */}
-                <View style={{ gap: 6 }}>
-                  <T kind="eyebrow">Who can see it</T>
-                  <ChipRow>
-                    <Chip label="Just me" icon="lock" selected={shared === false} onPress={() => setShared(false)} />
-                    <Chip label="The family" icon="person.2" selected={shared === true} onPress={() => setShared(true)} />
-                  </ChipRow>
-                  <T kind="caption" color={colors.textFaint}>
-                    {shared ? "Everyone can see this, so they can offer to help." : "Only you — nobody else sees this task."}
-                  </T>
-                </View>
+                <VisibilityPicker
+                  value={scope.visibility}
+                  nestId={scope.nestId}
+                  nests={nests.map((n) => ({ id: n.id, label: n.label }))}
+                  onChange={setScope}
+                />
                 {members.length > 0 ? (
                   <View style={{ gap: 6 }}>
                     <T kind="eyebrow">Assign to</T>

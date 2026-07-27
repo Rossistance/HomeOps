@@ -25,7 +25,7 @@ import {
   listTasks, getTask, putTask, patchTask, deleteTaskRec,
   listSubscriptions, getSubscription, putSubscription, patchSubscription, deleteSubscriptionRec,
   listMeals, getMeal, putMeal, patchMeal, deleteMealRec,
-  listKnowledge, getKnowledge, addKnowledge, patchKnowledge, removeKnowledge,
+  listKnowledge, getKnowledge, addKnowledge, patchKnowledge, removeKnowledge, normalizeVisibility,
   listConversations, getConversation, putConversation, appendConversationMessage, deleteConversationRec,
   canSeeEntity, listMemory, listArtifacts, getMemoryEntry, deleteMemoryEntry,
   listRiskOverrides, putRiskOverride, deleteRiskOverrideRec, getRiskOverride,
@@ -175,6 +175,32 @@ function maybeSeedSandbox(s) {
 // startAt:null on purpose, and the web store represents an unscheduled event as "".
 function badTimestamp(v) {
   return v != null && v !== "" && isNaN(+new Date(v));
+}
+
+/* Who can see it — decided ONCE, for everything that offers the choice.
+ *
+ * "The privacy option needs to extend to tasks and lists, new or pre-existing… the actual
+ *  logic of who sees what needs to extend throughout the app."
+ *
+ * It was written out separately per feature, and the copies had drifted: tasks understood
+ * private/nest/household with a real nest-membership check, while knowledge clamped to
+ * `personal | household` — a word the visibility gate doesn't know — so a knowledge item
+ * couldn't be nest-scoped at all and its "Just me" wasn't private. One function now, so
+ * every surface that offers Just me / My Nest / Everyone gets the same three answers and
+ * the same refusal.
+ *
+ * Returns null when a nest was named that this person isn't in — the caller turns that into
+ * a 403 rather than silently downgrading, because quietly filing something somewhere other
+ * than where you asked is worse than refusing.
+ */
+function resolveVisibility(requested, requestedNestId, session, current = {}) {
+  const vis = normalizeVisibility(requested ?? current.visibility);
+  if (vis !== "nest") return { visibility: vis, nestId: null };
+  // Falling back to the current nest lets "keep it where it is" be expressed by sending
+  // visibility alone, which is what an edit form does when only the scope changed.
+  const target = String(requestedNestId ?? current.nestId ?? "");
+  if (!canSeeNest(target, session.householdId, session.actorId)) return null;
+  return { visibility: "nest", nestId: target };
 }
 
 /**
@@ -2207,6 +2233,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (body.remindMinutesBefore !== undefined && !isValidReminder(body.remindMinutesBefore)) {
         return json(res, 400, { error: "bad_reminder" }, req);
       }
+      /* Was: a nest you're not in silently became "private", so the task existed but not
+       * where you put it. Refusing says so. Same helper as knowledge and the same three
+       * scopes, which is what "throughout the app" has to mean to be worth anything. */
+      const tkVis = resolveVisibility(body.visibility, body.nestId, g.session);
+      if (!tkVis) return json(res, 403, { error: "not_in_nest", message: "You can only put this in a nest you're part of." }, req);
       const tk = putTask({
         id: "tk_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         title: String(body.title).trim(), type: body.type ?? "task", status: body.status ?? "todo",
@@ -2217,9 +2248,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
          * group." Grocery items ARE tasks (type:"list", listName:"Groceries"), so scoping
          * tasks to a nest gives him both lists in one move. Membership is checked here:
          * naming a nest you aren't in doesn't put your task in it, it just makes it yours. */
-        ...(body.visibility === "nest" && body.nestId && canSeeNest(String(body.nestId), g.session.householdId, g.session.actorId)
-          ? { visibility: "nest", nestId: String(body.nestId) }
-          : { visibility: body.visibility === "nest" ? "private" : (body.visibility ?? "household") }),
+        ...tkVis,
         listName: body.listName ?? undefined,
         startAt: body.startAt ?? null, endAt: body.endAt ?? null,
         remindMinutesBefore: body.remindMinutesBefore ?? null, reminderSentAt: null,
@@ -2616,9 +2645,19 @@ function mayWriteAgent(session, agent, nextVisibility) {
      * "personal" items are visible only to the creator + adults. Tenant-scoped. */
     if (path === "/api/knowledge" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      /* "The actual logic of who sees what needs to extend throughout the app."
+       *
+       * This used to be its own rule: `personal` meant the creator OR ANY ADULT — behind a
+       * chip that says "Just me" and a badge with a padlock on it. So a note you marked
+       * private was readable by every adult in the household, and every OTHER reader of a
+       * knowledge item (which went through canSeeEntity, where `personal` isn't a word)
+       * fell through to the household default and showed it to everyone.
+       *
+       * One gate now, the same one tasks and files use, so "Just me" means the same thing
+       * everywhere it's offered — including nest scope, which knowledge simply couldn't
+       * express before. */
       const items = listKnowledge((k) => k.householdId === g.session.householdId)
-        // household → everyone; personal → creator + adults only.
-        .filter((k) => k.createdBy === g.session.actorId || k.visibility !== "personal" || isAdultRole(g.session.role))
+        .filter((k) => canSeeEntity(k, g.session))
         .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
       return json(res, 200, { items }, req);
     }
@@ -2627,6 +2666,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       if (!String(body.title ?? "").trim()) return json(res, 400, { error: "title_required" }, req);
+      // Same three scopes as a task, same refusal for a nest you're not in.
+      const knVis = resolveVisibility(body.visibility, body.nestId, g.session);
+      if (!knVis) return json(res, 403, { error: "not_in_nest", message: "You can only save this into a nest you're part of." }, req);
       const item = addKnowledge({
         id: "kn_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         title: String(body.title).trim(),
@@ -2634,7 +2676,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         type: typeof body.type === "string" && body.type.trim() ? body.type.trim() : "Reference Note",
         content: typeof body.content === "string" ? body.content : "",
         tags: Array.isArray(body.tags) ? body.tags.map(String).filter(Boolean).slice(0, 20) : [],
-        visibility: body.visibility === "personal" ? "personal" : "household",
+        ...knVis,
         sensitive: !!body.sensitive,
         fileIds: Array.isArray(body.fileIds) ? body.fileIds.map(String).slice(0, 50) : [],
         createdBy: g.session.actorId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -2660,7 +2702,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (body.type !== undefined) patch.type = typeof body.type === "string" && body.type.trim() ? body.type.trim() : k.type;
       if (body.content !== undefined) patch.content = typeof body.content === "string" ? body.content : "";
       if (body.tags !== undefined) patch.tags = Array.isArray(body.tags) ? body.tags.map(String).filter(Boolean).slice(0, 20) : [];
-      if (body.visibility !== undefined) patch.visibility = body.visibility === "personal" ? "personal" : "household";
+      if (body.visibility !== undefined || body.nestId !== undefined) {
+        const v = resolveVisibility(body.visibility, body.nestId, g.session, k);
+        if (!v) return json(res, 403, { error: "not_in_nest", message: "You can only move this into a nest you're part of." }, req);
+        patch.visibility = v.visibility; patch.nestId = v.nestId;
+      }
       if (body.sensitive !== undefined) patch.sensitive = !!body.sensitive;
       if (body.fileIds !== undefined) patch.fileIds = Array.isArray(body.fileIds) ? body.fileIds.map(String).slice(0, 50) : [];
       const updated = patchKnowledge(k.id, patch);

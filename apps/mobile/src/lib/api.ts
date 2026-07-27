@@ -233,7 +233,10 @@ export interface FileRec {
 // Server-durable knowledge items (household memory the user writes + curates).
 export interface KnowledgeRec {
   id: string; householdId: string; title: string; type: string; content: string;
-  tags: string[]; visibility: "household" | "personal"; sensitive: boolean; fileIds: string[];
+  /* "personal" is the OLD spelling of "private" — records written before the vocabularies
+   * were merged still carry it, so readers must run it through normalizeVisibility rather
+   * than compare it directly. New writes always send private | nest | household. */
+  tags: string[]; visibility: "household" | "personal" | "private" | "nest"; nestId?: string | null; sensitive: boolean; fileIds: string[];
   createdBy: string; createdAt: string; updatedAt: string;
 }
 // Server evolution registry — improvement proposals mined from real run traces
@@ -799,12 +802,12 @@ export const api = {
     const r = await req<{ items: KnowledgeRec[] }>("/knowledge");
     return r.data?.items ?? [];
   },
-  async createKnowledge(body: { title: string; type: string; content: string; tags?: string[]; visibility?: "household" | "personal"; sensitive?: boolean; fileIds?: string[] }): Promise<{ item?: KnowledgeRec; error?: string; message?: string }> {
+  async createKnowledge(body: { title: string; type: string; content: string; tags?: string[]; visibility?: "household" | "private" | "nest"; nestId?: string | null; sensitive?: boolean; fileIds?: string[] }): Promise<{ item?: KnowledgeRec; error?: string; message?: string }> {
     const r = await req<{ item?: KnowledgeRec; error?: string; message?: string }>("/knowledge", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
-  async patchKnowledge(id: string, patch: Partial<Pick<KnowledgeRec, "title" | "type" | "content" | "tags" | "visibility" | "sensitive" | "fileIds">> & { ifUpdatedAt?: string }): Promise<{ item?: KnowledgeRec; error?: string; message?: string; current?: KnowledgeRec }> {
+  async patchKnowledge(id: string, patch: Partial<Pick<KnowledgeRec, "title" | "type" | "content" | "tags" | "visibility" | "nestId" | "sensitive" | "fileIds">> & { ifUpdatedAt?: string }): Promise<{ item?: KnowledgeRec; error?: string; message?: string; current?: KnowledgeRec }> {
     const r = await req<{ item?: KnowledgeRec; error?: string; message?: string; current?: KnowledgeRec }>(`/knowledge/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };

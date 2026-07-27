@@ -30,13 +30,15 @@
 // from Today straight to whatever is actually next to it, because the list is derived from the
 // same capabilities the tab bar is built from rather than hard-coded.
 import { useMemo, type ReactNode } from "react";
-import { Dimensions, View } from "react-native";
-import { router } from "expo-router";
+import { useWindowDimensions, View } from "react-native";
+import { router, useSegments } from "expo-router";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { runOnJS } from "react-native-reanimated";
 import { useSession } from "@/lib/session";
 import { capabilitiesFor } from "@/lib/roles";
+import { neighbourTab, tabsFor } from "@/lib/tab-order";
 import { tapHaptic } from "@/theme";
+import { reportCrash } from "@/lib/crash-reporter";
 
 /** Movement needed before this gesture is even in the running. */
 const ACTIVATE_X = 28;
@@ -48,48 +50,64 @@ const COMMIT_VELOCITY = 550;
 
 export function TabSwipe({ current, children }: { current: string; children: ReactNode }) {
   const { session } = useSession();
+  const { width } = useWindowDimensions();
+  /* At the root of this tab, or deeper in it? A tab root has exactly one segment — its group.
+   * Read reactively rather than probed inside the gesture: the old code asked router.canGoBack()
+   * at swipe time, which answers the question far too late to stop the gesture from having
+   * already competed for the touch. */
+  const segments = useSegments();
+  const atRoot = segments.length <= 1;
   const caps = useMemo(() => capabilitiesFor(session ? { role: session.role } : null), [session]);
 
   // Mirrors TabsNav's trigger list. Derived from the same capabilities, so a role that has no
   // Agents tab has no Agents stop on the swipe either — the alternative is swiping into a screen
   // the tab bar says you don't have.
-  const tabs = useMemo(() => {
-    const t = ["/(home)"];
-    if (caps.canUseAI) t.push("/(ask)");
-    if (caps.viewMode === "owner" || caps.viewMode === "adult") t.push("/(agents)", "/(library)", "/(settings)");
-    return t;
-  }, [caps.canUseAI, caps.viewMode]);
+  const tabs = useMemo(() => tabsFor(caps), [caps.canUseAI, caps.viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const goTo = (dir: -1 | 1) => {
-    /* Deeper than the root of this tab? Then a horizontal swipe belongs to the back gesture,
-     * and this one has no business firing. Checked at the moment of the swipe rather than
-     * subscribed to, because navigation state changes far more often than anyone swipes. */
-    if (router.canGoBack()) return;
-    const i = tabs.indexOf(current);
-    if (i === -1) return;
-    const next = tabs[i + dir];
-    // No wrap-around. Sliding off the end of the tab bar and reappearing at the other end is
-    // disorienting, and the tab bar itself doesn't behave that way.
+    const next = neighbourTab(tabs, current, dir);
     if (!next) return;
-    tapHaptic("select");
-    router.navigate(next as never);
+    /* A failed navigation must not be fatal. This gesture can fire while a native sheet is
+     * mid-dismissal or a route is being replaced, and "the app closed because I swiped" is a
+     * far worse outcome than "the swipe did nothing". Reported so a silent no-op still leaves
+     * a trail in the household's log. */
+    try {
+      tapHaptic("select");
+      router.navigate(next as never);
+    } catch (e) {
+      reportCrash(e, { screen: `TabSwipe:${current}->${next}` });
+    }
   };
 
   const pan = useMemo(
     () => Gesture.Pan()
+      /* THE CRASH. "If I'm on a screen that does not allow swiping, it will crash the app."
+       *
+       * This gesture used to be live on every screen inside the tab — including the pushed
+       * detail screens and the native formSheet — and merely decline to navigate afterwards.
+       * So on exactly the screens where swiping isn't supposed to do anything, a pan handler
+       * was still claiming the touch and racing the sheet's own drag.
+       *
+       * Declining after the fact is not the same as standing down. Disabled means the touch
+       * is never claimed here at all, which is both the fix and what the screen was always
+       * trying to express. */
+      .enabled(atRoot)
       .activeOffsetX([-ACTIVATE_X, ACTIVATE_X])
       .failOffsetY([-FAIL_Y, FAIL_Y])
       .onEnd((e) => {
+        "worklet";
         // A share of the width, not a fixed number of points: the same drag should mean the
-        // same thing on a mini and on a Pro Max.
-        const far = Math.abs(e.translationX) > Dimensions.get("window").width * COMMIT_RATIO;
+        // same thing on a mini and on a Pro Max. `width` is captured at render — reading
+        // Dimensions HERE would be a JS call from the UI thread, which is not a thing a
+        // worklet may do.
+        const far = Math.abs(e.translationX) > width * COMMIT_RATIO;
         const fast = Math.abs(e.velocityX) > COMMIT_VELOCITY && Math.abs(e.translationX) > 60;
         if (!far && !fast) return;
         runOnJS(goTo)(e.translationX < 0 ? 1 : -1);
       }),
     // goTo closes over `tabs` and `current`; rebuilding the gesture when either changes keeps
     // the swipe pointing at the right neighbour after a role or route change.
-    [tabs, current], // eslint-disable-line react-hooks/exhaustive-deps
+    [tabs, current, atRoot, width], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   return (

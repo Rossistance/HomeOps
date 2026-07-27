@@ -56,12 +56,19 @@ test("…and the other person in the nest can", async () => {
   assert.ok(theirs.some((t) => t.id === r.data.task.id));
 });
 
-test("NEGATIVE: naming a nest you're not in doesn't put your task in it", async () => {
+/* CHANGED DELIBERATELY: this now REFUSES rather than silently downgrading.
+ *
+ * The old fallback to "private" was the safe direction for the nest, but it was dishonest to
+ * the person: the task was created, the call returned 200, and it was not where they put it.
+ * Since the three scopes became a real control they choose from, a scope that can't be
+ * honoured has to be said out loud — the same rule an existing task's PATCH has always used
+ * (see the next test), which is where the inconsistency was. */
+test("NEGATIVE: naming a nest you're not in is refused, not silently downgraded", async () => {
   const r = await mkTask(alex, { title: "Nice try", visibility: "nest", nestId: nest.id });
-  assert.notEqual(r.data.task.visibility, "nest");
-  assert.equal(r.data.task.visibility, "private", "it falls back to private — the safe direction");
+  assert.equal(r.status, 403);
+  assert.equal(r.data.error, "not_in_nest");
   const theirs = await tasksFor(beannie);
-  assert.ok(!theirs.some((t) => t.id === r.data.task.id), "and it did not land in their nest");
+  assert.ok(!theirs.some((t) => t.title === "Nice try"), "and nothing landed in their nest");
 });
 
 test("NEGATIVE: an existing task can't be pushed into a nest you're not in", async () => {

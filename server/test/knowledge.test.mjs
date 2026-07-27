@@ -51,11 +51,22 @@ test("create → list → patch → delete round-trips a household item", async 
   assert.ok(!after.some((k) => k.id === item.id), "gone after delete");
 });
 
-test("personal knowledge is visible only to its creator + adults", async () => {
+/* CHANGED DELIBERATELY. This test used to assert "creator + ANY ADULT", which is what the old
+ * inline filter did — behind a chip labelled "Just me" and a badge with a padlock on it.
+ *
+ * "It needs to read just me, my nest, then everyone. The actual logic of who sees what needs
+ *  to extend throughout the app."
+ *
+ * Just me now means just me. The scope is stored as `private` (the old `personal` is kept as
+ * an alias so existing records are honoured rather than reinterpreted), and it is enforced by
+ * the same canSeeEntity every task and file goes through — so the answer no longer depends on
+ * which code path happens to be asking. */
+test("knowledge marked Just me is visible ONLY to its creator", async () => {
   const id = (await adult.req("/api/knowledge", { method: "POST", body: JSON.stringify({ title: "Morgan's note", visibility: "personal", content: "just for me" }) })).data.item.id;
-  assert.ok((await adult.req("/api/knowledge")).data.items.some((k) => k.id === id), "creator sees own personal item");
-  assert.ok((await owner.req("/api/knowledge")).data.items.some((k) => k.id === id), "another adult sees the personal item");
-  assert.ok(!(await child.req("/api/knowledge")).data.items.some((k) => k.id === id), "a child cannot see a personal item");
+  assert.ok((await adult.req("/api/knowledge")).data.items.some((k) => k.id === id), "creator sees own private item");
+  assert.ok(!(await owner.req("/api/knowledge")).data.items.some((k) => k.id === id),
+    "another adult must NOT see it — that was the leak, and role is not a way in");
+  assert.ok(!(await child.req("/api/knowledge")).data.items.some((k) => k.id === id), "nor a child");
 });
 
 test("gating: a peer can't edit/delete another member's item; the creator or an adult can", async () => {
