@@ -10,6 +10,7 @@ import * as WebBrowser from "expo-web-browser";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { api, type CalendarSubscription, type ProviderRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { categoryStyle } from "@/theme/categories";
 import { useTheme, riskColor, tapHaptic, type HearthColors } from "@/theme";
 import {
   Badge, BrandIcon, Button, Card, EmptyState, Expander, HScreen, Notice, PressableScale, Rise, Row,
@@ -74,6 +75,19 @@ export default function ConnectionsScreen() {
   const scroller = useRef<ScrollView>(null);
   /* Which providers are open. Collapsed by default — see the note on the card head. */
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  /* T2/T3 — "at the bottom of the page there's some things that give information I'm not sure
+   * is necessary: whether or not a custom HTTP is set up, if a webhook receiver is set up. I'm
+   * not even sure if that will be used often. And text messaging is currently, even though
+   * there's credentials, not fully vetted and accurate and active, so it doesn't really even
+   * need to be there yet — Twilio has not approved my A2P verification."
+   *
+   * Hidden rather than deleted. A connector that isn't ready is a row that answers a question
+   * nobody asked and invites one that has no good answer ("why is this offline?"). They come
+   * back on their own the moment they're genuinely usable — nothing to remember to re-enable,
+   * which is the failure mode of commenting a feature out. */
+  const NOT_YET = /webhook|custom http|text messag|twilio|sms/i;
+  const shownConnectors = connectors.filter((c) => !(NOT_YET.test(c.name) && !c.live));
+
   const cardY = useRef<Record<string, number>>({});
   const [ringFor, setRingFor] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -463,22 +477,23 @@ export default function ConnectionsScreen() {
           )}
 
           <SectionHeader title="Connectors" />
-          {connectors.length === 0 ? (
+          {shownConnectors.length === 0 ? (
             <EmptyState icon="bolt.slash" title="No connectors loaded" hint="Is the runtime online?" />
           ) : (
             <Rise index={4}>
               <Card padded={false}>
-                {connectors.map((c, i) => {
+                {shownConnectors.map((c, i) => {
                   const m = readinessMeta(colors, c.readiness);
+                  const look = categoryStyle(colors, c.name);
                   return (
                     <Row
                       key={c.id}
                       title={c.name}
-                      icon="puzzlepiece.extension"
-                      iconColor={colors.textMuted}
-                      iconBg={colors.surfaceSunken}
+                      icon={look.icon}
+                      iconColor={look.fg}
+                      iconBg={look.bg}
                       trailing={<Badge label={m.label} fg={m.fg} bg={m.bg} />}
-                      last={i === connectors.length - 1}
+                      last={i === shownConnectors.length - 1}
                     />
                   );
                 })}

@@ -981,6 +981,13 @@ export default function AskScreen() {
           </View>
           </Coach>
 
+          {/* The Ask chapter's entry point. It was dropped when the two header rows merged,
+              which left that chapter reachable from nowhere — Settings' "Show me around" runs
+              the app-wide spine, not this screen's. It's back, but under the new rules: shown
+              once ever, gone after ten seconds, and only while the header is expanded. That
+              answers the row it was costing without orphaning a chapter. */}
+          {headerOpen ? <ScreenTour route="/(ask)" /> : null}
+
           {/* The grab handle — the affordance that says this can move. */}
           <View style={{ alignItems: "center", paddingTop: 2 }}>
             <View style={{ width: 34, height: 4, borderRadius: 2, backgroundColor: colors.border }} />

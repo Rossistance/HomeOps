@@ -8,7 +8,21 @@ services:
     # --include=dev is required: NODE_ENV=production (set below) also applies at
     # build time on Render, and a bare `npm ci` would omit the devDependencies
     # that the build itself needs (vite, tsc, tailwind).
-    buildCommand: npm ci --include=dev && npm run build
+    # T4 — "how am I intended to run browser automation with Playwright or something similar
+    # from the server? Is that stored and ran from the server? We need to make this be able to
+    # work." From the server, yes — and the reason it said "runtime offline" is right here: the
+    # playwright PACKAGE was installed, but its Chromium BINARY never was. server/browser.mjs
+    # would try to launch, fail, and mark itself unavailable for the life of the process, so the
+    # connector honestly reported a runtime that genuinely wasn't there.
+    #
+    # `--with-deps` because a bare Linux container lacks the shared libraries Chromium needs
+    # (libnss3, libatk, …), and without them the install succeeds and the launch still fails —
+    # the worst of both. Render's build runs as root, so it can install them.
+    #
+    # Honest cost: this adds roughly 400 MB and a couple of minutes to every build. Worth it for
+    # a capability that was advertised in the UI and could not work; not worth it silently, so
+    # it's written down here.
+    buildCommand: npm ci --include=dev && npx playwright install --with-deps chromium && npm run build
     startCommand: npm start
     autoDeploy: true
     healthCheckPath: /api/health

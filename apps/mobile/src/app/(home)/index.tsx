@@ -356,12 +356,19 @@ function AdminToday() {
 
   // Meals and Tasks sit up front (not buried in Settings) — the two most-used
   // everyday surfaces after the calendar.
+  /* C3 — "these tags are titles, they need to be capitalised, both words. 'Assign' and 'chore'
+   * needs to be capitalised; same thing here, 'New' and 'agent'." These are the two he pointed
+   * at. Written out rather than passed through titleCase() because they're fixed labels, not
+   * data — running a transform over a constant hides the intent from whoever edits it next.
+   *
+   * Their colours come from the category table too, so the Meals tile here is the same teal as
+   * a Meals agent and a Meals playbook. */
   const quickActions = [
-    { title: "Meals", icon: "fork.knife", fg: colors.sage, bg: colors.sageBg, go: () => router.push("/meals") },
-    { title: "Tasks & Lists", icon: "checklist", fg: colors.lavender, bg: colors.lavenderBg, go: () => router.push("/tasks") },
-    { title: "Assign chore", icon: "checkmark", fg: colors.amber, bg: colors.amberBg, go: () => setChoreOpen(true) },
-    { title: "New agent", icon: "plus", fg: colors.ember, bg: colors.emberBg, go: () => router.push("/(agents)?create=1") },
-    { title: "Upload", icon: "square.and.arrow.up", fg: colors.sky, bg: colors.skyBg, go: () => router.push("/(library)?upload=1") },
+    { title: "Meals", ...categoryStyle(colors, "Meals"), go: () => router.push("/meals") },
+    { title: "Tasks & Lists", ...categoryStyle(colors, "Tasks"), go: () => router.push("/tasks") },
+    { title: "Assign Chore", ...categoryStyle(colors, "Chores"), go: () => setChoreOpen(true) },
+    { title: "New Agent", icon: "sparkle", fg: colors.ember, bg: colors.emberBg, go: () => router.push("/(agents)?create=1") },
+    { title: "Upload", ...categoryStyle(colors, "Documents"), go: () => router.push("/(library)?upload=1") },
     { title: "Connect", icon: "link", fg: colors.textMuted, bg: colors.surfaceSunken, go: () => router.push("/connections") },
   ];
 
