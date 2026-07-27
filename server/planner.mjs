@@ -846,7 +846,19 @@ function normalizeBuild(b) {
  * liveness signals; the JSON tokens are not meaningful mid-stream). Returns the
  * same {ok, kind, answer, plan, model} shape when the full response is assembled.
  */
-export async function assistantStream({ message, context, session, providerId, history, agent = null } = {}, onToken) {
+/* The assistant does three genuinely different things and used to admit to one.
+ *
+ * `onToken` is a liveness ping — it fires as provider tokens arrive, and the client turned
+ * that into "Writing…". For a plain answer that's true. For a LOOKUP it was a lie during the
+ * slowest part of the whole interaction: performLookup goes out to the live web, which can
+ * take many seconds, and the old code announced it by calling onToken("") — a fake token,
+ * whose only effect was to make the app claim it was writing. Someone watching "Writing…"
+ * for eight seconds concludes the app is stuck, because nothing is being written.
+ *
+ * So the phase is now said out loud rather than inferred from a side effect. `onPhase` is
+ * optional; callers that don't pass it behave exactly as before. */
+export async function assistantStream({ message, context, session, providerId, history, agent = null } = {}, onToken, onPhase) {
+  const phase = (p) => { try { onPhase?.(p); } catch { /* progress reporting must never break a run */ } };
   if (!message || !String(message).trim()) return { ok: false, error: "empty_message", message: "Type a message first." };
   const id = activeProviderId(providerId, session?.householdId);
   if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
@@ -866,16 +878,18 @@ export async function assistantStream({ message, context, session, providerId, h
   const parsed = extractJSON(out.text);
   if (!parsed) return { ok: true, kind: "answer", answer: safeAnswerFallback(out.text), model: out.model };
   if (parsed.kind === "lookup") {
-    // Signal the client that live fetching started (the streamed JSON tokens
-    // weren't meaningful), then do the bounded fetch + compose pass.
+    // The long one. Say so, and keep the liveness ping for clients that only understand it.
+    phase("searching");
     try { onToken?.(""); } catch { /* liveness only */ }
     return await performLookup({ id, session, message, parsed });
   }
   if (parsed.kind === "plan" && parsed.plan && typeof parsed.plan === "object") {
+    phase("creating");
     const plan = normalizePlan(parsed.plan, catalog, String(message).trim());
     return { ok: true, kind: "plan", answer: String(parsed.answer ?? plan.summary ?? "On it."), plan, model: out.model };
   }
   if (parsed.kind === "build" && parsed.build && typeof parsed.build === "object") {
+    phase("creating");
     return { ok: true, kind: "build", answer: String(parsed.answer ?? parsed.build.summary ?? "Here's what I'll set up."), build: normalizeBuild(parsed.build), model: out.model };
   }
   return { ok: true, kind: "answer", answer: String(parsed.answer ?? out.text ?? "").trim() || "I'm not sure how to help with that yet.", model: out.model };

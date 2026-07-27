@@ -131,6 +131,17 @@ export async function makeSession(ctx, actorId, body = {}) {
       try { data = await r.json(); } catch { /* non-JSON */ }
       return { status: r.status, data, headers: r.headers };
     },
+    /** Same auth, but the body comes back as text. For routes that aren't JSON — an SSE
+     * stream parsed as JSON silently yields null, which reads as "the server sent nothing"
+     * rather than "you asked the wrong way". */
+    async text(path, init = {}) {
+      const headers = { ...(init.headers || {}) };
+      if (cookie) headers.Cookie = cookie;
+      if (csrf && init.method && init.method !== "GET") headers["x-homeops-csrf"] = csrf;
+      if (init.body && !headers["content-type"]) headers["content-type"] = "application/json";
+      const r = await ctx.fetch(path, { ...init, headers });
+      return { status: r.status, text: await r.text(), headers: r.headers };
+    },
   };
   return client;
 }

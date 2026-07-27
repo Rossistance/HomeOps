@@ -7,11 +7,16 @@
 //     { requireSession: true }, so an unauthenticated call gets a JSON 401/403
 //     (NOT an event stream).
 //   ← 200 `text/event-stream`; each frame is a single `data: <json>` line
-//     terminated by a blank line. Two event shapes only:
+//     terminated by a blank line. Three event shapes:
 //       { "type": "progress", "tokens": n }
 //         — liveness ping emitted every 4th provider token. The raw token TEXT
 //           is never streamed: the model responds with JSON that is meaningless
 //           mid-stream, so the server only signals that generation is alive.
+//       { "type": "phase", "phase": "searching" | "creating" }
+//         — what the server has decided to DO, sent when it decides it. Distinct
+//           from the token ping on purpose: a lookup goes out to the live web and
+//           emits no tokens while it does, so inferring the phase from token flow
+//           reported "writing" throughout the slowest part of the request.
 //       { "type": "done", "result": { ok, kind, answer, plan?, build?, model } }
 //         — the fully parsed AssistantResult, identical in shape to the
 //           non-streaming POST /api/assistant response ({ ok:false, error,
@@ -34,15 +39,26 @@ async function bearerToken(): Promise<string | null> {
   try { return await SecureStore.getItemAsync(TOKEN_KEY); } catch { return null; }
 }
 
-interface StreamEvent { type?: string; tokens?: number; result?: AssistantResult }
+/** What the server can announce it is DOING. Deliberately narrower than what the UI can
+ *  show: these two are facts from the server, the other two are inferred from token flow. */
+export type ServerPhase = "searching" | "creating";
+
+/** The full vocabulary of the working bubble. */
+export type AssistantPhase = "thinking" | "writing" | ServerPhase;
+
+interface StreamEvent { type?: string; tokens?: number; phase?: string; result?: AssistantResult }
 
 export interface StreamAssistantOpts {
   conversationId?: string;
   context?: Record<string, unknown>;
   /** Fires with the running token count each time the server pings progress. */
   onProgress?: (tokens: number) => void;
+  /** Fires when the server says what it has decided to do. */
+  onPhase?: (phase: ServerPhase) => void;
   signal?: AbortSignal;
 }
+
+const PHASES: readonly string[] = ["searching", "creating"];
 
 export async function streamAssistant(message: string, opts?: StreamAssistantOpts): Promise<AssistantResult> {
   const token = await bearerToken();
@@ -70,6 +86,9 @@ export async function streamAssistant(message: string, opts?: StreamAssistantOpt
       let ev: StreamEvent;
       try { ev = JSON.parse(line.slice(5).trim()) as StreamEvent; } catch { continue; }
       if (ev.type === "progress" && typeof ev.tokens === "number") opts?.onProgress?.(ev.tokens);
+      // Unknown phase names are ignored rather than displayed: a future server adding one
+      // shouldn't put a raw identifier in front of a person.
+      else if (ev.type === "phase" && ev.phase && PHASES.includes(ev.phase)) opts?.onPhase?.(ev.phase as ServerPhase);
       else if (ev.type === "done" && ev.result) result = ev.result;
     }
   };

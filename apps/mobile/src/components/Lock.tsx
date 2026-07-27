@@ -147,9 +147,20 @@ export function Lock() {
       />
       <SafeAreaView style={{ flex: 1 }}>
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={process.env.EXPO_OS === "ios" ? "padding" : undefined}>
+          {/* The infinite-scroll bug's last hiding place.
+            *
+            * `automaticallyAdjustKeyboardInsets` and the KeyboardAvoidingView above it BOTH
+            * make room for the keyboard. Two compensations for one keyboard is a feedback
+            * loop: the inset grows the scrollable area, the grown area moves the focused
+            * field, the field triggers another adjustment. Every other screen in the app had
+            * this prop removed when the bug was traced — this one kept it because the lock
+            * screen is short and it never visibly ran away. "Doesn't reproduce yet" is not
+            * the same as fixed, and this screen grows a row per household member.
+            *
+            * KeyboardAvoidingView stays: it's the one that does the job, and it does it by
+            * padding the container rather than by mutating scroll insets. */}
           <ScrollView
             ref={scrollRef}
-            automaticallyAdjustKeyboardInsets
             contentContainerStyle={{ flexGrow: 1, justifyContent: "center", padding: spacing.xl, paddingBottom: 48 }}
             keyboardShouldPersistTaps="handled"
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void onRefresh()} tintColor={colors.textFaint} />}

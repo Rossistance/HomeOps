@@ -20,7 +20,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec, type MemberRec, type NestRec, type ResultGroupRec, type RunRec } from "@/lib/api";
 import { ResultCards } from "@/components/ResultCards";
-import { streamAssistant } from "@/lib/assistant-stream";
+import { streamAssistant, type AssistantPhase } from "@/lib/assistant-stream";
 import { getLocationContext } from "@/lib/location";
 import { canManageHousehold, canManageOwn, capabilitiesFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
@@ -123,7 +123,14 @@ export default function AskScreen() {
   const [text, setText] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
-  const [phase, setPhase] = useState<"thinking" | "writing">("thinking");
+  /* What the assistant is doing, for the working bubble. "thinking" and "writing" are
+   * inferred locally from token flow; "searching" and "creating" are only ever set because
+   * the SERVER said so. Once the server has spoken, the token ping stops being allowed to
+   * overwrite it — a web lookup emits no tokens while it fetches but the provider's earlier
+   * tokens are still arriving, and letting those win is how "Searching…" would flicker back
+   * to "Writing…" a beat after appearing. */
+  const [phase, setPhase] = useState<AssistantPhase>("thinking");
+  const phaseLockedRef = useRef(false);
   const [buildingId, setBuildingId] = useState<string | null>(null);
   // Server-durable thread: created on the first send so both turns persist and
   // the same conversation shows up on the web. Opening a recent chat resumes it.
@@ -561,6 +568,7 @@ export default function AskScreen() {
     // Focus survives the dismissal, so typing again brings the keyboard straight back.
     setTimeout(() => inputRef.current?.focus(), 400);
     setPhase("thinking");
+    phaseLockedRef.current = false;
     justSentRef.current = true;
     // The room is needed for reading the moment a conversation starts.
     setHeaderOpen(false);
@@ -596,7 +604,12 @@ export default function AskScreen() {
     const context = Object.keys(ctx).length ? ctx : undefined;
     let r: AssistantResult;
     try {
-      r = await streamAssistant(t, { conversationId: convId ?? undefined, context, onProgress: () => setPhase("writing") });
+      r = await streamAssistant(t, {
+        conversationId: convId ?? undefined,
+        context,
+        onProgress: () => { if (!phaseLockedRef.current) setPhase("writing"); },
+        onPhase: (p) => { phaseLockedRef.current = true; setPhase(p); },
+      });
     } catch {
       // Any stream failure (transport, auth, parse) → non-streaming call, so
       // behavior never regresses. The server persists the turn either way.
@@ -1386,8 +1399,18 @@ function ConvChip({ label, icon = "bubble.left", dot, selected, onPress, onLongP
   );
 }
 
+/* Said plainly, because the point is to be believed. "Searching the web" is a different
+ * wait from "Thinking" — it is longer, it involves someone else's server, and knowing which
+ * one you are in is the difference between waiting and giving up. */
+const PHASE_LABEL: Record<AssistantPhase, string> = {
+  thinking: "Thinking…",
+  writing: "Writing…",
+  searching: "Searching the web…",
+  creating: "Setting that up…",
+};
+
 /** Three softly pulsing dots — the "assistant is working" bubble. */
-function TypingBubble({ phase }: { phase: "thinking" | "writing" }) {
+function TypingBubble({ phase }: { phase: AssistantPhase }) {
   const { spacing } = useTheme();
   return (
     <Animated.View entering={FadeInDown.duration(200).reduceMotion(ReduceMotion.System)} style={{ alignItems: "flex-start" }}>
@@ -1397,7 +1420,7 @@ function TypingBubble({ phase }: { phase: "thinking" | "writing" }) {
           <TypingDot delay={140} />
           <TypingDot delay={280} />
         </View>
-        <T kind="caption">{phase === "writing" ? "Writing…" : "Thinking…"}</T>
+        <T kind="caption">{PHASE_LABEL[phase]}</T>
       </Card>
     </Animated.View>
   );

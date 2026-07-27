@@ -4205,6 +4205,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
         const out = await assistantStream(
           { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent },
           (_tok) => { tokenCount++; if (tokenCount % 4 === 0) res.write(`data: ${JSON.stringify({ type: "progress", tokens: tokenCount })}\n\n`); },
+          // What it's actually doing, as opposed to what the token counter implies. A web
+          // lookup used to spend its whole (long) life claiming to be writing.
+          (phase) => { try { res.write(`data: ${JSON.stringify({ type: "phase", phase })}\n\n`); } catch { /* client hung up */ } },
         );
         demoteBuildForRole(out, g.session); // ISS-011 — the streaming path gates identically
 
