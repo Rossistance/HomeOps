@@ -106,3 +106,49 @@ test("the health endpoint stays open, because a platform health check cannot hol
   assert.ok(getLine > 0 && gate > getLine,
     "the GET health response must come BEFORE the token gate, or Render marks the service unhealthy and never routes to it");
 });
+
+/* ---------------------------- The standby state ---------------------------- *
+ *
+ * The runtime runs on Render's free plan: it spins down after ~15 minutes idle and takes
+ * about 50s to wake. The health probe waits 8s. So for most of the day a working runtime
+ * would fail its check and the connector would go back to saying "offline" — the exact
+ * complaint — about something that answers fine when anything actually asks it.
+ *
+ * The tempting fixes are both wrong. A longer probe just moves the stall. A keepalive timer
+ * keeps a free service awake permanently and spends the month's allowance answering a
+ * question nobody asked. So "asleep" is reported as its own state, and only ever for a
+ * failure that looks like sleep — a misconfigured URL must not sit there reassuring people. */
+
+test("a configured runtime that doesn't answer in time reads as standby, not unavailable", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../connectors.mjs", import.meta.url), "utf8");
+  assert.match(src, /status: asleep \? "standby" : "runtime_unavailable"/,
+    "sleeping and broken are different things and must not share a status");
+});
+
+test("…but a POLICY refusal is never mistaken for a nap", async () => {
+  // An SSRF-guard block or a blocked IP range means the URL is wrong, not that the service
+  // is warming up. Calling that "standby" would hide a misconfiguration behind a promise.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../connectors.mjs", import.meta.url), "utf8");
+  assert.match(src, /const asleep = !r\.ok && !r\.policyBlocked && r\.error === "fetch_failed"/,
+    "policyBlocked must exclude the standby path");
+});
+
+test("health reports serving-now and deployed-at-all as separate answers", async () => {
+  // One boolean for both is how "offline" came to describe a runtime that works.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../index.mjs", import.meta.url), "utf8");
+  assert.match(src, /browserRuntimeConfigured: !!\(browserHealth && \(browserHealth\.ok \|\| browserHealth\.status === "standby"\)\)/);
+  assert.match(src, /browserRuntime: !!\(browserHealth && browserHealth\.ok\)/,
+    "the original flag keeps its original meaning — existing readers must not silently change");
+});
+
+test("no keepalive timer was added to paper over the spin-down", async () => {
+  // A 15-minute probe would keep the free service awake round the clock and burn the
+  // month's hours. If this ever appears, the standby state has been quietly abandoned.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../index.mjs", import.meta.url), "utf8");
+  assert.ok(!/setInterval\([^)]*healthCheck\("browser"\)/.test(src),
+    "the runtime is meant to sleep; waking it on a timer defeats the plan it runs on");
+});

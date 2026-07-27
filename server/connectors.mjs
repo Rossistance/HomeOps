@@ -294,7 +294,37 @@ export async function healthCheck(id) {
       if (!url) return persist({ ok: false, status: "runtime_unavailable", error: "no_runtime_url", reason });
       if (/^wss?:/.test(url)) return persist({ ok: false, status: "runtime_unavailable", error: "no_executable_runtime", reason });
       const r = await safeFetch(url, {}, { allowLoopback: true });
-      return persist({ ok: r.ok && r.httpOk, status: r.ok && r.httpOk ? "healthy" : "runtime_unavailable", source: r.ok && r.httpOk ? "runtime-service" : undefined, latencyMs: Date.now() - t0, error: r.ok ? undefined : r.error, reason: r.ok && r.httpOk ? undefined : reason });
+      if (r.ok && r.httpOk) return persist({ ok: true, status: "healthy", source: "runtime-service", latencyMs: Date.now() - t0 });
+      /* STANDBY is a real state, and reporting it as "offline" would be the same lie in the
+       * other direction.
+       *
+       * The runtime deploys on Render's free plan, which spins a service down after ~15
+       * minutes idle and takes ~50s to wake. This probe waits 8s. So for most of the day a
+       * perfectly working runtime fails its health check, and the connector would go back to
+       * saying exactly what he complained about — about something that would have answered
+       * fine if anything had actually asked it.
+       *
+       * The fix is NOT a longer probe or a keepalive timer. A probe every 15 minutes keeps a
+       * free service awake permanently and burns the month's allowance to answer a question
+       * nobody asked; a 60s probe just moves the stall. So a configured-but-unreachable
+       * runtime is reported as configured, asleep, and about to wake — which is true, and
+       * which is what the first real automation will demonstrate. A runtime that is
+       * MISCONFIGURED is a different thing and still reads as unavailable, above. */
+      /* `fetch_failed` is safeFetch's single bucket for "the request didn't come back" —
+       * an abort on timeout lands here alongside a refused connection, and a cold Render
+       * service produces exactly that. A policy refusal (SSRF guard, blocked range) is NOT
+       * a sleeping service and must keep reading as unavailable, or a misconfigured URL
+       * would sit there reassuring everyone it was about to wake up. */
+      const asleep = !r.ok && !r.policyBlocked && r.error === "fetch_failed";
+      return persist({
+        ok: false,
+        status: asleep ? "standby" : "runtime_unavailable",
+        latencyMs: Date.now() - t0,
+        error: r.ok ? undefined : r.error,
+        reason: asleep
+          ? "The browser runtime is deployed but idle. It wakes on the first automation, which takes about a minute; after that it stays warm."
+          : reason,
+      });
     }
     const ok = ["connected", "authorized_write", "authorized_readonly", "local_only"].includes(readiness);
     return persist({ ok, status: ok ? "healthy" : readiness, latencyMs: Date.now() - t0 });

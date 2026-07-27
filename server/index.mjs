@@ -548,6 +548,11 @@ const handleRequest = async (req, res) => {
       return json(res, 200, {
         ok: true, version: VERSION, time: new Date().toISOString(), runtime: "node-http", node: process.version, env: IS_PROD ? "production" : "development",
         browserRuntime: !!(browserHealth && browserHealth.ok),
+        /* Two different questions, and collapsing them into one boolean is how "offline"
+         * ended up describing a runtime that works. `browserRuntime` is "serving right now";
+         * this is "deployed and addressable, possibly asleep". A free service spends most of
+         * its day in the second state. */
+        browserRuntimeConfigured: !!(browserHealth && (browserHealth.ok || browserHealth.status === "standby")),
         memoryProvider: { ok: !!memHealth?.ok, degraded: !!memHealth?.degraded, backend: memHealth?.backend ?? memoryProvider.backend },
         externalActionsEnabled: externalActionsEnabled(CURRENT_TENANT),
         webhookBaseUrl: (process.env.HOMEOPS_PUBLIC_URL || `http://localhost:${PORT}`).split(",")[0].trim().replace(/\/$/, ""),
