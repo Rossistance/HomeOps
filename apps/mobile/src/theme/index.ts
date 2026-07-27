@@ -41,6 +41,24 @@ export interface HearthColors {
   amber: string; amberBg: string;       // warn / pending
   sky: string; skyBg: string;           // info / synced
   lavender: string; lavenderBg: string; // sensitive (caregiving / private docs)
+  /* EXPANDED PALETTE (2026-07-27). "Each category gets its own colour… to accomplish this
+   * we're going to need to expand the colour palette across the app."
+   *
+   * Six accents could not carry fourteen categories, so everything collapsed to ember and the
+   * colour stopped meaning anything — every agent orange, every playbook orange, Bills and
+   * Medical and Caregiving indistinguishable. Six more hues, chosen to stay legible against
+   * both the porcelain and the near-black, and to stay apart from EACH OTHER at a 20pt icon
+   * (adjacent hues are the failure mode here, not clashing ones).
+   *
+   * Semantic accents above keep their meaning — sage is still "done", coral still "danger".
+   * These are for identity, not status, which is why they're named as colours rather than as
+   * roles: a category owns its hue, and the hue means that category and nothing else. */
+  teal: string; tealBg: string;         // meals, food, groceries
+  indigo: string; indigoBg: string;     // briefing, documents, records
+  rose: string; roseBg: string;         // medical, health
+  moss: string; mossBg: string;         // bills, money, subscriptions
+  clay: string; clayBg: string;         // home, maintenance, errands
+  plum: string; plumBg: string;         // caregiving, family, pets
   tabInactive: string;
   shadow: string;        // boxShadow color component
 }
@@ -70,6 +88,12 @@ export const lightColors: HearthColors = {
   amber: "#B4791E", amberBg: "rgba(180,121,30,0.13)",
   sky: "#2E6FA3", skyBg: "rgba(46,111,163,0.12)",
   lavender: "#7C5CA8", lavenderBg: "rgba(124,92,168,0.12)",
+  teal: "#1F7A72", tealBg: "rgba(31,122,114,0.12)",
+  indigo: "#3C4E9E", indigoBg: "rgba(60,78,158,0.12)",
+  rose: "#B03A55", roseBg: "rgba(176,58,85,0.12)",
+  moss: "#5A7A2E", mossBg: "rgba(90,122,46,0.13)",
+  clay: "#9A5A2B", clayBg: "rgba(154,90,43,0.12)",
+  plum: "#7A3E7E", plumBg: "rgba(122,62,126,0.12)",
   tabInactive: "rgba(32,28,21,0.45)",
   shadow: "rgba(32,28,21,0.10)",
 };
@@ -99,6 +123,12 @@ export const darkColors: HearthColors = {
   amber: "#D9A24B", amberBg: "rgba(217,162,75,0.16)",
   sky: "#6FA6D6", skyBg: "rgba(111,166,214,0.16)",
   lavender: "#B096D6", lavenderBg: "rgba(176,150,214,0.18)",
+  teal: "#5FBDB2", tealBg: "rgba(95,189,178,0.16)",
+  indigo: "#8494E4", indigoBg: "rgba(132,148,228,0.16)",
+  rose: "#E0788F", roseBg: "rgba(224,120,143,0.16)",
+  moss: "#9FC168", mossBg: "rgba(159,193,104,0.16)",
+  clay: "#D18E5A", clayBg: "rgba(209,142,90,0.16)",
+  plum: "#C083C4", plumBg: "rgba(192,131,196,0.18)",
   tabInactive: "rgba(243,237,225,0.36)",
   shadow: "rgba(0,0,0,0.35)",
 };

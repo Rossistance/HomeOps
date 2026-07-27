@@ -119,6 +119,31 @@ const GLYPHS: Record<string, { d?: string[]; fill?: string[]; circles?: [number,
   wifi: { d: ["M2.8 9.4a13 13 0 0 1 18.4 0", "M6.2 12.9a8.2 8.2 0 0 1 11.6 0", "M9.6 16.4a3.4 3.4 0 0 1 4.8 0", "M12 19.6v.1"] },
   pulse: { d: ["M3 12.4h3.6l2.2-5.6 3.6 10.4 2.4-6.2 1.6 3h4.6"] },
 
+  /* The two halves of asking and offering. "The icon should not just be a hand sign — it
+   * should be someone essentially waving for help; and the offer help would be someone having
+   * their hands held out to offer someone help, to pull them up."
+   *
+   * Both are a PERSON, not a disembodied hand, which is the whole distinction he drew. They're
+   * built from the same head-and-body so the pair reads as two states of one idea, and differ
+   * only in what the arms are doing — raised and open to ask, extended and level to offer. */
+  "hand.wave": {
+    // Standing, one arm up and open: asking to be seen.
+    d: ["M8.6 20.4v-5.2a3.4 3.4 0 0 1 3.4-3.4h.6", "M12.6 11.8a3.4 3.4 0 0 1 3.4 3.4v5.2",
+        "M17 10.6 19.4 5", "M15.4 9.9l1.4-3.3"],
+    circles: [[12.2, 6.4, 2.9]],
+  },
+  // Dictation. A capsule and a stand — the universally-read microphone, at 14px.
+  mic: {
+    d: ["M12 3.6a2.8 2.8 0 0 1 2.8 2.8v5a2.8 2.8 0 0 1-5.6 0v-5A2.8 2.8 0 0 1 12 3.6Z",
+        "M5.8 11a6.2 6.2 0 0 0 12.4 0", "M12 17.2v3.2", "M8.8 20.4h6.4"],
+  },
+  "hand.offer": {
+    // Standing, both arms reaching out and level: offering a hand up.
+    d: ["M12.2 11.6v8.8", "M12.2 13.6 6.4 16.4", "M12.2 13.6 18 16.4",
+        "M4.2 17.2a2 2 0 0 0 2.6-.6", "M19.8 17.2a2 2 0 0 1-2.6-.6"],
+    circles: [[12.2, 6.6, 2.9]],
+  },
+
   /* ---- third pass: the tail. Drawn because they were still showing up. ---- */
   "chevron.down": { d: ["M5.4 9.4 12 16l6.6-6.6"] },
   "chevron.up": { d: ["M5.4 14.6 12 8l6.6 6.6"] },
@@ -150,7 +175,7 @@ const ALIAS: Record<string, string> = {
   "checkmark.shield": "shield", "plus.circle": "plus", "plus.circle.fill": "plus",
   "xmark.circle.fill": "xmark", "person.fill": "person", "person.2.fill": "person.2",
   "person.crop.circle": "person", "hand.raised.fill": "hand", "hand.raised": "hand",
-  "hand.thumbsup": "hand", "fork.knife": "meals", "cart.fill": "cart",
+  "hand.thumbsup": "hand.offer", "hand.wave.fill": "hand.wave", "fork.knife": "meals", "cart.fill": "cart",
   sparkles: "sparkle", "wand.and.stars": "sparkle", cpu: "agents", "paperplane.fill": "paperplane",
   "square.and.pencil": "pencil", "mappin.and.ellipse": "pin", mappin: "pin",
   "exclamationmark.triangle": "warning", "exclamationmark.triangle.fill": "warning",
@@ -192,7 +217,7 @@ const ALIAS: Record<string, string> = {
   "sun.max": "sun", sunrise: "sun", "circle.lefthalf.filled": "circle",
   "eye.slash": "eye", "play.circle": "play", "hand.tap": "hand",
   pawprint: "paw", "antenna.radiowaves.left.and.right": "broadcast",
-  number: "tag",
+  number: "tag", "mic.fill": "mic", microphone: "mic", "waveform": "pulse",
 };
 
 export function resolveGlyph(name: string): string | null {

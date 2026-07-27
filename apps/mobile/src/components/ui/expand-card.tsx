@@ -25,6 +25,7 @@ import { PressableCard } from "./card";
 import { Badge } from "./badge";
 import { Button } from "./button";
 import { Sym } from "./symbol";
+import { Expander, GoArrow } from "./expander";
 import { T } from "./text";
 
 /** A small always-visible fact: "3 tools", "Google Calendar", "Runs unattended". */
@@ -122,7 +123,11 @@ export function ExpandCard({
             people were tapping it instead of the card and missing. */}
         {expandable || onPress ? (
           <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: colors.surfaceSunken, alignItems: "center", justifyContent: "center", marginTop: 2 }}>
-            <Sym name={expandable ? (open ? "chevron.up" : "chevron.down") : "chevron.right"} size={15} color={colors.textSecondary} />
+            {/* One expander for the whole app (ui/expander) — the sizes used to be picked
+                per screen, which is why they drifted and why some came out scaled down. */}
+            {expandable
+              ? <Expander open={open} kind="chevron" tone={iconColor} />
+              : <GoArrow tone={colors.textSecondary} />}
           </View>
         ) : null}
       </View>

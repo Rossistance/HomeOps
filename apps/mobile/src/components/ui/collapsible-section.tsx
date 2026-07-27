@@ -5,6 +5,7 @@ import { useState, type ReactNode } from "react";
 import { View } from "react-native";
 import { useTheme, tapHaptic } from "@/theme";
 import { PressableScale } from "./pressable-scale";
+import { Expander } from "./expander";
 import { T } from "./text";
 import { Sym } from "./symbol";
 import { Badge } from "./badge";
@@ -32,7 +33,7 @@ export function CollapsibleSection({ title, count, defaultOpen = false, children
           <T kind="eyebrow">{title}</T>
           {count != null ? <Badge label={String(count)} fg={colors.textMuted} bg={colors.surfaceSunken} /> : null}
         </View>
-        <Sym name={open ? "chevron.up" : "chevron.down"} size={13} color={colors.textFaint} />
+        <Expander open={open} kind="chevron" size={26} />
       </PressableScale>
       {open ? <View style={{ gap: spacing.md }}>{children}</View> : null}
     </View>

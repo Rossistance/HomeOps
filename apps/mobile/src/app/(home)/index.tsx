@@ -18,9 +18,11 @@ import { useAdvancedMode } from "@/lib/prefs";
 import { pickPrompt } from "@/lib/ask-prompts";
 import { AskShimmer } from "@/components/ask-shimmer";
 import { useTheme, riskColor, tapHaptic } from "@/theme";
+import { depth, rimColor, rimGlow, softRadii } from "@/theme/neumorph";
+import { categoryStyle, titleCase } from "@/theme/categories";
 import {
   T, Bloom, Coach, Card, Badge, SectionHeader, SkeletonCards, ErrorState, Rise, HScreen,
-  Sym, SymTile, PressableScale, PressableCard, Button,
+  Sym, SymTile, PressableScale, PressableCard, Button, Expander, GoArrow,
 } from "@/components/ui";
 import { ApprovalSheet } from "@/components/sheets/approval-sheet";
 import { ChoreSheet } from "@/components/sheets/chore-sheet";
@@ -30,11 +32,25 @@ import { GrandparentHome } from "./grandparent";
 import { SitterHome } from "./sitter";
 import { MemberAvatar } from "./profile";
 
+/* "See all has no button look to it, no neumorphism look to it — it needs to look clickable,
+ * not just text." It was ember-coloured text, which relies on you already knowing that ember
+ * means tappable in this app. A pill you can see is a smaller ask. */
 function SeeAll({ label = "See all", onPress }: { label?: string; onPress: () => void }) {
-  const { colors } = useTheme();
+  const { colors, dark } = useTheme();
   return (
-    <PressableScale onPress={onPress} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel={label}>
+    <PressableScale
+      onPress={onPress} haptic="select" hitSlop={8}
+      accessibilityRole="button" accessibilityLabel={label}
+      style={{
+        flexDirection: "row", alignItems: "center", gap: 5,
+        paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+        backgroundColor: colors.emberBg,
+        borderWidth: 1, borderColor: rimColor(colors, dark),
+        boxShadow: depth("raisedSm", colors, dark),
+      }}
+    >
       <T kind="subMedium" color={colors.ember}>{label}</T>
+      <Sym name="chevron.right" size={12} color={colors.ember} />
     </PressableScale>
   );
 }
@@ -77,20 +93,37 @@ function EventChip({ event, members, showDay }: { event: EventRec; members: Memb
         style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, paddingRight: spacing.md, paddingVertical: 10 }}
       >
         <View style={{ width: 4, alignSelf: "stretch", backgroundColor: tone }} />
+        {/* A3 — "all of the individual calendar items that are shown can be compressed down;
+            there's no need to show so much information." Title and one line beneath it: when,
+            and where if there is a where. The rest is a tap away. */}
         <View style={{ flex: 1, gap: 1 }}>
           <T kind="subMedium" color={colors.text} numberOfLines={1}>{event.title}</T>
           <T kind="detail" numberOfLines={1}>
             {[showDay ? day : null, eventTimeLabel(event), event.location || null].filter(Boolean).join(" · ")}
           </T>
         </View>
-        {/* The people on it, in their own colours — the same dots as everywhere else. */}
-        <View style={{ flexDirection: "row", gap: 4 }}>
-          {(event.participantIds ?? []).slice(0, 4).map((pid) => {
-            const c = memberColor(colors, members.find((m) => m.actorId === pid));
-            return c ? <View key={pid} style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: c }} /> : null;
+        {/* A4 — "in addition to just the name and the colour dot, there needs to be our profile
+            photos, miniature versions of them, here inside of each calendar event, so it's
+            easily visually identified." A face is recognised faster than a dot is decoded, and
+            these are people you know. Overlapped slightly so four still fit on a narrow row;
+            MemberAvatar already falls back to the emoji or the initial in their own colour, so
+            somebody with no photo still reads as themselves. */}
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          {(event.participantIds ?? []).slice(0, 4).map((pid, i) => {
+            const m = members.find((x) => x.actorId === pid);
+            return m ? (
+              <View key={pid} style={{ marginLeft: i === 0 ? 0 : -7 }}>
+                <MemberAvatar member={m} size={22} />
+              </View>
+            ) : null;
           })}
+          {(event.participantIds ?? []).length > 4 ? (
+            <T kind="caption" color={colors.textMuted} style={{ marginLeft: 4 }}>
+              +{(event.participantIds ?? []).length - 4}
+            </T>
+          ) : null}
         </View>
-        <Sym name="chevron.right" size={11} color={colors.textFaint} />
+        <GoArrow tone={colors.textSecondary} size={24} />
       </LinearGradient>
     </PressableScale>
   );
@@ -210,9 +243,34 @@ function AdminToday() {
     .filter((e) => e.startAt && !isToday(e.startAt) && new Date(e.startAt).getTime() > now.getTime())
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
     .slice(0, 3);
-  // What the Calendar card actually shows: today if there is a today, otherwise what's next.
-  // Three either way — a card that shows one thing and calls it "Next" was the complaint.
-  const cardEvents = todayEvents.length > 0 ? todayEvents.slice(0, 3) : upcoming.slice(0, 3);
+  /* A1 — "There is a calendar event, Serving as Eucharistic Minister, shown at 8:30am. However
+   * it's 11:54am, so this event should no longer be showing. It is either complete or was
+   * missed." An event whose time has passed is not a plan; leaving it at the top of Today is
+   * the app telling you to go do something you already did.
+   *
+   * A2 — "The calendar should not just show one plan, it should show the plans for the next
+   * three days." So the window is three DAYS from now, not "today, or else the next thing" —
+   * which is a different question and produced a card that went blank at 6pm.
+   *
+   * All-day events are kept for their whole day rather than being dropped at midnight: an
+   * all-day event at 2pm is still today's news. */
+  const cardEvents = useMemo(() => {
+    const nowMs = now.getTime();
+    const horizon = nowMs + 3 * 24 * 60 * 60 * 1000;
+    return events
+      .filter((e) => {
+        if (!e.startAt) return false;
+        const start = new Date(e.startAt).getTime();
+        if (isNaN(start)) return false;
+        // Still "live" until its end, or until the end of its day when it's all-day.
+        const endsAt = e.allDay
+          ? new Date(new Date(e.startAt).setHours(23, 59, 59, 999)).getTime()
+          : (e.endAt ? new Date(e.endAt).getTime() : start);
+        return endsAt >= nowMs && start <= horizon;
+      })
+      .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
+      .slice(0, 3);
+  }, [events, now]);
   const bills = tasks.filter((t) => t.type === "bill" && t.status !== "done").slice(0, 4);
 
   // Help requests to/from me — the "needs your attention" companions.
@@ -341,11 +399,12 @@ function AdminToday() {
             </Bloom>
           </View>
           </Coach>
-          <T kind="body">
-            {offline ? "Can't reach your household right now."
-              : pending.length > 0 ? `${pending.length} thing${pending.length === 1 ? "" : "s"} need${pending.length === 1 ? "s" : ""} your approval today.`
-              : "Nothing needs your approval right now."}
-          </T>
+          {/* F1 — "I removed the 'nothing needs your approval right now', because that's not
+              where it goes and it's just a text sign. The actual approval card needs to go
+              here." So the sentence is gone entirely and the Needs-your-attention CARD moved up
+              under Calendar (see below). Only the offline case still speaks here, because a
+              household you can't reach has no cards to show at all. */}
+          {offline ? <T kind="body">Can&apos;t reach your household right now.</T> : null}
         </View>
       </Rise>
 
@@ -452,8 +511,15 @@ function AdminToday() {
                 colors={[colors.hero1, colors.hero2]}
                 start={{ x: 0.1, y: 0 }} end={{ x: 0.75, y: 1 }}
                 style={{
-                  borderRadius: 22, borderCurve: "continuous", padding: spacing.lg, gap: 8, overflow: "hidden",
-                  boxShadow: "0 18px 40px -20px rgba(21,26,38,0.55)",
+                  /* G1 — "even though this Ask Famili card has animation and I like it, it does
+                     not have the offsets that the other cards do to give it the neumorphism
+                     look." It had one flat drop shadow. Now it carries the same dual-shadow
+                     depth and ember rim as every other card, over its own gradient.
+                     G2 — "it also needs to be shrunk down a bit." Padding md, tighter radius. */
+                  borderRadius: softRadii.card, borderCurve: "continuous",
+                  padding: spacing.md, gap: 6, overflow: "hidden",
+                  borderWidth: 1, borderColor: rimColor(colors, dark),
+                  boxShadow: `${rimGlow(colors, dark)}, ${depth("raised", colors, dark)}`,
                 }}
                 onLayout={(e) => setHeroH(e.nativeEvent.layout.height)}
               >
@@ -462,11 +528,25 @@ function AdminToday() {
                     the base gradient, and it stops on its own. */}
                 {heroH > 0 ? <AskShimmer height={heroH} /> : null}
                 <T kind="eyebrow" color="rgba(245,241,233,0.55)">Ask Famili</T>
-                <T kind="h2" color={colors.heroText}>{prompt}</T>
+                <T kind="h3" color={colors.heroText} style={{ fontSize: 20, lineHeight: 26 }}>{prompt}</T>
                 <View style={st.heroInput}>
                   <T kind="sub" color="rgba(245,241,233,0.5)" style={{ flex: 1 }} numberOfLines={1}>
                     Plan a birthday, draft an email…
                   </T>
+                  {/* E1 — "I've added under the Ask portion a microphone. We need to add
+                      dictation to ALL chat input interfaces, here and in the standalone page."
+                      Tapping it opens the chat with the mic already listening, rather than
+                      running a second speech pipeline on a card that isn't a text field. */}
+                  <PressableScale
+                    onPress={() => router.push({ pathname: "/(ask)", params: { dictate: "1" } })}
+                    haptic="light"
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Ask by voice"
+                    style={[st.sendCircle, { backgroundColor: "rgba(245,241,233,0.14)" }]}
+                  >
+                    <Sym name="mic" size={15} color={colors.heroText} />
+                  </PressableScale>
                   <View style={[st.sendCircle, { backgroundColor: colors.ember }]}>
                     <Sym name="paperplane.fill" size={15} color={colors.onEmber} />
                   </View>
@@ -489,14 +569,18 @@ function AdminToday() {
               <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                 <SymTile name="calendar" color={colors.ember} bg={colors.emberBg} size={36} iconSize={17} />
                 <View style={{ flex: 1, gap: 2 }}>
-                  <T kind="rowTitle">Calendar</T>
+                  {/* "The calendar font is smaller than the Ask or offer help font. Why is
+                      that?" No reason — one was rowTitle and the other h3. Both are h3. */}
+                  <T kind="h3" color={colors.text}>Calendar</T>
                   <T kind="detail">
-                    {todayEvents.length === 0
-                      ? "Nothing on the calendar today"
-                      : `${todayEvents.length} plan${todayEvents.length === 1 ? "" : "s"} today`}
+                    {cardEvents.length === 0
+                      ? "Nothing coming up in the next three days"
+                      : todayEvents.length > 0
+                        ? `${todayEvents.length} plan${todayEvents.length === 1 ? "" : "s"} today`
+                        : `Next ${cardEvents.length === 1 ? "plan" : `${cardEvents.length} plans`}`}
                   </T>
                 </View>
-                <Sym name="chevron.right" size={13} color={colors.textFaint} />
+                <GoArrow tone={colors.textSecondary} size={26} />
               </View>
               {/* Reported: the next event read as "Next: …" in the same type as the card
                   titles, so a real appointment looked like a heading. It's a THING now — a card
@@ -516,64 +600,31 @@ function AdminToday() {
             </Coach>
           </Rise>
 
-          {/* Ask OR offer help — hand a task off to, or pitch in for, a
-              grandparent, sitter or family member. */}
-          <Rise index={4}>
-            <Coach id="today.help">
-            <Card style={{ gap: spacing.sm }}>
+          {/* F3/F4/F5 — "The needs-your-attention card should move up, right underneath
+              Calendar. It should also display however many events are necessary there… the
+              title is inside of a card, the information is inside of a card within that card."
+              Moved, and rebuilt to that grammar: one card, its heading inside it, and each
+              waiting thing as a card within — exactly what Calendar does with its events. */}
+          <Rise index={3}>
+            <Card style={{ gap: spacing.md }}>
+              {/* The heading lives INSIDE the card now — "the title is inside of a card, the
+                  information is inside of a card within that card", which is the grammar
+                  Calendar and Ask-for-help already use and this one didn't. */}
               <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-                <SymTile name="hand.raised.fill" color={colors.lavender} bg={colors.lavenderBg} size={36} iconSize={17} />
+                <SymTile name="bell" color={colors.ember} bg={colors.emberBg} size={36} iconSize={17} />
                 <View style={{ flex: 1, gap: 2 }}>
-                  {/* [v2 01:37] "this text on here, ask or offer for help, it's very
-                      inconspicuous. Too small. You can't actually tell what's going on there."
-                      It was a row title over a caption; on a grandparent's home it was the
-                      main thing on screen and read as fine print. */}
-                  <T kind="h3" color={colors.text}>Ask or offer help</T>
-                  {/* Reported: too long, and it broke badly — the em-dash landed at the start of
-                      a line and "member" was left stranded on its own below. Em-dash pairs are
-                      the problem: they can't be hyphenated or kept with their clause, so they
-                      go wherever the wrap falls. Two short lines that can't break wrong. */}
-                  <T kind="sub">Hand something off, or pitch in for someone else.</T>
+                  <T kind="h3" color={colors.text}>Needs your attention</T>
+                  <T kind="detail">
+                    {pending.length + helpToMe.length + helpFromMe.length === 0
+                      ? "Nothing waiting on you"
+                      : `${pending.length + helpToMe.length + helpFromMe.length} waiting`}
+                  </T>
                 </View>
+                {pending.length > 0
+                  ? <Badge label={String(pending.length)} fg={colors.onEmber} bg={colors.ember} />
+                  : <SeeAll onPress={() => router.push("/inbox")} />}
               </View>
-              <View style={{ flexDirection: "row", gap: spacing.sm }}>
-                <View style={{ flex: 1 }}>
-                  <Button small variant="ember" icon="hand.raised.fill" title="Ask for help" onPress={() => router.push({ pathname: "/help", params: { mode: "ask" } })} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  {/* S6/the "Offer help" complaint — neutral read as unavailable, so the two
-                      halves of one choice looked like an action and a dead control. Outlined
-                      ember is its peer: same weight, opposite fill. */}
-                  <Button small variant="emberOutline" icon="hand.thumbsup" title="Offer help" onPress={() => router.push({ pathname: "/help", params: { mode: "offer" } })} />
-                </View>
-              </View>
-            </Card>
-            </Coach>
-          </Rise>
-
-          {/* quick actions — 2×3 grid; Meals + Tasks lead */}
-          <Rise index={5}>
-            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
-              {quickActions.map((a) => (
-                <PressableCard key={a.title} onPress={a.go} padded={false} style={{ flexBasis: "30%", flexGrow: 1, alignItems: "center", paddingVertical: 12, gap: 7 }} accessibilityRole="button" accessibilityLabel={a.title}>
-                  <SymTile name={a.icon} color={a.fg} bg={a.bg} size={40} iconSize={18} />
-                  <T kind="detail" color={colors.textSecondary} numberOfLines={1} style={{ fontSize: 11.5 }}>{a.title}</T>
-                </PressableCard>
-              ))}
-            </View>
-          </Rise>
-
-          {/* needs your attention */}
-          <Rise index={6}>
-            <SectionHeader
-              title="Needs your attention"
-              trailing={pending.length > 0
-                ? <Badge label={String(pending.length)} fg={colors.onEmber} bg={colors.ember} />
-                : <SeeAll onPress={() => router.push("/inbox")} />}
-            />
-            {pending.length === 0 && helpToMe.length === 0 && helpFromMe.length === 0 && !justHelped ? (
-              <Card><T kind="sub">All caught up — nothing waiting on you.</T></Card>
-            ) : (
+            {pending.length === 0 && helpToMe.length === 0 && helpFromMe.length === 0 && !justHelped ? null : (
               <View style={{ gap: spacing.sm }}>
                 {/* confirmation: accepting moved the linked task to me (WP-001) */}
                 {justHelped && (
@@ -661,6 +712,57 @@ function AdminToday() {
                 ))}
               </View>
             )}
+            </Card>
+          </Rise>
+
+
+          {/* Ask OR offer help — hand a task off to, or pitch in for, a
+              grandparent, sitter or family member. */}
+          <Rise index={4}>
+            <Coach id="today.help">
+            <Card style={{ gap: spacing.sm }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+                <SymTile name="hand.wave" color={colors.lavender} bg={colors.lavenderBg} size={36} iconSize={17} />
+                <View style={{ flex: 1, gap: 2 }}>
+                  {/* [v2 01:37] "this text on here, ask or offer for help, it's very
+                      inconspicuous. Too small. You can't actually tell what's going on there."
+                      It was a row title over a caption; on a grandparent's home it was the
+                      main thing on screen and read as fine print. */}
+                  <T kind="h3" color={colors.text}>Ask or offer help</T>
+                  {/* Reported: too long, and it broke badly — the em-dash landed at the start of
+                      a line and "member" was left stranded on its own below. Em-dash pairs are
+                      the problem: they can't be hyphenated or kept with their clause, so they
+                      go wherever the wrap falls. Two short lines that can't break wrong. */}
+                  {/* "The tagline underneath Ask or offer help should be 'Hand off or pitch
+                      in' — that simple. Remove the 'for' and 'something' and 'someone else'." */}
+                  <T kind="sub">Hand off or pitch in.</T>
+                </View>
+              </View>
+              <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                <View style={{ flex: 1 }}>
+                  <Button small variant="ember" icon="hand.wave" title="Ask for help" onPress={() => router.push({ pathname: "/help", params: { mode: "ask" } })} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  {/* S6/the "Offer help" complaint — neutral read as unavailable, so the two
+                      halves of one choice looked like an action and a dead control. Outlined
+                      ember is its peer: same weight, opposite fill. */}
+                  <Button small variant="emberOutline" icon="hand.offer" title="Offer help" onPress={() => router.push({ pathname: "/help", params: { mode: "offer" } })} />
+                </View>
+              </View>
+            </Card>
+            </Coach>
+          </Rise>
+
+          {/* quick actions — 2×3 grid; Meals + Tasks lead */}
+          <Rise index={5}>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
+              {quickActions.map((a) => (
+                <PressableCard key={a.title} onPress={a.go} padded={false} style={{ flexBasis: "30%", flexGrow: 1, alignItems: "center", paddingVertical: 12, gap: 7 }} accessibilityRole="button" accessibilityLabel={a.title}>
+                  <SymTile name={a.icon} color={a.fg} bg={a.bg} size={40} iconSize={18} />
+                  <T kind="detail" color={colors.textSecondary} numberOfLines={1} style={{ fontSize: 11.5 }}>{a.title}</T>
+                </PressableCard>
+              ))}
+            </View>
           </Rise>
 
           {/* coming up */}

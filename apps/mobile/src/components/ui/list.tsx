@@ -5,6 +5,7 @@ import { useTheme } from "@/theme";
 import { PressableScale } from "./pressable-scale";
 import { T } from "./text";
 import { Sym, SymTile } from "./symbol";
+import { GoArrow } from "./expander";
 
 export function SectionHeader({ title, trailing }: { title: string; trailing?: ReactNode }) {
   const { spacing } = useTheme();
@@ -55,7 +56,7 @@ export function Row({ title, subtitle, icon, iconColor, iconBg, leading, trailin
           still pressable; this makes that look true. */}
       {chevron ? (
         <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: colors.surfaceSunken, alignItems: "center", justifyContent: "center" }}>
-          <Sym name="chevron.right" size={15} color={colors.textSecondary} />
+          <GoArrow tone={colors.textSecondary} size={26} />
         </View>
       ) : null}
     </View>

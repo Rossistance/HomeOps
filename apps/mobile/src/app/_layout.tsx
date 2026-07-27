@@ -21,6 +21,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { installCrashReporting } from "@/lib/crash-reporter";
 import { Lock } from "@/components/Lock";
 import { Splash } from "@/components/Splash";
+import { markAppVisible } from "@/lib/app-visible";
 import { Onboarding } from "@/components/Onboarding";
 import { useTheme } from "@/theme";
 import { api } from "@/lib/api";
@@ -183,7 +184,9 @@ function Shell() {
           </TutorialProvider>
         </RunProvider>
       </SessionProvider>
-      {!splashDone && <Splash onDone={() => setSplashDone(true)} />}
+      {/* markAppVisible is what starts anything that is meant to be WATCHED (the greeting's
+          bloom) — see lib/app-visible. Screens mount under this thing. */}
+      {!splashDone && <Splash onDone={() => { setSplashDone(true); markAppVisible(); }} />}
     </ThemeProvider>
   );
 }

@@ -17,12 +17,15 @@
 // could see anything, and the mount that was finally visible read `true` and started at rest.
 // Reported exactly that way: "I did not see the bloom effect at all."
 //
-// The flag is gone. This just animates when it mounts. That lands in the same place for the
-// behaviour we wanted — native tabs keep screens mounted, so switching to Ask and back does
-// not replay it — and it can't be silently defeated by a remount nobody watched.
+// The flag went, and it still didn't show — because mounting was the wrong trigger twice over.
+// The Today screen mounts UNDERNEATH the splash: the springs ran, settled, and the splash then
+// faded away to reveal a greeting that had finished blooming half a second earlier. It waits
+// for the app to be genuinely on screen now (lib/app-visible), which is the only moment that
+// means anything for an animation whose entire job is to be watched.
 import { useEffect, type ReactNode } from "react";
 import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withDelay, withSpring, withTiming } from "react-native-reanimated";
 import { useCalmMotion } from "@/theme";
+import { whenAppVisible } from "@/lib/app-visible";
 
 export function Bloom({
   children, delay = 120, big = false, style,
@@ -34,21 +37,29 @@ export function Bloom({
   style?: object;
 }) {
   const calm = useCalmMotion();
-  const from = big ? 0.72 : 0.9;
+  /* `big` is the user's own name — "the user's name should use the big effect". It starts
+   * markedly smaller and settles on a looser spring, so it visibly overshoots and comes back
+   * rather than merely appearing slightly late. */
+  const from = big ? 0.58 : 0.9;
   const scale = useSharedValue(calm ? 1 : from);
-  const lift = useSharedValue(calm ? 0 : big ? 20 : 12);
+  const lift = useSharedValue(calm ? 0 : big ? 26 : 12);
   const fade = useSharedValue(calm ? 1 : 0);
 
   useEffect(() => {
     if (calm) return;
+    /* Wait for the app to actually be on screen. The Today screen mounts underneath the splash,
+     * so a mount-triggered bloom ran, settled, and was revealed already finished — reported
+     * twice as "the bloom still isn't happening". It was happening; nobody could see it. */
+    return whenAppVisible(() => {
     // Low damping on the scale is what makes it a bloom rather than a fade-up: it overshoots
     // and comes back. `big` overshoots harder and settles slower. The lift is damped more in
     // both, so the text rises into place without bobbing.
     scale.value = withDelay(delay, withSpring(1, {
-      damping: big ? 7.5 : 9, stiffness: big ? 110 : 130, mass: big ? 1 : 0.9, reduceMotion: ReduceMotion.System,
+      damping: big ? 6.5 : 9, stiffness: big ? 95 : 130, mass: big ? 1.1 : 0.9, reduceMotion: ReduceMotion.System,
     }));
     lift.value = withDelay(delay, withSpring(0, { damping: 15, stiffness: 140, reduceMotion: ReduceMotion.System }));
     fade.value = withDelay(delay, withTiming(1, { duration: big ? 520 : 420, reduceMotion: ReduceMotion.System }));
+    });
   }, [calm, big, delay, scale, lift, fade]);
 
   const a = useAnimatedStyle(() => ({
