@@ -12,7 +12,7 @@ import { api, type CalendarSubscription, type ProviderRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTheme, riskColor, tapHaptic, type HearthColors } from "@/theme";
 import {
-  Badge, BrandIcon, Button, Card, EmptyState, HScreen, Notice, PressableScale, Rise, Row,
+  Badge, BrandIcon, Button, Card, EmptyState, Expander, HScreen, Notice, PressableScale, Rise, Row,
   SectionHeader, SkeletonCards, Sym, SymTile, T,
 } from "@/components/ui";
 
@@ -72,6 +72,8 @@ export default function ConnectionsScreen() {
   const focusProvider = typeof params.focus === "string" ? params.focus : null;
   const fromRoute = typeof params.from === "string" ? params.from : null;
   const scroller = useRef<ScrollView>(null);
+  /* Which providers are open. Collapsed by default — see the note on the card head. */
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const cardY = useRef<Record<string, number>>({});
   const [ringFor, setRingFor] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -287,17 +289,38 @@ export default function ConnectionsScreen() {
             return (
               <Rise key={p.id} index={Math.min(i + 1, 8)}>
                 <FocusRing active={ringed} onLayout={(e) => { cardY.current[p.id] = e.nativeEvent.layout.y; }}>
-                <Card style={{ gap: spacing.md }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+                {/* T1 — "these cards are very large and they need to be able to be condensed
+                    down into essentially a single line saying whether or not setup is required
+                    and if they're active. They could be expanded to reveal all this detail, but
+                    there's no need to display such large cards on a single screen when that
+                    information is not accessed all the time."
+                    So the head is the single line: who, and what state it's in. Everything else
+                    lives behind the expander, closed by default, unless it's the one you just
+                    came back to (`ringed`) — that one opens itself, because you arrived here to
+                    look at it. */}
+                <Card style={{ gap: expanded[p.id] ?? ringed ? spacing.md : 0 }}>
+                  <PressableScale
+                    onPress={() => setExpanded((e) => ({ ...e, [p.id]: !(e[p.id] ?? ringed) }))}
+                    haptic="select"
+                    accessibilityRole="button"
+                    accessibilityState={{ expanded: expanded[p.id] ?? ringed }}
+                    accessibilityLabel={`${p.name}, ${m.label}`}
+                    style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}
+                  >
                     <BrandIcon provider={p.id} />
                     <View style={{ flex: 1, gap: 2 }}>
                       <T kind="bodyMedium" color={colors.text}>{p.name}</T>
-                      <T kind="sub">
+                      <T kind="sub" color={m.fg}>
                         {connected
                           ? `${p.accounts.length} account${p.accounts.length === 1 ? "" : "s"} connected`
                           : needsAuth ? "Authorize to let plans act on this account" : "Server-side setup required first"}
                       </T>
                     </View>
+                    <Expander open={expanded[p.id] ?? ringed} tone={m.fg} />
+                  </PressableScale>
+                  {(expanded[p.id] ?? ringed) ? (
+                  <>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
                     <Badge label={connected ? `${p.accounts.length} connected` : m.label} fg={m.fg} bg={m.bg} />
                   </View>
                   {connected ? (
@@ -365,6 +388,8 @@ export default function ConnectionsScreen() {
                     <T kind="caption" color={colors.textFaint}>
                       Deployment setup needed: set {p.clientIdEnv} and {p.clientSecretEnv} on the server, then connect here.
                     </T>
+                  ) : null}
+                  </>
                   ) : null}
                 </Card>
                 </FocusRing>

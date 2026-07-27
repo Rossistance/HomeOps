@@ -3,7 +3,7 @@
 // api.patchMember (self-edits are allowed for everyone; the server enforces it).
 // Also exports MemberAvatar — the shared avatar circle (photo/emoji/initials with
 // a member-color ring) used on Today's strip and the scoped home headers.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { TextInput, View } from "react-native";
 import { router } from "expo-router";
 import { Image } from "expo-image";
@@ -75,7 +75,15 @@ export function MemberAvatar({ member, size = 40, ringWidth = 2 }: {
 /* The editor screen                                                    */
 /* ------------------------------------------------------------------ */
 
-const ACCENTS = ["ink", "sage", "coral", "amber", "sky", "lavender"] as const;
+/* S2 — "if Melissa wanted to go right now and select the same colour that I have, she could.
+ * And that would present an error, because then the calendar would look like it was all the
+ * same person and all the same colour. It would be very confusing. So if a colour is selected
+ * and another user has that colour… they should not be able to select that colour, and give
+ * them a toast to let them know that colour is being used by another person."
+ *
+ * The palette also grew, because six colours across a household of five leaves almost no room
+ * to be told apart — and the whole point of a member colour is that it's THEIRS. */
+const ACCENTS = ["ink", "sage", "coral", "amber", "sky", "lavender", "teal", "indigo", "rose", "moss", "clay", "plum"] as const;
 const EMOJIS = ["🦊", "🐻", "🦉", "🐙", "🌻", "🍀", "⭐️", "🌈", "🐝", "🦋", "🍕", "⚽️"] as const;
 const MAX_PHOTO_BYTES = 25 * 1024 * 1024;  // matches the server cap
 
@@ -83,6 +91,8 @@ export default function ProfileScreen() {
   const { colors, spacing } = useTheme();
   const { session } = useSession();
   const [me, setMe] = useState<MemberRec | null>(null);
+  // The whole roster, so a colour someone else holds can be reserved (see takenColors).
+  const [allMembers, setAllMembers] = useState<MemberRec[]>([]);
   const [name, setName] = useState("");
   const [color, setColor] = useState<string | null>(null);
   const [photoFileId, setPhotoFileId] = useState<string | null>(null);
@@ -96,6 +106,7 @@ export default function ProfileScreen() {
     void api.members().then((ms) => {
       if (cancelled) return;
       const m = ms.find((x) => x.isCurrentUser) ?? ms.find((x) => x.actorId === session.actorId) ?? null;
+      setAllMembers(ms);
       setMe(m);
       if (m) { setName(m.displayName); setColor(m.color ?? null); setPhotoFileId(m.photoFileId ?? null); }
     });
@@ -146,6 +157,18 @@ export default function ProfileScreen() {
   }
 
   // Live preview member: whatever is currently picked, not yet saved.
+  /* Every colour somebody ELSE already holds, and who. Explicit choices only: a member with no
+   * colour set is rendered from a hash of their id, and reserving a hashed colour would lock
+   * most of the palette on day one for people who never chose anything. */
+  const takenColors = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of allMembers) {
+      if (!m.color || m.actorId === session?.actorId) continue;
+      map.set(m.color, m.displayName.split(" ")[0]);
+    }
+    return map;
+  }, [allMembers, session?.actorId]);
+
   const preview: MemberRec = { ...me, displayName: name || me.displayName, color, photoFileId };
   const previewAccent = memberColor(colors, preview) ?? colors.ember;
   const currentEmoji = photoFileId?.startsWith("emoji:") ? photoFileId.slice("emoji:".length) : null;
@@ -188,21 +211,36 @@ export default function ProfileScreen() {
             {ACCENTS.map((a) => {
               const c = memberAccent(colors, a) ?? colors.ember;
               const selected = color === a;
+              const takenBy = takenColors.get(a);
               return (
                 <PressableScale
                   key={a}
                   haptic="select"
-                  onPress={() => setColor(a)}
+                  onPress={() => {
+                    if (takenBy) {
+                      // Told, not silently ignored: a swatch that does nothing when tapped reads
+                      // as a broken swatch rather than as somebody else's colour.
+                      setNote({ text: `${takenBy} is already using that colour — pick another so the calendar stays readable.`, ok: false });
+                      return;
+                    }
+                    setNote(null);
+                    setColor(a);
+                  }}
                   accessibilityRole="button"
-                  accessibilityState={{ selected }}
-                  accessibilityLabel={`Color ${a}`}
+                  accessibilityState={{ selected, disabled: !!takenBy }}
+                  accessibilityLabel={takenBy ? `Colour ${a}, already used by ${takenBy}` : `Colour ${a}`}
                   style={{
                     width: 40, height: 40, borderRadius: 20,
                     alignItems: "center", justifyContent: "center",
                     borderWidth: selected ? 3 : 0, borderColor: colors.text,
                   }}
                 >
-                  <View style={{ width: selected ? 28 : 34, height: selected ? 28 : 34, borderRadius: 17, backgroundColor: c }} />
+                  <View style={{ width: selected ? 28 : 34, height: selected ? 28 : 34, borderRadius: 17, backgroundColor: c, opacity: takenBy ? 0.28 : 1 }} />
+                  {takenBy ? (
+                    <View style={{ position: "absolute" }}>
+                      <Sym name="person" size={15} color={colors.text} />
+                    </View>
+                  ) : null}
                 </PressableScale>
               );
             })}

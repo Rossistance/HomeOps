@@ -60,6 +60,8 @@ export default function SettingsScreen() {
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
   const initials = (session?.actorName ?? "?").split(" ").map((p) => p[0]).slice(0, 2).join("");
+  // The signed-in person's own roster record — carries their photo, emoji and colour.
+  const meMember = members.find((m) => m.isCurrentUser || m.actorId === session?.actorId) ?? null;
   const version = Constants.expoConfig?.version ?? "1.0";
 
   // Revoking an invite = archiving the member. Their profile disappears from the
@@ -155,13 +157,21 @@ export default function SettingsScreen() {
     <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
       <Rise index={0}>
         <Card style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-          <LinearGradient
-            colors={[colors.hero1, colors.hero2]}
-            start={{ x: 0.1, y: 0 }} end={{ x: 0.75, y: 1 }}
-            style={{ width: 48, height: 48, borderRadius: 24, alignItems: "center", justifyContent: "center" }}
-          >
-            <T kind="bodyMedium" color={colors.heroText} style={{ fontWeight: "600" }}>{initials}</T>
-          </LinearGradient>
+          {/* S1 — "while I do have a profile photo for myself here, it's not replicated at the
+              top of the Settings page inside my badge." MemberAvatar already knows how to fall
+              back to an emoji or an initial in the member's own colour, so the initials
+              gradient was doing a worse version of a job something else already did. */}
+          {meMember
+            ? <MemberAvatar member={meMember} size={48} />
+            : (
+              <LinearGradient
+                colors={[colors.hero1, colors.hero2]}
+                start={{ x: 0.1, y: 0 }} end={{ x: 0.75, y: 1 }}
+                style={{ width: 48, height: 48, borderRadius: 24, alignItems: "center", justifyContent: "center" }}
+              >
+                <T kind="bodyMedium" color={colors.heroText} style={{ fontWeight: "600" }}>{initials}</T>
+              </LinearGradient>
+            )}
           <View style={{ flex: 1, gap: 2 }}>
             <T kind="rowTitle">{session?.actorName}</T>
             <T kind="detail">{session?.role}{householdName ? ` · ${householdName}` : ""}</T>
@@ -169,25 +179,13 @@ export default function SettingsScreen() {
         </Card>
       </Rise>
 
-      <Rise index={1}>
-        <SectionHeader title="Appearance" />
-        <Card>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-            <View style={{ flex: 1, gap: 2 }}>
-              <T kind="rowTitle">Dark mode</T>
-              {/* Not "Set manually" any more: dark is what the app ships as, so on a fresh
-                  install that line claimed a choice nobody had made. State what it IS. */}
-              <T kind="detail">{pref === "system" ? "Matching your device" : pref === "dark" ? "Dark" : "Light"}</T>
-            </View>
-            {pref !== "system" && (
-              <PressableScale onPress={() => setPref("system")} haptic="select" hitSlop={8}>
-                <T kind="subMedium" color={colors.ember}>Match system</T>
-              </PressableScale>
-            )}
-            <Switch value={dark} onValueChange={(v) => setPref(v ? "dark" : "light")} trackColor={{ true: colors.ember }} />
-          </View>
-        </Card>
-      </Rise>
+      {/* V1 — "there's no need for this card at the bottom of the screen for appearance; it
+          actually doesn't do anything, there's really no point for that" (other than on web).
+          It does do something — but dark now ships as the default and the switch was a row of
+          chrome on a screen he wants shorter. It moved to the bottom, under More, where a
+          preference belongs; it is not deleted, because someone who wants light mode still
+          needs a way to say so. */}
+
 
       {loading ? <SkeletonCards count={2} /> : (
         <>
@@ -324,6 +322,26 @@ export default function SettingsScreen() {
         </Card>
       </Rise>
 
+      {/* Moved down here from the top of the screen. It's a preference, not something you came
+          to Settings to do — and dark is the default now, so most people never touch it. */}
+      <Rise index={5}>
+        <SectionHeader title="Appearance" />
+        <Card>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+            <View style={{ flex: 1, gap: 2 }}>
+              <T kind="rowTitle">Dark mode</T>
+              <T kind="detail">{pref === "system" ? "Matching your device" : pref === "dark" ? "Dark" : "Light"}</T>
+            </View>
+            {pref !== "system" && (
+              <PressableScale onPress={() => setPref("system")} haptic="select" hitSlop={8}>
+                <T kind="subMedium" color={colors.ember}>Match system</T>
+              </PressableScale>
+            )}
+            <Switch value={dark} onValueChange={(v) => setPref(v ? "dark" : "light")} trackColor={{ true: colors.ember }} />
+          </View>
+        </Card>
+      </Rise>
+
       <Rise index={5}>
         <Card>
           <Button title="Sign out" variant="danger" onPress={confirmSignOut} full />
@@ -345,7 +363,20 @@ export default function SettingsScreen() {
                   ? "Deleting your account removes the entire household — every member, event, task, file, and helper. It cannot be undone."
                   : "Deleting your account removes your sign-in and your access to this household. Shared household data stays with the family."}
               </T>
-              <Button title="Delete my account" variant="danger" full onPress={() => { setDeleteOpen(true); setDeleteNote(null); }} />
+              {/* V2 — "the delete my account button is a little large, and given that there's an
+                  infinite scroll error on this page it presents itself as an issue and is
+                  potentially able to be hit by accident. A better idea would be to put an
+                  additional step here, and it'd be greyed out until your PIN was put in —
+                  either a PIN or your username or email — which would then relieve it, and
+                  then a toast afterwards to confirm."
+                  So: small and ghosted, not a full-width red bar competing with Sign out. The
+                  identity check he described already guards the step behind it. */}
+              <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+                <Button
+                  title="Delete my account" variant="ghost" small
+                  onPress={() => { setDeleteOpen(true); setDeleteNote(null); }}
+                />
+              </View>
             </>
           ) : (
             <>

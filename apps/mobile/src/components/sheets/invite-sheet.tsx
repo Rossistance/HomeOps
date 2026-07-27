@@ -11,25 +11,41 @@ import {
   T, Well, SymTile, PressableScale, HSheet, SheetCTA, Notice, Sym, useConfirmFlash,
 } from "@/components/ui";
 
-// Handoff roles → real server roles. Access below is what the role actually
-// grants (server-enforced) — no pretend toggles.
+/* S3 — "there's a screen here that says 'who are you inviting'. I actually do not believe these
+ * are the correct categories that we base things off of in the application. The grandparent
+ * term was thrown out at one point. However, it's adult admin, adult member, limited member,
+ * helper."
+ *
+ * Right, and the mismatch was doing real harm: the picker offered "Grandparent", the SERVER
+ * enforces Limited Member, and the two aren't the same idea. A grandparent might be an Adult
+ * Member with full standing (that's the routing fix from an earlier review) or a Limited Member
+ * — the relationship and the role are different questions, and one control was answering both.
+ *
+ * These are the roles the server actually has. Access below is what each one actually grants,
+ * server-enforced; no pretend toggles. Relationship is set separately on the member, where it
+ * belongs, and no longer smuggled in through the invite.
+ */
 const ROLE_CARDS = [
-  { key: "adult", name: "Adult", icon: "person.2", serverRole: "Adult Member", relationship: null,
-    desc: "Full member — sees shared spaces, approves their own items",
-    access: ["Family calendar & chores", "Meals, groceries and lists", "Shared files and bills", "Connects their own accounts"],
-    line: "You'll see the family calendar plus the shared household spaces." },
-  { key: "child", name: "Child", icon: "graduationcap", serverRole: "Child View", relationship: "Child",
-    desc: "Chores and calendar only — everything else stays with you",
-    access: ["Their own chore list", "The family calendar", "Nothing external — ever"],
-    line: "You'll see your chores and the family calendar." },
-  { key: "grandparent", name: "Grandparent", icon: "heart", serverRole: "Limited Member", relationship: "Grandparent",
-    desc: "Calendar and family updates, in the format they prefer",
-    access: ["The family calendar", "Family updates and notes", "Can add items to shared lists"],
-    line: "You'll see the family calendar and updates from the family." },
-  { key: "helper", name: "Helper / Sitter", icon: "clock", serverRole: "Guest/Helper", relationship: "Helper",
-    desc: "Schedule and care notes while they're helping",
+  { key: "adult-admin", name: "Adult Admin", icon: "shield", serverRole: "Adult Admin", relationship: null,
+    desc: "Runs the household with you — everything you can do, except deleting it",
+    access: ["Everything an Adult Member has", "Invites and removes members", "Approves anything leaving the house", "Changes household settings"],
+    line: "You'll help run the household — the calendar, the people, and what goes out." },
+  { key: "adult-member", name: "Adult Member", icon: "person", serverRole: "Adult Member", relationship: null,
+    desc: "Full member — their own calendar, helpers and chats, and the family's too",
+    access: ["Family calendar & chores", "Meals, groceries and lists", "Their own connected accounts", "Their own helpers and private chats"],
+    line: "You'll see the family calendar and the shared spaces, and have your own side of the app." },
+  { key: "limited-member", name: "Limited Member", icon: "person.2", serverRole: "Limited Member", relationship: null,
+    desc: "The calendar and the lists, without the household's admin",
+    access: ["The family calendar", "Shared lists they can add to", "Family updates and notes", "No approvals, no settings"],
+    line: "You'll see the family calendar, the lists, and what's going on." },
+  { key: "helper", name: "Helper", icon: "clock", serverRole: "Guest/Helper", relationship: "Helper",
+    desc: "The schedule and care notes, while they're helping",
     access: ["The schedule while helping", "Care notes shared with them", "No bills, files or approvals"],
     line: "You'll see the schedule and care notes while you're helping." },
+  { key: "child", name: "Child", icon: "graduationcap", serverRole: "Child View", relationship: "Child",
+    desc: "Chores and the calendar — everything else stays with you",
+    access: ["Their own chore list", "The family calendar", "Nothing external — ever"],
+    line: "You'll see your chores and the family calendar." },
 ] as const;
 
 export function InviteSheet({ visible, onClose, householdName, onInvited }: {

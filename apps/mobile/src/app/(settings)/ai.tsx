@@ -5,6 +5,7 @@ import { Alert, Linking, Switch, TextInput, View } from "react-native";
 import { api, API_URL, type AIProviderRec, type CatalogToolRec, type RiskOverrideRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useAdvancedMode } from "@/lib/prefs";
+import { Expander } from "@/components/ui";
 import { useTheme, tapHaptic, type HearthColors } from "@/theme";
 import {
   Badge, Button, Card, ErrorState, HScreen, Notice, PressableScale,
@@ -256,7 +257,11 @@ export default function SettingsScreen() {
       {isAdmin ? <RiskOverridesSection /> : null}
       {isAdmin ? <AutoApproveImprovements /> : null}
 
-      <AdvancedModeToggle />
+      {/* U2 — "as well as changing any of these suggestions such as auto-approval, risk,
+          improvements, and accessing Advanced Mode" — all Owner and Adult Admin. The other
+          three already were; this one was a personal view preference and therefore ungated,
+          which is defensible right up until you notice it reveals the raw activity log. */}
+      {isAdmin ? <AdvancedModeToggle /> : null}
 
       <SectionHeader title="On the web" />
       <Rise index={2}>
@@ -357,7 +362,7 @@ function RiskOverridesSection() {
                 <T kind="bodyMedium" color={colors.text}>Approval-gated tools</T>
                 <T kind="sub">Let a trusted tool run without asking. Server-enforced; every skipped gate is still audited.</T>
               </View>
-              <Sym name={open ? "chevron.up" : "chevron.down"} size={13} color={colors.textFaint} />
+              <Expander open={open} kind="chevron" size={28} />
             </View>
           </PressableScale>
 
