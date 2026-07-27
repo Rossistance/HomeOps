@@ -6,7 +6,7 @@ export default function LibraryLayout() {
   return (
     <TabSwipe current="/(library)">
       <Stack screenOptions={useHearthStackOptions()}>
-        <Stack.Screen name="index" options={{ title: "Library" }} />
+        <Stack.Screen name="index" options={{ title: "Library", gestureEnabled: false }} />
       </Stack>
     </TabSwipe>
   );

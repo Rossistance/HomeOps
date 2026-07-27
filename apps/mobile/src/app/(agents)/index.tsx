@@ -11,7 +11,7 @@ import { canManageOwn } from "@/lib/roles";
 import { useTheme, tapHaptic } from "@/theme";
 import { Badge, EmptyState, ErrorState, ExpandCard, HScreen, Notice, PressableCard, PressableScale, Rise, SkeletonCards, Sym, SymTile, T } from "@/components/ui";
 import { NewAgentSheet } from "@/components/sheets/new-agent-sheet";
-import { agentIcon, agentTint, scheduleForAgent, connectionsForToolIds } from "@/lib/agent-meta";
+import { agentLook, agentTint, scheduleForAgent, connectionsForToolIds } from "@/lib/agent-meta";
 
 type AgentX = AgentRec & { system?: boolean; icon?: string };
 type RunX = RunRec & { sourceRef?: { agentId?: string | null } | null; createdAt?: string | number };
@@ -210,10 +210,13 @@ export default function AgentsScreen() {
                 no idea what tools it uses, what connections it uses — that should be easily
                 and visibly displayed there on that card." The name now WRAPS, and the
                 chips answer "what does this thing actually use" without opening anything. */}
+            {/* Identity, not status: the tile says what this agent is FOR. Whether it's running
+                is the badge's job — which is why every Active agent used to be the same colour
+                as every other Active agent, and every tile the same ember. */}
             <ExpandCard
-              icon={agentIcon(a.name)}
-              iconColor={tint.fg}
-              iconBg={tint.bg}
+              icon={agentLook(colors, a).icon}
+              iconColor={agentLook(colors, a).fg}
+              iconBg={agentLook(colors, a).bg}
               title={a.name}
               badge={{ label: a.status, fg: tint.fg, bg: tint.bg }}
               summary={a.purpose || undefined}

@@ -2,6 +2,7 @@
 // a human schedule line derived from the agent's triggers.
 import type { TriggerRec } from "@/lib/api";
 import type { HearthColors } from "@/theme";
+import { categoryStyle } from "@/theme/categories";
 
 export function agentIcon(name: string): string {
   const n = name.toLowerCase();
@@ -17,6 +18,25 @@ export function agentIcon(name: string): string {
   if (/carpool|ride|drive/.test(n)) return "person.2";
   if (/travel|trip|pack/.test(n)) return "airplane";
   return "cpu";
+}
+
+/**
+ * An agent's own colour and icon, from what it's FOR.
+ *
+ * "Each one of these icons that's supposed to be for a certain agent — they're not coloured per
+ *  that agent, they're all just the orange… while one is Household, one is Meals, and another
+ *  is a Briefing category, they actually share the same colour, and they shouldn't."
+ *
+ * The old pair was agentIcon(name) for the glyph and agentTint(status) for the colour, which is
+ * why every Active agent was the same green and every card's tile the same ember: the colour
+ * was answering "is it running", not "what is it". Status still has a home — the badge — but
+ * identity belongs to the icon.
+ *
+ * Reads name, purpose and category together, because an agent called "Morning Briefing" and one
+ * categorised "Briefing" are the same thing to a person and were two different colours here.
+ */
+export function agentLook(c: HearthColors, a: { name?: string; purpose?: string; category?: string | null }) {
+  return categoryStyle(c, `${a.category ?? ""} ${a.name ?? ""} ${a.purpose ?? ""}`.trim());
 }
 
 export function agentTint(c: HearthColors, status: string): { fg: string; bg: string } {

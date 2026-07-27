@@ -752,8 +752,8 @@ export const api = {
   // the extra pages and returns pageBlobIds[]/pageCount on the record.
   /** `kind: "avatar"` keeps a profile picture out of the family document library — the blob
    *  is stored the same way, but the Library lists documents. Omitted means document. */
-  async uploadFile(body: { name: string; contentBase64: string; mime?: string; tags?: string[]; visibility?: string; kind?: "avatar" | "document"; pages?: { name?: string; base64: string }[] }): Promise<{ file?: FileRec; error?: string; message?: string }> {
-    const r = await req<{ file?: FileRec; error?: string; message?: string }>("/files", { method: "POST", body: JSON.stringify(body) });
+  async uploadFile(body: { name: string; contentBase64: string; mime?: string; tags?: string[]; visibility?: string; kind?: "avatar" | "document"; pages?: { name?: string; base64: string }[]; autoFile?: boolean }): Promise<{ file?: FileRec; error?: string; message?: string; autoFiled?: string }> {
+    const r = await req<{ file?: FileRec; error?: string; message?: string; autoFiled?: string }>("/files", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };
     if (r.status === 413) return { error: "too_large" };
     return r.data ?? { error: "network" };
@@ -989,7 +989,7 @@ export const api = {
   },
 
   /* ---- Tasks (create/edit come to mobile with the redesign) ---- */
-  async createTask(body: { title: string; type?: string; dueAt?: string | null; assignedMemberId?: string | null; priority?: string; listName?: string; visibility?: string; nestId?: string }): Promise<{ task?: TaskRec; error?: string }> {
+  async createTask(body: { title: string; type?: string; dueAt?: string | null; startAt?: string | null; endAt?: string | null; assignedMemberId?: string | null; priority?: string; listName?: string; visibility?: string; nestId?: string }): Promise<{ task?: TaskRec; error?: string }> {
     const r = await req<{ task?: TaskRec; error?: string }>("/tasks", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };

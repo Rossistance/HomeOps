@@ -16,6 +16,7 @@ import { UploadSheet } from "@/components/sheets/upload-sheet";
 // Categorization is pure + unit-tested (WP-002/ISS-002): explicit space tags win,
 // heuristics use word boundaries — see lib/spaces.test.mjs.
 import { SPACE_DEFS, spaceOf, type SpaceKey } from "@/lib/spaces";
+import { categoryStyle } from "@/theme/categories";
 
 const KTYPES = ["note", "reference", "contact", "medical", "instructions"] as const;
 
@@ -58,7 +59,9 @@ export default function LibraryScreen() {
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
+  /* A toast can carry the colour of the space a file landed in — "if something is saved to
+   * School it should be blue; the toast shouldn't be green." */
+  const [notice, setNotice] = useState<{ text: string; ok: boolean; tone?: { fg: string; bg: string } } | null>(null);
   const [preview, setPreview] = useState<{ id: string; mime: string; text?: string; dataUri?: string } | null>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("");
@@ -186,6 +189,9 @@ export default function LibraryScreen() {
   };
 
   const spaceLabel = (k: SpaceKey) => SPACE_DEFS.find((s) => s.key === k)?.label ?? "Home";
+  /* A space's colour comes from the same table everything else uses, so School is the same blue
+   * here, on an agent, and on a playbook. */
+  const spaceTone = (c: typeof colors, k: SpaceKey) => categoryStyle(c, SPACE_DEFS.find((s) => s.key === k)?.label ?? "Home");
 
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
@@ -219,12 +225,21 @@ export default function LibraryScreen() {
         </View>
       </Rise>
 
-      {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
+      {notice ? <Notice text={notice.text} ok={notice.ok} tone={notice.tone} /> : null}
 
       {/* WP-002: persistent, dismissable save confirmation with tap-through */}
       {justUploaded ? (
-        <Card style={{ backgroundColor: colors.sageBg, borderColor: "transparent", flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-          <Sym name="checkmark.circle.fill" size={16} color={colors.sage} />
+        /* P1/P2/P4 — "if something is indeed saved to School it should be blue; the toast
+           shouldn't be green… and its card down below should have a glowing hue of its own
+           category's colour." Green only ever said "that worked". The colour now says WHERE,
+           which is the part you'd actually want to check. */
+        <Card style={{
+          backgroundColor: spaceTone(colors, spaceOf(justUploaded)).bg,
+          borderColor: spaceTone(colors, spaceOf(justUploaded)).fg,
+          boxShadow: `0 0 18px -4px ${spaceTone(colors, spaceOf(justUploaded)).fg}`,
+          flexDirection: "row", alignItems: "center", gap: spacing.sm,
+        }}>
+          <Sym name={spaceTone(colors, spaceOf(justUploaded)).icon} size={17} color={spaceTone(colors, spaceOf(justUploaded)).fg} />
           <T kind="subMedium" style={{ flex: 1 }} numberOfLines={2}>
             Saved to {spaceLabel(spaceOf(justUploaded))} — {justUploaded.name}
           </T>
@@ -233,7 +248,7 @@ export default function LibraryScreen() {
             haptic={null} hitSlop={12} accessibilityRole="button" accessibilityLabel={`View ${justUploaded.name} in ${spaceLabel(spaceOf(justUploaded))}`}
             style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.surface }}
           >
-            <T kind="subMedium" color={colors.sage}>View</T>
+            <T kind="subMedium" color={spaceTone(colors, spaceOf(justUploaded)).fg}>View</T>
           </PressableScale>
           <PressableScale onPress={() => setJustUploaded(null)} haptic={null} hitSlop={14} accessibilityRole="button" accessibilityLabel="Dismiss upload confirmation">
             <Sym name="xmark" size={13} color={colors.textMuted} />

@@ -177,6 +177,32 @@ function badTimestamp(v) {
   return v != null && v !== "" && isNaN(+new Date(v));
 }
 
+/**
+ * Which Library space does this document belong in, judged from what it SAYS?
+ *
+ * Mirrors apps/mobile/src/lib/spaces.ts so the client's preview of where something will land
+ * and the server's decision agree — two copies of a rule is how you get a toast that says one
+ * thing and a library that shows another.
+ *
+ * Scored rather than first-match, and "home" is excluded from scoring entirely: a Home Depot
+ * receipt contains the word "home", and a naive contents match would file it exactly where it
+ * was wrongly filed before. Home is only ever the fallback.
+ */
+const SPACE_PATTERNS = [
+  { tag: "school", re: /school|class|teacher|homework|permission/gi },
+  { tag: "medical-ids", re: /medic|health|passport|ids?|insurance|prescription|doctor|dental/gi },
+  { tag: "bills-receipts", re: /receipt|invoice|bill|billing|utilit|statement|subtotal|total\s*\$|order\s*#|purchase/gi },
+];
+function decideSpaceFromText(text, name = "") {
+  const body = `${String(text ?? "").slice(0, 6000)} ${name}`;
+  let best = null;
+  for (const p of SPACE_PATTERNS) {
+    const hits = (body.match(p.re) ?? []).length;
+    if (hits > 0 && (!best || hits > best.hits)) best = { tag: p.tag, hits };
+  }
+  return best?.tag ?? null;
+}
+
 /* The half of a mirrored event that belongs to the calendar it came from (Q2).
  *
  * These are the fields a re-sync overwrites, and the fields everyone else on that invite
@@ -3440,6 +3466,34 @@ function mayWriteAgent(session, agent, nextVisibility) {
       });
       pageBufs.forEach((p, i) => writeFileBlob(pageBlobIds[i], p.buf));
       audit({ type: "file.upload", fileId: rec.id, name, sizeBytes, pageCount: pageBufs.length, ok: true }, req, g.session);
+
+      /* P3 — "I uploaded a receipt from Home Depot for a Ryobi drill as a PDF. I let Famili
+       * decide, and Famili decided to put it into Home… this is wrong, it should have gone into
+       * Bills & Receipts."
+       *
+       * The client decided from the FILENAME, which for a camera-roll PDF is `IMG_3011.pdf` and
+       * matches nothing — so it fell through to Home, whose pattern matches everything. The
+       * server can do better because the server can READ it: the same understandFile that lets
+       * the assistant answer questions about a document can tell a receipt from a permission
+       * slip. Only for "let Famili decide" (the client sends `autoFile`), so an explicit choice
+       * is never second-guessed.
+       *
+       * Deliberately after the response is prepared and awaited before returning: filing that
+       * lands a second later would mean the confirmation toast names the wrong space, which is
+       * the exact complaint. */
+      if (body.autoFile === true) {
+        try {
+          const read = await understandFile(rec.id, { householdId: g.session.householdId });
+          if (read.ok && read.text) {
+            const decided = decideSpaceFromText(read.text, name);
+            if (decided) {
+              const tagged = putFileRec({ ...rec, tags: [...new Set([...(rec.tags ?? []), decided])] });
+              audit({ type: "file.autofile", fileId: rec.id, space: decided, ok: true }, req, g.session);
+              return json(res, 200, { file: tagged, autoFiled: decided }, req);
+            }
+          }
+        } catch { /* filing is a convenience; a failure must not lose the upload */ }
+      }
       return json(res, 200, { file: rec }, req);
     }
     /* O2 [08:24] — "the Daily Household Briefing has some odd characters in it, and it says

@@ -7,11 +7,14 @@ import { T } from "./text";
 import { Sym, SymTile } from "./symbol";
 import { GoArrow } from "./expander";
 
-export function SectionHeader({ title, trailing }: { title: string; trailing?: ReactNode }) {
+export function SectionHeader({ title, trailing, tint }: { title: string; trailing?: ReactNode; tint?: string }) {
   const { spacing } = useTheme();
   return (
     <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.xl, marginBottom: spacing.sm }}>
-      <T kind="eyebrow">{title}</T>
+      {/* `tint` lets a section carry its category's colour, so the heading and the cards under
+          it agree — "those categories up here would need to match the categories and the icon
+          colours below." Untinted headers are unchanged. */}
+      <T kind="eyebrow" color={tint}>{title}</T>
       {trailing}
     </View>
   );

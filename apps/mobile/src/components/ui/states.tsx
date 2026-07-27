@@ -38,13 +38,26 @@ export function ErrorState({ message, onRetry }: { message?: string; onRetry?: (
 }
 
 /** Inline result notice (success or problem) — replaces ad-hoc toast text. */
-export function Notice({ text, ok }: { text: string; ok: boolean }) {
+/**
+ * @param tone  A category colour to wear instead of the default green.
+ *
+ * "If something is indeed saved to School it should be blue — the toast shouldn't be green…
+ *  It should go into Bills & Receipts, and therefore assume a yellow hue."
+ *
+ * Green means "that worked", which is true but is the least interesting thing the toast could
+ * say. WHERE it went is the part you'd want to check, and a colour says it before you've
+ * finished reading. Failures stay coral regardless: a red thing must never be given a
+ * category's friendly colour just because it knows which category it failed in.
+ */
+export function Notice({ text, ok, tone }: { text: string; ok: boolean; tone?: { fg: string; bg: string } }) {
   const { colors, spacing } = useTheme();
+  const fg = !ok ? colors.coral : (tone?.fg ?? colors.sage);
+  const bg = !ok ? colors.coralBg : (tone?.bg ?? colors.sageBg);
   return (
     <Animated.View entering={FadeInDown.duration(220).reduceMotion(ReduceMotion.System)}>
-      <View style={{ flexDirection: "row", gap: 8, alignItems: "center", backgroundColor: ok ? colors.sageBg : colors.coralBg, borderRadius: 12, borderCurve: "continuous", paddingHorizontal: spacing.md, paddingVertical: 10 }}>
-        <Sym name={ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"} size={15} color={ok ? colors.sage : colors.coral} />
-        <T kind="subMedium" color={ok ? colors.sage : colors.coral} selectable style={{ flex: 1 }}>{text}</T>
+      <View style={{ flexDirection: "row", gap: 8, alignItems: "center", backgroundColor: bg, borderRadius: 12, borderCurve: "continuous", paddingHorizontal: spacing.md, paddingVertical: 10 }}>
+        <Sym name={ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"} size={15} color={fg} />
+        <T kind="subMedium" color={fg} selectable style={{ flex: 1 }}>{text}</T>
       </View>
     </Animated.View>
   );

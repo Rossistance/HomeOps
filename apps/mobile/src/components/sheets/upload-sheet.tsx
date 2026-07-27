@@ -134,7 +134,12 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
     // Explicit filing, always (WP-002/ISS-002): "Let Famili decide" runs the
     // unit-tested name heuristic and files the result EXPLICITLY — never a
     // silent untagged fallback. The library banner then names the real category.
-    tags.push(space === SPACES[0] ? explicitTagOf(decideSpace(customName.trim() || file.name)) : spaceTag(space));
+    /* "Let Famili decide" now asks the SERVER to decide, because only the server can read the
+     * file. The name-based guess still rides along as a fallback for the case where the file
+     * can't be read at all — a filename is a poor signal, but it beats defaulting a receipt
+     * into Home, which is what happened. */
+    const autoFile = space === SPACES[0];
+    tags.push(autoFile ? explicitTagOf(decideSpace(customName.trim() || file.name)) : spaceTag(space));
     if (sensitive) tags.push("sensitive");
     // The typed name wins, exactly as typed — except a lost dot-extension is
     // restored from the original so the file stays openable.
@@ -146,6 +151,8 @@ export function UploadSheet({ visible, onClose, onUploaded }: {
     const r = await api.uploadFile({
       name, contentBase64: file.base64, mime: file.mime,
       tags: tags.length ? tags : undefined,
+      // The server reads it and files it; the name-based tag above is the fallback.
+      autoFile,
       visibility: sensitive ? "private" : undefined,
       pages,
     });

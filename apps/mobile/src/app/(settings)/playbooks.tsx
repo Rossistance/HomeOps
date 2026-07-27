@@ -12,6 +12,7 @@ import { useTheme } from "@/theme";
 // "ui/index" (not "ui"): the legacy src/components/ui.tsx still shadows the ui/
 // directory until the old screens are all ported — this resolves the new system.
 import { Badge, Button, Chip, ChipRow, EmptyState, ErrorState, HScreen, PressableCard, Rise, SectionHeader, SkeletonCards, Sym, T } from "@/components/ui";
+import { categoryStyle, titleCase } from "@/theme/categories";
 
 export default function PlaybooksScreen() {
   const { session } = useSession();
@@ -85,7 +86,11 @@ export default function PlaybooksScreen() {
 
           {sections.map(([cat, items]) => (
             <View key={cat}>
-              <SectionHeader title={cat} />
+              {/* O6/O7 — "every category is the same colour… and they actually share just this
+                  playbook icon, whereas the icon should be more geared towards the title of
+                  these categories. Those categories up here would need to match the categories
+                  and the icon colours below." One table decides both (theme/categories). */}
+              <SectionHeader title={titleCase(cat)} tint={categoryStyle(colors, cat).fg} />
               <View style={{ gap: spacing.md }}>
                 {items.map((p) => {
                   const open = expanded === p.id;
@@ -101,8 +106,8 @@ export default function PlaybooksScreen() {
                         style={{ gap: spacing.sm }}
                       >
                         <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-                          <View style={{ width: 34, height: 34, borderRadius: 11, borderCurve: "continuous", backgroundColor: colors.emberBg, alignItems: "center", justifyContent: "center" }}>
-                            <Sym name="book" size={17} color={colors.ember} />
+                          <View style={{ width: 38, height: 38, borderRadius: 12, borderCurve: "continuous", backgroundColor: categoryStyle(colors, p.category).bg, alignItems: "center", justifyContent: "center" }}>
+                            <Sym name={categoryStyle(colors, p.category).icon} size={20} color={categoryStyle(colors, p.category).fg} />
                           </View>
                           <View style={{ flex: 1 }}>
                             <T kind="h3" color={colors.text} numberOfLines={2}>{p.name}</T>
@@ -135,8 +140,8 @@ export default function PlaybooksScreen() {
                                   return (
                                     <View key={i} style={{ flexDirection: "row", gap: spacing.md }}>
                                       <View style={{ alignItems: "center", width: 24 }}>
-                                        <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: colors.emberBg, alignItems: "center", justifyContent: "center" }}>
-                                          <T kind="caption" color={colors.ember}>{i + 1}</T>
+                                        <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: categoryStyle(colors, p.category).bg, alignItems: "center", justifyContent: "center" }}>
+                                          <T kind="caption" color={categoryStyle(colors, p.category).fg}>{i + 1}</T>
                                         </View>
                                         {!lastStep ? (
                                           <View style={{ flex: 1, width: 2, borderRadius: 1, backgroundColor: colors.border, marginVertical: 3 }} />

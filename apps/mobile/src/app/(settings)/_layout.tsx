@@ -6,7 +6,7 @@ export default function SettingsLayout() {
   return (
     <TabSwipe current="/(settings)">
       <Stack screenOptions={useHearthStackOptions()}>
-        <Stack.Screen name="index" options={{ title: "Settings" }} />
+        <Stack.Screen name="index" options={{ title: "Settings", gestureEnabled: false }} />
         <Stack.Screen name="tasks" options={{ title: "Tasks & Lists" }} />
         <Stack.Screen name="meals" options={{ title: "Meals" }} />
         <Stack.Screen name="automations" options={{ title: "Automations" }} />

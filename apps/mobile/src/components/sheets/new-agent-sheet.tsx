@@ -6,8 +6,10 @@ import { useEffect, useState } from "react";
 import { Alert, ScrollView, TextInput, View } from "react-native";
 import { api, type AgentTemplateSectionRec, type ChatBuild } from "@/lib/api";
 import { useTheme, tapHaptic } from "@/theme";
+import { categoryStyle, titleCase } from "@/theme/categories";
+import { depth, rimColor } from "@/theme/neumorph";
 import {
-  T, Badge, Well, Row, SymTile, PressableScale, HSheet, SheetCTA, Notice, useConfirmFlash,
+  T, Badge, Card, Well, Row, SymTile, PressableScale, HSheet, SheetCTA, Notice, useConfirmFlash,
 } from "@/components/ui";
 
 export function NewAgentSheet({ visible, onClose, onCreated }: {
@@ -15,7 +17,7 @@ export function NewAgentSheet({ visible, onClose, onCreated }: {
   onClose: () => void;
   onCreated: () => void;
 }) {
-  const { colors, spacing } = useTheme();
+  const { colors, dark, spacing } = useTheme();
   const { flash, show } = useConfirmFlash();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -127,27 +129,48 @@ export function NewAgentSheet({ visible, onClose, onCreated }: {
                           accessibilityState={{ selected: active }}
                           accessibilityLabel={s.title}
                           style={{
+                            flexDirection: "row", alignItems: "center", gap: 6,
                             paddingHorizontal: 13, paddingVertical: 7, borderRadius: 999,
-                            backgroundColor: active ? colors.ember : colors.surfaceSunken,
+                            // O7 — the chips have to agree with the cards beneath them, or the
+                            // colour is decoration rather than a filter you can read.
+                            backgroundColor: active ? categoryStyle(colors, s.title).fg : colors.surfaceSunken,
+                            borderWidth: 1, borderColor: rimColor(colors, dark),
+                            boxShadow: depth("raisedSm", colors, dark),
                           }}
                         >
-                          <T kind="subMedium" color={active ? colors.onEmber : colors.textSecondary}>{s.title}</T>
+                          {s.key !== "__all" ? (
+                            <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: active ? colors.surface : categoryStyle(colors, s.title).fg }} />
+                          ) : null}
+                          <T kind="subMedium" color={active ? colors.surface : colors.textSecondary}>{titleCase(s.title)}</T>
                         </PressableScale>
                       );
                     })}
                   </ScrollView>
+                  {/* O4/O5 — "these are also not within cards on the new agent request page…
+                      they need to be sectioned into cards just like the rest of the app and
+                      take on the neumorphism. The titles should also be coloured to match the
+                      icon — health may be red, the heart may be red; bills and money may be
+                      green and the icon green." */}
                   {visibleSections.map((s) => (
-                    <View key={s.key} style={{ gap: 2 }}>
-                      <View style={{ flexDirection: "row", alignItems: "baseline", gap: 6, paddingBottom: 4 }}>
-                        <T kind="eyebrow">{s.title}</T>
-                        {s.blurb ? <T kind="caption" color={colors.textFaint} style={{ flex: 1 }}>{s.blurb}</T> : null}
+                    <Card key={s.key} padded={false} style={{ overflow: "hidden" }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: 6 }}>
+                        <SymTile
+                          name={categoryStyle(colors, s.title).icon}
+                          color={categoryStyle(colors, s.title).fg}
+                          bg={categoryStyle(colors, s.title).bg}
+                          size={30} iconSize={16}
+                        />
+                        <View style={{ flex: 1, gap: 1 }}>
+                          <T kind="subMedium" color={categoryStyle(colors, s.title).fg}>{titleCase(s.title)}</T>
+                          {s.blurb ? <T kind="caption" color={colors.textFaint}>{s.blurb}</T> : null}
+                        </View>
                       </View>
                       {s.templates.map((t, i) => (
                         <Row
                           key={t.id}
-                          icon={t.icon}
-                          iconColor={colors.ember}
-                          iconBg={colors.emberBg}
+                          icon={categoryStyle(colors, `${s.title} ${t.name}`).icon}
+                          iconColor={categoryStyle(colors, `${s.title} ${t.name}`).fg}
+                          iconBg={categoryStyle(colors, `${s.title} ${t.name}`).bg}
                           title={t.name}
                           subtitle={t.desc}
                           chevron
@@ -155,7 +178,7 @@ export function NewAgentSheet({ visible, onClose, onCreated }: {
                           last={i === s.templates.length - 1}
                         />
                       ))}
-                    </View>
+                    </Card>
                   ))}
                 </>
               )}

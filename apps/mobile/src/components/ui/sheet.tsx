@@ -10,6 +10,7 @@ import { useTheme, tapHaptic } from "@/theme";
 import { T } from "./text";
 import { Sym } from "./symbol";
 import { PressableScale } from "./pressable-scale";
+import { depth, rimColor } from "@/theme/neumorph";
 
 const EASE = Easing.bezier(0.22, 1, 0.36, 1);
 
@@ -22,7 +23,7 @@ export function HSheet({ visible, onClose, title, leftLabel = "Close", heightPct
   children: ReactNode;
   footer?: ReactNode;
 }) {
-  const { colors, spacing } = useTheme();
+  const { colors, dark, spacing } = useTheme();
   const { height: winH } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const sheetH = Math.round(winH * heightPct);
@@ -63,9 +64,25 @@ export function HSheet({ visible, onClose, title, leftLabel = "Close", heightPct
         >
           <View style={[st.handle, { backgroundColor: colors.textFaint }]} />
           <View style={[st.header, { paddingHorizontal: spacing.xl }]}>
-            <Pressable onPress={onClose} hitSlop={10} style={st.headerSide}>
-              <T kind="bodyMedium" color={colors.ember}>{leftLabel}</T>
-            </Pressable>
+            {/* I2 — "the Cancel button at the top is not an actual button, just text." Every
+                sheet in the app shares this header, so it was every sheet. A pill with the same
+                depth as the rest of the app's controls: still quiet, now visibly pressable. */}
+            <PressableScale
+              onPress={onClose} haptic="select" hitSlop={10}
+              accessibilityRole="button" accessibilityLabel={leftLabel}
+              style={[st.headerSide, {
+                alignItems: "flex-start",
+              }]}
+            >
+              <View style={{
+                paddingHorizontal: 12, paddingVertical: 5, borderRadius: 999,
+                backgroundColor: colors.surfaceSunken,
+                borderWidth: 1, borderColor: rimColor(colors, dark),
+                boxShadow: depth("raisedSm", colors, dark),
+              }}>
+                <T kind="subMedium" color={colors.ember}>{leftLabel}</T>
+              </View>
+            </PressableScale>
             <T style={{ fontSize: 15, fontWeight: "600" }} color={colors.text}>{title}</T>
             <View style={st.headerSide} />
           </View>

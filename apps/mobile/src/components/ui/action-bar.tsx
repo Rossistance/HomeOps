@@ -4,7 +4,8 @@
 // [15:03], adding an event: "Save is not visible at all — you can't even see it. That's
 // crucial." And [13:48], editing one: "Save changes should be closer to the text entry."
 //
-// HScreen already sets automaticallyAdjustKeyboardInsets, which keeps the focused FIELD
+// HScreen adds the keyboard's height as bottom PADDING (never an inset — see screen.tsx),
+// which keeps the focused FIELD
 // visible. It does nothing for a Save button that lives at the bottom of the scrolled
 // content — that button just scrolls with everything else, behind the keyboard, and the
 // family has to dismiss the keyboard to find out whether the form can even be submitted.

@@ -9,10 +9,12 @@ import { api, type HelpRequestRec, type MemberRec, type NestRec, type TaskRec } 
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic } from "@/theme";
+import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import { memberTone } from "@/lib/member-colors";
 // "ui/index" (not "ui"): the legacy src/components/ui.tsx still shadows the ui/
 // directory until the old screens are all ported — this resolves the new system.
-import { Badge, Button, Card, CheckCircle, Chip, ChipRow, Coach, EmptyState, ErrorState, HScreen, Notice, Rise, ScreenTour, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
+import { Badge, Button, Card, CheckCircle, Chip, ChipRow, Coach, EmptyState, ErrorState, HScreen, Notice, PressableScale, Rise, ScreenTour, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
+import { titleCase } from "@/theme/categories";
 import { TaskSheet } from "@/components/sheets/task-sheet";
 
 /* ------------------------------ grouping ------------------------------ */
@@ -29,7 +31,7 @@ function groupOf(t: TaskRec): string {
 }
 
 /* ------------------------------- helpers ------------------------------ */
-type QuickDue = "today" | "tomorrow" | "nextweek" | null;
+type QuickDue = "today" | "tomorrow" | "nextweek" | null | "custom";
 
 function dueFromQuick(k: QuickDue): string | null {
   if (!k) return null;
@@ -151,6 +153,15 @@ export default function TasksScreen() {
   /* T1 — "their own… task list, available between the two of them, and yet still isolated
    * from the broader family group." A second axis on the same screen: which SPACE, then
    * which list within it. Family is the default and never shows a nest's items. */
+  /* Private by default — see the note at the "Who can see it" chips. A task is yours until you
+   * say otherwise, which is the opposite of what it was. */
+  /* A list created but still empty. It has no tasks yet, so nothing in the store knows about
+   * it — this keeps it on screen and selected so the very next thing you type goes into it,
+   * which is what "create a list" means to a person. */
+  const [pendingList, setPendingList] = useState<string | null>(null);
+  const [shared, setShared] = useState(false);
+  const [startAt, setStartAt] = useState<Date>(() => { const d = new Date(); d.setMinutes(d.getMinutes() < 30 ? 30 : 60, 0, 0); return d; });
+  const [dueAt, setDueAt] = useState<Date>(() => { const d = new Date(); d.setHours(d.getHours() + 1, 0, 0, 0); return d; });
   const [nests, setNests] = useState<NestRec[]>([]);
   const [nestId, setNestId] = useState<string | null>(null);
   const [doneOpen, setDoneOpen] = useState(false);
@@ -215,7 +226,13 @@ export default function TasksScreen() {
   const inSpace = useCallback((t: TaskRec) => (nestId ? t.nestId === nestId : t.visibility !== "nest"), [nestId]);
   const open = useMemo(() => tasks.filter((t) => t.status !== "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
   const done = useMemo(() => tasks.filter((t) => t.status === "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
-  const listNames = useMemo(() => [...new Set(tasks.filter(inSpace).map(groupOf))].sort((a, b) => a.localeCompare(b)), [tasks, inSpace]);
+  const listNames = useMemo(() => {
+    const names = new Set(tasks.filter(inSpace).map(groupOf));
+    // A just-created list has nothing in it yet; without this it would vanish the moment you
+    // made it, which is a strange reward for creating something.
+    if (pendingList) names.add(pendingList);
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [tasks, inSpace, pendingList]);
 
   const byDue = (a: TaskRec, b: TaskRec) => (a.dueAt ?? "9999").localeCompare(b.dueAt ?? "9999") || a.title.localeCompare(b.title);
   const groups = useMemo(() => {
@@ -269,15 +286,43 @@ export default function TasksScreen() {
     ]);
   };
 
+  const promptNewList = useCallback(() => {
+    Alert.prompt?.(
+      "New list",
+      "What's it for? Summer camp, the move, a party — anything you'd keep a list about.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Create",
+          onPress: (name?: string) => {
+            const n = titleCase((name ?? "").trim());
+            if (!n) return;
+            tapHaptic("success");
+            setPendingList(n);
+            setActiveList(n);
+          },
+        },
+      ],
+      "plain-text",
+    );
+  }, []);
+
   const add = async () => {
     const name = title.trim();
     if (!name || adding) return;
     setAdding(true); setNotice(null);
     const target = activeList === "All" ? { type: "task" } : (GROUP_CREATE[activeList] ?? { type: "list", listName: activeList });
     const r = await api.createTask({
-      title: name, type: target.type, dueAt: dueFromQuick(quickDue),
+      title: name, type: target.type,
+      // A picked date beats a chip; a chip beats nothing.
+      dueAt: quickDue === "custom" ? dueAt.toISOString() : dueFromQuick(quickDue),
+      startAt: quickDue === "custom" ? startAt.toISOString() : undefined,
       assignedMemberId: assignee, listName: target.listName,
-      ...(nestId ? { visibility: "nest", nestId } : {}),
+      ...(nestId
+        ? { visibility: "nest", nestId }
+        // Private unless he said otherwise. "Not everybody wants everyone in the family to see
+        // a task they have and offer help for it."
+        : { visibility: shared ? "household" : "private" }),
     });
     if (r.task) {
       let created = r.task;
@@ -287,7 +332,7 @@ export default function TasksScreen() {
         if (p.task) created = p.task;
       }
       setTasks((arr) => [created, ...arr]);
-      setTitle(""); setQuickDue(null); setAssignee(null);
+      setTitle(""); setQuickDue(null); setAssignee(null); setShared(false);
       tapHaptic("success");
     } else {
       setNotice({ ok: false, text: r.error === "insufficient_role" ? "Adding tasks needs Limited Member or higher." : friendly(r.error) });
@@ -333,6 +378,34 @@ export default function TasksScreen() {
           </View>
         </Rise>
       ) : null}
+
+      {/* R4/R5 — "we need to add an addition button at the top that allows me to create new
+          lists from scratch… all Groceries, Reminders and Tasks are essentially the same, and I
+          need to be able to create a new one — let's say Summer Camp."
+          He's right that they're the same: a list IS a listName on a task. So making one is
+          naming one, and it appears the moment something is in it. Nothing to migrate, nothing
+          to configure — and every list gets identical options because they're the same thing. */}
+      <Rise index={riseIdx++}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <T kind="eyebrow">Lists</T>
+          {canAdd ? (
+            <PressableScale
+              onPress={promptNewList}
+              haptic="select"
+              accessibilityRole="button"
+              accessibilityLabel="Create a new list"
+              style={{
+                flexDirection: "row", alignItems: "center", gap: 5,
+                paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+                backgroundColor: colors.emberBg,
+              }}
+            >
+              <Sym name="plus" size={13} color={colors.ember} />
+              <T kind="subMedium" color={colors.ember}>New list</T>
+            </PressableScale>
+          ) : null}
+        </View>
+      </Rise>
 
       {nests.length > 0 ? (
         <Rise index={riseIdx++}>
@@ -388,7 +461,46 @@ export default function TasksScreen() {
                     <Chip label="Today" icon="sun.max" selected={quickDue === "today"} onPress={() => setQuickDue(quickDue === "today" ? null : "today")} />
                     <Chip label="Tomorrow" icon="sunrise" selected={quickDue === "tomorrow"} onPress={() => setQuickDue(quickDue === "tomorrow" ? null : "tomorrow")} />
                     <Chip label="Next week" icon="calendar" selected={quickDue === "nextweek"} onPress={() => setQuickDue(quickDue === "nextweek" ? null : "nextweek")} />
+                    <Chip label="Pick…" icon="clock" selected={quickDue === "custom"} onPress={() => setQuickDue(quickDue === "custom" ? null : "custom")} />
                   </ChipRow>
+                </View>
+
+                {/* R1 — "upon creating a new task, the start date and time, the due date and
+                    time." Quick chips still cover the common case; this is for when the answer
+                    is "Thursday at 4:15", which a chip can't say. */}
+                {quickDue === "custom" ? (
+                  <View style={{ gap: 6 }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                      <T kind="eyebrow">Starts</T>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                        <DateTimePicker value={startAt} mode="date" display="compact" accentColor={colors.ember} onValueChange={(_e: unknown, d: Date) => setStartAt(d)} />
+                        <DateTimePicker value={startAt} mode="time" display="compact" accentColor={colors.ember} onValueChange={(_e: unknown, d: Date) => setStartAt(d)} />
+                      </View>
+                    </View>
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                      <T kind="eyebrow">Due</T>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                        <DateTimePicker value={dueAt} mode="date" display="compact" accentColor={colors.ember} onValueChange={(_e: unknown, d: Date) => setDueAt(d)} />
+                        <DateTimePicker value={dueAt} mode="time" display="compact" accentColor={colors.ember} onValueChange={(_e: unknown, d: Date) => setDueAt(d)} />
+                      </View>
+                    </View>
+                  </View>
+                ) : null}
+
+                {/* R2/R3 — "the standard should be that all tasks are for yourself and not
+                    displayed to others in the family… they should automatically be private
+                    unless indicated. That could be down here at the bottom somewhere in this
+                    card, not after creation but during the initial creation."
+                    Private is the default, and the choice is made here, before it exists. */}
+                <View style={{ gap: 6 }}>
+                  <T kind="eyebrow">Who can see it</T>
+                  <ChipRow>
+                    <Chip label="Just me" icon="lock" selected={shared === false} onPress={() => setShared(false)} />
+                    <Chip label="The family" icon="person.2" selected={shared === true} onPress={() => setShared(true)} />
+                  </ChipRow>
+                  <T kind="caption" color={colors.textFaint}>
+                    {shared ? "Everyone can see this, so they can offer to help." : "Only you — nobody else sees this task."}
+                  </T>
                 </View>
                 {members.length > 0 ? (
                   <View style={{ gap: 6 }}>

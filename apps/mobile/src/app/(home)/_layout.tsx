@@ -7,7 +7,7 @@ export default function HomeLayout() {
     <TabSwipe current="/(home)">
       <Stack screenOptions={useHearthStackOptions()}>
         {/* Today draws its own greeting header per the handoff. */}
-        <Stack.Screen name="index" options={{ title: "Today", headerShown: false }} />
+        <Stack.Screen name="index" options={{ title: "Today", headerShown: false, gestureEnabled: false }} />
         <Stack.Screen name="activity" options={{ title: "Activity" }} />
         <Stack.Screen name="groceries" options={{ title: "Groceries" }} />
         <Stack.Screen name="kid" options={{ title: "", headerShown: false }} />
