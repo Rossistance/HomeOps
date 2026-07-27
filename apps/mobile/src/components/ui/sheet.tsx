@@ -55,11 +55,14 @@ export function HSheet({ visible, onClose, title, leftLabel = "Close", heightPct
       backdrop.value = withTiming(0.4, { duration: 300 });
     } else if (mounted) {
       backdrop.value = withTiming(0, { duration: 260 });
-      y.value = withTiming(baseH, { duration: 300, easing: EASE }, (done) => {
+      /* Translate by the sheet's CURRENT height, not its base one. An expanded sheet is
+       * taller than baseH, so animating to baseH would leave the difference still sitting on
+       * screen — the sheet would appear to close and then stick. */
+      y.value = withTiming(Math.max(h.value, baseH), { duration: 300, easing: EASE }, (done) => {
         if (done) runOnJS(unmount)();
       });
     }
-  }, [visible, mounted, baseH, y, backdrop, unmount]);
+  }, [visible, mounted, baseH, y, h, backdrop, unmount]);
 
   // A reopened sheet starts at its base height — inheriting the last drag would mean opening
   // full-screen for a reason nobody watching could remember.

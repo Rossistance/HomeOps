@@ -343,8 +343,20 @@ export default function TasksScreen() {
         if (p.task) created = p.task;
       }
       setTasks((arr) => [created, ...arr]);
+      /* Follow the task to wherever it actually landed.
+       *
+       * The space chips filter by nest, and the privacy picker can now disagree with them —
+       * choosing "Just me" while standing in a nest space creates a task that belongs to no
+       * nest, so the list you are looking at is precisely the list it is NOT in. It would
+       * have been created, confirmed, and invisible: a success message about something you
+       * can't see is the failure mode this app keeps producing, and adding a control was
+       * about to add another one.
+       *
+       * Moving the view is the honest resolution — the task is real and this is where it is. */
+      const landedIn = created.visibility === "nest" ? (created.nestId ?? null) : null;
+      if (landedIn !== nestId) setNestId(landedIn);
       setTitle(""); setQuickDue(null); setAssignee(null);
-      setScope({ visibility: nestId ? "nest" : "private", nestId });
+      setScope({ visibility: landedIn ? "nest" : "private", nestId: landedIn });
       tapHaptic("success");
     } else {
       setNotice({ ok: false, text: r.error === "insufficient_role" ? "Adding tasks needs Limited Member or higher." : friendly(r.error) });
