@@ -10,14 +10,52 @@
 //
 // Run:  cd server/browser-runtime && npm install && npm run setup && npm start
 // Then: set BROWSER_RUNTIME_URL=http://localhost:9223 in the backend's .env
+//
+// WHY THIS SERVICE IS THE ANSWER, and not a flag on the backend:
+//
+//   "Browser automation says runtime offline. How am I intended to run browser automation
+//    with Playwright or something similar from the server? We need to make this be able
+//    to work."
+//
+// It couldn't, in-process, on the instance the backend runs on. Chromium plus the backend
+// measured over 512MB on real pages and the OOM killer took the WHOLE app down (Render
+// events, 2026-07-09) — which is why server/browser.mjs refuses to launch below ~900MB of
+// container memory. That refusal is the correct behaviour and lowering it would trade an
+// honest "offline" for an app that dies mid-render.
+//
+// So the browser moves out. Here, it is the only thing in the container, an OOM kills a
+// service nobody else depends on, and the backend keeps answering. That's what makes it
+// work rather than making it *look* like it works.
+//
+// SECURITY. A runtime reachable over the public internet is a browser anyone can drive —
+// an open proxy that fetches URLs from inside your network. So:
+//   • BROWSER_RUNTIME_TOKEN set  → every request must present it; binds all interfaces.
+//   • BROWSER_RUNTIME_TOKEN unset → binds 127.0.0.1 ONLY, so the documented local flow
+//     above still works with no ceremony and cannot be exposed by accident.
+// There is deliberately no third mode. "Public and unauthenticated" is not a configuration
+// you can reach by forgetting something.
 import http from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { chromium } from "playwright";
 
-const PORT = Number(process.env.BROWSER_RUNTIME_PORT || 9223);
+const PORT = Number(process.env.BROWSER_RUNTIME_PORT || process.env.PORT || 9223);
 const NAME = "homeops-browser-runtime";
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const MAX_TEXT = 20000;
 const NAV_TIMEOUT = 30000;
+
+const TOKEN = String(process.env.BROWSER_RUNTIME_TOKEN || "").trim();
+/* No token, no exposure. Binding loopback is the enforcement — not a warning in a log
+ * nobody reads. */
+const HOST = TOKEN ? "0.0.0.0" : "127.0.0.1";
+
+/** Constant-time compare, and never on unequal lengths (timingSafeEqual throws). */
+function tokenOk(req) {
+  if (!TOKEN) return true; // loopback-only; the bind address is the gate
+  const raw = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  const a = Buffer.from(raw), b = Buffer.from(TOKEN);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 let browser = null;
 async function getBrowser() {
@@ -40,7 +78,12 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
   // Health / reachability — the backend probes this to mark the connector "connected".
-  if (req.method === "GET") return send(res, 200, { ok: true, name: NAME, version: VERSION, headless: true });
+  // Unauthenticated ON PURPOSE: it reveals nothing but "a runtime is here", and Render's
+  // platform health check has no way to present a bearer token.
+  if (req.method === "GET") return send(res, 200, { ok: true, name: NAME, version: VERSION, headless: true, authRequired: !!TOKEN });
+
+  // Everything past here drives a real browser, so it needs the token.
+  if (!tokenOk(req)) return send(res, 401, { ok: false, error: "unauthorized", message: "Present BROWSER_RUNTIME_TOKEN as a bearer token." });
 
   if (req.method === "POST" && url.pathname === "/open") {
     const body = await readBody(req);
@@ -90,9 +133,11 @@ const server = http.createServer(async (req, res) => {
   return send(res, 404, { ok: false, error: "not_found" });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   // eslint-disable-next-line no-console
-  console.log(`${NAME} v${VERSION} listening on http://localhost:${PORT} — set BROWSER_RUNTIME_URL=http://localhost:${PORT} in the backend .env`);
+  console.log(TOKEN
+    ? `${NAME} v${VERSION} listening on ${HOST}:${PORT} (token required)`
+    : `${NAME} v${VERSION} listening on http://localhost:${PORT} — loopback only (set BROWSER_RUNTIME_TOKEN to accept remote calls). Set BROWSER_RUNTIME_URL=http://localhost:${PORT} in the backend .env`);
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, async () => { try { await browser?.close(); } catch { /* ignore */ } process.exit(0); });

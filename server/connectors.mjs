@@ -4,8 +4,8 @@
 // fail honestly with a typed reason and never fabricate success.
 import { getConnectorConfig, setConnectorConfig, getSecret, getSettings, appendAudit, setHealth, getHealth } from "./store.mjs";
 import { safeFetch, assertSafeUrl } from "./net.mjs";
-import { browserAvailable, probeBrowser, renderPage } from "./browser.mjs";
-import { searchWeb, readPage, extractRecipe } from "./web.mjs";
+import { browserAvailable, probeBrowser, renderPage, browserUnavailableReason } from "./browser.mjs";
+import { searchWeb, readPage, extractRecipe, runtimeAuthHeader, browserRuntimeBase } from "./web.mjs";
 import { sandboxEnabled, SANDBOX_CONNECTOR_IDS, isSandboxConnectorTool, sandboxConnectorExecute } from "./sandbox-connectors.mjs";
 
 /**
@@ -102,7 +102,7 @@ export const CONNECTORS = [
     authType: "runtime",
     runtime: "browser-automation",
     risk: "Sensitive",
-    description: "Drive websites with a real headless browser runtime. Start the bundled runtime (server/browser-runtime: npm install && npm run setup && npm start) and set BROWSER_RUNTIME_URL. Login handoff required — we never ask for your password.",
+    description: "Drive websites with a real headless browser. The browser runs as its own service — it needs more memory than this server has spare, and sharing a container with it has taken the whole app down before. On Render it deploys from the same blueprint (familios-browser-runtime) and wires itself up; locally, run server/browser-runtime and set BROWSER_RUNTIME_URL. Login handoff required — we never ask for your password.",
     configSchema: [{ key: "runtimeUrl", label: "Runtime URL", type: "text", env: "BROWSER_RUNTIME_URL", placeholder: "http://localhost:9223" }],
     tools: [
       { id: "browser.open", name: "Open & extract", action: "Browser Action", risk: "Medium", requiresApproval: false, delivers: false, description: "Open a page and read its content.", inputs: [{ key: "url", label: "Page URL", type: "text", required: true, placeholder: "https://example.com/orders" }, { key: "extract", label: "What to extract (optional)", type: "text", placeholder: "order totals" }] },
@@ -287,11 +287,14 @@ export async function healthCheck(id) {
         return persist({ ok: true, status: "healthy", source: "in-process", latencyMs: Date.now() - t0 });
       }
       const cfg = getConnectorConfig(c.id);
-      const url = process.env.BROWSER_RUNTIME_URL || cfg.fields?.runtimeUrl;
-      if (!url) return persist({ ok: false, status: "runtime_unavailable", error: "no_runtime_url" });
-      if (/^wss?:/.test(url)) return persist({ ok: false, status: "runtime_unavailable", error: "no_executable_runtime" });
+      const url = browserRuntimeBase() || cfg.fields?.runtimeUrl;
+      // Carry WHY the in-process path is out, so "offline" comes with a next step
+      // instead of leaving him to ask how this is supposed to work at all.
+      const reason = browserUnavailableReason() ?? undefined;
+      if (!url) return persist({ ok: false, status: "runtime_unavailable", error: "no_runtime_url", reason });
+      if (/^wss?:/.test(url)) return persist({ ok: false, status: "runtime_unavailable", error: "no_executable_runtime", reason });
       const r = await safeFetch(url, {}, { allowLoopback: true });
-      return persist({ ok: r.ok && r.httpOk, status: r.ok && r.httpOk ? "healthy" : "runtime_unavailable", latencyMs: Date.now() - t0, error: r.ok ? undefined : r.error });
+      return persist({ ok: r.ok && r.httpOk, status: r.ok && r.httpOk ? "healthy" : "runtime_unavailable", source: r.ok && r.httpOk ? "runtime-service" : undefined, latencyMs: Date.now() - t0, error: r.ok ? undefined : r.error, reason: r.ok && r.httpOk ? undefined : reason });
     }
     const ok = ["connected", "authorized_write", "authorized_readonly", "local_only"].includes(readiness);
     return persist({ ok, status: ok ? "healthy" : readiness, latencyMs: Date.now() - t0 });
@@ -360,12 +363,12 @@ async function callBrowserRuntime(pathname, body) {
     }
   }
   const cfg = getConnectorConfig("browser");
-  const baseRaw = process.env.BROWSER_RUNTIME_URL || cfg.fields?.runtimeUrl || "";
-  const base = baseRaw.replace(/\/$/, "");
-  if (!base) return { ok: false, error: "runtime_unavailable", message: "Browser automation runtime is not connected (set BROWSER_RUNTIME_URL)." };
+  const base = browserRuntimeBase() || String(cfg.fields?.runtimeUrl || "").replace(/\/$/, "");
+  if (!base) return { ok: false, error: "runtime_unavailable", message: `Browser automation runtime is not connected (set BROWSER_RUNTIME_URL). ${browserUnavailableReason() ?? ""}`.trim() };
   if (/^wss?:/.test(base)) return { ok: false, error: "runtime_unavailable", message: "Configured runtime is a websocket URL; set BROWSER_RUNTIME_URL to the HTTP runtime (e.g. http://localhost:9223)." };
-  const r = await safeFetch(`${base}${pathname}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }, { allowLoopback: true, timeoutMs: 35000, maxBytes: 4_000_000 });
+  const r = await safeFetch(`${base}${pathname}`, { method: "POST", headers: { "content-type": "application/json", ...runtimeAuthHeader() }, body: JSON.stringify(body) }, { allowLoopback: true, timeoutMs: 35000, maxBytes: 4_000_000 });
   if (!r.ok) return { ok: false, error: r.policyBlocked ? "egress_blocked" : "runtime_unavailable", message: `Browser runtime unreachable: ${r.error}` };
+  if (r.status === 401) return { ok: false, error: "runtime_unauthorized", message: "The browser runtime rejected our token. BROWSER_RUNTIME_TOKEN must match on both services." };
   if (!r.httpOk) return { ok: false, error: "runtime_error", message: `Browser runtime returned HTTP ${r.status}` };
   let json = null; try { json = JSON.parse(r.text); } catch { /* ignore */ }
   if (!json || json.ok === false) return { ok: false, error: json?.error ?? "runtime_error", message: json?.message ?? "Browser action failed." };

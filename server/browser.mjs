@@ -80,6 +80,22 @@ export function browserAvailable() {
   return !DISABLED && !unavailable;
 }
 
+/** Why the in-process browser is off, in words a person can act on.
+ *
+ * "Browser automation says runtime offline" was true and useless. On a 512MB instance the
+ * honest answer isn't "offline", it's "this container is too small to hold Chromium and
+ * the app at once, so run the browser as its own service" — which is a thing you can
+ * actually do something about. Returns null when the browser IS available. */
+export function browserUnavailableReason() {
+  if (FORCED === "0") return "The in-process browser is switched off (FAMILIOS_BROWSER=0).";
+  if (DISABLED) {
+    const mb = Math.round(containerMemoryBytes() / (1024 * 1024));
+    return `This server has ${mb}MB of memory; Chromium needs the app to have about ${Math.round(MIN_BROWSER_BYTES / (1024 * 1024))}MB spare, and running it here has previously OOM-killed the whole instance. Deploy the bundled runtime (server/browser-runtime) as its own service and point BROWSER_RUNTIME_URL at it.`;
+  }
+  if (unavailable) return "Chromium is installed but failed to launch — its system libraries are probably missing (npx playwright install-deps chromium).";
+  return null;
+}
+
 /** Real handshake: actually launch (or reuse) Chromium. Used by health checks
  * so "connected" is never reported on hope. */
 export async function probeBrowser() {

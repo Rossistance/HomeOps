@@ -8,6 +8,7 @@ import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import { prepareImage } from "@/lib/prepare-image";
 import { AttachmentTile } from "@/components/AttachmentTile";
+import { LinkCards, linksIn } from "@/components/LinkCards";
 import { readAsStringAsync } from "expo-file-system/legacy";
 import Animated, {
   FadeInDown, ReduceMotion, cancelAnimation, clamp, runOnJS,
@@ -1129,6 +1130,13 @@ export default function AskScreen() {
                       {m.error
                         ? <T selectable color={colors.coral}>{m.text}</T>
                         : <MarkdownText text={m.text} />}
+                      {/* N1 — "these are links… they need to be displayed as cards, just like
+                          throughout the app, within this actual chat bubble — individual ones,
+                          so they're more structured, I can see them, I can click on them."
+                          The prose stays: the sentence around a result is usually why that
+                          result is there, and a list of cards can't say "the closest match is
+                          X, though Y is cheaper". */}
+                      {!m.error ? <LinkCards links={linksIn(m.text)} /> : null}
                     </Card>
                   ) : null}
                   {/* K2 — the rows the run fetched, as real cards, right here in the thread. */}

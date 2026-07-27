@@ -268,10 +268,34 @@ export async function searchWeb(query, { maxResults = 8 } = {}) {
 
 /* --------------------------------- Read ---------------------------------- */
 
+/** Bearer for the out-of-process browser runtime, when one is configured. Empty when the
+ * runtime is local — it binds loopback in that mode and needs no token. */
+export function runtimeAuthHeader() {
+  const t = String(process.env.BROWSER_RUNTIME_TOKEN || "").trim();
+  return t ? { authorization: `Bearer ${t}` } : {};
+}
+
+/** The runtime's base URL, scheme included.
+ *
+ * Render's `fromService` can hand over a HOSTNAME but not a URL — there is no property that
+ * includes the scheme and no way to concatenate one in the blueprint. Rather than hard-code
+ * an assumption in render.yaml and have the whole feature fail on a string, the scheme is
+ * inferred here: a bare host is https (that's what a public Render service is), and a
+ * localhost or 127.x host is http (that's what the documented local runtime is).
+ * Returns "" when no runtime is configured. */
+export function browserRuntimeBase() {
+  const raw = String(process.env.BROWSER_RUNTIME_URL || "").trim().replace(/\/$/, "");
+  if (!raw) return "";
+  if (/^wss?:/i.test(raw)) return raw;                    // caller rejects these with a reason
+  if (/^https?:/i.test(raw)) return raw;
+  const local = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])(:\d+)?$/i.test(raw);
+  return `${local ? "http" : "https"}://${raw}`;
+}
+
 async function tryBrowserRuntime(url) {
-  const base = (process.env.BROWSER_RUNTIME_URL || "").replace(/\/$/, "");
+  const base = browserRuntimeBase();
   if (!base || !/^https?:/.test(base)) return null;
-  const r = await safeFetch(`${base}/open`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url }) }, { allowLoopback: true, timeoutMs: 35_000, maxBytes: 4_000_000 });
+  const r = await safeFetch(`${base}/open`, { method: "POST", headers: { "content-type": "application/json", ...runtimeAuthHeader() }, body: JSON.stringify({ url }) }, { allowLoopback: true, timeoutMs: 35_000, maxBytes: 4_000_000 });
   if (!r.ok || !r.httpOk) return null;
   try { const j = JSON.parse(r.text); return j.ok ? j : null; } catch { return null; }
 }

@@ -1,4 +1,45 @@
+# The token the backend presents to the browser runtime. In a group because Render can
+# generate a value ONCE and hand the same one to both services — which is the whole point:
+# neither service has the token written down anywhere, and they still agree.
+envVarGroups:
+  - name: familios-browser-runtime
+    envVars:
+      - key: BROWSER_RUNTIME_TOKEN
+        generateValue: true
+
 services:
+  # T4 — "How am I intended to run browser automation with Playwright or something similar
+  # from the server? We need to make this be able to work."
+  #
+  # Like this: as its own service. Chromium cannot live in the backend's container — the two
+  # together measured past 512MB on real pages and the OOM killer took the whole app down
+  # (2026-07-09), which is why server/browser.mjs refuses to launch below ~900MB and why the
+  # connector had been honestly reporting "offline". Out here the browser is the only tenant,
+  # and if a heavy page does kill it, it kills a service nothing else depends on.
+  #
+  # plan: free is deliberate — this costs nothing and spins down when idle. A cold start
+  # costs ~50s on the first automation of the day, which is the right trade for something
+  # used occasionally and on purpose. Bump to starter if that wait ever grates.
+  - type: web
+    name: familios-browser-runtime
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: server/browser-runtime
+    # --with-deps installs the shared libraries Chromium links against. Without them the
+    # download succeeds, the launch fails, and you get "offline" about a browser that is
+    # sitting right there on disk — the exact failure this whole item started as.
+    buildCommand: npm install && npx playwright install --with-deps chromium
+    startCommand: npm start
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      # Public URL + a token = the only safe combination. index.mjs binds loopback-only
+      # when this is absent, so a missing token can't quietly expose a browser.
+      - fromGroup: familios-browser-runtime
+
   - type: web
     name: homeops-ai
     runtime: node
@@ -44,6 +85,15 @@ services:
         value: production
       - key: HOMEOPS_DATA_DIR
         value: /data
+      # T4 — where the browser actually lives. fromService reads the sibling's URL at sync
+      # time, so this never goes stale if Render reassigns it, and the shared group means
+      # both ends hold the same token without either of them holding it in git.
+      - key: BROWSER_RUNTIME_URL
+        fromService:
+          type: web
+          name: familios-browser-runtime
+          property: host
+      - fromGroup: familios-browser-runtime
       # Update these if Render assigns a different service URL or you add a custom domain.
       - key: HOMEOPS_PUBLIC_URL
         value: https://homeops-ai.onrender.com
