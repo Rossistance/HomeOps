@@ -90,3 +90,34 @@ test("…while the Owner keeps household-wide stewardship of connections", async
   const del = await owner.req("/api/calendar/subscriptions/sub_ross", { method: "DELETE" });
   assert.equal(del.status, 200, "the Owner may remove any — someone has to be able to clean up");
 });
+
+/* ---------------- Cluster X: a child's invitation is answered up ---------------- */
+
+test("a child's nest invitation is answered by the nest's senior adult, not left hanging", async () => {
+  // Morgan (nested from earlier tests, or re-nested here) invites the child; Morgan answers
+  // FOR the child; the child lands joined. "Approval should run through a nested adult with
+  // the highest level of access."
+  const mine = (await adult.req("/api/nests")).data.nests ?? [];
+  for (const n of mine) await adult.req(`/api/nests/${n.id}/leave`, { method: "POST", body: "{}" });
+  const childMine = (await child.req("/api/nests")).data.nests ?? [];
+  for (const n of childMine) await child.req(`/api/nests/${n.id}/leave`, { method: "POST", body: "{}" });
+  const made = await adult.req("/api/nests", { method: "POST", body: JSON.stringify({ name: "Parent + kid", inviteActorIds: [child.actorId] }) });
+  assert.ok(made.data?.nest?.id, JSON.stringify(made.data));
+  const r = await adult.req(`/api/nests/${made.data.nest.id}/accept`, { method: "POST", body: JSON.stringify({ forActorId: child.actorId }) });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const childNests = (await child.req("/api/nests")).data.nests ?? [];
+  assert.ok(childNests.some((n) => n.id === made.data.nest.id), "the child is genuinely in");
+});
+
+test("…and forActorId is a child-only door — an adult can't be answered for", async () => {
+  const made = await owner.req("/api/nests", { method: "POST", body: JSON.stringify({ name: "Owner tries", inviteActorIds: [adult2.actorId] }) }).catch(() => null);
+  // owner may be nested from earlier; walk out first if refused
+  let nest = made?.data?.nest;
+  if (!nest) {
+    const mine = (await owner.req("/api/nests")).data.nests ?? [];
+    for (const n of mine) await owner.req(`/api/nests/${n.id}/leave`, { method: "POST", body: "{}" });
+    nest = (await owner.req("/api/nests", { method: "POST", body: JSON.stringify({ name: "Owner tries", inviteActorIds: [adult2.actorId] }) })).data.nest;
+  }
+  const r = await owner.req(`/api/nests/${nest.id}/accept`, { method: "POST", body: JSON.stringify({ forActorId: adult2.actorId }) });
+  assert.equal(r.status, 403, "putting words in an adult's mouth stays forbidden — consent is theirs");
+});

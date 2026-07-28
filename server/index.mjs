@@ -57,7 +57,7 @@ import { agentTemplateSections } from "./agent-templates.mjs";
 import { nameConversation } from "./planner.mjs";
 import { suggestAddresses, placesProvider } from "./places.mjs";
 import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
-import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel } from "./nests.mjs";
+import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel, listNests } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive } from "./reminders.mjs";
 import { getAgent, getViewerNote, putViewerNote } from "./store.mjs";
@@ -1361,7 +1361,35 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const roster = new Map(listMembers((m) => m.householdId === g.session.householdId).map((m) => [m.actorId, m.displayName]));
       let out;
       if (action === "accept" || action === "decline") {
-        out = respondToNest({ nestId, householdId: g.session.householdId, actorId: g.session.actorId, accept: action === "accept" });
+        /* Cluster X — "Amelia has not answered because there is no surfaced area for her to
+         * answer on the child profile. Approval should run through a nested adult with the
+         * highest level of access." A child's invitation is answered FOR them, by the most
+         * senior joined adult of the nest doing the inviting (the Owner qualifies from
+         * anywhere — someone must always be able to resolve a stuck invite). forActorId is
+         * only honoured for a Child View target; adults still answer for themselves. */
+        const body = (await readBody(req)) ?? {};
+        let respondingFor = g.session.actorId;
+        if (body.forActorId && String(body.forActorId) !== g.session.actorId) {
+          const target = getMember(String(body.forActorId));
+          if (!target || target.role !== "Child View") {
+            return json(res, 403, { error: "forbidden", message: "You can only answer a nest invitation for a child." }, req);
+          }
+          const nest = listNests((n) => n.id === nestId && n.householdId === g.session.householdId)[0];
+          const joinedAdults = (nest?.members ?? [])
+            .filter((m) => m.status === "joined")
+            .map((m) => getMember(m.actorId))
+            .filter((m) => m && isAdultRole(m.role));
+          const rank = { "Owner": 3, "Adult Admin": 2, "Adult Member": 1 };
+          const topRank = Math.max(0, ...joinedAdults.map((m) => rank[m.role] ?? 0));
+          const myRank = rank[g.session.role] ?? 0;
+          const isSenior = g.session.role === "Owner"
+            || (joinedAdults.some((m) => m.actorId === g.session.actorId) && myRank >= topRank);
+          if (!isSenior) {
+            return json(res, 403, { error: "not_senior_adult", message: "A child's invitation is answered by the nest's most senior adult (or the Owner)." }, req);
+          }
+          respondingFor = String(body.forActorId);
+        }
+        out = respondToNest({ nestId, householdId: g.session.householdId, actorId: respondingFor, accept: action === "accept" });
       } else if (action === "leave") {
         out = leaveNest({ nestId, householdId: g.session.householdId, actorId: g.session.actorId });
       } else {
@@ -3292,7 +3320,14 @@ function mayWriteAgent(session, agent, nextVisibility) {
          * nest is theirs by consent, so it is open to them. */
         ...(body.visibility === "nest" && body.nestId && canSeeNest(String(body.nestId), g.session.householdId, g.session.actorId)
           ? { visibility: "nest", nestId: String(body.nestId) }
-          : { visibility: (body.visibility === "household" && !isAdultMemberOnly(g.session)) ? "household" : "personal" }),
+          /* Cluster R/Z — "there should be NO personal chat if AI chat is turned on for the
+           * child accounts. It should just be their nest or their family." A child's chats
+           * are readable by their adults BY DESIGN — coerced here, not merely hidden in the
+           * picker, because a clamp that lives client-side is a clamp the next screen
+           * forgets. Everyone else keeps personal as the safe default. */
+          : g.session.role === "Child View"
+            ? { visibility: "household" }
+            : { visibility: (body.visibility === "household" && !isAdultMemberOnly(g.session)) ? "household" : "personal" }),
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
       return json(res, 200, { conversation: c }, req);
