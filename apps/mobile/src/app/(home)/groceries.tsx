@@ -7,6 +7,7 @@ import { useFocusEffect } from "expo-router";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import { api, type MemberRec, type NestRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { TaskSheet } from "@/components/sheets/task-sheet";
 import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic, motion } from "@/theme";
 import {
@@ -122,8 +123,14 @@ export default function GroceriesScreen() {
     }
   };
 
+  /* Cluster O — the merge's missing half. Meals pointed here, but "if I click on ham, I
+   * can't edit any details here" — a grocery item IS a task, and the tasks screen already
+   * has the one true editor (dates, reminders, assignee, who can see it). Same sheet,
+   * opened from here, instead of a second lesser editor drifting beside the first. */
+  const [detailTask, setDetailTask] = useState<TaskRec | null>(null);
   const itemMenu = (t: TaskRec) => {
     Alert.alert(t.title, undefined, [
+      { text: "Details…", onPress: () => setDetailTask(t) },
       { text: "Rename", onPress: () => beginEdit(t) },
       { text: "Remove", style: "destructive", onPress: () => remove(t) },
       { text: "Cancel", style: "cancel" },
@@ -314,6 +321,15 @@ export default function GroceriesScreen() {
         </View>
       </HSheet>
       {flash}
+      <TaskSheet
+        visible={!!detailTask}
+        task={detailTask}
+        members={members}
+        canEdit
+        onClose={() => setDetailTask(null)}
+        onSaved={() => { setDetailTask(null); void load(); }}
+        onDeleted={() => { setDetailTask(null); void load(); }}
+      />
     </HScreen>
   );
 }

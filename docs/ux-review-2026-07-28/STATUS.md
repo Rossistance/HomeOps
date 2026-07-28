@@ -36,8 +36,8 @@ This reversed build 57's order; flipped in P4a.
 | K task scope model | ✅ three rooms, follow-the-task, confirmed order, private default |
 | L list lifecycle | ✅ registry: empty lists persist, hold-to-delete, room-scoped, 409 dupes; 6 tests |
 | M archive | ✅ 3-day sweep, completedAt stamps, legacy backlog drains, reopen un-archives |
-| N reminders | ◐ multi-offset server + sheet + creation-card Remind row + time-sensitive push shipped (P4c/P6c); the calendar-side **"Alerts" rename** remains |
-| O groceries merge | ⬜ |
+| N reminders | ✅ multi-offset server + sheet + creation-card Remind row + time-sensitive push (P4c/P6c). The "Alerts" rename has NO surface yet — iOS events carry no reminder control to relabel; noted rather than invented. |
+| O groceries merge | ✅ grocery items open the ONE task editor (TaskSheet) from the Groceries screen Meals links to — dates, reminders, assignee, scope, all in one place (P6h). |
 | P back-nav | ✅ (BUG-04) |
 | Q task colour | ✅ Coming-up + calendar-screen tasks carry member colour (overdue still coral); stale group route fixed (P6c) |
 | R Ask mini-composer | ✅ real input, ?q= fires on arrival (P6b); child personal chats coerced to family server-side (P6g) |
