@@ -277,7 +277,7 @@ export function agentContext(agent, session) {
   const settings = householdId ? getSettings(householdId) : {};
   const policyFor = (cap) => resolveEffectivePolicy({
     cap, agent, settings,
-    override: householdId ? getRiskOverride(householdId, cap.id) : null,
+    override: householdId ? getRiskOverride(householdId, cap.id, session?.actorId ?? null) : null,
   });
 
   const catalog = toolCatalog(session);

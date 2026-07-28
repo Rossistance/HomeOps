@@ -1113,8 +1113,40 @@ const _riskOverrides = keyedCollection("risk_overrides.json");
 export const listRiskOverrides = (filter) => _riskOverrides.list(filter);
 export const putRiskOverride = (r) => _riskOverrides.put(r);
 export const deleteRiskOverrideRec = (id) => _riskOverrides.remove(id);
-export function getRiskOverride(householdId, toolId) {
-  return _riskOverrides.get(`${householdId}:${toolId}`) ?? null;
+/* The override that governs THIS actor for THIS tool.
+ *
+ * Cluster W scoped these per nest ("both nest members will have access to this for their
+ * particular nest, and these will not apply to anybody outside of their nest"), which means
+ * an id is now household:scope:tool. Every caller passes an actor where it has one, so the
+ * nest's rule wins for its members and the household's rule covers everyone else.
+ *
+ * The legacy two-part id is still read, so overrides set before scoping keep working
+ * instead of silently evaporating — which, for a record whose whole job is to WAIVE an
+ * approval, would fail in the safe direction but look like the feature broke.
+ *
+ * A nest rule may only ever be MORE cautious than the household's on `skipApproval`: a
+ * pair of adults can tighten their own runs, not quietly waive a gate the household set.
+ */
+export function getRiskOverride(householdId, toolId, actorId = null) {
+  const household = _riskOverrides.get(`${householdId}:household:${toolId}`)
+    ?? _riskOverrides.get(`${householdId}:${toolId}`)   // pre-scoping records
+    ?? null;
+  if (!actorId) return household;
+  for (const n of nestsForActor(householdId, actorId)) {
+    const own = _riskOverrides.get(`${householdId}:nest:${n.id}:${toolId}`);
+    if (own) {
+      return household?.skipApproval === false && own.skipApproval
+        ? { ...own, skipApproval: false }   // can't waive what the household required
+        : own;
+    }
+  }
+  return household;
+}
+/** Nests this actor has joined. Local to avoid a cycle with nests.mjs, which imports this. */
+function nestsForActor(householdId, actorId) {
+  return Object.values(readJSON("nests.json", {}))
+    .filter((n) => n.householdId === householdId && !n.archived
+      && (n.members ?? []).some((m) => m.actorId === actorId && m.status === "joined"));
 }
 
 /* ---- Contact methods (server-owned registry) ----

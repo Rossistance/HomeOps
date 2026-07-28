@@ -147,7 +147,7 @@ export function toolCatalog(session) {
   // preserved alongside so the override is visible (and reversible), never silent.
   if (session?.householdId) {
     for (const t of out) {
-      const ov = getRiskOverride(session.householdId, t.toolId);
+      const ov = getRiskOverride(session.householdId, t.toolId, session.actorId ?? null);
       if (!ov) continue;
       t.defaultRisk = t.risk;
       t.defaultRequiresApproval = t.requiresApproval;

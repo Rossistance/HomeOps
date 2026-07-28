@@ -174,6 +174,26 @@ function maybeSeedSandbox(s) {
 // GET payload, and was still absent after add, after nav, and after sync. Refuse it at the
 // boundary instead. `null` and `""` stay legal: the mobile form's "scheduled" toggle sends
 // startAt:null on purpose, and the web store represents an unscheduled event as "".
+/* Cluster W — "the advanced mode should come with a warning saying that if you do choose to
+ * use this, you risk screwing up agent configuration — possibly a pin input. And the same
+ * here on the advanced builders. This should require a pin input."
+ *
+ * The household PIN, re-entered at the moment of the dangerous act. Not a session flag: the
+ * point is a deliberate pause by the person actually holding the phone, and a flag set
+ * twenty minutes ago proves nothing about who is holding it now.
+ *
+ * Returns null when satisfied, or a ready-to-send refusal. A household with no PIN set
+ * cannot be gated by one, so it falls back to role — refusing everyone until someone sets
+ * a PIN would lock a family out of their own settings. */
+async function requireHouseholdPin(session, pin) {
+  const s = getSettings(session.householdId);
+  if (!s.ownerPinHash) return null;                 // nothing to check against
+  if (!pin) return { error: "pin_required", message: "Enter your household PIN to change this." };
+  const ok = await verifyPin(String(pin), s.ownerPinHash);
+  if (!ok) return { error: "pin_incorrect", message: "That PIN didn't match. Nothing was changed." };
+  return null;
+}
+
 /* Cluster W's reach, applied to contact methods: Owner → everyone; adults → self + nest;
  * everyone else → self. A closure over the session so list filters read cleanly. */
 function contactReach(session) {
@@ -3747,7 +3767,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
      * clients render exactly what the engine will enforce. */
     if (path === "/api/risk-overrides" && method === "GET") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const overrides = listRiskOverrides((o) => o.householdId === g.session.householdId);
+      // Only what governs THIS person: their nest's rules, plus the household's. Another
+      // nest's relaxed rule is none of their business and must never look like theirs.
+      const mine = new Set(nestsFor(g.session.householdId, g.session.actorId).map((n) => `nest:${n.id}`));
+      const overrides = listRiskOverrides((o) => o.householdId === g.session.householdId)
+        .filter((o) => !o.scope || o.scope === "household" || mine.has(o.scope));
       return json(res, 200, { overrides, catalog: toolCatalog(g.session) }, req);
     }
     if (path === "/api/risk-overrides" && method === "PUT") {
@@ -3759,8 +3783,22 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const RISKS = ["Low", "Medium", "High", "Sensitive"];
       const riskClass = body.riskClass == null ? null : (RISKS.includes(body.riskClass) ? body.riskClass : undefined);
       if (riskClass === undefined) return json(res, 400, { error: "invalid_risk_class" }, req);
+      /* Lowering a tool's risk class — or waiving its approval entirely — is the single most
+       * consequential switch a household has. It gets the PIN. */
+      const gated = await requireHouseholdPin(g.session, body.pin);
+      if (gated) return json(res, 403, gated, req);
+      /* Cluster W — "if there's nests, then both nest members will have access to this for
+       * their particular nest, and these will not apply to anybody outside of their nest.
+       * They don't apply family-wide."
+       *
+       * So an override belongs to a NEST when its setter is in one, and to the household
+       * otherwise. The id carries the scope, which is what keeps one nest's relaxed rule
+       * from silently governing the other nest's runs. */
+      const myNest = nestsFor(g.session.householdId, g.session.actorId)[0] ?? null;
+      const scopeId = myNest ? `nest:${myNest.id}` : "household";
       const rec = putRiskOverride({
-        id: `${g.session.householdId}:${toolId}`, householdId: g.session.householdId, toolId,
+        id: `${g.session.householdId}:${scopeId}:${toolId}`, householdId: g.session.householdId, toolId,
+        scope: scopeId, nestId: myNest?.id ?? null,
         riskClass, skipApproval: !!body.skipApproval,
         setBy: g.session.actorId, setAt: new Date().toISOString(),
       });
@@ -3771,7 +3809,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (rovOne && method === "DELETE") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const toolId = decodeURIComponent(rovOne[1]);
-      const existing = getRiskOverride(g.session.householdId, toolId);
+      const myNest = nestsFor(g.session.householdId, g.session.actorId)[0] ?? null;
+      const scopeId = myNest ? `nest:${myNest.id}` : "household";
+      // Yours to clear means yours: the one in YOUR scope, not whichever matched first.
+      const existing = listRiskOverrides((o) => o.householdId === g.session.householdId && o.toolId === toolId)
+        .find((o) => (o.scope ?? "household") === scopeId);
       if (!existing) return json(res, 404, { error: "not_found" }, req);
       deleteRiskOverrideRec(existing.id);
       audit({ type: "risk_override.cleared", toolId, ok: true }, req, g.session);
@@ -4510,6 +4552,14 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const prev = getSettings(g.session.householdId);
       const patch = {};
+      /* The switches that change what runs WITHOUT asking a human first. Same reasoning as
+       * the risk overrides: a deliberate pause, proved by the PIN, at the moment of the act.
+       * Setting the PIN itself is exempt — you can't be asked for what you're establishing. */
+      const DANGEROUS = ["externalActionsEnabled", "calendarAutoSync", "autoApproveImprovements"];
+      if (DANGEROUS.some((k) => body[k] !== undefined && body[k] !== prev[k])) {
+        const gated = await requireHouseholdPin(g.session, body.pin);
+        if (gated) return json(res, 403, gated, req);
+      }
       if (typeof body.externalActionsEnabled === "boolean") patch.externalActionsEnabled = body.externalActionsEnabled;
       // Calendar auto-sync: Adult Admin opt-in that pre-authorizes Google Calendar
       // pushes (no per-event approvals) and turns on the server-triggered two-way sweep.

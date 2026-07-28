@@ -5,7 +5,7 @@ import { Alert, Linking, Switch, TextInput, View } from "react-native";
 import { api, API_URL, type AIProviderRec, type CatalogToolRec, type RiskOverrideRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useAdvancedMode } from "@/lib/prefs";
-import { Expander } from "@/components/ui";
+import { PinPrompt, Expander } from "@/components/ui";
 import { useTheme, tapHaptic, type HearthColors } from "@/theme";
 import {
   Badge, Button, Card, ErrorState, HScreen, Notice, PressableScale,
@@ -346,14 +346,41 @@ function RiskOverridesSection() {
   useEffect(() => { if (open && !loaded) void load(); }, [open, loaded, load]);
 
   const ovFor = (toolId: string) => overrides.find((o) => o.toolId === toolId);
-  const toggleSkip = async (t: CatalogToolRec) => {
-    setBusyTool(t.toolId);
+  /* Cluster W — waiving an approval is the switch that lets something happen to this family
+   * without anyone being asked first. It gets the warning and the PIN. Turning a waiver back
+   * OFF is the safe direction and goes straight through: making people prove themselves to
+   * become MORE careful is how you teach them to leave it switched on. */
+  const [pinFor, setPinFor] = useState<CatalogToolRec | null>(null);
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinErr, setPinErr] = useState<string | null>(null);
+
+  const applySkip = async (t: CatalogToolRec, nextSkip: boolean, pin?: string) => {
     const current = ovFor(t.toolId);
-    const nextSkip = !current?.skipApproval;
-    if (!nextSkip && !current?.riskClass) await api.clearRiskOverride(t.toolId);
-    else await api.setRiskOverride(t.toolId, { skipApproval: nextSkip, riskClass: current?.riskClass ?? null });
+    if (!nextSkip && !current?.riskClass) return await api.clearRiskOverride(t.toolId);
+    return await api.setRiskOverride(t.toolId, { skipApproval: nextSkip, riskClass: current?.riskClass ?? null, pin });
+  };
+
+  const toggleSkip = async (t: CatalogToolRec) => {
+    const nextSkip = !ovFor(t.toolId)?.skipApproval;
+    if (nextSkip) { setPinErr(null); setPinFor(t); return; }   // dangerous direction → prompt
+    setBusyTool(t.toolId);
+    await applySkip(t, false);
     await load();
     setBusyTool(null);
+  };
+
+  const confirmSkipWithPin = async (pin: string) => {
+    if (!pinFor) return;
+    setPinBusy(true); setPinErr(null);
+    const r = await applySkip(pinFor, true, pin);
+    setPinBusy(false);
+    if ((r as { error?: string })?.error) {
+      // Say which failure it was — "wrong PIN" and "you can't do this" are different problems.
+      setPinErr((r as { message?: string }).message ?? "Couldn't save that.");
+      return;
+    }
+    setPinFor(null);
+    await load();
   };
 
   // Only gated tools are worth listing on the phone — the full risk-class matrix
@@ -428,6 +455,15 @@ function RiskOverridesSection() {
           ) : null}
         </Card>
       </Rise>
+      <PinPrompt
+        visible={!!pinFor}
+        title={`Let ${pinFor?.name ?? "this tool"} run without asking?`}
+        warning="Famili will use it without checking with anyone first. This is the kind of change that's hard to notice until something has already happened — and it applies to your nest, not the whole household."
+        busy={pinBusy}
+        error={pinErr}
+        onCancel={() => { setPinFor(null); setPinErr(null); }}
+        onConfirm={(pin) => void confirmSkipWithPin(pin)}
+      />
     </>
   );
 }

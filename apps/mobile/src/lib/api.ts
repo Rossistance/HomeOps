@@ -604,7 +604,9 @@ export const api = {
     const r = await req<{ overrides: RiskOverrideRec[]; catalog: CatalogToolRec[] }>("/risk-overrides");
     return r.ok ? r.data : null;
   },
-  async setRiskOverride(toolId: string, patch: { riskClass?: string | null; skipApproval?: boolean }): Promise<{ override?: RiskOverrideRec; error?: string }> {
+  /* `pin` — the household PIN, re-entered at the moment of a dangerous change (Cluster W).
+   * Optional in the type because a household with no PIN set isn't gated by one. */
+  async setRiskOverride(toolId: string, patch: { riskClass?: string | null; skipApproval?: boolean; pin?: string }): Promise<{ override?: RiskOverrideRec; error?: string; message?: string }> {
     const r = await req<{ override?: RiskOverrideRec; error?: string }>("/risk-overrides", { method: "PUT", body: JSON.stringify({ toolId, ...patch }) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
@@ -1188,7 +1190,7 @@ export const api = {
     const r = await req<{ settings: AppSettingsRec }>("/settings");
     return r.data?.settings ?? null;
   },
-  async updateSettings(patch: Partial<Pick<AppSettingsRec, "externalActionsEnabled" | "calendarAutoSync" | "autoApproveImprovements">> & { ownerPin?: string }): Promise<{ settings?: AppSettingsRec; error?: string; message?: string }> {
+  async updateSettings(patch: Partial<Pick<AppSettingsRec, "externalActionsEnabled" | "calendarAutoSync" | "autoApproveImprovements">> & { ownerPin?: string; pin?: string }): Promise<{ settings?: AppSettingsRec; error?: string; message?: string }> {
     const r = await req<{ settings?: AppSettingsRec; error?: string; message?: string }>("/settings", { method: "POST", body: JSON.stringify(patch) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };

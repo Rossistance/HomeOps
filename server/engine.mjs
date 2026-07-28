@@ -274,10 +274,13 @@ function resolveToolBase(toolId) {
 // skip its approval gate for THEIR household. Applied here — inside the single server
 // authority — so every caller (run steps, catalogs) sees the same effective values.
 // baseRequiresApproval is kept so audits can record when a gate was actually bypassed.
-function resolveTool(toolId, householdId) {
+// actorId is threaded so a nest's own risk rules apply to its members' runs (Cluster W);
+// omitted, it resolves the household's rule, which is the correct default for anything
+// running without a person behind it.
+function resolveTool(toolId, householdId, actorId = null) {
   const base = resolveToolBase(toolId);
   if (!base || !householdId) return base;
-  const ov = getRiskOverride(householdId, toolId);
+  const ov = getRiskOverride(householdId, toolId, actorId);
   // Always hand back a FRESH object: the agent-policy pass below refines
   // requiresApproval per run, and resolveToolBase may return a registered-function
   // record that other callers share. Mutating that would leak across runs.
@@ -409,7 +412,7 @@ export async function startRun({ source = "manual", sourceRef = {}, plan, params
   const runId = "run_" + crypto.randomBytes(10).toString("hex");
   const now = Date.now();
   const steps = (plan?.steps ?? []).map((s, i) => {
-    const resolved = s.toolId ? resolveTool(s.toolId, session?.householdId) : null;
+    const resolved = s.toolId ? resolveTool(s.toolId, session?.householdId, session?.actorId ?? null) : null;
     return {
       index: i,
       toolId: s.toolId ?? null,
@@ -603,7 +606,7 @@ async function _drive(runId) {
       continue;
     }
 
-    const resolved = resolveTool(step.toolId, run.householdId);
+    const resolved = resolveTool(step.toolId, run.householdId, run.actorId ?? null);
     if (!resolved) {
       patchRunStep(runId, i, { status: "failed", detail: `Unknown tool: ${step.toolId}`, finishedAt: Date.now() });
       return finishFailed(runId, "unknown_tool");
@@ -657,7 +660,7 @@ async function _drive(runId) {
           },
           agent,
           settings: getSettings(run.householdId),
-          override: getRiskOverride(run.householdId, step.toolId),
+          override: getRiskOverride(run.householdId, step.toolId, run.actorId ?? null),
         });
         // Clearing a gate is admin-sanctioned but NEVER silent — the household override
         // path is audited a few lines above, and an agent-level clear is audited here.
