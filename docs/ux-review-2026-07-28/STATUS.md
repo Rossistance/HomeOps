@@ -44,7 +44,7 @@ This reversed build 57's order; flipped in P4a.
 | S Coming up = mine | ✅ owned-or-on, 7 days, + my dated tasks |
 | T "What I did" context | ✅ WHO (agent name / "You asked") + last completed step as the outcome line; publicRun carries agentName (P6e) |
 | U library hue rings | ✅ category glow + tinted file icons (P6e); artifact privacy ✅ (P1) |
-| V settings IA | ◐ backend URL dev-only, builders warning, tasks/meals rows removed, Appearance card gone + dark-mode moon at top (P6f); **connections consolidation, coming-soon greying, AI-providers move, icons, collapses, ICS file import, connect-calendar naming, Manage-Household minimisation, invite gating** remain |
+| V settings IA | ◐ backend URL dev-only, builders warning, tasks/meals rows removed, Appearance card gone + dark-mode moon at top (P6f), coming-soon greying on unconfigured connectors (P6i); **connections consolidation under one screen, AI-providers move, per-connector icons, collapse states, ICS file import, connect-calendar naming, Manage-Household minimisation, invite gating** remain |
 | W role matrix | ◐ member-edit matrix + child colour/emoji-only (8 tests) + contacts reach (P6f) + builders warning (P6a); **per-nest approval tools and the advanced-mode PIN** remain |
 | X nests | ✅ one-nest rule both doors; a child's invitation answered by the nest's senior adult via forActorId (child-only door, 2 tests) (P6g) |
 | Y calendar connections | ✅ creator-or-Owner only, refusal names the holder |

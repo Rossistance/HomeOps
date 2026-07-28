@@ -482,19 +482,26 @@ export default function ConnectionsScreen() {
           ) : (
             <Rise index={4}>
               <Card padded={false}>
+                {/* Cluster V — "for connectors that have not been set up by the application
+                    developer, these need to be grayed out with a note saying coming soon —
+                    everything but Google for now." Live rows keep their state badge; the
+                    rest dim to 40% with one honest label, so the list reads as a roadmap
+                    rather than a wall of inexplicable 'offline's. */}
                 {shownConnectors.map((c, i) => {
-                  const m = readinessMeta(colors, c.readiness);
+                  const live = c.live || ["connected", "authorized_write", "authorized_readonly", "local_only", "healthy"].includes(c.readiness);
+                  const m = live ? readinessMeta(colors, c.readiness) : { label: "Coming soon", fg: colors.textFaint, bg: colors.surfaceSunken };
                   const look = categoryStyle(colors, c.name);
                   return (
-                    <Row
-                      key={c.id}
-                      title={c.name}
-                      icon={look.icon}
-                      iconColor={look.fg}
-                      iconBg={look.bg}
-                      trailing={<Badge label={m.label} fg={m.fg} bg={m.bg} />}
-                      last={i === shownConnectors.length - 1}
-                    />
+                    <View key={c.id} style={{ opacity: live ? 1 : 0.4 }}>
+                      <Row
+                        title={c.name}
+                        icon={look.icon}
+                        iconColor={look.fg}
+                        iconBg={look.bg}
+                        trailing={<Badge label={m.label} fg={m.fg} bg={m.bg} />}
+                        last={i === shownConnectors.length - 1}
+                      />
+                    </View>
                   );
                 })}
               </Card>
