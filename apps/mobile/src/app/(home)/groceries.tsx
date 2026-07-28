@@ -7,6 +7,7 @@ import { useFocusEffect } from "expo-router";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import { api, type MemberRec, type NestRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { isOpen } from "@/lib/task-state";
 import { TaskSheet } from "@/components/sheets/task-sheet";
 import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic, motion } from "@/theme";
@@ -72,7 +73,7 @@ export default function GroceriesScreen() {
     [allItems, nestId],
   );
   const done = useMemo(() => items.filter((t) => t.status === "done").length, [items]);
-  const open = items.filter((t) => t.status !== "done");
+  const open = items.filter(isOpen);
   const checked = items.filter((t) => t.status === "done");
 
   async function addItem() {

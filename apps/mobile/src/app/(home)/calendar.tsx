@@ -13,6 +13,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { fade, memberAccent, memberColor } from "@/lib/member-colors";
 import * as SecureStore from "expo-secure-store";
 import { useSession } from "@/lib/session";
+import { isOpen } from "@/lib/task-state";
 import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
 // still shadows the ui/ directory until old screens are deleted centrally.
@@ -165,7 +166,7 @@ export default function CalendarScreen() {
   const tasksByDay = useMemo(() => {
     const map: Record<string, TaskRec[]> = {};
     for (const t of tasks) {
-      if (t.status === "done") continue;
+      if (!isOpen(t)) continue;   // archived tasks are filed away, not upcoming
       const at = t.startAt ?? t.dueAt;
       if (!at) continue;
       const d = new Date(at);

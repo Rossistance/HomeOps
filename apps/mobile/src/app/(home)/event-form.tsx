@@ -314,7 +314,17 @@ export default function EventFormScreen() {
   /* Creating → it's yours. Editing → only if it actually is. Everything the owner controls
    * (attendees, driver, the shared bring list) keys off THIS, not off role — the narrator
    * demonstrating the bug was the household Owner, the most privileged role there is. */
-  const isOwnerOfEvent = !isEdit || (eventOwnerId != null && eventOwnerId === session?.actorId);
+  /* Whose event is it — and the case the first pass at this missed.
+   *
+   * A MEMBER's event (GPop's ride, Melissa's dance) is theirs alone to change. But a
+   * HOUSEHOLD FEED mirror — the school's early-dismissal ICS — has no member owner, and its
+   * FamiliOS half (who from this family is going, what to bring) is collective. The server
+   * already draws that line; the client didn't, so on exactly those events it locked
+   * controls the server would have accepted, quietly removing the Q2 behaviour he asked for
+   * and has been using. No member owner → an adult is the steward. */
+  const isOwnerOfEvent = !isEdit
+    || (eventOwnerId != null && eventOwnerId === session?.actorId)
+    || (eventOwnerId == null && canManage);
   const ownerControls = canManage && isOwnerOfEvent;
   const canSave = canManage && busy === null && (appendOnly || !isOwnerOfEvent || (!readOnly && title.trim().length > 0 && !endInvalid));
   /** The household's half of the event — open even when the source owns the rest. */

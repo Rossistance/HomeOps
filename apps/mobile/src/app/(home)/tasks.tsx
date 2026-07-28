@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, TextInput, View } from "react-native";
 import { api, type HelpRequestRec, type MemberRec, type NestRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { isOpen } from "@/lib/task-state";
 import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic } from "@/theme";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
@@ -265,7 +266,7 @@ export default function TasksScreen() {
       : t.visibility === "household"),
     [nestId, justMe],
   );
-  const open = useMemo(() => tasks.filter((t) => t.status !== "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
+  const open = useMemo(() => tasks.filter((t) => isOpen(t) && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
   const done = useMemo(() => tasks.filter((t) => t.status === "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
   /* Cluster M — where done goes after three days, "that way the completed section will
    * eventually entirely empty." The server's sweep moves them; this just gives them a

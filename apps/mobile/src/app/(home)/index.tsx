@@ -14,6 +14,7 @@ import { coversDay, eventTimeLabel } from "@/lib/event-days";
 import { fade, memberColor } from "@/lib/member-colors";
 import { isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
+import { isOpen } from "@/lib/task-state";
 import { useAdvancedMode } from "@/lib/prefs";
 import { pickPrompt } from "@/lib/ask-prompts";
 import { AskShimmer } from "@/components/ask-shimmer";
@@ -342,7 +343,7 @@ function AdminToday() {
     const nowMs = now.getTime();
     const horizon = nowMs + 7 * 24 * 60 * 60 * 1000;
     return tasks
-      .filter((t) => (t.assignedMemberId ?? t.createdBy) === me && t.status !== "done" && t.status !== "archived")
+      .filter((t) => (t.assignedMemberId ?? t.createdBy) === me && isOpen(t))
       .filter((t) => {
         const at = Date.parse(t.startAt ?? t.dueAt ?? "");
         return !Number.isNaN(at) && at >= nowMs - 12 * 3600e3 && at <= horizon;
