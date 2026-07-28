@@ -253,6 +253,25 @@ export default function TasksScreen() {
    * always means it belongs to Mum & Dad, and making someone say so twice is the kind of
    * friction that gets a feature ignored. It's a DEFAULT, not a lock: the picker below still
    * has the final word, so a private note written inside a nest space stays private. */
+  /* Who a nest task can go to: the nest's other members. "It'll be everybody in my nest but
+   * me" — I'm the one writing it, and a task assigned to yourself is just a task. */
+  const assignable = useMemo(() => {
+    if (scope.visibility !== "nest") return [];
+    const nest = nests.find((n) => n.id === scope.nestId);
+    const ids = new Set((nest?.members ?? []).map((m) => (typeof m === "string" ? m : m.actorId)));
+    return members.filter((m) => ids.has(m.actorId) && m.actorId !== session?.actorId);
+  }, [scope.visibility, scope.nestId, nests, members, session?.actorId]);
+
+  /* "It will automatically have loaded and been selected." A two-person nest has exactly one
+   * other person, so pre-select them; leaving it blank would make the common case a chore.
+   * Any other scope clears it — an assignee left over from a nest choice would silently
+   * hand a private task to someone. */
+  useEffect(() => {
+    if (scope.visibility !== "nest") { setAssignee(null); return; }
+    if (assignable.length === 1) setAssignee(assignable[0].actorId);
+    else if (assignee && !assignable.some((m) => m.actorId === assignee)) setAssignee(null);
+  }, [scope.visibility, scope.nestId, assignable]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     // A nest space seeds nest scope; Family and Just me BOTH seed private — "the default for
     // every task creation should always be just me… even though the list is created under
@@ -633,11 +652,20 @@ export default function TasksScreen() {
                     </ChipRow>
                   </View>
                 ) : null}
-                {members.length > 0 ? (
+                {/* K5 — the scope already answered this question, so asking it twice is the
+                    app not listening.
+                    "If it's just for me, do I need to assign it to anybody? No, of course
+                     not — it's assigned to me. So these options shouldn't even be available.
+                     When it says everyone… none of this will be surfaced. When it says my
+                     nest, it'll be everybody in my nest but me, and it will automatically
+                     have loaded and been selected."
+                    So: Just me → nobody to pick. Everyone → everyone already. My Nest →
+                    the nest, minus me, pre-selected and adjustable. */}
+                {scope.visibility === "nest" && assignable.length > 0 ? (
                   <View style={{ gap: 6 }}>
                     <T kind="eyebrow">Assign to</T>
                     <ChipRow>
-                      {members.map((m) => (
+                      {assignable.map((m) => (
                         <Chip
                           key={m.actorId}
                           label={m.displayName.split(" ")[0]}
