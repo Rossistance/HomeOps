@@ -270,17 +270,9 @@ function AdminToday() {
     return () => { live = false; };
   }, [now]);
   const inboxCount = pending.length + unreadNotices;
-  const isToday = (iso: string | null) => {
-    if (!iso) return false;
-    const d = new Date(iso);
-    return d.toDateString() === now.toDateString();
-  };
   // Multi-day events (ISS-004) count as "today" on every spanned day.
   const todayEvents = events.filter((e) => coversDay(e, now)).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
-  const upcoming = events
-    .filter((e) => e.startAt && !isToday(e.startAt) && new Date(e.startAt).getTime() > now.getTime())
-    .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
-    .slice(0, 3);
+
   /* A1 — "There is a calendar event, Serving as Eucharistic Minister, shown at 8:30am. However
    * it's 11:54am, so this event should no longer be showing. It is either complete or was
    * missed." An event whose time has passed is not a plan; leaving it at the top of Today is
@@ -292,16 +284,17 @@ function AdminToday() {
    *
    * All-day events are kept for their whole day rather than being dropped at midnight: an
    * all-day event at 2pm is still today's news. */
-  /* Cluster S — "Coming up should not act like the calendar does… it should be the next
-   * four or five events that I'M ON, and the next few upcoming tasks that I'm on, within
-   * the next five to seven days. Not other people's events." The Calendar card above stays
-   * the family's; this one is yours. Mine = I own it or I'm on it. */
+  /* THE CALENDAR CARD — the FAMILY's day. Everyone's plans, next three days.
+   *
+   * This card and "Coming up" below answer different questions, and a previous pass put
+   * Coming-up's answer here: it filtered this to just my events over seven days, which
+   * emptied the household's at-a-glance view and undid A2 ("the calendar should not just
+   * show one plan, it should show the plans for the next three days") from the earlier
+   * review. Whose events: EVERYONE'S. Window: three days. What's mine belongs downstairs. */
   const cardEvents = useMemo(() => {
     const nowMs = now.getTime();
-    const horizon = nowMs + 7 * 24 * 60 * 60 * 1000;
-    const me = session?.actorId;
+    const horizon = nowMs + 3 * 24 * 60 * 60 * 1000;
     return events
-      .filter((e) => e.ownerId === me || (e.participantIds ?? []).includes(me ?? ""))
       .filter((e) => {
         if (!e.startAt) return false;
         const start = new Date(e.startAt).getTime();
@@ -313,9 +306,37 @@ function AdminToday() {
         return endsAt >= nowMs && start <= horizon;
       })
       .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
+      .slice(0, 3);
+  }, [events, now]);
+
+  /* COMING UP — MY week. The other half of the same distinction.
+   *
+   * "The coming up should not act like the calendar does and more be a quick view of just
+   *  the tasks that I'm on or events that I'm on… the next four or five events that I'm on
+   *  and the next three upcoming tasks that I'm on, within the next five to seven days.
+   *  Not other people's events that are on the calendar."
+   *
+   * It was "nearly an exact copy" of the card above because it read the same unfiltered
+   * list. Mine = I own it or I'm on it; tasks = assigned to me, or mine and unassigned. */
+  const mineSoon = useMemo(() => {
+    const me = session?.actorId;
+    if (!me) return [];
+    const nowMs = now.getTime();
+    const horizon = nowMs + 7 * 24 * 60 * 60 * 1000;
+    return events
+      .filter((e) => e.ownerId === me || (e.participantIds ?? []).includes(me))
+      .filter((e) => {
+        if (!e.startAt) return false;
+        const start = new Date(e.startAt).getTime();
+        if (isNaN(start)) return false;
+        const endsAt = e.allDay
+          ? new Date(new Date(e.startAt).setHours(23, 59, 59, 999)).getTime()
+          : (e.endAt ? new Date(e.endAt).getTime() : start);
+        return endsAt >= nowMs && start <= horizon;
+      })
+      .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
       .slice(0, 5);
   }, [events, now, session?.actorId]);
-  /* …and the tasks half of "coming up": mine, dated, open, same window. */
   const comingTasks = useMemo(() => {
     const me = session?.actorId;
     const nowMs = now.getTime();
@@ -706,32 +727,6 @@ function AdminToday() {
                   {todayEvents.length > 3 ? (
                     <T kind="detail" color={colors.ember}>+{todayEvents.length - 3} more today</T>
                   ) : null}
-                  {/* The tasks half of "coming up" — mine, dated, tinted MY colour (Q1:
-                      "these are my tasks… they should share my color", not the generic
-                      blue), and tapping goes to the Tasks page whose Back now returns
-                      here (BUG-04). */}
-                  {comingTasks.map((t) => {
-                    const mine = memberColor(colors, members.find((m) => m.actorId === (t.assignedMemberId ?? t.createdBy))) ?? colors.sky;
-                    const at = new Date(t.dueAt ?? t.startAt ?? "");
-                    return (
-                      <PressableScale
-                        key={t.id}
-                        onPress={() => router.push("/tasks")}
-                        haptic="select"
-                        accessibilityRole="button"
-                        accessibilityLabel={`Task: ${t.title}. Opens Tasks`}
-                        style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, borderRadius: 10, backgroundColor: fade(mine, 0.10), paddingHorizontal: spacing.md, paddingVertical: 8 }}
-                      >
-                        <Sym name="checkmark.circle" size={14} color={mine} />
-                        <T kind="subMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={1}>{t.title}</T>
-                        {!Number.isNaN(+at) ? (
-                          <T kind="caption" color={colors.textFaint}>
-                            {at.toLocaleDateString(undefined, { weekday: "short" })} {at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
-                          </T>
-                        ) : null}
-                      </PressableScale>
-                    );
-                  })}
                 </View>
               ) : null}
             </PressableCard>
@@ -903,12 +898,14 @@ function AdminToday() {
             </View>
           </Rise>
 
-          {/* coming up */}
-          {upcoming.length > 0 && (
+          {/* Coming up — MINE, events then tasks, in the flat list style of the Ask-for-help
+              screen he pointed at ("it should look like these items… the ones that I really
+              do have coming up that I may need a plan with or help with"). */}
+          {(mineSoon.length > 0 || comingTasks.length > 0) && (
             <Rise index={7}>
               <SectionHeader title="Coming up" />
               <Card padded={false}>
-                {upcoming.map((e, i) => (
+                {mineSoon.map((e, i) => (
                   <PressableScale
                     key={e.id}
                     haptic="select"
@@ -933,6 +930,39 @@ function AdminToday() {
                     <Sym name="chevron.right" size={13} color={colors.textFaint} />
                   </PressableScale>
                 ))}
+                {/* "…and the next three upcoming tasks that I'm on." Same list, same rows —
+                    a plan and a to-do are both things I have coming, and separating them
+                    into two cards would be the copy problem again in miniature. Tinted my
+                    colour (Q1) and routed to Tasks, whose Back returns here. */}
+                {comingTasks.map((t, i) => {
+                  const mine = memberColor(colors, members.find((m) => m.actorId === (t.assignedMemberId ?? t.createdBy))) ?? colors.sky;
+                  const at = new Date(t.dueAt ?? t.startAt ?? "");
+                  return (
+                    <PressableScale
+                      key={t.id}
+                      haptic="select"
+                      onPress={() => router.push("/tasks")}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Task: ${t.title}. Opens Tasks`}
+                      style={{
+                        flexDirection: "row", alignItems: "center", gap: spacing.md,
+                        paddingHorizontal: spacing.lg, paddingVertical: 13,
+                        borderTopWidth: (i > 0 || mineSoon.length > 0) ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator,
+                      }}
+                    >
+                      <Sym name="checkmark.circle" size={15} color={mine} />
+                      <View style={{ flex: 1, gap: 2 }}>
+                        <T kind="rowTitle">{t.title}</T>
+                        <T kind="detail" numberOfLines={1}>
+                          {!Number.isNaN(+at)
+                            ? `${at.toLocaleDateString(undefined, { weekday: "short" })} · ${at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`
+                            : "No date"}
+                        </T>
+                      </View>
+                      <Sym name="chevron.right" size={13} color={colors.textFaint} />
+                    </PressableScale>
+                  );
+                })}
               </Card>
             </Rise>
           )}
