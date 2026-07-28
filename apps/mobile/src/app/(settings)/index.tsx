@@ -255,12 +255,17 @@ export default function SettingsScreen() {
                   last={false}
                 />
               )}
+              {/* Cluster V — "it's mainly an informational screen. It just tells him what he
+                  can see, what he can't see. It's not really managing households — it's a
+                  household VIEW, I'd call it, for an adult member." The row says which one
+                  it is before you tap it; only an Owner or Adult Admin actually manages
+                  anything in there (the PIN), and for everyone else it reads. */}
               <Row
                 icon="person.2"
                 iconColor={colors.sky}
                 iconBg={colors.skyBg}
-                title="Manage household"
-                subtitle="Members, spaces and roles"
+                title={canInvite ? "Manage household" : "Household view"}
+                subtitle={canInvite ? "Members, spaces and roles" : "Who's here and who sees what"}
                 chevron
                 onPress={() => router.push("/household")}
                 last
@@ -334,8 +339,9 @@ export default function SettingsScreen() {
               authority over anyone, so there is no role gate beyond that. */}
           <Row icon="person.2.fill" iconColor={colors.lavender} iconBg={colors.lavenderBg} title="Nests" subtitle="A shared space for just some of you" chevron onPress={() => router.push("/nests")} />
           <Row icon="clock" iconColor={colors.amber} iconBg={colors.amberBg} title="Automations" chevron onPress={() => router.push("/automations")} />
-          <Row icon="doc.text" iconColor={colors.textMuted} iconBg={colors.surfaceSunken} title="Playbooks" chevron onPress={() => router.push("/playbooks")} />
-          <Row icon="cpu" iconColor={colors.ember} iconBg={colors.emberBg} title="AI Providers" chevron onPress={() => router.push("/ai")} last={!session?.isOperator} />
+          <Row icon="doc.text" iconColor={colors.textMuted} iconBg={colors.surfaceSunken} title="Playbooks" chevron onPress={() => router.push("/playbooks")} last={!session?.isOperator} />
+          {/* AI providers moved under All connections & calendars — "it would be prudent to
+              move the AI providers under the all connections and calendars." */}
           {/* D5 — only the platform operator sees this row at all. "New households do not get
               this," in his words: it isn't a household feature. */}
           {session?.isOperator ? (

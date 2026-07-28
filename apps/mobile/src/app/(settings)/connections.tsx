@@ -7,13 +7,16 @@ import Animated, {
   ReduceMotion, useAnimatedStyle, useSharedValue, withRepeat, withSequence, withTiming,
 } from "react-native-reanimated";
 import * as WebBrowser from "expo-web-browser";
+import * as DocumentPicker from "expo-document-picker";
+// The legacy entry point is the one the rest of the app uses (see (ask)/index.tsx).
+import { readAsStringAsync } from "expo-file-system/legacy";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { api, type CalendarSubscription, type ProviderRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { categoryStyle } from "@/theme/categories";
 import { useTheme, riskColor, tapHaptic, type HearthColors } from "@/theme";
 import {
-  Badge, BrandIcon, Button, Card, EmptyState, Expander, HScreen, Notice, PressableScale, Rise, Row,
+  Badge, BrandIcon, Button, Card, CollapsibleSection, EmptyState, Expander, HScreen, Notice, PressableScale, Rise, Row,
   SectionHeader, SkeletonCards, Sym, SymTile, T,
 } from "@/components/ui";
 
@@ -202,13 +205,33 @@ export default function ConnectionsScreen() {
     else setNotice({ text: r.error === "insufficient_role" ? "Subscribing needs an adult member." : r.message ?? r.error ?? "Couldn't subscribe.", ok: false });
   };
 
-  const importPasted = async () => {
-    if (!icsPaste.trim()) return;
+  /* Cluster V — "I'd rather this be a file upload — import ICS file." Pasting the contents
+   * of a calendar file into a text box asks a person to do a computer's job: find the file,
+   * open it in something that can show raw text, select thousands of lines, copy, come back.
+   * The picker does it in one tap, and .ics is a real file type iOS can hand us. */
+  const importFile = async () => {
     setSubBusy("paste"); setNotice(null);
-    const r = await api.importIcs({ ics: icsPaste.trim() });
-    setSubBusy(null);
-    if (r.subscription) { setIcsPaste(""); setNotice({ text: `Imported — ${r.sync?.imported ?? 0} event${(r.sync?.imported ?? 0) === 1 ? "" : "s"} added to the calendar.`, ok: true }); await load(); }
-    else setNotice({ text: r.error === "insufficient_role" ? "Importing needs an adult member." : r.message ?? r.error ?? "Couldn't import that .ics.", ok: false });
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        // iOS reports .ics as text/calendar; some exporters send octet-stream, so both.
+        type: ["text/calendar", "application/octet-stream", "*/*"],
+        copyToCacheDirectory: true,
+      });
+      if (res.canceled || !res.assets?.[0]) { setSubBusy(null); return; }
+      const ics = await readAsStringAsync(res.assets[0].uri);
+      if (!/BEGIN:VCALENDAR/i.test(ics)) {
+        setSubBusy(null);
+        setNotice({ text: "That doesn't look like a calendar file — pick a .ics export.", ok: false });
+        return;
+      }
+      const r = await api.importIcs({ ics });
+      setSubBusy(null);
+      if (r.subscription) { setNotice({ text: `Imported — ${r.sync?.imported ?? 0} event${(r.sync?.imported ?? 0) === 1 ? "" : "s"} added to the calendar.`, ok: true }); await load(); }
+      else setNotice({ text: r.error === "insufficient_role" ? "Importing needs an adult member." : r.message ?? r.error ?? "Couldn't import that .ics.", ok: false });
+    } catch {
+      setSubBusy(null);
+      setNotice({ text: "Couldn't read that file — try exporting it again.", ok: false });
+    }
   };
 
   const connectGoogleCal = async () => {
@@ -443,31 +466,35 @@ export default function ConnectionsScreen() {
 
           {canManage ? (
             <Rise index={3}>
-              <Card style={{ gap: spacing.sm }}>
-                <T kind="eyebrow">Add a feed</T>
-                <TextInput
-                  style={inputStyle}
-                  placeholder="Feed URL (webcal:// or https://…ics)"
-                  placeholderTextColor={colors.textFaint}
-                  autoCapitalize="none" autoCorrect={false} keyboardType="url"
-                  value={feedUrl} onChangeText={setFeedUrl}
-                  accessibilityLabel="Calendar feed URL"
-                />
-                <Button title="Subscribe to feed" variant="neutral" full loading={subBusy === "url"} disabled={!feedUrl.trim()} onPress={() => void subscribe()} />
-                <TextInput
-                  style={[inputStyle, { minHeight: 72 }]}
-                  placeholder="…or paste .ics contents here"
-                  placeholderTextColor={colors.textFaint}
-                  autoCapitalize="none" autoCorrect={false} multiline
-                  value={icsPaste} onChangeText={setIcsPaste}
-                  accessibilityLabel="Paste ICS contents"
-                />
-                <Button title="Import pasted .ics" variant="neutral" full loading={subBusy === "paste"} disabled={!icsPaste.trim()} onPress={() => void importPasted()} />
+              <Card padded={false}>
+                {/* Cluster V — "this can be collapsed a bit… I do like this connect Google
+                    Calendar button, however it should just be 'connect calendar' because it
+                    could be any type of calendar." Connecting an account is the common act
+                    and stays out front; the feed URL and file import are the rare ones and
+                    fold away until asked for. */}
                 {googleConnected ? (
-                  <Button title="Connect Google Calendar" variant="ember" icon="calendar" full loading={subBusy === "google"} onPress={() => void connectGoogleCal()} />
+                  <View style={{ padding: spacing.lg, paddingBottom: spacing.sm }}>
+                    <Button title="Connect calendar" variant="ember" icon="calendar" full loading={subBusy === "google"} onPress={() => void connectGoogleCal()} />
+                  </View>
                 ) : (
-                  <T kind="caption" color={colors.textFaint}>Connect a Google account above to sync Google Calendar.</T>
+                  <View style={{ padding: spacing.lg, paddingBottom: spacing.sm }}>
+                    <T kind="caption" color={colors.textFaint}>Connect an account above, and its calendar comes with it.</T>
+                  </View>
                 )}
+                <CollapsibleSection title="Other calendar options">
+                  <View style={{ gap: spacing.sm, paddingTop: spacing.sm }}>
+                    <Button title="Import calendar file (.ics)" variant="neutral" icon="square.and.arrow.down" full loading={subBusy === "paste"} onPress={() => void importFile()} />
+                    <TextInput
+                      style={inputStyle}
+                      placeholder="Feed URL (webcal:// or https://…ics)"
+                      placeholderTextColor={colors.textFaint}
+                      autoCapitalize="none" autoCorrect={false} keyboardType="url"
+                      value={feedUrl} onChangeText={setFeedUrl}
+                      accessibilityLabel="Calendar feed URL"
+                    />
+                    <Button title="Subscribe to feed" variant="neutral" full loading={subBusy === "url"} disabled={!feedUrl.trim()} onPress={() => void subscribe()} />
+                  </View>
+                </CollapsibleSection>
               </Card>
             </Rise>
           ) : (
@@ -476,12 +503,30 @@ export default function ConnectionsScreen() {
             </Rise>
           )}
 
+          {/* Cluster V — "it would be prudent to move the AI providers under the all
+              connections and calendars. Currently it services everything here." The model
+              that answers the household IS a connection; keeping it in a separate branch of
+              Settings made people hunt for it in the one place it doesn't live. */}
+          <Rise index={4}>
+            <Card padded={false}>
+              <Row
+                icon="cpu" iconColor={colors.ember} iconBg={colors.emberBg}
+                title="AI providers" subtitle="The model answering for this household"
+                chevron onPress={() => router.push("/ai")} last
+              />
+            </Card>
+          </Rise>
+
+          {/* "This information down here is like a connector status — it's useful, but it can
+              also benefit from a collapsed state." Folded by default: it answers a question
+              you only ask when something's wrong. */}
           <SectionHeader title="Connectors" />
           {shownConnectors.length === 0 ? (
             <EmptyState icon="bolt.slash" title="No connectors loaded" hint="Is the runtime online?" />
           ) : (
-            <Rise index={4}>
+            <Rise index={5}>
               <Card padded={false}>
+                <CollapsibleSection title="Connector status" count={shownConnectors.length}>
                 {/* Cluster V — "for connectors that have not been set up by the application
                     developer, these need to be grayed out with a note saying coming soon —
                     everything but Google for now." Live rows keep their state badge; the
@@ -504,6 +549,7 @@ export default function ConnectionsScreen() {
                     </View>
                   );
                 })}
+                </CollapsibleSection>
               </Card>
             </Rise>
           )}
