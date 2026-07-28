@@ -59,7 +59,7 @@ import { suggestAddresses, placesProvider } from "./places.mjs";
 import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
 import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
-import { isValidReminder, sweepTaskReminders } from "./reminders.mjs";
+import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive } from "./reminders.mjs";
 import { getAgent, getViewerNote, putViewerNote } from "./store.mjs";
 import { captureMemoryFromExchange } from "./memory-capture.mjs";
 import {
@@ -2518,6 +2518,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (body.remindMinutesBefore !== undefined && !isValidReminder(body.remindMinutesBefore)) {
         return json(res, 400, { error: "bad_reminder" }, req);
       }
+      // Cluster N — "I need to be able to select both of them… all of them if need be."
+      if (body.remindOffsets !== undefined && !isValidReminderList(body.remindOffsets)) {
+        return json(res, 400, { error: "bad_reminder", message: "Pick reminder times from the offered list." }, req);
+      }
       /* Was: a nest you're not in silently became "private", so the task existed but not
        * where you put it. Refusing says so. Same helper as knowledge and the same three
        * scopes, which is what "throughout the app" has to mean to be worth anything. */
@@ -2536,7 +2540,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
         ...tkVis,
         listName: body.listName ?? undefined,
         startAt: body.startAt ?? null, endAt: body.endAt ?? null,
-        remindMinutesBefore: body.remindMinutesBefore ?? null, reminderSentAt: null,
+        remindMinutesBefore: body.remindMinutesBefore ?? (Array.isArray(body.remindOffsets) && body.remindOffsets.length ? body.remindOffsets[0] : null),
+        remindOffsets: Array.isArray(body.remindOffsets) ? [...new Set(body.remindOffsets)] : undefined,
+        remindersSent: [], reminderSentAt: null,
         notes: body.notes ?? "", source: "user", createdBy: g.session.actorId,
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
@@ -2564,10 +2570,18 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if ("remindMinutesBefore" in patch && !isValidReminder(patch.remindMinutesBefore)) {
         return json(res, 400, { error: "bad_reminder" }, req);
       }
+      if ("remindOffsets" in patch && !isValidReminderList(patch.remindOffsets)) {
+        return json(res, 400, { error: "bad_reminder", message: "Pick reminder times from the offered list." }, req);
+      }
       // Moving the time, or changing the lead, must RE-ARM the reminder — otherwise a task
       // pushed from Tuesday to Friday keeps a spent stamp and silently never nudges again.
-      const timingChanged = ["startAt", "dueAt", "remindMinutesBefore"].some((k) => k in patch && patch[k] !== tk[k]);
-      if (timingChanged) patch.reminderSentAt = null;
+      const timingChanged = ["startAt", "dueAt", "remindMinutesBefore", "remindOffsets"].some((k) => k in patch && JSON.stringify(patch[k]) !== JSON.stringify(tk[k]));
+      if (timingChanged) { patch.reminderSentAt = null; patch.remindersSent = []; }
+      /* Cluster M — done is a MOMENT, so it gets a stamp; the archive sweep measures three
+       * days from here. Reopening clears it (and un-archives), because a task pulled back
+       * into play is in play. */
+      if (patch.status === "done" && tk.status !== "done") patch.completedAt = new Date().toISOString();
+      if (patch.status && patch.status !== "done" && patch.status !== "archived" && (tk.status === "done" || tk.status === "archived")) patch.completedAt = null;
       /* T1 — a task may be moved into a nest you're in, or back out of one (unlike a chat: a
        * task is a line you wrote, not a history other people would suddenly be able to read).
        * What's refused is naming a nest you're NOT in, which would otherwise be a way to
@@ -5199,6 +5213,10 @@ server.listen(PORT, () => {
   // than scheduled on whichever device happened to create the task. Every 30s so a
   // "15 minutes before" lands within half a minute of the mark.
   setInterval(() => { void forEachTenant(() => sweepTaskReminders()); }, 30_000);
+  // Archive is cheap and slow-moving; hourly is generous. First pass shortly after boot so
+  // a long-stopped server catches up without waiting an hour.
+  setInterval(() => { void forEachTenant(() => sweepTaskArchive()); }, 60 * 60_000);
+  setTimeout(() => { void forEachTenant(() => sweepTaskArchive()); }, 20_000);
   // Connection health, on a timer — see accounts.mjs sweepAccountHealth. Without this, an
   // account's status describes the last thing that happened to touch it rather than what the
   // credential can do now, which is how "needs reconnect" outlived the problem it named.

@@ -28,6 +28,24 @@ export function isValidReminder(v) {
   return v === null || REMINDER_CHOICES.some((c) => c.minutes === v);
 }
 
+/* Cluster N — "What if I want to be notified the day before AND one hour before? I can't
+ * select both of them. I need to be able to select both — all of them if need be." An array
+ * of offsets, each individually valid, deduped, capped at the menu's own size. */
+export function isValidReminderList(v) {
+  return Array.isArray(v) && v.length <= REMINDER_CHOICES.length && v.every((m) => REMINDER_CHOICES.some((c) => c.minutes === m));
+}
+
+/** Every offset a task wants, oldest schema included: a legacy single value is a one-item
+ *  list, and a legacy reminderSentAt means that one offset already fired. */
+export function taskReminderPlan(task) {
+  const offsets = isValidReminderList(task?.remindOffsets) && task.remindOffsets.length > 0
+    ? [...new Set(task.remindOffsets)]
+    : task?.remindMinutesBefore != null ? [task.remindMinutesBefore] : [];
+  const sent = new Set(Array.isArray(task?.remindersSent) ? task.remindersSent : []);
+  if (task?.reminderSentAt && !Array.isArray(task?.remindersSent)) for (const m of offsets) sent.add(m);
+  return { offsets, sent };
+}
+
 /** The moment a task's reminder should fire, or null when it can't have one. */
 export function reminderAt(task) {
   const mins = task?.remindMinutesBefore;
@@ -41,10 +59,9 @@ export function reminderAt(task) {
   return t - mins * 60_000;
 }
 
-function reminderText(task) {
+function reminderTextFor(task, mins) {
   const anchor = task.startAt || task.dueAt;
   const when = anchor ? new Date(anchor) : null;
-  const mins = task.remindMinutesBefore;
   const lead = mins === 0 ? "now"
     : mins === 24 * 60 ? "tomorrow"
     : mins >= 60 ? `in ${Math.round(mins / 60)} hour${mins >= 120 ? "s" : ""}`
@@ -62,33 +79,61 @@ function reminderText(task) {
  */
 export async function sweepTaskReminders(now = Date.now()) {
   const out = { checked: 0, sent: 0, skipped: 0 };
-  let due;
+  let candidates;
   try {
-    due = listTasks((t) => t.status !== "done" && t.remindMinutesBefore != null && !t.reminderSentAt);
+    candidates = listTasks((t) => t.status !== "done" && t.status !== "archived" && (t.remindMinutesBefore != null || (Array.isArray(t.remindOffsets) && t.remindOffsets.length > 0)));
   } catch { return out; }
-  for (const task of due) {
-    out.checked++;
-    const at = reminderAt(task);
-    if (at == null) continue;
-    if (at > now) continue;
-    // More than a day late means the app (or the server) was down through the window. Firing
-    // it now would be noise about something already past, so it's retired quietly instead.
-    const stale = now - at > 24 * 60 * 60 * 1000;
-    try {
-      patchTask(task.id, { reminderSentAt: new Date().toISOString() });   // stamp FIRST — see above
-      if (stale) { out.skipped++; continue; }
-      const actorId = task.assignedMemberId || task.createdBy;
-      if (!actorId) { out.skipped++; continue; }
-      const who = getMember(actorId);
-      const r = await pushToMember({
-        householdId: task.householdId,
-        actorId,
-        title: task.title,
-        body: `Due ${reminderText(task)}${who && task.assignedMemberId ? "" : ""}`,
-        data: { type: "task", id: task.id },
-      });
-      if (r?.ok) out.sent++; else out.skipped++;
-    } catch { out.skipped++; }
+  for (const task of candidates) {
+    const { offsets, sent } = taskReminderPlan(task);
+    const anchor = task.startAt || task.dueAt;
+    const anchorMs = anchor ? Date.parse(anchor) : NaN;
+    if (Number.isNaN(anchorMs)) continue;
+    for (const mins of offsets) {
+      if (sent.has(mins)) continue;
+      const at = anchorMs - mins * 60_000;
+      if (at > now) continue;
+      out.checked++;
+      // More than a day late means the app (or the server) was down through the window.
+      // Firing it now would be noise about something already past — retired quietly.
+      const stale = now - at > 24 * 60 * 60 * 1000;
+      try {
+        sent.add(mins);
+        // Stamp FIRST — a slow push or a restart mid-sweep must not nudge twice. The legacy
+        // stamp rides along so an old reader still sees "this task reminded".
+        patchTask(task.id, { remindersSent: [...sent], reminderSentAt: new Date().toISOString() });
+        if (stale) { out.skipped++; continue; }
+        const actorId = task.assignedMemberId || task.createdBy;
+        if (!actorId) { out.skipped++; continue; }
+        const r = await pushToMember({
+          householdId: task.householdId,
+          actorId,
+          title: task.title,
+          body: `Due ${reminderTextFor(task, mins)}`,
+          data: { type: "task", id: task.id },
+          // "The priority to get this notification needs to be on high." Reminders only.
+          timeSensitive: true,
+        });
+        if (r?.ok) out.sent++; else out.skipped++;
+      } catch { out.skipped++; }
+    }
+  }
+  return out;
+}
+
+/* Cluster M — "after three days after being completed, they should drop into another
+ * category down here called archived. That way the completed section will eventually
+ * entirely empty." Done is a moment; archived is where done goes to rest. Tasks completed
+ * before completedAt existed use their last update as the completion moment, so his 26-item
+ * backlog drains on the same schedule instead of sitting exempt forever. */
+export const ARCHIVE_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
+export function sweepTaskArchive(now = Date.now()) {
+  const out = { archived: 0 };
+  let doneTasks;
+  try { doneTasks = listTasks((t) => t.status === "done"); } catch { return out; }
+  for (const t of doneTasks) {
+    const completedAt = Date.parse(t.completedAt ?? t.updatedAt ?? "");
+    if (Number.isNaN(completedAt) || now - completedAt < ARCHIVE_AFTER_MS) continue;
+    try { patchTask(t.id, { status: "archived" }); out.archived++; } catch { /* next task */ }
   }
   return out;
 }

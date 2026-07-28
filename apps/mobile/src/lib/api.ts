@@ -196,6 +196,11 @@ export interface TaskRec {
   notes?: string;
   /** 0 = at the time, 15, 30, 60, 1440. null = no reminder. */
   remindMinutesBefore?: number | null;
+  /* Cluster N — several nudges per task ("the day before AND one hour before"). The single
+   * field stays for old readers; the array is the real plan. */
+  remindOffsets?: number[];
+  remindersSent?: number[];
+  completedAt?: string | null;
   reminderSentAt?: string | null;
   /** Set once the task has been added to the calendar. */
   eventId?: string | null;

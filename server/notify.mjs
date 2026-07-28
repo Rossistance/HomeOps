@@ -67,7 +67,7 @@ export async function pushApprovalNotification(approval) {
  * Used by help requests (and anything else person-to-person): only tokens owned by
  * that actor in that household are sent to — never legacy/unattributed tokens, so a
  * personal ping can't reach a device we can't attribute. Fire-and-forget; never throws. */
-export async function pushToMember({ householdId, actorId, title, body, data }) {
+export async function pushToMember({ householdId, actorId, title, body, data, timeSensitive = false }) {
   try {
     const hh = householdId ?? "local";
     const tokens = getPushTokens()
@@ -77,7 +77,16 @@ export async function pushToMember({ householdId, actorId, title, body, data }) 
     await fetch("https://exp.host/--/api/v2/push/send", {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify(tokens.map((to) => ({ to, title, body: String(body ?? "").slice(0, 160), data: data ?? {}, sound: "default", badge: 1 }))),
+      /* Cluster N — "the priority to get this notification needs to be on high… it will
+       * still ring on high." Expo maps priority:"high" to APNs high priority, and
+       * interruptionLevel:"timeSensitive" is what lets iOS surface a reminder through a
+       * Focus mode WHEN the user has granted the app Time Sensitive notifications — the
+       * capability is theirs to grant, so this is a request, not a promise to bypass
+       * silence. Only reminders ask for it; ordinary chatter must not cry wolf. */
+      body: JSON.stringify(tokens.map((to) => ({
+        to, title, body: String(body ?? "").slice(0, 160), data: data ?? {}, sound: "default", badge: 1,
+        ...(timeSensitive ? { priority: "high", interruptionLevel: "timeSensitive" } : {}),
+      }))),
     });
     return { ok: true, sent: tokens.length };
   } catch {

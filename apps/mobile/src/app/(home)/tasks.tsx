@@ -187,6 +187,7 @@ export default function TasksScreen() {
   const [quickDue, setQuickDue] = useState<QuickDue>(null);
   const [assignee, setAssignee] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
   // C6 [21:45] — "the add-task input doesn't recenter when the keyboard comes up." The
   // composer sits under the filter chips, and the chip rows it reveals as you type push it
   // further down; the keyboard inset alone doesn't chase it.
@@ -256,6 +257,10 @@ export default function TasksScreen() {
   );
   const open = useMemo(() => tasks.filter((t) => t.status !== "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
   const done = useMemo(() => tasks.filter((t) => t.status === "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
+  /* Cluster M — where done goes after three days, "that way the completed section will
+   * eventually entirely empty." The server's sweep moves them; this just gives them a
+   * quiet drawer instead of pretending they evaporated. */
+  const archived = useMemo(() => tasks.filter((t) => t.status === "archived" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
   const listNames = useMemo(() => {
     const names = new Set(tasks.filter(inSpace).map(groupOf));
     /* Registry lists exist even when empty — "even if there's no task on a created list,
@@ -671,6 +676,37 @@ export default function TasksScreen() {
                   t={t}
                   members={members}
                   last={i === doneVisible.length - 1}
+                  showGroup={activeList === "All"}
+                  onToggle={() => void toggle(t)}
+                  onLongPress={() => menuFor(t)}
+                  onOpen={() => setEditing(t)}
+                />
+              ))
+              : null}
+          </Card>
+        </Rise>
+      ) : null}
+
+      {archived.length > 0 ? (
+        <Rise index={riseIdx++}>
+          <Card padded={false}>
+            <Pressable
+              onPress={() => { tapHaptic("select"); setArchivedOpen((v) => !v); }}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: archivedOpen }}
+              accessibilityLabel={`Archived, ${archived.length} tasks`}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingHorizontal: spacing.lg, paddingVertical: 13, borderBottomWidth: archivedOpen ? 1 : 0, borderBottomColor: colors.border }}>
+                <Sym name="archivebox" size={15} color={colors.textFaint} />
+                <T kind="bodyMedium" color={colors.textMuted} style={{ flex: 1 }}>Archived</T>
+                <Badge label={String(archived.length)} fg={colors.textMuted} bg={colors.surfaceSunken} />
+                <Sym name={archivedOpen ? "chevron.up" : "chevron.down"} size={12} color={colors.textFaint} />
+              </View>
+            </Pressable>
+            {archivedOpen
+              ? archived.map((t, i) => (
+                <TaskRow
+                  key={t.id} t={t} members={members} last={i === archived.length - 1}
                   showGroup={activeList === "All"}
                   onToggle={() => void toggle(t)}
                   onLongPress={() => menuFor(t)}

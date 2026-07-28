@@ -68,7 +68,10 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
   const [start, setStart] = useState<Date>(nextHalfHour);
   const [hasEnd, setHasEnd] = useState(false);
   const [end, setEnd] = useState<Date>(() => { const d = nextHalfHour(); d.setHours(d.getHours() + 1); return d; });
-  const [remind, setRemind] = useState<number | null>(null);
+  /* Cluster N — "What if I want to be notified the day before AND one hour before? I can't
+   * select both of them. I need to be able to select both — all of them if need be."
+   * A set, not a single. "None" clears the set. */
+  const [remindSet, setRemindSet] = useState<Set<number>>(new Set());
   /* "The privacy option needs to extend to tasks and lists for NEW OR PRE-EXISTING tasks."
    * A privacy control that only exists at creation is a privacy control you can't correct —
    * and the thing people most want to change afterwards is exactly who can see something. */
@@ -89,7 +92,7 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
     if (sd && !Number.isNaN(+sd)) { setScheduled(true); setStart(sd); } else { setScheduled(false); setStart(nextHalfHour()); }
     const e = task.endAt ? new Date(task.endAt) : null;
     if (e && !Number.isNaN(+e)) { setHasEnd(true); setEnd(e); } else { setHasEnd(false); }
-    setRemind(task.remindMinutesBefore ?? null);
+    setRemindSet(new Set(task.remindOffsets ?? (task.remindMinutesBefore != null ? [task.remindMinutesBefore] : [])));
     setScope({ visibility: normalizeVisibility(task.visibility), nestId: task.nestId ?? null });
     void api.nests().then((r) => setNests(r.nests ?? [])).catch(() => setNests([]));
   }, [visible, task]);
@@ -112,7 +115,8 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
       // dueAt stays in step with the start so every existing list, sort and overdue badge
       // keeps working — this sheet adds a start/end, it doesn't replace the deadline model.
       dueAt: startAt,
-      remindMinutesBefore: remind,
+      remindOffsets: [...remindSet],
+      remindMinutesBefore: remindSet.size ? Math.min(...remindSet) : null,
       visibility: scope.visibility,
       nestId: scope.visibility === "nest" ? scope.nestId : null,
     });
@@ -282,17 +286,22 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
                 <Chip
                   key={String(r.minutes)}
                   label={r.label}
-                  icon={remind === r.minutes && r.minutes !== null ? "bell.fill" : undefined}
-                  selected={remind === r.minutes}
-                  onPress={canEdit ? () => setRemind(r.minutes) : undefined}
+                  icon={r.minutes !== null && remindSet.has(r.minutes) ? "bell.fill" : undefined}
+                  selected={r.minutes === null ? remindSet.size === 0 : remindSet.has(r.minutes)}
+                  onPress={canEdit ? () => setRemindSet((prev) => {
+                    if (r.minutes === null) return new Set();
+                    const next = new Set(prev);
+                    if (next.has(r.minutes)) next.delete(r.minutes); else next.add(r.minutes);
+                    return next;
+                  }) : undefined}
                 />
               ))}
             </ChipRow>
-            {remind !== null ? (
+            {remindSet.size > 0 ? (
               <T kind="caption" color={colors.textFaint}>
-                {assignee
-                  ? `${members.find((m) => m.actorId === assignee)?.displayName.split(" ")[0] ?? "They"} gets the notification on their phone.`
-                  : "You'll get the notification on your phone."}
+                {`${remindSet.size === 1 ? "One nudge" : `${remindSet.size} nudges`} — ${assignee
+                  ? `${members.find((m) => m.actorId === assignee)?.displayName.split(" ")[0] ?? "they"} gets them on their phone`
+                  : "you'll get them on your phone"}, loud enough to matter.`}
               </T>
             ) : null}
           </View>
