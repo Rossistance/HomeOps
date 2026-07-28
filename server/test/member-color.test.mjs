@@ -26,10 +26,14 @@ test("color round-trips on create, on PATCH (hex), on the roster read, and clear
   assert.equal(hex.status, 200);
   assert.equal(hex.data.member.color, "#ff8800");
 
-  // An unrecognized color is ignored (keeps the prior value), never stored.
+  /* CHANGED DELIBERATELY (BUG-02 family): "ignored, previous kept" was the false-success
+   * template — the client showed the colour chosen, the server dropped the field, the 200
+   * said it worked. An unknown colour is now refused OUT LOUD, and nothing changes. */
   const bad = await admin.req(`/api/members/${actorId}`, { method: "PATCH", body: JSON.stringify({ color: "chartreuse-ish" }) });
-  assert.equal(bad.status, 200);
-  assert.equal(bad.data.member.color, "#ff8800", "invalid color ignored, previous kept");
+  assert.equal(bad.status, 400);
+  assert.equal(bad.data.error, "bad_color");
+  const kept = (await admin.req("/api/members")).data.members.find((m) => m.actorId === actorId);
+  assert.equal(kept.color, "#ff8800", "refused means untouched");
 
   // Explicit null clears it.
   const cleared = await admin.req(`/api/members/${actorId}`, { method: "PATCH", body: JSON.stringify({ color: null }) });

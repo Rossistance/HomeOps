@@ -9,6 +9,7 @@ import { api, type MemberRec } from "@/lib/api";
 import { memberAccent } from "@/lib/member-colors";
 import { roleAtLeast } from "@/lib/roles";
 import { useSession } from "@/lib/session";
+import { ColorPicker } from "@/components/ui/color-picker";
 import { useTheme, useThemePref, tapHaptic } from "@/theme";
 import { HuddleMark } from "@/components/brand";
 import {
@@ -434,6 +435,7 @@ export default function SettingsScreen() {
       />
       <InviteSheet visible={inviteOpen} onClose={() => setInviteOpen(false)} householdName={householdName} onInvited={() => void load()} />
       <MemberSheet
+        allMembers={members}
         member={editingMember}
         canManage={canManage}
         visible={!!editingMember}
@@ -449,13 +451,14 @@ export default function SettingsScreen() {
 // The 6 server roles, highest authority first (must match server/auth.mjs).
 const ALL_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member", "Child View", "Guest/Helper"] as const;
 // Named accents the server stores in member.color (same set the web uses).
-const ACCENTS = ["ember", "sage", "sky", "lavender", "amber", "coral"] as const;
+// ACCENTS removed — the shared ColorPicker (lib/member-colors) is the single source.
 
 /** Edit a member. Owners/Adult Admins get the full editor (role, relationship,
  * child AI toggle); everyone else gets self-service name + color. The server
  * enforces the real rules — last-owner demotion comes back as 409 last_owner. */
-function MemberSheet({ member, canManage, visible, onClose, onSaved }: {
+function MemberSheet({ member, canManage, visible, onClose, onSaved, allMembers = [] }: {
   member: MemberRec | null;
+  allMembers?: MemberRec[];
   canManage: boolean;
   visible: boolean;
   onClose: () => void;
@@ -466,6 +469,8 @@ function MemberSheet({ member, canManage, visible, onClose, onSaved }: {
   const [relationship, setRelationship] = useState("");
   const [role, setRole] = useState<string>("Adult Member");
   const [color, setColor] = useState<string | null>(null);
+  // Everyone whose colour this member must not collide with — the roster minus themselves.
+  const othersFor = (m: MemberRec | null) => allMembers.filter((x) => x.actorId !== m?.actorId);
   const [aiEnabled, setAiEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -565,29 +570,17 @@ function MemberSheet({ member, canManage, visible, onClose, onSaved }: {
 
         <View style={{ gap: 8 }}>
           <T kind="eyebrow">Color</T>
-          <View style={{ flexDirection: "row", gap: spacing.sm }}>
-            {ACCENTS.map((a) => {
-              const c = memberAccent(colors, a) ?? colors.ember;
-              const on = color === a;
-              return (
-                <PressableScale
-                  key={a}
-                  onPress={() => { tapHaptic("select"); setColor(on ? null : a); }}
-                  haptic={null}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${a} accent${on ? ", selected" : ""}`}
-                  style={{
-                    width: 34, height: 34, borderRadius: 17,
-                    backgroundColor: c, alignItems: "center", justifyContent: "center",
-                    borderWidth: on ? 2.5 : 0, borderColor: colors.text,
-                  }}
-                >
-                  {on ? <Sym name="checkmark" size={13} color="#FFFFFF" /> : null}
-                </PressableScale>
-              );
-            })}
-          </View>
-          <T kind="detail">Their color on the calendar and around the app.</T>
+          {/* BUG-02 — "in the settings page you do have the ability to select a color that
+              someone else is already on… and that's not gonna work. The colors have to be
+              strict." This editor was the unguarded door: its own six-colour list, no taken
+              check, silently displacing whoever held the colour. Same picker as My Profile
+              now, same refusal, same spectrum. */}
+          <ColorPicker
+            value={color}
+            onChange={setColor}
+            others={othersFor(member)}
+          />
+          <T kind="detail">Their color on the calendar and around the app — unique per person.</T>
         </View>
 
         {showAiToggle ? (

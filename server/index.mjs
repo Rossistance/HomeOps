@@ -260,7 +260,15 @@ const andList = (xs) => {
 
 // Per-member accent color: one of the app accent names, or a hex string. Optional and
 // back-compat — an unrecognized value is ignored (never stored) rather than erroring.
-const MEMBER_COLORS = ["ink", "sage", "coral", "amber", "sky", "lavender"];
+/* Every accent the app offers, with its canonical (light-theme) hex — kept in step with
+ * apps/mobile/src/theme/colors-data.ts. The old six-name list silently DROPPED the newer
+ * hues: the picker showed teal chosen, normalize returned undefined, the patch skipped the
+ * field, and the picker's confirmation was a false success about a colour that never saved. */
+const MEMBER_COLOR_HEX = {
+  ink: "#5C554A", sage: "#3F7A4F", coral: "#C6482E", amber: "#B4791E", sky: "#2E6FA3", lavender: "#7C5CA8",
+  ember: "#CE5D1D", teal: "#1F7A72", indigo: "#3C4E9E", rose: "#B03A55", moss: "#5A7A2E", clay: "#9A5A2B", plum: "#7A3E7E",
+};
+const MEMBER_COLORS = Object.keys(MEMBER_COLOR_HEX);
 function normalizeMemberColor(v) {
   if (v == null) return undefined;
   const s = String(v).trim();
@@ -268,6 +276,34 @@ function normalizeMemberColor(v) {
   if (MEMBER_COLORS.includes(s)) return s;
   if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(s)) return s;
   return undefined;
+}
+/* "The colors have to be strict." One person, one colour, family-wide — enforced HERE, not
+ * only in the picker, because the Settings editor proved a second client can undo a rule
+ * that lives client-side. Distance mirrors lib/member-colors: rgb-manhattan, same threshold,
+ * so what the picker dims is exactly what the API refuses. */
+function memberColorHex(c) {
+  if (!c) return null;
+  if (MEMBER_COLOR_HEX[c]) return MEMBER_COLOR_HEX[c];
+  const m = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(c);
+  if (!m) return null;
+  let h = m[1];
+  if (h.length === 3) h = h.split("").map((x) => x + x).join("");
+  return `#${h}`;
+}
+const COLOR_TOO_CLOSE = 90;
+function colorHeldBy(candidate, householdId, exceptActorId) {
+  const mine = memberColorHex(candidate);
+  if (!mine) return null;
+  const a = parseInt(mine.slice(1), 16);
+  for (const m of listMembers({ householdId })) {
+    if (m.archived || m.actorId === exceptActorId || !m.color) continue;
+    const theirs = memberColorHex(m.color);
+    if (!theirs) continue;
+    const b = parseInt(theirs.slice(1), 16);
+    const d = Math.abs(((a >> 16) & 255) - ((b >> 16) & 255)) + Math.abs(((a >> 8) & 255) - ((b >> 8) & 255)) + Math.abs((a & 255) - (b & 255));
+    if (d < COLOR_TOO_CLOSE) return m;
+  }
+  return null;
 }
 // Per-calendar-subscription accent: each connected calendar (a Google account's
 // calendar, an ICS feed, a pasted import) gets the next unused accent so its
@@ -1617,7 +1653,18 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // Color: an explicit null/"" clears it; a valid accent name or hex sets it; anything else is ignored.
       if (body.color !== undefined) {
         if (body.color === null || body.color === "") patch.color = null;
-        else { const c = normalizeMemberColor(body.color); if (c) patch.color = c; }
+        else {
+          const c = normalizeMemberColor(body.color);
+          if (!c) return json(res, 400, { error: "bad_color", message: "Pick a named accent or a #hex colour." }, req);
+          const holder = colorHeldBy(c, g.session.householdId, m.actorId);
+          if (holder) {
+            return json(res, 409, {
+              error: "color_taken", holder: holder.displayName,
+              message: `${holder.displayName} already has that colour (or one too close to tell apart). Pick one further away.`,
+            }, req);
+          }
+          patch.color = c;
+        }
       }
       if (body.role != null) {
         if (!VALID_ROLES.includes(body.role)) return json(res, 400, { error: "bad_role", valid: VALID_ROLES }, req);

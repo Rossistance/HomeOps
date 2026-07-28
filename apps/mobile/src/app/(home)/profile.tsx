@@ -11,6 +11,7 @@ import * as ImagePicker from "expo-image-picker";
 import { api, type MemberRec } from "@/lib/api";
 import { fade, memberAccent, memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
+import { ColorPicker } from "@/components/ui/color-picker";
 import { useTheme, tapHaptic } from "@/theme";
 import {
   T, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, PressableScale, Button, Notice, Well,
@@ -83,7 +84,7 @@ export function MemberAvatar({ member, size = 40, ringWidth = 2 }: {
  *
  * The palette also grew, because six colours across a household of five leaves almost no room
  * to be told apart — and the whole point of a member colour is that it's THEIRS. */
-const ACCENTS = ["ink", "sage", "coral", "amber", "sky", "lavender", "teal", "indigo", "rose", "moss", "clay", "plum"] as const;
+// ACCENTS now lives in lib/member-colors — one list, one resolver, one collision rule.
 const EMOJIS = ["🦊", "🐻", "🦉", "🐙", "🌻", "🍀", "⭐️", "🌈", "🐝", "🦋", "🍕", "⚽️"] as const;
 const MAX_PHOTO_BYTES = 25 * 1024 * 1024;  // matches the server cap
 
@@ -207,44 +208,14 @@ export default function ProfileScreen() {
       <Rise index={2}>
         <SectionHeader title="Your color" />
         <Card>
-          <View style={{ flexDirection: "row", gap: spacing.md, flexWrap: "wrap" }}>
-            {ACCENTS.map((a) => {
-              const c = memberAccent(colors, a) ?? colors.ember;
-              const selected = color === a;
-              const takenBy = takenColors.get(a);
-              return (
-                <PressableScale
-                  key={a}
-                  haptic="select"
-                  onPress={() => {
-                    if (takenBy) {
-                      // Told, not silently ignored: a swatch that does nothing when tapped reads
-                      // as a broken swatch rather than as somebody else's colour.
-                      setNote({ text: `${takenBy} is already using that colour — pick another so the calendar stays readable.`, ok: false });
-                      return;
-                    }
-                    setNote(null);
-                    setColor(a);
-                  }}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected, disabled: !!takenBy }}
-                  accessibilityLabel={takenBy ? `Colour ${a}, already used by ${takenBy}` : `Colour ${a}`}
-                  style={{
-                    width: 40, height: 40, borderRadius: 20,
-                    alignItems: "center", justifyContent: "center",
-                    borderWidth: selected ? 3 : 0, borderColor: colors.text,
-                  }}
-                >
-                  <View style={{ width: selected ? 28 : 34, height: selected ? 28 : 34, borderRadius: 17, backgroundColor: c, opacity: takenBy ? 0.28 : 1 }} />
-                  {takenBy ? (
-                    <View style={{ position: "absolute" }}>
-                      <Sym name="person" size={15} color={colors.text} />
-                    </View>
-                  ) : null}
-                </PressableScale>
-              );
-            })}
-          </View>
+          {/* BUG-01/BUG-02 — the ONE picker (see components/ui/color-picker): every named
+              accent now resolves (no more six oranges), the spectrum makes colours that
+              aren't on the list, and the same closeness rule guards every screen. */}
+          <ColorPicker
+            value={color}
+            onChange={(c) => { setNote(null); setColor(c); }}
+            others={allMembers.filter((m) => m.actorId !== session?.actorId)}
+          />
         </Card>
       </Rise>
 

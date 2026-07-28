@@ -3,7 +3,7 @@
 // hashed from the display name — the SAME fallback the web app uses, so a member
 // is the same color on iOS and web even before anyone picks one.
 import type { MemberRec } from "@/lib/api";
-import type { HearthColors } from "@/theme";
+import type { HearthColors } from "@/theme/colors-data";
 
 export function memberAccent(colors: HearthColors, name?: string | null): string | null {
   if (!name) return null;
@@ -16,8 +16,59 @@ export function memberAccent(colors: HearthColors, name?: string | null): string
     case "lavender": return colors.lavender;
     case "ember": return colors.ember;
     case "ink": return colors.textSecondary;
+    /* BUG-01 — "the color options it gives me are all similar orange colors."
+     *
+     * These six were added to the theme and to the profile picker during the neumorphic
+     * work — and never taught to this resolver. Each fell through to `default: null`, and
+     * null renders as the ember fallback, so twelve swatches produced six oranges. The
+     * regression test in member-colors.test.mjs walks the whole ACCENTS list against this
+     * switch, so a thirteenth hue can never repeat the trick. */
+    case "teal": return colors.teal;
+    case "indigo": return colors.indigo;
+    case "rose": return colors.rose;
+    case "moss": return colors.moss;
+    case "clay": return colors.clay;
+    case "plum": return colors.plum;
     default: return null;
   }
+}
+
+/* THE list. Three screens each carried their own (12, 6, and a different 6) — which is how
+ * the Settings editor could hand out colours the profile picker had reserved. One source. */
+export const ACCENTS = ["ink", "sage", "coral", "amber", "sky", "lavender", "teal", "indigo", "rose", "moss", "clay", "plum"] as const;
+
+/** Perceptual-enough distance between two resolved colours (0..~765, rgb manhattan).
+ *  "If it's taken — or within two deviations — block it." The threshold below is tuned so
+ *  the pairs he named (GPop's amber vs Beannie's coral) collide, and genuinely different
+ *  hues don't. */
+export function colorDistance(a: string, b: string): number {
+  const rgb = (c: string): [number, number, number] | null => {
+    const m = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(c);
+    if (!m) return null;
+    let h = m[1];
+    if (h.length === 3) h = h.split("").map((x) => x + x).join("");
+    const n = parseInt(h, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const x = rgb(a), y = rgb(b);
+  if (!x || !y) return a === b ? 0 : Infinity; // non-hex: only exact match collides
+  return Math.abs(x[0] - y[0]) + Math.abs(x[1] - y[1]) + Math.abs(x[2] - y[2]);
+}
+export const TOO_CLOSE = 90;
+
+/** Who holds a colour that would clash with `candidate` — or null if it's free.
+ *
+ * EXPLICIT choices only. A member who never picked renders from a hash of their id, and
+ * reserving hashed colours would lock most of the palette on day one for people who never
+ * chose anything — the hash moves out of the way the moment anyone claims its colour. */
+export function heldBy(colors: HearthColors, candidate: string, others: MemberRec[]): MemberRec | null {
+  const mine = memberAccent(colors, candidate) ?? candidate;
+  for (const m of others) {
+    if (!m.color) continue;
+    const theirs = memberAccent(colors, m.color) ?? m.color;
+    if (colorDistance(mine, theirs) < TOO_CLOSE) return m;
+  }
+  return null;
 }
 
 /** Apply an alpha to a #rgb/#rrggbb color (theme accents are hex). Non-hex

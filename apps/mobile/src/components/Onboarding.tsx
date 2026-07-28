@@ -10,6 +10,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme, tapHaptic } from "@/theme";
 import { useOnboarding } from "@/lib/prefs";
 import { useSession } from "@/lib/session";
+import { ColorPicker } from "@/components/ui/color-picker";
 import { api, type AgentRec, type MemberRec } from "@/lib/api";
 import { HuddleMark, Wordmark, SPLASH_BG } from "@/components/brand";
 import { memberAccent } from "@/lib/member-colors";
@@ -26,7 +27,7 @@ const ADMIN_ROLES = new Set(["Owner", "Adult Admin"]);
  * emoji, and the colour every other screen then identifies you by), and a first pass at what
  * the household wants the assistant to know. Both write through the same APIs the Settings
  * screens use, so nothing here is a special onboarding-only shortcut that drifts later. */
-const ACCENTS = ["ink", "sage", "coral", "amber", "sky", "lavender"] as const;
+// ACCENTS lives in lib/member-colors now — one list for the whole app.
 const EMOJIS = ["🦊", "🐻", "🦉", "🐙", "🌻", "🍀", "⭐️", "🌈", "🐝", "🦋", "🍕", "⚽️"] as const;
 const MAX_PHOTO_BYTES = 25 * 1024 * 1024;  // matches the server cap
 
@@ -296,28 +297,9 @@ export function Onboarding() {
 
             <View style={{ gap: 6 }}>
               <T kind="eyebrow">Your colour</T>
-              <View style={{ flexDirection: "row", gap: spacing.sm }}>
-                {ACCENTS.map((a) => {
-                  const tint = memberAccent(colors, a) ?? colors.ember;
-                  const selected = color === a;
-                  return (
-                    <PressableScale
-                      key={a} haptic="select"
-                      onPress={() => setColor(selected ? null : a)}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected }}
-                      accessibilityLabel={`Colour ${a}`}
-                      style={{
-                        width: 40, height: 40, borderRadius: 20, backgroundColor: tint,
-                        alignItems: "center", justifyContent: "center",
-                        borderWidth: selected ? 3 : 0, borderColor: colors.bg,
-                      }}
-                    >
-                      {selected ? <Sym name="checkmark" size={15} color={colors.surface} /> : null}
-                    </PressableScale>
-                  );
-                })}
-              </View>
+              {/* Same picker as everywhere else; compact because the household is empty —
+                  there is nobody to collide with on day one. */}
+              <ColorPicker value={color} onChange={setColor} others={[]} compact />
             </View>
           </Animated.View>
         )}
