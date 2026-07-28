@@ -367,7 +367,7 @@ export default function AskScreen() {
 
   // Deep link support: the Inbox screen links with /(ask)?c=<conversation id>;
   // the Approval sheet links with ?prefill=<draft message> (filled, not sent).
-  const params = useLocalSearchParams<{ c?: string; prefill?: string; draft?: string; dictate?: string }>();
+  const params = useLocalSearchParams<{ c?: string; prefill?: string; draft?: string; dictate?: string; q?: string }>();
   const handledC = useRef<string | null>(null);
   useEffect(() => {
     const id = typeof params.c === "string" && params.c ? params.c : null;
@@ -375,6 +375,18 @@ export default function AskScreen() {
     handledC.current = id;
     void openConversation(id);
   }, [params.c, session, openConversation]);
+  /* Cluster R — ?q= is a question already COMMITTED on the Today card ("allow me to type
+   * and dictate and send from here"). Unlike prefill (filled, not sent), q fires on
+   * arrival: the person already pressed send once, and asking them to press it again is
+   * the facade he was describing. */
+  const handledQ = useRef<string | null>(null);
+  useEffect(() => {
+    const q = typeof params.q === "string" && params.q.trim() ? params.q : null;
+    if (!q || !session || handledQ.current === q) return;
+    handledQ.current = q;
+    // send() takes the message directly — no composer round-trip, no second tap.
+    setTimeout(() => { void send(q); }, 80);
+  }, [params.q, session]); // eslint-disable-line react-hooks/exhaustive-deps
   const handledPrefill = useRef<string | null>(null);
   useEffect(() => {
     const p = typeof params.prefill === "string" && params.prefill ? params.prefill : null;

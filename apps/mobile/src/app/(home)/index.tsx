@@ -5,7 +5,7 @@
 // card, quick actions, then the day at a glance: approvals needing you (and
 // help requests to/from you), coming up, bills due. Server-truth via api.*.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Platform, ScrollView, StyleSheet, View } from "react-native";
+import { Alert, Platform, ScrollView, StyleSheet, TextInput, View } from "react-native";
 import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -248,6 +248,17 @@ function AdminToday() {
     () => members.find((m) => m.isCurrentUser) ?? members.find((m) => m.actorId === session?.actorId) ?? null,
     [members, session?.actorId],
   );
+
+  /* Cluster R — the hero's own draft. Send hands the text to the Ask screen as a param,
+   * which fires it on arrival; an empty send just opens the chat, which is still one tap
+   * fewer than the old facade. */
+  const [heroDraft, setHeroDraft] = useState("");
+  const sendHeroAsk = useCallback(() => {
+    const q = heroDraft.trim();
+    setHeroDraft("");
+    if (q) router.push({ pathname: "/(ask)", params: { q } });
+    else router.push("/(ask)");
+  }, [heroDraft]);
 
   const pending = useMemo(() => approvals.filter((a) => a.status === "pending"), [approvals]);
   /* Approvals + unread updates in one number — "both approvals and updates". Loaded with the
@@ -605,14 +616,25 @@ function AdminToday() {
                 {heroH > 0 ? <AskShimmer height={heroH} /> : null}
                 <T kind="eyebrow" color="rgba(245,241,233,0.55)">Ask Famili</T>
                 <T kind="h3" color={colors.heroText} style={{ fontSize: 20, lineHeight: 26 }}>{prompt}</T>
+                {/* Cluster R — "this needs to be an actual functional interface, a mini
+                    version of the full ask page. I need to be able to click here and it
+                    allow me to type and dictate and send from here. Right now this is just
+                    a facade redirect: I click it, it redirects me, and then I have to click
+                    it AGAIN." A real TextInput now. Typing happens here; SEND is the moment
+                    the chat takes over, carrying the question with it so it fires on
+                    arrival — one tap total, not three. */}
                 <View style={st.heroInput}>
-                  <T kind="sub" color="rgba(245,241,233,0.5)" style={{ flex: 1 }} numberOfLines={1}>
-                    Plan a birthday, draft an email…
-                  </T>
-                  {/* E1 — "I've added under the Ask portion a microphone. We need to add
-                      dictation to ALL chat input interfaces, here and in the standalone page."
-                      Tapping it opens the chat with the mic already listening, rather than
-                      running a second speech pipeline on a card that isn't a text field. */}
+                  <TextInput
+                    value={heroDraft}
+                    onChangeText={setHeroDraft}
+                    placeholder="Plan a birthday, draft an email…"
+                    placeholderTextColor="rgba(245,241,233,0.5)"
+                    style={{ flex: 1, color: colors.heroText, fontSize: 14, paddingVertical: 2 }}
+                    returnKeyType="send"
+                    onSubmitEditing={sendHeroAsk}
+                    accessibilityLabel="Ask Famili anything"
+                  />
+                  {/* E1 — dictation on every chat input: the mic opens the chat listening. */}
                   <PressableScale
                     onPress={() => router.push({ pathname: "/(ask)", params: { dictate: "1" } })}
                     haptic="light"
@@ -623,9 +645,16 @@ function AdminToday() {
                   >
                     <Sym name="mic" size={15} color={colors.heroText} />
                   </PressableScale>
-                  <View style={[st.sendCircle, { backgroundColor: colors.ember }]}>
+                  <PressableScale
+                    onPress={sendHeroAsk}
+                    haptic="select"
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Send to Famili"
+                    style={[st.sendCircle, { backgroundColor: colors.ember, opacity: heroDraft.trim() ? 1 : 0.55 }]}
+                  >
                     <Sym name="paperplane.fill" size={15} color={colors.onEmber} />
-                  </View>
+                  </PressableScale>
                 </View>
               </LinearGradient>
             </PressableScale>

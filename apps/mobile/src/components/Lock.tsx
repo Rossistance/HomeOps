@@ -229,9 +229,14 @@ export function Lock() {
                     so Sign in arrives with the field instead of under the keyboard. */}
                 <Card
                   style={{ marginTop: spacing.sm }}
-                  onLayout={(e: LayoutChangeEvent) => {
-                    const y = e.nativeEvent.layout.y;
-                    requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: Math.max(0, y - 24), animated: true }));
+                  onLayout={() => {
+                    /* Cluster J (regression) — "I have to scroll up just to get to the sign
+                       in button." The old scroll used this card's layout.y, which is
+                       relative to its PARENT, not to the scroll content — so with a tall
+                       roster the number was small and the scroll was a polite no-op. The
+                       PIN card is the last thing on this screen; the honest target is the
+                       end. Delayed a beat so the keyboard's inset has already applied. */
+                    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 120);
                   }}
                 >
                   <T kind="eyebrow">Household PIN · {selected.displayName}</T>
