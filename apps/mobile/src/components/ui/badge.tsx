@@ -17,11 +17,12 @@ export function Badge({ label, fg, bg, icon }: { label: string; fg: string; bg: 
   );
 }
 
-export function Chip({ label, selected, onPress, icon }: { label: string; selected?: boolean; onPress?: () => void; icon?: string }) {
+export function Chip({ label, selected, onPress, onLongPress, icon }: { label: string; selected?: boolean; onPress?: () => void; onLongPress?: () => void; icon?: string }) {
   const { colors, dark } = useTheme();
   return (
     <PressableScale
       onPress={() => { tapHaptic("select"); onPress?.(); }}
+      onLongPress={onLongPress}
       haptic={null}
       accessibilityRole="button"
       accessibilityState={{ selected: !!selected }}

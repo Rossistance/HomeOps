@@ -22,7 +22,7 @@ import {
   listEvolutions, getEvolution, patchEvolution, putEvolution,
   getMember, listMembers, putMember, canApprove, isAdultRole,
   listEvents, getEvent, putEvent, patchEvent, deleteEventRec,
-  listTasks, getTask, putTask, patchTask, deleteTaskRec,
+  listTasks, getTask, putTask, patchTask, deleteTaskRec, listTaskLists, addTaskList, markTaskListDeleted,
   listSubscriptions, getSubscription, putSubscription, patchSubscription, deleteSubscriptionRec,
   listMeals, getMeal, putMeal, patchMeal, deleteMealRec,
   listKnowledge, getKnowledge, addKnowledge, patchKnowledge, removeKnowledge, normalizeVisibility,
@@ -2444,6 +2444,57 @@ function mayWriteAgent(session, agent, nextVisibility) {
       deleteEventRec(ev.id);
       audit({ type: "event.delete", eventId: ev.id, ok: true, ...(googleOutcome ? { google: googleOutcome } : {}) }, req, g.session);
       return json(res, 200, { ok: true, ...(googleOutcome ? { google: googleOutcome } : {}) }, req);
+    }
+    /* ---- Task lists as REAL records (Cluster L) ----
+     *
+     * "It appears that after you delete the last task on a given list, the actual list
+     *  disappears. That should not be the case — that list name should persist until the
+     *  user decides they would like to click and delete it."
+     *
+     * Lists used to be a mirage: derived from the tasks' listName strings, so an empty list
+     * was indistinguishable from no list, and deleting one was impossible because there was
+     * nothing to delete. This registry makes the list itself the durable thing. Tasks keep
+     * their listName field — the registry ADDS existence, it doesn't re-key anything, so
+     * every pre-existing task still lands in its list. */
+    if (path === "/api/task-lists" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const all = listTaskLists(g.session.householdId).filter((l) => canSeeEntity(l, g.session));
+      return json(res, 200, { lists: all }, req);
+    }
+    if (path === "/api/task-lists" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const name = String(body.name ?? "").trim();
+      if (!name) return json(res, 400, { error: "name_required" }, req);
+      const vis = resolveVisibility(body.visibility, body.nestId, g.session);
+      if (!vis) return json(res, 403, { error: "not_in_nest", message: "You can only put a list in a nest you're part of." }, req);
+      // One list per name per room — a second "Groceries" in the same room is a typo, not a list.
+      const dup = listTaskLists(g.session.householdId).some((l) =>
+        l.name.toLowerCase() === name.toLowerCase() && l.visibility === vis.visibility && (l.nestId ?? null) === (vis.nestId ?? null));
+      if (dup) return json(res, 409, { error: "list_exists" }, req);
+      const rec = addTaskList({
+        id: "tl_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
+        name, ...vis, createdBy: g.session.actorId, createdAt: new Date().toISOString(),
+      });
+      audit({ type: "tasklist.create", listId: rec.id, name, ok: true }, req, g.session);
+      return json(res, 200, { list: rec }, req);
+    }
+    const taskListOne = path.match(/^\/api\/task-lists\/([^/]+)$/);
+    if (taskListOne && method === "DELETE") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const l = listTaskLists(g.session.householdId).find((x) => x.id === taskListOne[1]);
+      // A list you can't see is a list that doesn't exist for you — 404, not 403, or a
+      // probed id would confirm there's a private list behind it.
+      if (!l || !canSeeEntity(l, g.session)) return json(res, 404, { error: "not_found" }, req);
+      if (!isAdultRole(g.session.role) && l.createdBy !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
+      markTaskListDeleted(l.id);
+      // The list's tasks go WITH it — a deleted list whose items linger under "All" would be
+      // the vanish-into-another-room bug inverted. Said in the audit, counted in the reply.
+      const doomed = listTasks((t) => t.householdId === g.session.householdId && t.type === "list" && t.listName === l.name && (t.visibility ?? "household") === l.visibility && (t.nestId ?? null) === (l.nestId ?? null));
+      for (const t of doomed) deleteTaskRec(t.id);
+      audit({ type: "tasklist.delete", listId: l.id, name: l.name, tasksRemoved: doomed.length, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, tasksRemoved: doomed.length }, req);
     }
     if (path === "/api/tasks" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);

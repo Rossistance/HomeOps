@@ -167,6 +167,9 @@ export default function TasksScreen() {
   const [startAt, setStartAt] = useState<Date>(() => { const d = new Date(); d.setMinutes(d.getMinutes() < 30 ? 30 : 60, 0, 0); return d; });
   const [dueAt, setDueAt] = useState<Date>(() => { const d = new Date(); d.setHours(d.getHours() + 1, 0, 0, 0); return d; });
   const [nests, setNests] = useState<NestRec[]>([]);
+  /* The durable list registry (Cluster L): a list exists because it was made, not because a
+   * task happens to carry its name — so empty lists persist and full ones can be deleted. */
+  const [registry, setRegistry] = useState<{ id: string; name: string; visibility: string; nestId?: string | null }[]>([]);
   const [nestId, setNestId] = useState<string | null>(null);
   /* Cluster K — the third room. "It's family, your nest, and then just me… any tasks or
    * lists in that section would need to be visible only to me." Family used to mean
@@ -191,15 +194,17 @@ export default function TasksScreen() {
   const composerY = useRef(0);
 
   const load = useCallback(async () => {
-    const [tks, mems, hrs, ns] = await Promise.all([
+    const [tks, mems, hrs, ns, tl] = await Promise.all([
       api.tasks(), api.members(), api.helpRequests(),
       api.nests().catch(() => ({ nests: [] as NestRec[], invitations: [] as NestRec[] })),
+      api.taskLists().catch(() => ({ lists: [] as Awaited<ReturnType<typeof api.taskLists>>["lists"] })),
     ]);
     if (mems.length === 0 && !(await api.health())) {
       setError("The FamiliOS server didn't answer.");
     } else {
       setError(null);
       setNests(ns.nests);
+      setRegistry(tl.lists);
       setTasks(tks);
       setMembers(mems);
       setHelpRequests(hrs);
@@ -253,11 +258,16 @@ export default function TasksScreen() {
   const done = useMemo(() => tasks.filter((t) => t.status === "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
   const listNames = useMemo(() => {
     const names = new Set(tasks.filter(inSpace).map(groupOf));
-    // A just-created list has nothing in it yet; without this it would vanish the moment you
-    // made it, which is a strange reward for creating something.
+    /* Registry lists exist even when empty — "even if there's no task on a created list,
+     * that list name should persist until the user decides to delete it." Only the ones
+     * that live in the room being looked at. */
+    for (const l of registry) {
+      const here = justMe ? l.visibility === "private" : nestId ? l.nestId === nestId : l.visibility === "household";
+      if (here) names.add(l.name);
+    }
     if (pendingList) names.add(pendingList);
     return [...names].sort((a, b) => a.localeCompare(b));
-  }, [tasks, inSpace, pendingList]);
+  }, [tasks, inSpace, pendingList, registry, justMe, nestId]);
 
   const byDue = (a: TaskRec, b: TaskRec) => (a.dueAt ?? "9999").localeCompare(b.dueAt ?? "9999") || a.title.localeCompare(b.title);
   const groups = useMemo(() => {
@@ -322,15 +332,24 @@ export default function TasksScreen() {
           onPress: (name?: string) => {
             const n = titleCase((name ?? "").trim());
             if (!n) return;
-            tapHaptic("success");
+            // Durable from birth: the registry is what lets it exist empty and be deleted
+            // later. pendingList still gives the instant selection while the POST lands.
             setPendingList(n);
             setActiveList(n);
+            void api.createTaskList({
+              name: n,
+              visibility: nestId ? "nest" : justMe ? "private" : "household",
+              nestId,
+            }).then((r) => {
+              if (r.list) { tapHaptic("success"); void load(); }
+              else if (r.error !== "list_exists") setNotice({ ok: false, text: r.message ?? "Couldn't create the list." });
+            });
           },
         },
       ],
       "plain-text",
     );
-  }, []);
+  }, [nestId, justMe, load]);
 
   const add = async () => {
     const name = title.trim();
@@ -465,7 +484,41 @@ export default function TasksScreen() {
           <ChipRow>
             <Chip label="All" icon="tray.full" selected={activeList === "All"} onPress={() => setActiveList("All")} />
             {listNames.map((n) => (
-              <Chip key={n} label={n} selected={activeList === n} onPress={() => setActiveList(n)} />
+              <Chip
+                key={n} label={n} selected={activeList === n} onPress={() => setActiveList(n)}
+                /* "There's no immediate way to click and hold and delete this list… this
+                   list should be able to be deleted if need be." Hold names the cost —
+                   the list AND its items — before anything happens. */
+                onLongPress={() => {
+                  const inRoom = registry.find((l) => l.name === n &&
+                    (justMe ? l.visibility === "private" : nestId ? l.nestId === nestId : l.visibility === "household"));
+                  const count = tasks.filter((t) => inSpace(t) && groupOf(t) === n).length;
+                  if (!inRoom && count === 0 && pendingList !== n) return;
+                  Alert.alert(
+                    `Delete "${n}"?`,
+                    count > 0 ? `The list and its ${count} item${count === 1 ? "" : "s"} are removed for everyone who can see it.` : "The empty list is removed.",
+                    [
+                      { text: "Cancel", style: "cancel" },
+                      {
+                        text: "Delete list", style: "destructive",
+                        onPress: () => void (async () => {
+                          if (pendingList === n) setPendingList(null);
+                          if (activeList === n) setActiveList("All");
+                          if (inRoom) {
+                            const r = await api.deleteTaskList(inRoom.id);
+                            if (r.error) { setNotice({ ok: false, text: "Couldn't delete the list." }); return; }
+                          } else {
+                            // Legacy list (pre-registry): its existence IS its tasks; remove them.
+                            for (const t of tasks.filter((x) => inSpace(x) && groupOf(x) === n)) await api.deleteTask(t.id);
+                          }
+                          tapHaptic("success");
+                          void load();
+                        })(),
+                      },
+                    ],
+                  );
+                }}
+              />
             ))}
           </ChipRow>
         </Rise>

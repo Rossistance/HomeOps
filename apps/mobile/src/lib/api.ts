@@ -997,6 +997,20 @@ export const api = {
   },
 
   /* ---- Tasks (create/edit come to mobile with the redesign) ---- */
+  /* Cluster L — lists are records now, so an empty list can exist and a full one can be
+   * deleted. The registry ADDS existence; tasks keep their listName strings. */
+  async taskLists(): Promise<{ lists: { id: string; name: string; visibility: string; nestId?: string | null; createdBy: string }[] }> {
+    const r = await req<{ lists: { id: string; name: string; visibility: string; nestId?: string | null; createdBy: string }[] }>("/task-lists");
+    return r.data ?? { lists: [] };
+  },
+  async createTaskList(body: { name: string; visibility?: string; nestId?: string | null }): Promise<{ list?: { id: string; name: string }; error?: string; message?: string }> {
+    const r = await req<{ list?: { id: string; name: string }; error?: string; message?: string }>("/task-lists", { method: "POST", body: JSON.stringify(body) });
+    return r.data ?? { error: "network" };
+  },
+  async deleteTaskList(id: string): Promise<{ ok?: boolean; tasksRemoved?: number; error?: string }> {
+    const r = await req<{ ok?: boolean; tasksRemoved?: number; error?: string }>(`/task-lists/${encodeURIComponent(id)}`, { method: "DELETE" });
+    return r.data ?? { error: "network" };
+  },
   async createTask(body: { title: string; type?: string; dueAt?: string | null; startAt?: string | null; endAt?: string | null; assignedMemberId?: string | null; priority?: string; listName?: string; visibility?: string; nestId?: string }): Promise<{ task?: TaskRec; error?: string }> {
     const r = await req<{ task?: TaskRec; error?: string }>("/tasks", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };

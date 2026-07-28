@@ -900,6 +900,26 @@ export function deleteMemoryEntry(id) {
   return true;
 }
 
+/* ---- Task lists as durable records (Cluster L) ----
+ * The list itself is the thing that persists — not a mirage derived from whichever tasks
+ * happen to carry its name. Soft-deleted so an id in an audit line stays resolvable. */
+export function listTaskLists(householdId) {
+  return Object.values(readJSON("task_lists.json", {})).filter((l) => l.householdId === householdId && !l.deleted);
+}
+export function addTaskList(rec) {
+  const all = readJSON("task_lists.json", {});
+  all[rec.id] = rec;
+  writeJSON("task_lists.json", all);
+  return rec;
+}
+export function markTaskListDeleted(id) {
+  const all = readJSON("task_lists.json", {});
+  if (!all[id]) return null;
+  all[id] = { ...all[id], deleted: true, deletedAt: new Date().toISOString() };
+  writeJSON("task_lists.json", all);
+  return all[id];
+}
+
 /* ---- Per-viewer event margins ("Just for me") ----
  *
  * "These are just notes for me about G-pop's event and not for anybody else."
