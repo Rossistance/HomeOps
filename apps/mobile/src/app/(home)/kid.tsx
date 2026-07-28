@@ -12,7 +12,7 @@ import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec }
 import { coversDay, eventTimeLabel } from "@/lib/event-days";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic, motion } from "@/theme";
-import { T, Card, Coach, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
+import { Button, T, Card, Coach, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
 import { MemberAvatar } from "./profile";
 
 const CHORE_ICONS: [RegExp, string][] = [
@@ -231,11 +231,30 @@ export function KidHome({ memberId, preview = false }: { memberId: string; previ
             </Rise>
           )}
 
-          {/* A child can ask for a hand or offer to help — including other kids. */}
+          {/* Cluster Z — two real doors instead of a text link.
+              "The child should have full calendar access, presented as a button down here,
+               but essentially a read-only view of that calendar. And the ask for help needs
+               to be its own button — big and bold — and she should only be able to ASK, from
+               a full adult member, an adult admin, or an owner." Offering is the adults'
+               side; the help screen greys it for a child. */}
           {!preview && (
-            <PressableScale onPress={() => router.push("/help")} haptic="select" style={{ alignItems: "center", marginTop: spacing.sm }} accessibilityRole="button" accessibilityLabel="Ask or offer help">
-              <T kind="subMedium" color={colors.ember}>Ask or offer help</T>
-            </PressableScale>
+            <Rise index={5}>
+              <View style={{ gap: spacing.sm, marginTop: spacing.sm }}>
+                <Button
+                  full
+                  icon="hand.raised.fill"
+                  title="Ask for help"
+                  onPress={() => router.push("/help")}
+                />
+                <Button
+                  full
+                  variant="neutral"
+                  icon="calendar"
+                  title="Family calendar"
+                  onPress={() => router.push("/calendar")}
+                />
+              </View>
+            </Rise>
           )}
         </>
       )}

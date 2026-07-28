@@ -61,8 +61,17 @@ export default function HelpScreen() {
     return () => { cancelled = true; };
   }, []);
 
-  // Everyone but me — children included on purpose (they can be asked or offered).
-  const others = useMemo(() => members.filter((m) => m.actorId !== session?.actorId), [members, session?.actorId]);
+  /* Cluster Z — a child asks UP, and only up: "she should only be able to ask for help
+   * from a full adult member, an adult admin, or an owner — she would not be able to offer
+   * help to anybody." Adults keep the full roster, children included, because a child can
+   * be asked or offered BY an adult; the restriction is on who a child can reach, not on
+   * who can reach a child. */
+  const iAmChild = session?.role === "Child View";
+  const others = useMemo(() => members.filter((m) => m.actorId !== session?.actorId)
+    .filter((m) => !iAmChild || ["Owner", "Adult Admin", "Adult Member"].includes(m.role)),
+  [members, session?.actorId, iAmChild]);
+  // A child can't offer — collapse to ask no matter what the route param said.
+  useEffect(() => { if (iAmChild && mode === "offer") setMode("ask"); }, [iAmChild, mode]);
   const toMember = useMemo(() => others.find((m) => m.actorId === toActorId) ?? null, [others, toActorId]);
 
   // Whose items fill the "link a plan/task" list:
@@ -195,18 +204,22 @@ export default function HelpScreen() {
         <View style={{ flexDirection: "row", backgroundColor: colors.surfaceSunken, borderRadius: 14, borderCurve: "continuous", padding: 3, gap: 3 }}>
           {([["ask", "Ask for help"], ["offer", "Offer help"]] as const).map(([key, label]) => {
             const active = mode === key;
+            // Cluster Z — greyed for a child, not hidden: "these would be greyed out."
+            // A vanished option looks like a bug; a dimmed one reads as a rule.
+            const locked = iAmChild && key === "offer";
             return (
               <PressableScale
                 key={key}
-                haptic="select"
-                onPress={() => switchMode(key)}
+                haptic={locked ? null : "select"}
+                onPress={locked ? undefined : () => switchMode(key)}
+                accessibilityState={{ disabled: locked, selected: active }}
                 accessibilityRole="button"
-                accessibilityState={{ selected: active }}
-                accessibilityLabel={label}
+                accessibilityLabel={locked ? `${label} — grown-ups only` : label}
                 style={{
                   flex: 1, alignItems: "center", paddingVertical: 10, borderRadius: 11, borderCurve: "continuous",
                   backgroundColor: active ? colors.surface : "transparent",
                   borderWidth: 1, borderColor: active ? colors.border : "transparent",
+                  opacity: locked ? 0.4 : 1,
                 }}
               >
                 <T kind="subMedium" color={active ? colors.text : colors.textMuted}>{label}</T>
