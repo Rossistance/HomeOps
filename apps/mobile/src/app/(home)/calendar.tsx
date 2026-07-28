@@ -231,13 +231,14 @@ export default function CalendarScreen() {
       .map((sub) => sub.ownerName ?? (/\(([^)]+)\)/.exec(sub.name)?.[1] ?? sub.name));
     return names.length ? [...new Set(names)].join(" · ") : null;
   }, [nameOf, subs]);
-  /** The single accent a whole event card keys off: first participant's color →
-   * the event owner's member color (linked Google events carry the member who
-   * connected that calendar) → the source calendar's color as the last resort. */
+  /** The single accent a whole event card keys off: the OWNER's colour first — Cluster G:
+   * this used to lead with participantIds[0], so the moment someone joined an event it
+   * repainted as theirs on every profile ("it's no longer Melissa's… when in reality it is
+   * a shared event"). Whose event it is doesn't change when someone joins. */
   const accentOf = useCallback(
     (e: EventRec) =>
-      e.participantIds.map((id) => colorOf(id)).find(Boolean)
-      ?? colorOf(e.ownerId ?? null)
+      colorOf(e.ownerId ?? null)
+      ?? e.participantIds.map((id) => colorOf(id)).find(Boolean)
       ?? subColorsOf(e)[0]
       ?? null,
     [colorOf, subColorsOf],
@@ -749,10 +750,11 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
   // the owner's member color (linked events), or the source calendar's color.
   // Shared events (several source calendars, or several members) blend 2+ colors
   // in both the stripe and the wash. One dot per calendar/member either way.
-  const memberColors = [...new Set(e.participantIds.map((id) => colorOf(id)).filter(Boolean))] as string[];
   const ownerColor = colorOf(e.ownerId ?? null);
+  /* Owner leads, participants follow — two people on it is what "shared, two colours" means. */
+  const memberColors = [...new Set([ownerColor, ...e.participantIds.map((id) => colorOf(id))].filter(Boolean))] as string[];
   const distinctSubColors = [...new Set(subColors)];
-  const stripe = memberColors[0] ?? ownerColor ?? subColors[0] ?? null;
+  const stripe = ownerColor ?? memberColors[0] ?? subColors[0] ?? null;
   // ≥2 sources (owning subscription + alsoSubscriptionIds) or ≥2 member colors → blend.
   const multiSource = ((e.provenance?.alsoSubscriptionIds as string[] | undefined)?.length ?? 0) > 0;
   const blendColors: string[] = memberColors.length >= 2
@@ -761,7 +763,7 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
       ? distinctSubColors.slice(0, 3)
       : [];
   const blended = blendColors.length >= 2;
-  const dots = e.participantIds.map((id) => colorOf(id) ?? colors.textFaint);
+  const dots = [...new Set([e.ownerId, ...e.participantIds])].filter(Boolean).map((id) => colorOf(id as string) ?? colors.textFaint);
   const [resolving, setResolving] = useState<"google" | "local" | null>(null);
 
   // Both sides changed since the last sync — the user picks the version to keep.

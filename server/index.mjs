@@ -60,7 +60,8 @@ import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
 import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, sweepTaskReminders } from "./reminders.mjs";
-import { getAgent } from "./store.mjs";
+import { getAgent, getViewerNote, putViewerNote } from "./store.mjs";
+import { captureMemoryFromExchange } from "./memory-capture.mjs";
 import {
   createSkill, replaceSkill, partialUpdateSkill, deleteSkill, duplicateSkill,
   promoteSkill, rollbackSkill, inferFunctions, testSkill, listSkillVersions, skillReadiness,
@@ -1959,15 +1960,22 @@ function mayWriteAgent(session, agent, nextVisibility) {
       };
       const withEditable = visible.map((e) => {
         const staleSource = staleSourceOf(e);
+        /* Cluster D — "This is his item and I should not be able to edit any of the
+         * information." Editing an event now belongs to the person whose event it IS, not
+         * to a role. The household Owner was the one demonstrating the bug — logged in as
+         * Owner, editing GPop's schedule — so isAdultRole is exactly the wrong test here. */
+        const mine = e.ownerId === g.session.actorId || e.createdBy === g.session.actorId;
         return {
           ...e,
-          editable: e.layer === "canonical"
-            ? (isAdultRole(g.session.role) || e.ownerId === g.session.actorId)
-            : isEditableLinkedGoogle(e, g.session.householdId, g.session.actorId),
-          /* Q2 — "can I change this event" and "can I add to it" are different questions,
-           * so they get different answers. A mirror you can't edit can still be added to:
-           * who's coming, what to bring, a reminder, your own notes. */
-          appendable: isAdultRole(g.session.role) || e.ownerId === g.session.actorId,
+          editable: e.layer === "canonical" ? mine : isEditableLinkedGoogle(e, g.session.householdId, g.session.actorId),
+          /* Anyone who can SEE an event can keep their own private margin on it — that is
+           * what appendable now means. The shared halves (attendees, driver, what to bring)
+           * moved behind the owner + the request flow. */
+          appendable: true,
+          /* The viewer's own margin, theirs alone. The owner's shared notes stay on the
+           * event record; this is everyone's private half — including the owner's, who may
+           * also keep notes on their own event that nobody else needs to read. */
+          myNotes: getViewerNote(e.id, g.session.actorId),
           ...(staleSource ? { staleSource } : {}),
         };
       });
@@ -2018,7 +2026,18 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const ev = getEvent(eventAttendees[1]);
       if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
-      if (!canSeeEntity(ev, g.session) || (!isAdultRole(g.session.role) && ev.ownerId !== g.session.actorId)) return json(res, 403, { error: "forbidden" }, req);
+      if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      /* "I shouldn't be able to change who's coming. That would be handled by the event
+       * creator." Owner of the EVENT — being an adult, or even the household Owner, is not
+       * a seat at someone else's guest list. Wanting on it goes through request-attend.
+       * A household feed's mirror (no member owner) stays adult-managed: which of US are
+       * going to the school's early dismissal is this family's own bookkeeping. */
+      const guestKeeper = getMember(ev.ownerId ?? "")
+        ? (ev.ownerId === g.session.actorId || ev.createdBy === g.session.actorId)
+        : isAdultRole(g.session.role);
+      if (!guestKeeper) {
+        return json(res, 403, { error: "not_event_owner", message: "Only the person whose event this is can change who's on it. You can request to attend instead." }, req);
+      }
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const wanted = Array.isArray(body.memberIds) ? body.memberIds.map(String) : null;
       if (!wanted) return json(res, 400, { error: "member_ids_required" }, req);
@@ -2070,8 +2089,14 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const status = ["accepted", "declined", "invited"].includes(body.status) ? body.status : null;
       if (!status) return json(res, 400, { error: "bad_status", message: "Answer with accepted, declined, or invited." }, req);
       const memberId = String(body.memberId ?? g.session.actorId);
-      if (memberId !== g.session.actorId && !isAdultRole(g.session.role)) {
-        return json(res, 403, { error: "forbidden", message: "You can only answer for yourself." }, req);
+      if (memberId !== g.session.actorId) {
+        /* An adult may answer for a CHILD — a six-year-old doesn't RSVP. What this used to
+         * allow was any adult answering for any ADULT, which is exactly the "I am able to
+         * select that I'm coming" problem inverted: putting words in someone's mouth. */
+        const target = getMember(memberId);
+        if (!isAdultRole(g.session.role) || !target || target.role !== "Child View") {
+          return json(res, 403, { error: "forbidden", message: "You can only answer for yourself (or for a child)." }, req);
+        }
       }
       const list = ev.attendees ?? (ev.participantIds ?? []).map((m) => ({ memberId: m, status: "invited", respondedAt: null }));
       if (!list.some((a) => a.memberId === memberId)) {
@@ -2085,24 +2110,140 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // reply?" — and the event owner is the one who has to plan around the answer.
       if (ev.ownerId && ev.ownerId !== memberId) {
         const who = getMember(memberId)?.displayName ?? "Someone";
+        const verb = status === "accepted" ? "is coming" : status === "declined" ? "can't make it" : "hasn't answered";
+        const when = updated.startAt
+          ? new Date(updated.startAt).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+          : "no date set";
+        /* Cluster I — "Melissa should have received a notification during that period. She
+         * did not." The in-app record existed; the PUSH didn't, so a phone in a pocket
+         * heard nothing. And the record itself said "Ross is coming" with no event, no
+         * time — "I can't actually see any context about it." Both halves fixed here:
+         * push rides along, and the body says what, when. data.id lets the client open
+         * the event instead of just dismissing the row. */
         addNotification({
           householdId: g.session.householdId, actorId: ev.ownerId, channel: "in_app",
-          title: `${who} ${status === "accepted" ? "is coming" : status === "declined" ? "can't make it" : "hasn't answered"}`,
-          body: `"${updated.title}"`,
+          title: `${who} ${verb}`,
+          body: `"${updated.title}" · ${when}`,
+          data: { type: "event", id: updated.id },
           to: null,
         });
+        void pushToMember({
+          householdId: g.session.householdId, actorId: ev.ownerId,
+          title: `${who} ${verb}`,
+          body: `"${updated.title}" · ${when}`,
+          data: { type: "event", id: updated.id },
+        }).catch(() => {});
       }
       audit({ type: "event.rsvp", eventId: ev.id, memberId, status, ok: true }, req, g.session);
       return json(res, 200, { event: updated }, req);
     }
 
+    /* ---- Cluster D: the polite doors into someone else's event ----
+     *
+     * "Would like to tag along? … send a request to attend. And Melissa would get a
+     *  notification … accept or decline. If she accepted I would be added to the event."
+     * "Want to give them a lift → offer transportation … at that point I would be assigned
+     *  as the driver."
+     * "There should be a button that says suggest to the owner of this event."
+     *
+     * Three kinds, one shape: a pending entry on the event, a notification (in-app + push)
+     * to the owner, and a respond endpoint only the owner can call. Nothing on the shared
+     * record changes until the owner says yes — that is the entire point of the door. */
+    const eventAsk = path.match(/^\/api\/events\/([^/]+)\/(request-attend|offer-drive|suggest-bring)$/);
+    if (eventAsk && method === "POST") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const ev = getEvent(eventAsk[1]);
+      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      const kind = eventAsk[2] === "request-attend" ? "attend" : eventAsk[2] === "offer-drive" ? "drive" : "bring";
+      const owner = ev.ownerId ?? ev.createdBy;
+      if (!owner) return json(res, 422, { error: "no_owner", message: "This event has no owner to ask." }, req);
+      if (owner === g.session.actorId) return json(res, 400, { error: "own_event", message: "It's your event — just edit it." }, req);
+      const body = (await readBody(req)) ?? {};
+      const item = kind === "bring" ? String(body.item ?? "").trim() : null;
+      if (kind === "bring" && !item) return json(res, 400, { error: "item_required", message: "Say what you're suggesting they bring." }, req);
+      if (kind === "attend" && (ev.participantIds ?? []).includes(g.session.actorId)) {
+        return json(res, 400, { error: "already_on_it", message: "You're already on this event." }, req);
+      }
+      const requests = { attend: [], drive: [], bring: [], ...(ev.requests ?? {}) };
+      // One standing ask per person per kind — a second tap is impatience, not a new request.
+      const dup = requests[kind].some((r) => r.actorId === g.session.actorId && (kind !== "bring" || r.item === item));
+      if (!dup) {
+        requests[kind] = [...requests[kind], { actorId: g.session.actorId, ...(item ? { item } : {}), at: new Date().toISOString() }];
+        patchEvent(ev.id, { requests });
+      }
+      const who = getMember(g.session.actorId)?.displayName ?? "Someone";
+      const when = ev.startAt
+        ? new Date(ev.startAt).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+        : "no date set";
+      const title = kind === "attend" ? `${who} would like to join "${ev.title}"`
+        : kind === "drive" ? `${who} offered to drive for "${ev.title}"`
+        : `${who} suggests bringing ${item} to "${ev.title}"`;
+      addNotification({
+        householdId: g.session.householdId, actorId: owner, channel: "in_app",
+        title, body: `${when} — accept or decline in the event.`,
+        data: { type: "event", id: ev.id }, to: null,
+      });
+      void pushToMember({
+        householdId: g.session.householdId, actorId: owner,
+        title, body: `${when} — accept or decline in FamiliOS.`,
+        data: { type: "event", id: ev.id },
+      }).catch(() => {});
+      audit({ type: `event.${eventAsk[2].replace(/-/g, "_")}`, eventId: ev.id, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, pending: true, requests }, req);
+    }
+    const eventRespond = path.match(/^\/api\/events\/([^/]+)\/requests\/respond$/);
+    if (eventRespond && method === "POST") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const ev = getEvent(eventRespond[1]);
+      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      // Only the owner answers — the same boundary as everywhere else in Cluster D.
+      if (ev.ownerId !== g.session.actorId && ev.createdBy !== g.session.actorId) {
+        return json(res, 403, { error: "not_event_owner", message: "Only the person whose event this is can answer requests on it." }, req);
+      }
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const kind = ["attend", "drive", "bring"].includes(body.kind) ? body.kind : null;
+      const actorId = String(body.actorId ?? "");
+      if (!kind || !actorId) return json(res, 400, { error: "bad_request", message: "kind and actorId are required." }, req);
+      const requests = { attend: [], drive: [], bring: [], ...(ev.requests ?? {}) };
+      const entry = requests[kind].find((r) => r.actorId === actorId && (kind !== "bring" || !body.item || r.item === body.item));
+      if (!entry) return json(res, 404, { error: "no_such_request" }, req);
+      requests[kind] = requests[kind].filter((r) => r !== entry);
+      const accept = body.accept === true;
+      let patch = { requests };
+      if (accept && kind === "attend") {
+        const ids = [...new Set([...(ev.participantIds ?? []), actorId])];
+        const prior = new Map((ev.attendees ?? []).map((a) => [a.memberId, a]));
+        // They asked to come, so their answer is already known — "accepted", not "invited".
+        patch = { ...patch, participantIds: ids, attendees: ids.map((m) => prior.get(m) ?? { memberId: m, status: m === actorId ? "accepted" : "invited", respondedAt: m === actorId ? new Date().toISOString() : null }) };
+      }
+      if (accept && kind === "drive") patch = { ...patch, driverId: actorId };
+      if (accept && kind === "bring") patch = { ...patch, whatToBring: [...(ev.whatToBring ?? []), { item: entry.item, memberId: actorId }] };
+      const updated = patchEvent(ev.id, patch);
+      const verb = kind === "attend" ? (accept ? "You're on" : "Couldn't add you to")
+        : kind === "drive" ? (accept ? "You're driving for" : "They've got driving covered for")
+        : (accept ? `They'll bring ${entry.item} to` : `No need for ${entry.item} at`);
+      addNotification({
+        householdId: g.session.householdId, actorId, channel: "in_app",
+        title: `${verb} "${ev.title}"`, body: accept ? "See you there." : "Thanks for offering.",
+        data: { type: "event", id: ev.id }, to: null,
+      });
+      void pushToMember({
+        householdId: g.session.householdId, actorId,
+        title: `${verb} "${ev.title}"`, body: accept ? "See you there." : "Thanks for offering.",
+        data: { type: "event", id: ev.id },
+      }).catch(() => {});
+      audit({ type: "event.request_responded", eventId: ev.id, kind, requester: actorId, accept, ok: true }, req, g.session);
+      return json(res, 200, { event: updated }, req);
+    }
     const eventOne = path.match(/^\/api\/events\/([^/]+)$/);
     if (eventOne && (method === "PATCH" || method === "POST")) {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const ev = getEvent(eventOne[1]);
       if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
-      // Only an adult, the owner, or a participant may edit; others can't even see it.
-      if (!canSeeEntity(ev, g.session) || (!isAdultRole(g.session.role) && ev.ownerId !== g.session.actorId)) return json(res, 403, { error: "forbidden" }, req);
+      // Seeing it is the only entry requirement — what you may WRITE is decided below,
+      // where owner and viewer take different doors.
+      if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
       // Three-layer calendar: canonical (FamiliOS-owned) events are always editable.
       // Linked events that originated in a connected Google Calendar are editable
       // TWO-WAY: the edit is written to Google first, then mirrored locally, so the
@@ -2121,6 +2262,52 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (badTimestamp(patch.endAt)) return json(res, 400, { error: "invalid_endAt", message: "That end date/time isn't a valid timestamp." }, req);
       if (ifUpdatedAt && ev.updatedAt && ifUpdatedAt !== ev.updatedAt) {
         return json(res, 409, { error: "stale_write", message: "This event changed on another device — refresh and try again.", current: ev }, req);
+      }
+      /* Cluster D — the fork. "This is his item and I should not be able to edit any of the
+       * information under schedule or the title of the event… The only part that I should be
+       * able to add is this section — just for me."
+       *
+       * Not the event's owner (and not the member whose Google account this mirror is
+       * two-way linked to)? Then exactly two fields exist for you, and both are YOURS:
+       * your private note and your private bring list. They live in the per-viewer store,
+       * never on the shared record, so nothing you type here can appear on the owner's
+       * card — which is precisely the leak the video demonstrates twice.
+       *
+       * Everything else is refused BY NAME rather than dropped. A request that half-works
+       * silently is how "I edited G-pop's event" becomes something you only discover at his
+       * dinner table. Attendance and driving have their own doors (request-attend,
+       * offer-drive), and the refusal points at them. */
+      /* Two different kinds of "not yours":
+       *
+       *   A MEMBER's event — Melissa's dance run, GPop's bike ride, her synced Google
+       *   calendar. ownerId names a real member, and Cluster D applies in full: that
+       *   member alone edits, everyone else keeps margins and knocks.
+       *
+       *   The HOUSEHOLD's event — a school-district ICS feed, a church calendar. No member
+       *   owns "Early dismissal"; its FamiliOS half (who from this family is going, what to
+       *   bring, a pickup note) is collective, so any adult may append to it — the Q2
+       *   behaviour, still wanted. The source's half stays refused below either way. */
+      const ownerMember = ev.ownerId ? getMember(ev.ownerId) : null;
+      const isEventOwner = ownerMember
+        ? (ev.ownerId === g.session.actorId || linkedGoogle)
+        : (ev.createdBy === g.session.actorId || linkedGoogle || isAdultRole(g.session.role));
+      if (!isEventOwner) {
+        // A child's margin is a nice idea for another day; today children are read-only
+        // outside their own things (Cluster Z), and this preserves that boundary.
+        if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "forbidden" }, req);
+        const VIEWER_FIELDS = new Set(["localNotes", "myBring"]);
+        const refused = Object.keys(patch).filter((k) => patch[k] !== undefined && !VIEWER_FIELDS.has(k));
+        if (refused.length > 0) {
+          const ownerName = getMember(ev.ownerId ?? ev.createdBy)?.displayName ?? "its owner";
+          return json(res, 403, {
+            error: "not_event_owner", fields: refused,
+            message: `This is ${ownerName}'s event — only they can change its ${andList(refused.map(fieldLabel))}. Your "just for me" notes are still yours, and you can request to attend or offer to drive.`,
+          }, req);
+        }
+        const myNotes = putViewerNote({ eventId: ev.id, actorId: g.session.actorId, note: patch.localNotes, bring: patch.myBring });
+        audit({ type: "event.viewer_note", eventId: ev.id, ok: true }, req, g.session);
+        // viewerOnly: nothing on the shared record moved, and the client should say so.
+        return json(res, 200, { event: { ...ev, myNotes }, localOnly: true, viewerOnly: true }, req);
       }
       /* Q2 — "it says edit at the source or copy it on the web app. Let me append to it
        * here in FamiliOS without syncing it back out."
@@ -3025,9 +3212,16 @@ function mayWriteAgent(session, agent, nextVisibility) {
     /* ---- Memory & artifacts (read; written by runs) — household-scoped ---- */
     if (path === "/api/memory" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      // Personal-scoped memory is private to its actor; family/household memory is shared.
+      /* Personal memory belongs to its author ALONE. The adult bypass that used to sit
+       * here was the knowledge-items leak wearing a different collection: a fact said in a
+       * private chat, readable by every adult in the house. Role is not a way in. Nest
+       * memories reach the nest, household memories reach everyone — the same three rooms
+       * as everything else since the visibility work. */
       const all = listMemory({ householdId: g.session.householdId, limit: 200 });
-      const visible = all.filter((m) => m.scope !== "personal" || m.source?.actorId === g.session.actorId || isAdultRole(g.session.role));
+      const visible = all.filter((m) =>
+        m.scope === "personal" ? m.source?.actorId === g.session.actorId
+        : m.scope === "nest" ? canSeeNest(m.nestId, g.session.householdId, g.session.actorId)
+        : true);
       return json(res, 200, { memory: visible }, req);
     }
     // Archive/delete a memory entry the actor can see (mirrors the GET visibility rule).
@@ -3067,8 +3261,30 @@ function mayWriteAgent(session, agent, nextVisibility) {
     }
     if (path === "/api/artifacts" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const all = listArtifacts({ householdId: g.session.householdId, runId: url.searchParams.get("runId") || undefined, limit: 100 });
-      return json(res, 200, { artifacts: all }, req);
+      /* BUG-05 — "there is no privacy with these artifacts… you can see artifacts that were
+       * performed in private chats."
+       *
+       * There wasn't: this returned everything in the household, unfiltered — the only
+       * collection that skipped the gate. An artifact is the OUTPUT of a run, and a run
+       * remembers the conversation it came from, so the artifact inherits that room's
+       * walls: personal chat → its author, nest chat → the nest, family chat → everyone.
+       * Resolved at read time rather than stamped at write time so every artifact that
+       * already exists is covered retroactively — stamping would have grandfathered the
+       * exact leak he demonstrated.
+       *
+       * Runs with no conversation (scheduled household agents) stay household-visible,
+       * which is what they are. The assistant's own context building is unaffected: his
+       * ask is that Beannie's ASSISTANT may know about the meal plan while Beannie's
+       * LIBRARY doesn't list the artifact. */
+      const all = listArtifacts({ householdId: g.session.householdId, runId: url.searchParams.get("runId") || undefined, limit: 200 });
+      const visible = all.filter((a) => {
+        const run = a.runId ? getRun(a.runId) : null;
+        const convId = run?.sourceRef?.conversationId;
+        if (!convId) return true;
+        const conv = getConversation(convId);
+        return !conv || canSeeConversation(conv, g.session);
+      }).slice(0, 100);
+      return json(res, 200, { artifacts: visible }, req);
     }
 
     /* ---- Contact methods (server-owned registry) ----
@@ -4250,6 +4466,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
             : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at });
           // I1 — name the thread from the first exchange (see maybeNameConversation).
           if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? out.plan?.summary ?? out.build?.summary ?? "", session: g.session });
+          // BUG-06 — the writer memory never had. Scoped to the room it was said in.
+          if (out.ok && out.kind === "answer") {
+            void captureMemoryFromExchange({ householdId: g.session.householdId, actorId: g.session.actorId, visibility: conv.visibility, nestId: conv.nestId, message: body.message, answer: out.answer });
+          }
         }
       }
       audit({ type: "assistant.respond", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
@@ -4332,6 +4552,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
           // I1 — the streaming path is the one the real chat UI uses, so naming has to happen
           // here too or it would never fire in practice.
           if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? out.plan?.summary ?? out.build?.summary ?? "", session: g.session });
+          // BUG-06 — same as POST /api/assistant, and this is the path the app actually
+          // uses, so leaving it out here would be leaving the bug in.
+          if (out.ok && out.kind === "answer") {
+            void captureMemoryFromExchange({ householdId: g.session.householdId, actorId: g.session.actorId, visibility: conv.visibility, nestId: conv.nestId, message: body.message, answer: out.answer });
+          }
         }
         audit({ type: "assistant.stream", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
         res.write(`data: ${JSON.stringify({ type: "done", result: out })}\n\n`);

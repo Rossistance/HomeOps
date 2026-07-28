@@ -3,7 +3,7 @@
 // iOS; dialog presentation elsewhere). Edit mode (?id=) prefls from the server
 // and adds a destructive delete. Synced (linked/public) events are read-only.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, ScrollView, Switch, TextInput, View } from "react-native";
+import { Alert, Keyboard, ScrollView, Switch, TextInput, View } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
@@ -108,6 +108,13 @@ export default function EventFormScreen() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
+  /* Cluster D — whose event this IS decides what this form is. The household Owner got a
+   * full edit surface on his father-in-law's event; the server now refuses those writes,
+   * and a form that offers what the server refuses is a lie with input fields. */
+  const [eventOwnerId, setEventOwnerId] = useState<string | null>(null);
+  const [requests, setRequests] = useState<NonNullable<EventRec["requests"]>>({});
+  const [myBring, setMyBring] = useState<{ item: string }[]>([]);
+  const [askBusy, setAskBusy] = useState<string | null>(null);
   /* Q2 — "it says edit at the source or copy it on the web app. Let me append to it here
    * without syncing it back out." Read-only was answering the wrong question: the calendar
    * this event came from owns its title, time and place, but who's coming, what to bring, a
@@ -194,7 +201,12 @@ export default function EventFormScreen() {
           setTitle(e.title);
           setLocation(e.location ?? "");
           setNotes(e.notes ?? "");
-          setLocalNotes(e.localNotes ?? "");
+          setEventOwnerId(e.ownerId ?? e.createdBy ?? null);
+          setRequests(e.requests ?? {});
+          // The viewer's own margin wins over the legacy shared field: localNotes is what
+          // the OWNER wrote on a mirror, myNotes is what I wrote for me.
+          setLocalNotes(e.myNotes?.note ?? (e.ownerId === session?.actorId ? (e.localNotes ?? "") : ""));
+          setMyBring(e.myNotes?.bring ?? []);
           setDriverId(e.driverId);
           // An event from before this feature has participantIds but no answers. Reading that
           // as "everyone accepted" would show a card claiming three people said yes when
@@ -297,9 +309,17 @@ export default function EventFormScreen() {
   // On a mirrored event there is nothing to validate — its title and times aren't ours to
   // change — so Save turns on as soon as there's something of ours to keep.
   const appendOnly = readOnly && canAppend;
-  const canSave = canManage && busy === null && (appendOnly || (!readOnly && title.trim().length > 0 && !endInvalid));
+  /* Creating → it's yours. Editing → only if it actually is. Everything the owner controls
+   * (attendees, driver, the shared bring list) keys off THIS, not off role — the narrator
+   * demonstrating the bug was the household Owner, the most privileged role there is. */
+  const isOwnerOfEvent = !isEdit || (eventOwnerId != null && eventOwnerId === session?.actorId);
+  const ownerControls = canManage && isOwnerOfEvent;
+  const canSave = canManage && busy === null && (appendOnly || !isOwnerOfEvent || (!readOnly && title.trim().length > 0 && !endInvalid));
   /** The household's half of the event — open even when the source owns the rest. */
   const localEditable = canManage && (!readOnly || canAppend);
+  const iAmParticipant = attendees.some((a) => a.memberId === session?.actorId);
+  const pendingAttend = (requests.attend ?? []).some((r) => r.actorId === session?.actorId);
+  const pendingDrive = (requests.drive ?? []).some((r) => r.actorId === session?.actorId);
 
   const addBring = useCallback(() => {
     const items = bringInput.split(",").map((s) => s.trim()).filter(Boolean);
@@ -310,6 +330,12 @@ export default function EventFormScreen() {
 
   const save = async () => {
     if (!canSave) return;
+    /* BUG-03 — "the pop-up did not retract. We're going to do that again. It did not
+     * retract." He tapped Save with the keyboard up; the form declined or failed, and the
+     * only explanation rendered 1,500pt above the viewport. First: the keyboard goes, so
+     * the bottom of the form — where the button and the notice now both live — is visible
+     * for whatever happens next. */
+    Keyboard.dismiss();
     setBusy("save"); setNotice(null);
     // All-day events anchor at local midnight and carry the explicit allDay flag;
     // timed events merge each calendar day with its clock time (end may cross days).
@@ -325,7 +351,11 @@ export default function EventFormScreen() {
      * they save on their own as they're tapped, because adding someone notifies them. */
     const r = !isEdit
       ? await api.createEvent({ ...body, visibility: "household" })
-      : await api.updateEvent(id, appendOnly ? { localNotes: localNotes.trim(), driverId, whatToBring } : body);
+      : await api.updateEvent(id, !isOwnerOfEvent
+        // Someone else's event: the ONLY two fields that exist for us. Sending anything
+        // more would be refused by name, and rightly.
+        ? { localNotes: localNotes.trim(), myBring }
+        : appendOnly ? { localNotes: localNotes.trim(), driverId, whatToBring } : body);
     setBusy(null);
     if (r.event) {
       tapHaptic("success");
@@ -479,7 +509,8 @@ export default function EventFormScreen() {
       {linkedGoogle ? (
         <Notice text="Synced from Google Calendar — changes you save here update it in Google too." ok />
       ) : null}
-      {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
+      {/* BUG-03: the notice moved next to the Save bar (see the ActionBar below) — an
+          explanation rendered at the top of a long form is an explanation nobody saw. */}
       {/* ISS-123: say plainly that the draft came back, and give the ONLY other way to
           clear it besides saving — dismissing deliberately keeps it. */}
       {draftRestored ? (
@@ -611,7 +642,10 @@ export default function EventFormScreen() {
           composed from `notes` and the Bring list only). */}
       {isEdit && localEditable ? (
         <>
-          <SectionHeader title={readOnly ? "Your notes" : "Just for us"} />
+          {/* "It needs to be relabeled 'just for me'… these are just notes for me about
+              G-pop's event and not for anybody else." Per-viewer on the server now, so the
+              label finally tells the truth. */}
+          <SectionHeader title="Just for me" />
           <Well style={{ gap: 6 }}>
             <TextInput
               style={[inputStyle, { minHeight: 60, textAlignVertical: "top" }]}
@@ -623,7 +657,7 @@ export default function EventFormScreen() {
               accessibilityLabel="Your own notes, kept in FamiliOS"
             />
             <T kind="caption" color={colors.textFaint}>
-              Kept in FamiliOS. This never goes to the calendar this event came from.
+              Only you see this — it never shows on anyone else&apos;s card, including the event&apos;s owner.
             </T>
           </Well>
         </>
@@ -643,7 +677,7 @@ export default function EventFormScreen() {
                     label={m.displayName.split(" ")[0]}
                     icon={row?.status === "accepted" ? "checkmark.circle.fill" : row?.status === "declined" ? "xmark.circle.fill" : row ? "person.fill" : "person"}
                     selected={!!row}
-                    onPress={!localEditable || attendeeBusy ? undefined : () => void (async () => {
+                    onPress={!ownerControls || attendeeBusy ? undefined : () => void (async () => {
                       const next = row
                         ? attendees.filter((a) => a.memberId !== m.actorId).map((a) => a.memberId)
                         : [...attendees.map((a) => a.memberId), m.actorId];
@@ -720,38 +754,137 @@ export default function EventFormScreen() {
               </View>
             ) : (
               <T kind="caption" color={colors.textFaint}>
-                Nobody added yet. Picking someone tells them they&apos;re on it, and they can answer.
+                {ownerControls
+                  ? <>Nobody added yet. Picking someone tells them they&apos;re on it, and they can answer.</>
+                  : <>Who&apos;s coming is up to {members.find((m) => m.actorId === eventOwnerId)?.displayName.split(" ")[0] ?? "the event’s owner"}.</>}
               </T>
             )}
+            {/* "All this should really say is… would like to tag along? — send a request to
+                attend. And Melissa would get a notification… accept or decline." Wanting on
+                someone else's event is a REQUEST, not a toggle. */}
+            {!ownerControls && !iAmParticipant ? (
+              <Well style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                <T kind="sub" style={{ flex: 1 }}>Would like to tag along?</T>
+                <Button
+                  small
+                  title={pendingAttend ? "Request sent" : "Request to attend"}
+                  disabled={pendingAttend || askBusy === "attend"}
+                  onPress={() => void (async () => {
+                    setAskBusy("attend");
+                    const r = await api.requestAttend(id!);
+                    setAskBusy(null);
+                    if (r.pending) {
+                      tapHaptic("success");
+                      setRequests((q) => ({ ...q, attend: [...(q.attend ?? []), { actorId: session!.actorId, at: new Date().toISOString() }] }));
+                      setNotice({ text: "Request sent — they'll get a notification and can say yes or no.", ok: true });
+                    } else setNotice({ text: r.message ?? "Couldn't send the request.", ok: false });
+                  })()}
+                />
+              </Well>
+            ) : null}
+            {/* The owner's side of the doors: who's knocking, answered here. */}
+            {ownerControls && ((requests.attend ?? []).length > 0 || (requests.drive ?? []).length > 0 || (requests.bring ?? []).length > 0) ? (
+              <Well style={{ gap: spacing.sm, borderLeftWidth: 3, borderLeftColor: colors.ember }}>
+                <T kind="rowTitle">Waiting on you</T>
+                {(["attend", "drive", "bring"] as const).flatMap((kind) =>
+                  (requests[kind] ?? []).map((q: { actorId: string; at: string; item?: string }) => {
+                    const who = members.find((m) => m.actorId === q.actorId)?.displayName.split(" ")[0] ?? "Someone";
+                    const line = kind === "attend" ? `${who} would like to come`
+                      : kind === "drive" ? `${who} offered to drive`
+                      : `${who} suggests bringing ${q.item}`;
+                    return (
+                      <View key={`${kind}:${q.actorId}:${q.item ?? ""}`} style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                        <T kind="sub" style={{ flex: 1 }}>{line}</T>
+                        {([true, false] as const).map((accept) => (
+                          <Button
+                            key={String(accept)} small
+                            variant={accept ? undefined : "danger"}
+                            title={accept ? "Accept" : "Decline"}
+                            disabled={askBusy === `${kind}:${q.actorId}`}
+                            onPress={() => void (async () => {
+                              setAskBusy(`${kind}:${q.actorId}`);
+                              const r = await api.respondEventRequest(id!, { kind, actorId: q.actorId, item: q.item, accept });
+                              setAskBusy(null);
+                              if (r.event) {
+                                tapHaptic(accept ? "success" : "light");
+                                setRequests(r.event.requests ?? {});
+                                setAttendees(r.event.attendees ?? []);
+                                setDriverId(r.event.driverId ?? null);
+                                setBring(r.event.whatToBring ?? []);
+                              } else setNotice({ text: r.message ?? "Couldn't answer that request.", ok: false });
+                            })()}
+                          />
+                        ))}
+                      </View>
+                    );
+                  }))}
+              </Well>
+            ) : null}
           </View>
         </>
       ) : null}
 
       {/* Driver — kept alongside attendees, not replaced by them: "who's driving" is a
-          different question from "who's coming", and a carpool needs both. */}
-      <SectionHeader title="Driver" />
-      <ChipRow>
-        <Chip label="No driver" selected={driverId === null} onPress={!localEditable ? undefined : () => setDriverId(null)} />
-        {members.map((m) => (
-          <Chip
-            key={m.actorId}
-            label={m.displayName}
-            icon="car.fill"
-            selected={driverId === m.actorId}
-            onPress={!localEditable ? undefined : () => setDriverId(driverId === m.actorId ? null : m.actorId)}
-          />
-        ))}
-      </ChipRow>
+          different question from "who's coming", and a carpool needs both.
 
-      {/* What to bring */}
-      <SectionHeader title="What to bring" />
+          "The option no driver is kind of redundant — there should just be a parentheses
+          that says this is an optional thing." A blank optional field already says nobody's
+          driving; a chip that says so is furniture. Tapping the chosen driver again clears
+          them, which is what the chip toggle always did. */}
+      <SectionHeader title="Driver (optional)" />
+      {ownerControls ? (
+        <ChipRow>
+          {members.map((m) => (
+            <Chip
+              key={m.actorId}
+              label={m.displayName}
+              icon="car.fill"
+              selected={driverId === m.actorId}
+              onPress={() => setDriverId(driverId === m.actorId ? null : m.actorId)}
+            />
+          ))}
+        </ChipRow>
+      ) : (
+        <View style={{ gap: spacing.sm }}>
+          <T kind="sub" color={driverId ? colors.text : colors.textFaint}>
+            {driverId ? `${members.find((m) => m.actorId === driverId)?.displayName ?? "Someone"} is driving.` : "No driver yet."}
+          </T>
+          {/* "Want to give them a lift — offer transportation… and then at that point I
+              would be assigned as the driver." Offering, with the owner's yes in between. */}
+          {driverId !== session?.actorId ? (
+            <Well style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+              <T kind="sub" style={{ flex: 1 }}>Want to give them a lift?</T>
+              <Button
+                small
+                title={pendingDrive ? "Offer sent" : "Offer transportation"}
+                disabled={pendingDrive || askBusy === "drive"}
+                onPress={() => void (async () => {
+                  setAskBusy("drive");
+                  const r = await api.offerDrive(id!);
+                  setAskBusy(null);
+                  if (r.pending) {
+                    tapHaptic("success");
+                    setRequests((q) => ({ ...q, drive: [...(q.drive ?? []), { actorId: session!.actorId, at: new Date().toISOString() }] }));
+                    setNotice({ text: "Offer sent — if they accept, you're the driver.", ok: true });
+                  } else setNotice({ text: r.message ?? "Couldn't send the offer.", ok: false });
+                })()}
+              />
+            </Well>
+          ) : null}
+        </View>
+      )}
+
+      {/* What to bring — the SHARED list belongs to the owner. "Anything that I add down
+          here should only be things that are just for my notes… and if I did add it, there
+          should be a button that says suggest to the owner of this event." */}
+      <SectionHeader title={ownerControls ? "What to bring" : "What to bring (theirs)"} />
       {bring.length > 0 ? (
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
           {bring.map((w, i) => (
             <PressableScale
               key={`${w.item}-${i}`}
               haptic="select"
-              disabled={!localEditable}
+              disabled={!ownerControls}
               onPress={() => setBring((b) => b.filter((_, j) => j !== i))}
               accessibilityRole="button"
               accessibilityLabel={`Remove ${w.item}`}
@@ -763,12 +896,55 @@ export default function EventFormScreen() {
             >
               <Sym name="bag.fill" size={12} color={colors.amber} />
               <T kind="subMedium" color={colors.amber}>{w.item}</T>
-              {localEditable ? <Sym name="xmark" size={10} color={colors.amber} /> : null}
+              {ownerControls ? <Sym name="xmark" size={10} color={colors.amber} /> : null}
             </PressableScale>
           ))}
         </View>
       ) : null}
-      {localEditable ? (
+      {!ownerControls ? (
+        <View style={{ gap: spacing.sm }}>
+          <SectionHeader title="Your list — just for you" />
+          {myBring.map((w, i) => (
+            <View key={`${w.item}-${i}`} style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+              <Sym name="bag" size={12} color={colors.textMuted} />
+              <T kind="sub" style={{ flex: 1 }}>{w.item}</T>
+              {/* The polite door: nothing lands on their card unless they say yes. */}
+              <Button
+                small
+                title={(requests.bring ?? []).some((q) => q.actorId === session?.actorId && q.item === w.item) ? "Suggested" : "Suggest to owner"}
+                disabled={(requests.bring ?? []).some((q) => q.actorId === session?.actorId && q.item === w.item) || askBusy === `bring:${w.item}`}
+                onPress={() => void (async () => {
+                  setAskBusy(`bring:${w.item}`);
+                  const r = await api.suggestBring(id!, w.item);
+                  setAskBusy(null);
+                  if (r.pending) {
+                    tapHaptic("success");
+                    setRequests((q) => ({ ...q, bring: [...(q.bring ?? []), { actorId: session!.actorId, item: w.item, at: new Date().toISOString() }] }));
+                  } else setNotice({ text: r.message ?? "Couldn't suggest that.", ok: false });
+                })()}
+              />
+              <PressableScale haptic="select" hitSlop={10} accessibilityRole="button" accessibilityLabel={`Remove ${w.item}`}
+                onPress={() => setMyBring((b) => b.filter((_, j) => j !== i))}>
+                <Sym name="xmark" size={11} color={colors.textFaint} />
+              </PressableScale>
+            </View>
+          ))}
+          <Well style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+            <TextInput
+              style={[inputStyle, { flex: 1 }]}
+              placeholder="A note to self — sunscreen, his lunch…"
+              placeholderTextColor={colors.textFaint}
+              value={bringInput}
+              onChangeText={setBringInput}
+              onSubmitEditing={() => { const t = bringInput.trim(); if (t) { setMyBring((b) => [...b, { item: t }]); setBringInput(""); } }}
+              accessibilityLabel="Add an item to your own list"
+              returnKeyType="done"
+            />
+            <Button small title="Add" disabled={!bringInput.trim()} onPress={() => { const t = bringInput.trim(); if (t) { setMyBring((b) => [...b, { item: t }]); setBringInput(""); } }} />
+          </Well>
+        </View>
+      ) : null}
+      {ownerControls ? (
         <Well
           style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}
           onLayout={(e) => { bringY.current = e.nativeEvent.layout.y; }}
@@ -856,8 +1032,9 @@ export default function EventFormScreen() {
           when a field is focused Save is directly above the keys. */}
       {localEditable ? (
         <ActionBar>
+          {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
           <Button
-            title={appendOnly ? "Save to FamiliOS" : isEdit ? (alsoGoogle && !linkedGoogle ? "Save & update Google" : "Save changes") : "Add event"}
+            title={!isOwnerOfEvent && isEdit ? "Save my notes" : appendOnly ? "Save to FamiliOS" : isEdit ? (alsoGoogle && !linkedGoogle ? "Save & update Google" : "Save changes") : "Add event"}
             variant="ember"
             full
             loading={busy === "save" || (busy === "push" && !pushApproval)}
@@ -868,7 +1045,7 @@ export default function EventFormScreen() {
               button and no explanation. */}
           {!canSave && busy === null ? (
             <T kind="caption" center color={colors.textFaint}>
-              {appendOnly ? "" : !title.trim() ? "Give it a title to save." : endInvalid ? "Fix the end time to save." : ""}
+              {!title.trim() && isOwnerOfEvent && !appendOnly ? "Give it a title to save." : endInvalid ? "Fix the end time to save." : ""}
             </T>
           ) : null}
         </ActionBar>

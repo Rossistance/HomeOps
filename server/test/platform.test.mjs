@@ -65,6 +65,12 @@ test("a linked (synced) event is read-only — editing is refused", async () => 
   all["ev_synced"] = { id: "ev_synced", householdId: "local", title: "From Google", layer: "linked", visibility: "household", source: "Google Calendar", ownerId: "m-alex", createdAt: Date.now(), updatedAt: new Date().toISOString() };
   writeStoreDoc(ctx, "events.json", all);
   const edit = await admin.req("/api/events/ev_synced", { method: "PATCH", body: JSON.stringify({ title: "hacked" }) });
-  assert.equal(edit.status, 409);
-  assert.equal(edit.data.error, "read_only_layer");
+  /* CHANGED DELIBERATELY (Cluster D): this event is Alex's synced calendar, and Morgan is
+   * refused because it is ALEX'S — 403 not_event_owner — before the sync layer even gets a
+   * say. The old 409 read_only_layer told an adult "you can't edit this because it's
+   * synced", implying they could edit it if it weren't. They couldn't, and now the refusal
+   * says the truer reason. Alex editing their OWN synced mirror still gets the 409 with
+   * field names — that path is pinned in append-to-mirrored-event.test.mjs. */
+  assert.equal(edit.status, 403);
+  assert.equal(edit.data.error, "not_event_owner");
 });

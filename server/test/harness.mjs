@@ -155,6 +155,12 @@ export function readStoreDoc(ctx, file, fallback, tenant = "local") {
   const eng = createEngine(ctx.dataDir);
   try { return eng.getDoc(tenant, file, fallback); } finally { eng.closeAll(); }
 }
+/** Seed a row-backed record (runs, events, …) the way the server's own put* functions do.
+ * writeStoreDoc can't reach these: records live in the engine's row table, not in a doc. */
+export function writeStoreRecord(ctx, coll, id, doc, tenant = "local") {
+  const eng = createEngine(ctx.dataDir);
+  try { eng.putRecord(tenant, coll, id, doc); } finally { eng.closeAll(); }
+}
 export function writeStoreDoc(ctx, file, value, tenant = "local") {
   const eng = createEngine(ctx.dataDir);
   try { eng.putDoc(tenant, file, value); } finally { eng.closeAll(); }

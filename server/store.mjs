@@ -900,6 +900,35 @@ export function deleteMemoryEntry(id) {
   return true;
 }
 
+/* ---- Per-viewer event margins ("Just for me") ----
+ *
+ * "These are just notes for me about G-pop's event and not for anybody else."
+ *
+ * The event record used to hold ONE localNotes field, so a note Ross typed on Melissa's
+ * event rendered on Melissa's card — a private margin implemented as a shared whiteboard.
+ * This store is the margin done properly: keyed by (eventId, actorId), readable by its
+ * author alone, merged into GET /api/events as `myNotes` per requester. The event owner's
+ * shared notes stay on the event; this is everyone else's half. */
+export function getViewerNote(eventId, actorId) {
+  return readJSON("event_viewer_notes.json", {})[`${eventId}|${actorId}`] ?? null;
+}
+export function putViewerNote({ eventId, actorId, note, bring }) {
+  const all = readJSON("event_viewer_notes.json", {});
+  const key = `${eventId}|${actorId}`;
+  const prev = all[key] ?? { note: "", bring: [] };
+  const rec = {
+    eventId, actorId,
+    note: note !== undefined ? String(note ?? "") : prev.note,
+    // Bring items here are the viewer's own list — suggestions to the owner travel through
+    // the request flow, never by writing into the shared event.
+    bring: bring !== undefined ? (Array.isArray(bring) ? bring.map((b) => ({ item: String(b.item ?? b) })) : prev.bring) : prev.bring,
+    updatedAt: new Date().toISOString(),
+  };
+  all[key] = rec;
+  writeJSON("event_viewer_notes.json", all);
+  return rec;
+}
+
 /* ---- Artifacts (reports/briefings/checklists produced by runs) ---- */
 export function listArtifacts({ householdId, runId, limit = 100 } = {}) {
   let arr = readJSON("artifacts.json", []);

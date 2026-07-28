@@ -175,6 +175,11 @@ export interface EventRec {
   /** E5/E7 — who's on the event and what they said. Absent on events created before this
    *  feature, which carry `participantIds` only; those read as "invited", never as accepted. */
   attendees?: AttendeeRec[];
+  /* Cluster D — the polite doors. Pending asks live ON the event (owner answers them);
+   * myNotes is the requester's own private margin, merged per-viewer by the server. */
+  createdBy?: string | null;
+  requests?: { attend?: { actorId: string; at: string }[]; drive?: { actorId: string; at: string }[]; bring?: { actorId: string; item: string; at: string }[] };
+  myNotes?: { note: string; bring: { item: string }[] } | null;
   /** H7 — set when this event was created from a task. */
   taskId?: string | null;
 }
@@ -1014,6 +1019,24 @@ export const api = {
   },
   /** `memberId` is optional: omit it to answer for yourself (the only thing most members
    *  may do — the server refuses answering for anyone else unless you're an adult). */
+  /* Cluster D — asking, offering, suggesting: nothing shared changes until the owner says
+   * yes, and each of these tells them you asked. */
+  async requestAttend(id: string): Promise<{ ok?: boolean; pending?: boolean; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; pending?: boolean; error?: string; message?: string }>(`/events/${encodeURIComponent(id)}/request-attend`, { method: "POST", body: "{}" });
+    return r.data ?? { error: "network" };
+  },
+  async offerDrive(id: string): Promise<{ ok?: boolean; pending?: boolean; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; pending?: boolean; error?: string; message?: string }>(`/events/${encodeURIComponent(id)}/offer-drive`, { method: "POST", body: "{}" });
+    return r.data ?? { error: "network" };
+  },
+  async suggestBring(id: string, item: string): Promise<{ ok?: boolean; pending?: boolean; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; pending?: boolean; error?: string; message?: string }>(`/events/${encodeURIComponent(id)}/suggest-bring`, { method: "POST", body: JSON.stringify({ item }) });
+    return r.data ?? { error: "network" };
+  },
+  async respondEventRequest(id: string, body: { kind: "attend" | "drive" | "bring"; actorId: string; item?: string; accept: boolean }): Promise<{ event?: EventRec; error?: string; message?: string }> {
+    const r = await req<{ event?: EventRec; error?: string; message?: string }>(`/events/${encodeURIComponent(id)}/requests/respond`, { method: "POST", body: JSON.stringify(body) });
+    return r.data ?? { error: "network" };
+  },
   async rsvpEvent(id: string, status: "accepted" | "declined" | "invited", memberId?: string): Promise<{ event?: EventRec; error?: string; message?: string }> {
     const r = await req<{ event?: EventRec; error?: string; message?: string }>(`/events/${encodeURIComponent(id)}/rsvp`, {
       method: "POST", body: JSON.stringify({ status, ...(memberId ? { memberId } : {}) }),

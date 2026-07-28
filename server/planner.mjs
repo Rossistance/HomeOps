@@ -100,7 +100,9 @@ export async function nameConversation({ question, answer, session, providerId }
   return title;
 }
 
-function activeProviderId(explicit, householdId) {
+// Exported for memory-capture.mjs, which needs the same "which provider answers for this
+// household" resolution without re-deriving it and drifting.
+export function activeProviderId(explicit, householdId) {
   return explicit || getSettings(householdId).aiActiveProvider || null;
 }
 // C1.3 budget gate: every planner entry point checks the household's optional
