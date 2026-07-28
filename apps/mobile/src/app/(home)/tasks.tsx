@@ -168,6 +168,11 @@ export default function TasksScreen() {
   const [dueAt, setDueAt] = useState<Date>(() => { const d = new Date(); d.setHours(d.getHours() + 1, 0, 0, 0); return d; });
   const [nests, setNests] = useState<NestRec[]>([]);
   const [nestId, setNestId] = useState<string | null>(null);
+  /* Cluster K — the third room. "It's family, your nest, and then just me… any tasks or
+   * lists in that section would need to be visible only to me." Family used to mean
+   * "everything that isn't a nest's", which quietly included your private tasks — so
+   * private items sat in the shared-looking view and "just me" didn't exist as a place. */
+  const [justMe, setJustMe] = useState(false);
   const [doneOpen, setDoneOpen] = useState(false);
   // H1 [21:31] — "group the tasks by person: mine, and everybody else's." A household list
   // that mixes everyone's chores together is a list nobody reads as theirs.
@@ -232,10 +237,18 @@ export default function TasksScreen() {
    * friction that gets a feature ignored. It's a DEFAULT, not a lock: the picker below still
    * has the final word, so a private note written inside a nest space stays private. */
   useEffect(() => {
+    // A nest space seeds nest scope; Family and Just me BOTH seed private — "the default for
+    // every task creation should always be just me… even though the list is created under
+    // the family." Sharing is the explicit act, never the ambient one.
     setScope({ visibility: nestId ? "nest" : "private", nestId });
-  }, [nestId]);
+  }, [nestId, justMe]);
 
-  const inSpace = useCallback((t: TaskRec) => (nestId ? t.nestId === nestId : t.visibility !== "nest"), [nestId]);
+  const inSpace = useCallback(
+    (t: TaskRec) => (justMe ? t.visibility === "private"
+      : nestId ? t.nestId === nestId
+      : t.visibility === "household"),
+    [nestId, justMe],
+  );
   const open = useMemo(() => tasks.filter((t) => t.status !== "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
   const done = useMemo(() => tasks.filter((t) => t.status === "done" && inSpace(t) && mineFilter(t)), [tasks, inSpace, mineFilter]);
   const listNames = useMemo(() => {
@@ -355,6 +368,9 @@ export default function TasksScreen() {
        * Moving the view is the honest resolution — the task is real and this is where it is. */
       const landedIn = created.visibility === "nest" ? (created.nestId ?? null) : null;
       if (landedIn !== nestId) setNestId(landedIn);
+      // "If I selected just me, it would actually disappear out of this family group and get
+      // added underneath the just me." Followed, not vanished.
+      setJustMe(created.visibility === "private");
       setTitle(""); setQuickDue(null); setAssignee(null);
       setScope({ visibility: landedIn ? "nest" : "private", nestId: landedIn });
       tapHaptic("success");
@@ -435,10 +451,11 @@ export default function TasksScreen() {
         <Rise index={riseIdx++}>
           <ScreenTour route="/tasks" />
           <Coach id="tasks.spaces"><ChipRow>
-            <Chip label="Family" icon="house.fill" selected={nestId === null} onPress={() => setNestId(null)} />
+            <Chip label="Family" icon="house.fill" selected={nestId === null && !justMe} onPress={() => { setJustMe(false); setNestId(null); }} />
             {nests.map((n) => (
-              <Chip key={n.id} label={n.label} icon="person.2.fill" selected={nestId === n.id} onPress={() => setNestId(n.id)} />
+              <Chip key={n.id} label={n.label} icon="person.2.fill" selected={nestId === n.id} onPress={() => { setJustMe(false); setNestId(n.id); }} />
             ))}
+            <Chip label="Just me" icon="lock" selected={justMe} onPress={() => { setNestId(null); setJustMe(true); }} />
           </ChipRow></Coach>
         </Rise>
       ) : null}

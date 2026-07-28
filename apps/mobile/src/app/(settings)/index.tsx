@@ -306,8 +306,10 @@ export default function SettingsScreen() {
 
         <SectionHeader title="More" />
         <Card padded={false}>
-          <Row icon="checklist" iconColor={colors.lavender} iconBg={colors.lavenderBg} title="Tasks & Lists" chevron onPress={() => router.push("/tasks")} />
-          <Row icon="fork.knife" iconColor={colors.sage} iconBg={colors.sageBg} title="Meals" chevron onPress={() => router.push("/meals")} />
+          {/* BUG-04 — the Tasks & Lists and Meals rows are gone from here on purpose: they
+              pushed those screens onto the SETTINGS stack, which is why Back from a task
+              landed on Settings. "These two need to be removed. They exist on the today
+              page. It can be accessed there." */}
           <Row icon="person.2" iconColor={colors.sky} iconBg={colors.skyBg} title="Contacts" chevron onPress={() => router.push("/contacts")} />
           {/* Nests — a small group inside the household. Any adult can form one; it grants no
               authority over anyone, so there is no role gate beyond that. */}

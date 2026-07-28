@@ -4,10 +4,13 @@
 //  needs to read just me, my nest, then everyone. The actual logic of who sees what needs to
 //  extend throughout the app."
 //
-// THE ORDER IS THE POINT, and it was backwards. The Library offered "Everyone · Just me",
-// which puts the widest possible audience under your thumb as the first thing you can hit,
-// and reads as a scale that starts at maximum. Narrowest first is both the safer misfire and
-// the order he drew: Just me → My Nest → Everyone.
+// THE ORDER: Everyone → My Nest → Just me, with Just me as the DEFAULT on creation.
+//
+// Stated twice in the 7-27 walkthrough as the app-wide norm ("we're gonna try to follow a
+// norm of everyone, my nest, just me"), which supersedes the earlier marked-up screenshot
+// this component originally followed. Order and default do different jobs: the row reads
+// widest-to-narrowest, while the SELECTION starts at the narrowest — "default should always
+// be privacy, should always be siloed to yourself on any of these kind of creation tasks."
 //
 // One component, because there were three different versions of this control and they didn't
 // agree with each other or with the server. Tasks had a two-way boolean and inferred nest
@@ -67,14 +70,14 @@ export function VisibilityPicker({ value, nestId, nests, onChange, label = "Who 
     <View style={{ gap: 6 }}>
       <T kind="eyebrow">{label}</T>
       <ChipRow>
-        {/* Narrowest first. */}
-        <Chip label="Just me" icon="lock" selected={value === "private"}
-          onPress={() => { setChoosing(false); onChange({ visibility: "private", nestId: null }); }} />
+        {/* His norm: everyone, my nest, just me. */}
+        <Chip label="Everyone" icon="house.fill" selected={value === "household"}
+          onPress={() => { setChoosing(false); onChange({ visibility: "household", nestId: null }); }} />
         {nests.length > 0 ? (
           <Chip label="My Nest" icon="person.2.fill" selected={value === "nest"} onPress={pickNest} />
         ) : null}
-        <Chip label="Everyone" icon="house.fill" selected={value === "household"}
-          onPress={() => { setChoosing(false); onChange({ visibility: "household", nestId: null }); }} />
+        <Chip label="Just me" icon="lock" selected={value === "private"}
+          onPress={() => { setChoosing(false); onChange({ visibility: "private", nestId: null }); }} />
       </ChipRow>
 
       {/* Which nest — only when there's a real question to answer. */}

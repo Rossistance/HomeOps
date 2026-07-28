@@ -10,6 +10,11 @@ export default function HomeLayout() {
         <Stack.Screen name="index" options={{ title: "Today", headerShown: false, gestureEnabled: false }} />
         <Stack.Screen name="activity" options={{ title: "Activity" }} />
         <Stack.Screen name="groceries" options={{ title: "Groceries" }} />
+        {/* BUG-04 — "when I click back, I get to the settings page." These two lived on the
+            SETTINGS stack, so Back unwound there no matter where you entered from. On the
+            home stack, Back returns to Today or Calendar — wherever you actually came from. */}
+        <Stack.Screen name="tasks" options={{ title: "Tasks & Lists" }} />
+        <Stack.Screen name="meals" options={{ title: "Meals" }} />
         <Stack.Screen name="kid" options={{ title: "", headerShown: false }} />
         <Stack.Screen name="grandparent" options={{ title: "", headerShown: false }} />
         <Stack.Screen name="sitter" options={{ title: "", headerShown: false }} />
