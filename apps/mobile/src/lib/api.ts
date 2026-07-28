@@ -581,7 +581,7 @@ export const api = {
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
-  async notifications(): Promise<{ id: string; channel: string; title: string; body: string; read: boolean; createdAt: number }[]> {
+  async notifications(): Promise<{ id: string; channel: string; title: string; body: string; read: boolean; createdAt: number; data?: { type?: string; id?: string } }[]> {
     const r = await req<{ notifications: { id: string; channel: string; title: string; body: string; read: boolean; createdAt: number }[] }>("/notifications");
     return r.data?.notifications ?? [];
   },

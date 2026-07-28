@@ -343,9 +343,18 @@ export default function InboxScreen() {
                     key={n.id}
                     scaleTo={0.99}
                     haptic={n.read ? null : "select"}
-                    onPress={() => void markRead(n)}
+                    onPress={() => {
+                      /* Cluster I — "when I go to select one, I can't actually see any
+                       * context about it… if I click it, I can't see any more. It just
+                       * disappears." A notification that only knows how to vanish is a
+                       * dead end. If it names a thing, tapping goes TO the thing; marking
+                       * read rides along instead of being the whole event. */
+                      void markRead(n);
+                      const d = (n as { data?: { type?: string; id?: string } }).data;
+                      if (d?.type === "event" && d.id) router.push({ pathname: "/event-form", params: { id: d.id } });
+                    }}
                     accessibilityRole="button"
-                    accessibilityLabel={`${n.title}${n.read ? "" : ", unread, tap to mark read"}`}
+                    accessibilityLabel={`${n.title}${n.read ? "" : ", unread"}`}
                   >
                     <View style={{ flexDirection: "row", alignItems: "flex-start", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: 13, borderBottomWidth: i === notices.length - 1 ? 0 : 1, borderBottomColor: colors.border }}>
                       <SymTile

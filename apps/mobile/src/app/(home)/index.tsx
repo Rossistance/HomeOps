@@ -85,11 +85,13 @@ function SeeAll({ label = "See all", onPress }: { label?: string; onPress: () =>
  */
 function EventChip({ event, members, showDay }: { event: EventRec; members: MemberRec[]; showDay?: boolean }) {
   const { colors, spacing } = useTheme();
-  // Whose event is it: the first named participant, else whoever owns the record. An event
-  // with neither belongs to the household, and gets the neutral edge rather than a stranger's
-  // colour — guessing here would put someone's name on a thing that isn't theirs.
-  const tone = memberColor(colors, members.find((m) => m.actorId === event.participantIds?.[0]))
-    ?? memberColor(colors, members.find((m) => m.actorId === event.ownerId))
+  /* Cluster G — the OWNER's colour, always. This used to read participantIds[0] first, so
+   * the moment Ross joined Melissa's event it repainted green on BOTH profiles: "it's no
+   * longer Melissa's… it's not even a shared event when in reality it is." Whose event it
+   * is doesn't change when someone joins it. An event with no member owner belongs to the
+   * household and keeps the neutral edge. */
+  const tone = memberColor(colors, members.find((m) => m.actorId === event.ownerId))
+    ?? memberColor(colors, members.find((m) => m.actorId === event.participantIds?.[0]))
     ?? colors.textFaint;
   const day = event.startAt
     ? new Date(event.startAt).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
@@ -124,7 +126,8 @@ function EventChip({ event, members, showDay }: { event: EventRec; members: Memb
             MemberAvatar already falls back to the emoji or the initial in their own colour, so
             somebody with no photo still reads as themselves. */}
         <View style={{ flexDirection: "row", alignItems: "center" }}>
-          {(event.participantIds ?? []).slice(0, 4).map((pid, i) => {
+          {/* Owner included — "we do not see her picture there" on her own event. */}
+          {[...new Set([event.ownerId, ...(event.participantIds ?? [])])].filter((x): x is string => !!x).slice(0, 4).map((pid, i) => {
             const m = members.find((x) => x.actorId === pid);
             return m ? (
               <View key={pid} style={{ marginLeft: i === 0 ? 0 : -7 }}>
@@ -132,9 +135,9 @@ function EventChip({ event, members, showDay }: { event: EventRec; members: Memb
               </View>
             ) : null;
           })}
-          {(event.participantIds ?? []).length > 4 ? (
+          {[...new Set([event.ownerId, ...(event.participantIds ?? [])])].filter(Boolean).length > 4 ? (
             <T kind="caption" color={colors.textMuted} style={{ marginLeft: 4 }}>
-              +{(event.participantIds ?? []).length - 4}
+              +{[...new Set([event.ownerId, ...(event.participantIds ?? [])])].filter(Boolean).length - 4}
             </T>
           ) : null}
         </View>
@@ -247,6 +250,15 @@ function AdminToday() {
   );
 
   const pending = useMemo(() => approvals.filter((a) => a.status === "pending"), [approvals]);
+  /* Approvals + unread updates in one number — "both approvals and updates". Loaded with the
+   * same refresh cycle as everything else on Today, and cheap: it's a count, not a feed. */
+  const [unreadNotices, setUnreadNotices] = useState(0);
+  useEffect(() => {
+    let live = true;
+    void api.notifications().then((ns) => { if (live) setUnreadNotices(ns.filter((n) => !n.read && n.channel === "in_app").length); }).catch(() => {});
+    return () => { live = false; };
+  }, [now]);
+  const inboxCount = pending.length + unreadNotices;
   const isToday = (iso: string | null) => {
     if (!iso) return false;
     const d = new Date(iso);
@@ -397,6 +409,24 @@ function AdminToday() {
               {now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
             </T>
             <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+              {/* Cluster I — "a small inbox mail icon up here at the top that represents
+                  incoming family chatter… with notification badges for those events, both
+                  approvals and updates." Persistent, so a missed push still has a place
+                  that visibly owes you something. */}
+              <PressableScale onPress={() => router.push("/inbox")} haptic="select" hitSlop={8} accessibilityRole="button"
+                accessibilityLabel={inboxCount > 0 ? `Inbox, ${inboxCount} waiting` : "Inbox"}>
+                <View>
+                  <SymTile name="envelope" color={inboxCount > 0 ? colors.ember : colors.textSecondary} bg={inboxCount > 0 ? colors.emberBg : colors.surfaceSunken} size={34} iconSize={16} />
+                  {inboxCount > 0 ? (
+                    <View style={{
+                      position: "absolute", top: -4, right: -4, minWidth: 17, height: 17, borderRadius: 9,
+                      backgroundColor: colors.ember, alignItems: "center", justifyContent: "center", paddingHorizontal: 4,
+                    }}>
+                      <T kind="caption" color={colors.onEmber} style={{ fontSize: 10, fontWeight: "700" }}>{inboxCount > 99 ? "99+" : String(inboxCount)}</T>
+                    </View>
+                  ) : null}
+                </View>
+              </PressableScale>
               <PressableScale onPress={() => router.push("/profile")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="My profile">
                 <MemberAvatar member={meMember} size={34} />
               </PressableScale>
