@@ -32,6 +32,7 @@ import { KidHome } from "./kid";
 import { GrandparentHome } from "./grandparent";
 import { SitterHome } from "./sitter";
 import { MemberAvatar } from "./profile";
+import { SelfFold } from "@/components/SelfFold";
 
 /* "See all has no button look to it, no neumorphism look to it — it needs to look clickable,
  * not just text." It was ember-coloured text, which relies on you already knowing that ember
@@ -487,9 +488,14 @@ function AdminToday() {
                   ) : null}
                 </View>
               </PressableScale>
-              <PressableScale onPress={() => router.push("/profile")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="My profile">
-                <MemberAvatar member={meMember} size={34} />
-              </PressableScale>
+              {/* Cluster B's remaining half — the fold. Your face starts where it used to
+                  sit in the line and settles into the corner, once per launch, so the
+                  rearrangement is watched rather than inferred. */}
+              <SelfFold size={34}>
+                <PressableScale onPress={() => router.push("/profile")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="My profile">
+                  <MemberAvatar member={meMember} size={34} />
+                </PressableScale>
+              </SelfFold>
               {advanced ? (
                 <PressableScale onPress={() => router.push("/activity")} haptic="select" hitSlop={8} accessibilityRole="button" accessibilityLabel="Activity">
                   <SymTile name="clock" color={colors.textSecondary} bg={colors.surfaceSunken} size={34} iconSize={16} />

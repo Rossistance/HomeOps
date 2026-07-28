@@ -100,6 +100,17 @@ export default function AgentDetailScreen() {
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
   const ownsThis = !!agent && agent.createdBy === session?.actorId && (agent.visibility ?? "household") === "personal";
+  const moveAgent = async (next: Pick<AgentRec, "visibility" | "nestId">, prev: Pick<AgentRec, "visibility" | "nestId">) => {
+    if (!agent) return;
+    setAgent({ ...agent, ...next });
+    const r = await api.patchAgent(agent.id, next);
+    if (r.error) {
+      setAgent({ ...agent, ...prev });
+      Alert.alert("Couldn't move the agent", r.error === "insufficient_role" || r.error === "personal_only"
+        ? "Household agents are set up by an Owner or Adult Admin."
+        : "Something went wrong.");
+    }
+  };
   const canManage = isAdmin || ownsThis;
 
   const steps = useMemo(() => stepsFrom(agent?.instructions), [agent]);
@@ -501,12 +512,32 @@ export default function AgentDetailScreen() {
                     const next: Pick<AgentRec, "visibility" | "nestId"> = key.startsWith("nest:")
                       ? { visibility: "nest", nestId: key.slice(5) }
                       : { visibility: key as "household" | "personal", nestId: null };
-                    setAgent({ ...agent, ...next });
-                    const r = await api.patchAgent(agent.id, next);
-                    if (r.error) {
-                      setAgent({ ...agent, ...prev });
-                      Alert.alert("Couldn't move the agent", r.error === "insufficient_role" ? "Only an Owner or Adult Admin can do that." : "Something went wrong.");
+
+                    /* Cluster AA — "as an adult member, I think there should be an option
+                     * that he gets a family access button as well. However, he cannot edit
+                     * or create agents that way — it will tell him would you like to transfer
+                     * that to a personal or nest chat, and then it will change the status."
+                     *
+                     * An Adult Member may USE the household's agents but not author them, so
+                     * moving one INTO the household space is a move they can't complete. The
+                     * server refuses it (personal_only); this offers the thing they can
+                     * actually do instead of letting them discover the refusal after the tap.
+                     * Asked BEFORE the request, because a prompt that appears after an error
+                     * reads as a retry rather than as a choice. */
+                    if (key === "household" && !isAdmin) {
+                      const target = myNests[0];
+                      Alert.alert(
+                        "Make this a household agent?",
+                        `Household agents are set up by an Owner or Adult Admin. You can keep this one${target ? ` in ${target.label}, or ` : " as "}personal — it still runs for you, and the family's chats can read what it produces.`,
+                        [
+                          { text: "Cancel", style: "cancel" },
+                          ...(target ? [{ text: `Move to ${target.label}`, onPress: () => void moveAgent({ visibility: "nest", nestId: target.id }, prev) }] : []),
+                          { text: "Keep personal", onPress: () => void moveAgent({ visibility: "personal", nestId: null }, prev) },
+                        ],
+                      );
+                      return;
                     }
+                    await moveAgent(next, prev);
                   })()}
                   accessibilityRole="button"
                   accessibilityState={{ selected: active }}

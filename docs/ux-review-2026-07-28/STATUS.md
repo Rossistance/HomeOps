@@ -3,7 +3,9 @@
 Statuses written per item as each landed, **never in bulk** — the last inventory's ✅ column
 was filled by find-and-replace and lied twice (see docs/ux-review-2026-07-27/INVENTORY.md,
 "Correction"). ✅ means committed with tests where the behaviour is testable; ◐ means partially
-landed with the remainder named; ⬜ means not started. Builds: 59–64 carry this work; the Opus-5 re-audit follows in 65.
+landed with the remainder named; ⬜ means not started. Builds 59–65 carry this work; the Opus-5 re-audit and the R-phases land in 66.
+
+**Every ⬜ and ◐ from the first ledger is now closed.** Two judgement calls are recorded rather than hidden: Manage Household was renamed rather than removed (he said both at different points; the later, more specific observation says minimise), and the calendar-side "Alerts" rename has no surface to land on because iOS events carry no reminder control.
 
 **Scope-order decision (owner-confirmed):** Everyone → My Nest → Just me, default Just me.
 This reversed build 57's order; flipped in P4a.
@@ -24,7 +26,7 @@ This reversed build 57's order; flipped in P4a.
 | Cluster | Status |
 |---|---|
 | A colour system | ✅ P2 (spectrum included) |
-| B you at the top | ◐ static reposition on Today + Settings shipped (P6a); the **fold-up animation** he described is not built |
+| B you at the top | ✅ static reposition (P6a) + the fold: your face starts in the line and settles into the corner, once per launch, gated on real visibility, Reduce Motion honoured (R3) |
 | C ownership faces on cards | ✅ owner in face rows (Today fixed in P3 after P1's script silently missed it — see that commit) |
 | D event permissions | ✅ owner-only core, per-viewer notes, request-attend / offer-drive / suggest-bring + owner panel; 13 tests. **Client-side household-feed stewardship was missing** (server allowed it, form locked it) — fixed in the re-audit. |
 | E info badge | ✅ glowing ⓘ, expandable |
@@ -44,14 +46,14 @@ This reversed build 57's order; flipped in P4a.
 | S Coming up = mine | ✅ — but the first pass applied it to the CALENDAR card and never touched Coming up. Un-inverted in the re-audit: Calendar = family/3 days, Coming up = mine/7 days + my tasks. |
 | T "What I did" context | ✅ WHO (agent name / "You asked") + last completed step as the outcome line; publicRun carries agentName (P6e) |
 | U library hue rings | ✅ category glow + tinted file icons (P6e); artifact privacy ✅ (P1) |
-| V settings IA | ◐ backend URL dev-only, builders warning, tasks/meals rows removed, Appearance card gone + dark-mode moon at top (P6f), coming-soon greying on unconfigured connectors (P6i); **connections consolidation under one screen, AI-providers move, per-connector icons, collapse states, ICS file import, connect-calendar naming, Manage-Household minimisation, invite gating** remain |
-| W role matrix | ◐ member-edit matrix + child colour/emoji-only (8 tests) + contacts reach (P6f) + builders warning (P6a); **per-nest approval tools and the advanced-mode PIN** remain |
+| V settings IA | ✅ backend URL dev-only, builders warning, tasks/meals rows removed, Appearance card gone, coming-soon greying, AI providers folded under connections, feed/status collapses, .ics file import, "Connect calendar" naming, Household-view rename (R1). Invite gating was already correct — verified, not re-done. |
+| W role matrix | ✅ member-edit matrix + child limits + contacts reach + per-nest risk overrides + household-PIN gate on the switches that run things unsupervised (R2, 8 tests) |
 | X nests | ✅ one-nest rule both doors; a child's invitation answered by the nest's senior adult via forActorId (child-only door, 2 tests) (P6g) |
 | Y calendar connections | ✅ creator-or-Owner only, refusal names the holder |
 | Z child home | ✅ two real buttons (Ask for help, read-only Family calendar); child asks UP only, Offer greyed not hidden (P6d) |
-| AA agent siloing | ◐ stale copy fixed (P6c); **the family-space transfer prompt** remains |
+| AA agent siloing | ✅ stale copy fixed (P6c); an Adult Member choosing Family is offered nest-or-personal BEFORE the request, so the refusal never arrives as an error (R3) |
 
 ## Test deltas this arc
 P1 +20 · P2 +10 (6 server, 4 mobile×2 themes) · P4b +6 · P4c +7 · P5a +8.
-Suites at close: **979 server / 50 mobile, 0 failures.** Five pre-existing tests updated in
+Suites at close: **987 server / 50 mobile, 0 failures.** Five pre-existing tests updated in
 place with reasons (old reach/order semantics); none quietly flipped.
