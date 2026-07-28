@@ -174,6 +174,19 @@ function maybeSeedSandbox(s) {
 // GET payload, and was still absent after add, after nav, and after sync. Refuse it at the
 // boundary instead. `null` and `""` stay legal: the mobile form's "scheduled" toggle sends
 // startAt:null on purpose, and the web store represents an unscheduled event as "".
+/* Cluster W's reach, applied to contact methods: Owner → everyone; adults → self + nest;
+ * everyone else → self. A closure over the session so list filters read cleanly. */
+function contactReach(session) {
+  if (session.role === "Owner") return () => true;
+  const mine = new Set([session.actorId]);
+  if (isAdultRole(session.role)) {
+    for (const n of nestsFor(session.householdId, session.actorId)) {
+      for (const m of (n.members ?? [])) if (m.status === "joined") mine.add(m.actorId);
+    }
+  }
+  return (memberId) => mine.has(memberId);
+}
+
 function badTimestamp(v) {
   return v != null && v !== "" && isNaN(+new Date(v));
 }
@@ -3445,13 +3458,20 @@ function mayWriteAgent(session, agent, nextVisibility) {
      * born verified. Changing an external address resets verification. */
     if (path === "/api/contact-methods" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const methods = listContactMethods((c) => c.householdId === g.session.householdId);
+      /* Cluster W — "As the owner, I should be able to see all contacts and make all
+       * modifications necessary. Others should not." Everyone else sees their own methods
+       * and their nest's — the same reach as everything since the edit matrix. Contact
+       * methods are where notifications go; another adult silently re-pointing YOUR phone
+       * number is the household's mail being redirected. */
+      const reach = contactReach(g.session);
+      const methods = listContactMethods((c) => c.householdId === g.session.householdId && reach(c.memberId));
       return json(res, 200, { contactMethods: methods }, req);
     }
     if (path === "/api/contact-methods" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const memberId = String(body.memberId ?? g.session.actorId).trim();
+      if (!contactReach(g.session)(memberId)) return json(res, 403, { error: "outside_your_nest", message: "You can add contact methods for yourself and your nest. The Owner manages everyone's." }, req);
       if (!isAdultRole(g.session.role) && memberId !== g.session.actorId) return json(res, 403, { error: "insufficient_role" }, req);
       const member = getMember(memberId);
       if (!member || member.archived || (member.householdId ?? "local") !== g.session.householdId) return json(res, 404, { error: "member_not_found" }, req);
@@ -3565,7 +3585,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const cm = getContactMethod(contactOne[1]);
       if (!cm || cm.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
-      if (!isAdultRole(g.session.role) && cm.memberId !== g.session.actorId) return json(res, 403, { error: "insufficient_role" }, req);
+      if (!contactReach(g.session)(cm.memberId)) return json(res, 403, { error: "outside_your_nest", message: "You can manage your own contact methods and your nest's. The Owner manages everyone's." }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const patch = {};
       if (body.label != null) { const l = String(body.label).trim(); if (!l) return json(res, 400, { error: "label_required" }, req); patch.label = l; }
@@ -3627,7 +3647,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const cm = getContactMethod(contactOne[1]);
       if (!cm || cm.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
-      if (!isAdultRole(g.session.role) && cm.memberId !== g.session.actorId) return json(res, 403, { error: "insufficient_role" }, req);
+      if (!contactReach(g.session)(cm.memberId)) return json(res, 403, { error: "outside_your_nest", message: "You can manage your own contact methods and your nest's. The Owner manages everyone's." }, req);
       deleteContactMethodRec(cm.id);
       deleteContactVerification(cm.id); // a pending code for a deleted method is dead
       audit({ type: "contact_method.delete", contactMethodId: cm.id, ok: true }, req, g.session);

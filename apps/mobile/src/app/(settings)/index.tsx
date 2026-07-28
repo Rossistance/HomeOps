@@ -180,6 +180,15 @@ export default function SettingsScreen() {
           {/* Cluster B, Settings edition — "there's no need to have myself here to tap to
               edit; that could be available up here, noting whose account I am. This should
               be me up here, and their family members down below." */}
+          {/* The whole Appearance card, reduced to its one real control. */}
+          <PressableScale
+            onPress={() => setPref(dark ? "light" : "dark")}
+            haptic="select" hitSlop={10} accessibilityRole="button"
+            accessibilityLabel={dark ? "Switch to light mode" : "Switch to dark mode"}
+            style={{ padding: 6 }}
+          >
+            <Sym name={dark ? "sun.max" : "moon"} size={16} color={colors.textSecondary} />
+          </PressableScale>
           <PressableScale
             onPress={() => { const me = members.find((m) => m.isCurrentUser || m.actorId === session?.actorId); if (me) setEditingMember(me); }}
             haptic="select" hitSlop={10} accessibilityRole="button" accessibilityLabel="Edit my profile"
@@ -335,26 +344,9 @@ export default function SettingsScreen() {
         </Card>
       </Rise>
 
-      {/* Moved down here from the top of the screen. It's a preference, not something you came
-          to Settings to do — and dark is the default now, so most people never touch it. */}
-      <Rise index={5}>
-        <SectionHeader title="Appearance" />
-        <Card>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-            <View style={{ flex: 1, gap: 2 }}>
-              <T kind="rowTitle">Dark mode</T>
-              <T kind="detail">{pref === "system" ? "Matching your device" : pref === "dark" ? "Dark" : "Light"}</T>
-            </View>
-            {pref !== "system" && (
-              <PressableScale onPress={() => setPref("system")} haptic="select" hitSlop={8}>
-                <T kind="subMedium" color={colors.ember}>Match system</T>
-              </PressableScale>
-            )}
-            <Switch value={dark} onValueChange={(v) => setPref(v ? "dark" : "light")} trackColor={{ true: colors.ember }} />
-          </View>
-        </Card>
-      </Rise>
-
+      {/* V — the Appearance card is gone: "it wouldn't be a bad idea to just move it all
+          the way to the top as a small toggle… I don't think it needs to be such a large
+          surface area button." It's now the moon on the identity card up top. */}
       <Rise index={5}>
         <Card>
           <Button title="Sign out" variant="danger" onPress={confirmSignOut} full />
