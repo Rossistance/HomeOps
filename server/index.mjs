@@ -1638,14 +1638,38 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const m = getMember(memberOne[1]);
       if (!m || m.archived) return json(res, 404, { error: "not_found" }, req);
-      // Self-service: a member may edit their OWN presentation (name/photo/color). Changing
-      // relationship, role, or a child's AI access — or editing ANOTHER member — is Adult Admin+.
+      /* Cluster W — the edit matrix, by RELATIONSHIP rather than by rank alone.
+       *
+       * "Other adult members or even admins should not have the ability to update anybody
+       *  else's account but themselves, their child or someone else in their nest. They
+       *  should not be able to update someone outside of their nest."
+       *
+       * Owner → anyone (they answer for the household). Adults → themselves + their own
+       * nest, the nest standing in for "their people" — Melissa edits Ross and Amelia
+       * because they share a nest, and cannot touch GPop's account across the hall.
+       * Limited members and children → themselves only, and a child's self-service is
+       * colour and emoji, nothing else ("for the child, they should only be able to edit
+       * their color, and that's it"). */
       const isSelf = m.actorId === g.session.actorId;
-      const canManage = roleAtLeast(g.session.role, "Adult Admin");
-      if (!canManage && !isSelf) return json(res, 403, { error: "insufficient_role" }, req);
+      const isOwner = g.session.role === "Owner";
+      const myNestIds = new Set(nestsFor(g.session.householdId, g.session.actorId).map((n) => n.id));
+      const sameNest = !isSelf && nestsFor(g.session.householdId, m.actorId).some((n) => myNestIds.has(n.id));
+      const adultActor = isAdultRole(g.session.role);
+      const mayTouch = isOwner || isSelf || (adultActor && sameNest);
+      if (!mayTouch) return json(res, 403, { error: "outside_your_nest", message: "You can edit yourself and the people in your nest. The Owner manages everyone else." }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!canManage && (body.relationship !== undefined || body.role != null || body.aiEnabled !== undefined)) {
+      // Role, relationship, and a child's AI switch stay governance: Adult Admin+ — and only
+      // inside the same matrix (an Adult Admin still can't re-role someone outside their nest).
+      const governs = isOwner || (roleAtLeast(g.session.role, "Adult Admin") && (isSelf || sameNest));
+      if (!governs && (body.relationship !== undefined || body.role != null || body.aiEnabled !== undefined)) {
         return json(res, 403, { error: "insufficient_role", message: "Only an Owner or Adult Admin can change roles or relationships." }, req);
+      }
+      if (g.session.role === "Child View") {
+        const allowed = new Set(["color", "photoFileId"]);
+        const asked = Object.keys(body).filter((k) => body[k] !== undefined);
+        if (asked.some((k) => !allowed.has(k)) || (body.photoFileId && !String(body.photoFileId).startsWith("emoji:"))) {
+          return json(res, 403, { error: "child_limited", message: "Kids can pick their colour and emoji here — a grown-up changes the rest." }, req);
+        }
       }
       const patch = {};
       if (body.displayName != null) { const n = String(body.displayName).trim(); if (!n) return json(res, 400, { error: "name_required" }, req); patch.displayName = n; }
@@ -3201,6 +3225,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const sub = getSubscription(subSync[1]);
       if (!sub || sub.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      /* Cluster Y — "there should be no availability to sync or remove a calendar that was
+       * not added through their login… only ones that should be modifiable are the ones that
+       * the particular user account adds and is in control of." The Owner keeps household-
+       * wide stewardship; every other adult manages exactly the calendars they connected. */
+      if (sub.createdBy && sub.createdBy !== g.session.actorId && g.session.role !== "Owner") {
+        return json(res, 403, { error: "not_your_calendar", message: `${getMember(sub.createdBy)?.displayName ?? "Another member"} connected this calendar — only they (or the Owner) can sync it.` }, req);
+      }
       const r = await syncSubscription({ sub, session: g.session });
       patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed } : { error: r.error }, eventCount: r.ok ? r.total : (sub.eventCount ?? 0) });
       audit({ type: "calendar.sync", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, req, g.session);
@@ -3212,6 +3243,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const sub = getSubscription(subOne[1]);
       if (!sub || sub.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      // Cluster Y — same boundary as sync: removing someone else's calendar removes THEIR
+      // events from the family's view, which is not a thing another adult gets to do.
+      if (sub.createdBy && sub.createdBy !== g.session.actorId && g.session.role !== "Owner") {
+        return json(res, 403, { error: "not_your_calendar", message: `${getMember(sub.createdBy)?.displayName ?? "Another member"} connected this calendar — only they (or the Owner) can remove it.` }, req);
+      }
       const removed = removeSubscriptionEvents(sub.id, g.session);
       deleteSubscriptionRec(sub.id);
       audit({ type: "calendar.unsubscribe", subscriptionId: sub.id, removedEvents: removed, ok: true }, req, g.session);

@@ -7,7 +7,9 @@ import { startServer, stopServer, makeSession } from "./harness.mjs";
 let ctx, admin;
 before(async () => {
   ctx = await startServer();
-  admin = await makeSession(ctx, "m-morgan"); // Adult Admin — manages the roster
+  /* CHANGED (Cluster W): roster-wide member management is the OWNER's now. An Adult Admin
+   * reaches only themselves and their nest, so the colour round-trip acts as the Owner. */
+  admin = await makeSession(ctx, "m-alex"); // Owner — manages the roster
 });
 after(async () => { await stopServer(ctx); });
 

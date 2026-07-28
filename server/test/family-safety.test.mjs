@@ -128,7 +128,10 @@ test("a Child View session without aiEnabled gets 403 ai_disabled on POST /api/a
 
   // An adult flips the toggle → the gate opens (any non-403 outcome is fine; without
   // an AI provider the assistant honestly fails 422, which proves the gate passed).
-  const patched = await morgan.req("/api/members/m-noah", { method: "PATCH", body: JSON.stringify({ aiEnabled: true }) });
+  /* CHANGED (Cluster W): morgan is an Adult Admin with no nest shared with Noah, and the
+   * edit matrix now stops exactly that reach — "admins should not update anybody but
+   * themselves, their child or someone in their nest." The Owner flips the switch. */
+  const patched = await alex.req("/api/members/m-noah", { method: "PATCH", body: JSON.stringify({ aiEnabled: true }) });
   assert.equal(patched.status, 200);
   const r2 = await child.req("/api/assistant", { method: "POST", body: JSON.stringify({ message: "hi" }) });
   assert.notEqual(r2.status, 403, JSON.stringify(r2.data));

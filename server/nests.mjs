@@ -98,6 +98,13 @@ export function publicNest(nest, roster = new Map(), forActorId = null) {
  * INVITED and has to say yes.
  */
 export function createNest({ householdId, actorId, name, inviteActorIds = [] }) {
+  /* Cluster X — ONE nest at a time. "You cannot join another nest until you leave your
+   * current nest. If so, there would be too many nests to keep track of. You'd get too many
+   * silos. Communication would get garbled." Creating one while in one is the same act as
+   * joining a second, so both doors are barred by the same rule. */
+  if (nestsFor(householdId, actorId).length > 0) {
+    return { error: "already_nested", message: "You're already in a nest. Leave it first — one nest at a time keeps who-sees-what simple enough to trust." };
+  }
   const roster = new Set(listMembers((m) => m.householdId === householdId && !m.archived).map((m) => m.actorId));
   const invitees = [...new Set(inviteActorIds.map(String))].filter((id) => roster.has(id) && id !== actorId);
   if (invitees.length === 0) return { error: "nobody_to_invite", message: "Choose at least one other person for the nest." };
@@ -136,6 +143,10 @@ export function respondToNest({ nestId, householdId, actorId, accept }) {
   if (!n || n.householdId !== householdId || n.archived) return { error: "not_found" };
   const me = (n.members ?? []).find((m) => m.actorId === actorId);
   if (!me || me.status !== "invited") return { error: "no_invitation", message: "You don't have an invitation to that nest." };
+  // Cluster X — accepting a second nest is the same as joining one: refused until you leave.
+  if (accept && nestsFor(householdId, actorId).length > 0) {
+    return { error: "already_nested", message: "You're already in a nest — leave it before joining another." };
+  }
   me.status = accept ? "joined" : "declined";
   me.respondedAt = now();
   n.updatedAt = now();

@@ -24,10 +24,28 @@ before(async () => {
 });
 after(async () => { await stopServer(ctx); });
 
-const mkNest = (as, inviteActorIds, name) =>
-  as.req("/api/nests", { method: "POST", body: JSON.stringify({ name, inviteActorIds }) });
+/* mkNest walks its creator (and the usual invitee) out of any current nest first: since the
+ * one-nest rule (Cluster X, pinned in role-matrix.test.mjs) a second nest can't be formed
+ * from inside one, and THIS file's subject is consent and isolation, not the join limit. */
+const mkNest = async (as, inviteActorIds, name) => {
+  for (const person of [alex, morgan, lily]) {
+    const mine = (await person.req("/api/nests")).data?.nests ?? [];
+    for (const n of mine) await person.req(`/api/nests/${n.id}/leave`, { method: "POST", body: "{}" });
+  }
+  return as.req("/api/nests", { method: "POST", body: JSON.stringify({ name, inviteActorIds }) });
+};
 const act = (as, id, action, body = {}) =>
   as.req(`/api/nests/${id}/${action}`, { method: "POST", body: JSON.stringify(body) });
+/* Cluster X (added 7-28): ONE nest at a time is now the rule, so a test that forms a fresh
+ * nest must first walk its actors out of the previous one — exactly what a real person would
+ * have to do. Leaving everyone out rather than only the creator, because an invitee who
+ * accepted earlier is just as nested as the person who invited them. */
+const leaveAll = async (...people) => {
+  for (const person of people) {
+    const mine = (await person.req("/api/nests")).data.nests ?? [];
+    for (const n of mine) await act(person, n.id, "leave");
+  }
+};
 
 /* ---- forming one ---- */
 
@@ -40,6 +58,7 @@ test("an adult creates a nest; the creator is in, the invitee is only INVITED", 
 });
 
 test("the label is the one he used — names, joined", async () => {
+  await leaveAll(alex, morgan);
   const r = await mkNest(alex, ["m-morgan"]);
   await act(morgan, r.data.nest.id, "accept");
   const list = await alex.req("/api/nests");
@@ -49,6 +68,7 @@ test("the label is the one he used — names, joined", async () => {
 });
 
 test("a nest with nobody else in it is refused", async () => {
+  await leaveAll(alex, morgan);
   const r = await mkNest(alex, []);
   assert.equal(r.status, 400);
   assert.equal(r.data.error, "nobody_to_invite");
@@ -62,6 +82,7 @@ test("a child cannot form one", async () => {
 /* ---- consent ---- */
 
 test("CONSENT: an invitation appears for the invitee, and not as membership", async () => {
+  await leaveAll(alex, morgan);
   const r = await mkNest(alex, ["m-morgan"]);
   const theirs = await morgan.req("/api/nests");
   assert.ok(theirs.data.invitations.some((n) => n.id === r.data.nest.id), "it is waiting on them");
@@ -69,10 +90,14 @@ test("CONSENT: an invitation appears for the invitee, and not as membership", as
 });
 
 test("accepting joins; declining does not", async () => {
+  await leaveAll(alex, morgan);
   const a = await mkNest(alex, ["m-morgan"]);
   await act(morgan, a.data.nest.id, "accept");
   assert.ok((await morgan.req("/api/nests")).data.nests.some((n) => n.id === a.data.nest.id));
 
+  // Forming the second one requires leaving the first — the one-nest rule is the point,
+  // not an obstacle course around it.
+  await leaveAll(alex, morgan);
   const b = await mkNest(alex, ["m-morgan"]);
   await act(morgan, b.data.nest.id, "decline");
   const theirs = await morgan.req("/api/nests");

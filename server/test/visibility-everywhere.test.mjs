@@ -35,6 +35,13 @@ before(async () => {
 });
 after(async () => { await stopServer(ctx); });
 
+/* One nest at a time now (Cluster X) — a test that needs a fresh nest walks out first. */
+const freshNest = async (client, name) => {
+  const mine = (await client.req("/api/nests")).data?.nests ?? [];
+  for (const n of mine) await client.req(`/api/nests/${n.id}/leave`, { method: "POST", body: "{}" });
+  return client.req("/api/nests", { method: "POST", body: JSON.stringify({ name, inviteActorIds: [owner.actorId] }) });
+};
+
 const addNote = (client, body) =>
   client.req("/api/knowledge", { method: "POST", body: JSON.stringify({ title: "Note", type: "Family Fact", content: "x", ...body }) });
 const notesVisibleTo = async (client) => (await client.req("/api/knowledge")).data.items.map((k) => k.title);
@@ -76,7 +83,7 @@ test("an unrecognised or missing scope is the household default, not an accident
 /* ------------------------------ My Nest ------------------------------ */
 
 test("a knowledge item can be nest-scoped at all, which it could not before", async () => {
-  const made = await adult.req("/api/nests", { method: "POST", body: JSON.stringify({ name: "Mum & Dad", inviteActorIds: [owner.actorId] }) });
+  const made = await freshNest(adult, "Mum & Dad");
   const nestId = made.data?.nest?.id;
   assert.ok(nestId, JSON.stringify(made.data));
   const r = await addNote(adult, { title: "Nest note", visibility: "nest", nestId });
@@ -89,7 +96,7 @@ test("a knowledge item can be nest-scoped at all, which it could not before", as
 test("naming a nest you are not in is REFUSED, not quietly downgraded", async () => {
   // Silently filing it somewhere else is worse than refusing: you'd believe it was shared
   // with someone it never reached, or private when it wasn't.
-  const made = await adult.req("/api/nests", { method: "POST", body: JSON.stringify({ name: "Just adults", inviteActorIds: [owner.actorId] }) });
+  const made = await freshNest(adult, "Just adults");
   const nestId = made.data.nest.id;
   const r = await addNote(other, { title: "Gatecrash", visibility: "nest", nestId });
   assert.equal(r.status, 403);
@@ -99,7 +106,7 @@ test("naming a nest you are not in is REFUSED, not quietly downgraded", async ()
 /* ----------------------------- Tasks ------------------------------- */
 
 test("a task gets the same three scopes and the same refusal", async () => {
-  const made = await adult.req("/api/nests", { method: "POST", body: JSON.stringify({ name: "Chores nest", inviteActorIds: [owner.actorId] }) });
+  const made = await freshNest(adult, "Chores nest");
   const nestId = made.data.nest.id;
 
   const priv = await adult.req("/api/tasks", { method: "POST", body: JSON.stringify({ title: "Mine only", visibility: "personal" }) });
@@ -134,7 +141,7 @@ test("a pre-existing knowledge item can change scope too", async () => {
 });
 
 test("leaving a nest scope clears the nest pointer instead of leaving a stale one behind", async () => {
-  const made = await adult.req("/api/nests", { method: "POST", body: JSON.stringify({ name: "Temp nest", inviteActorIds: [owner.actorId] }) });
+  const made = await freshNest(adult, "Temp nest");
   const nestId = made.data.nest.id;
   const note = await addNote(adult, { title: "Moves out", visibility: "nest", nestId });
   const r = await adult.req(`/api/knowledge/${note.data.item.id}`, { method: "PATCH", body: JSON.stringify({ visibility: "household" }) });
