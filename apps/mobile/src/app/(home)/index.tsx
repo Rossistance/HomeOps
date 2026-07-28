@@ -281,10 +281,16 @@ function AdminToday() {
    *
    * All-day events are kept for their whole day rather than being dropped at midnight: an
    * all-day event at 2pm is still today's news. */
+  /* Cluster S — "Coming up should not act like the calendar does… it should be the next
+   * four or five events that I'M ON, and the next few upcoming tasks that I'm on, within
+   * the next five to seven days. Not other people's events." The Calendar card above stays
+   * the family's; this one is yours. Mine = I own it or I'm on it. */
   const cardEvents = useMemo(() => {
     const nowMs = now.getTime();
-    const horizon = nowMs + 3 * 24 * 60 * 60 * 1000;
+    const horizon = nowMs + 7 * 24 * 60 * 60 * 1000;
+    const me = session?.actorId;
     return events
+      .filter((e) => e.ownerId === me || (e.participantIds ?? []).includes(me ?? ""))
       .filter((e) => {
         if (!e.startAt) return false;
         const start = new Date(e.startAt).getTime();
@@ -296,8 +302,22 @@ function AdminToday() {
         return endsAt >= nowMs && start <= horizon;
       })
       .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
+      .slice(0, 5);
+  }, [events, now, session?.actorId]);
+  /* …and the tasks half of "coming up": mine, dated, open, same window. */
+  const comingTasks = useMemo(() => {
+    const me = session?.actorId;
+    const nowMs = now.getTime();
+    const horizon = nowMs + 7 * 24 * 60 * 60 * 1000;
+    return tasks
+      .filter((t) => (t.assignedMemberId ?? t.createdBy) === me && t.status !== "done" && t.status !== "archived")
+      .filter((t) => {
+        const at = Date.parse(t.startAt ?? t.dueAt ?? "");
+        return !Number.isNaN(at) && at >= nowMs - 12 * 3600e3 && at <= horizon;
+      })
+      .sort((a, b) => String(a.dueAt ?? a.startAt).localeCompare(String(b.dueAt ?? b.startAt)))
       .slice(0, 3);
-  }, [events, now]);
+  }, [tasks, now, session?.actorId]);
   const bills = tasks.filter((t) => t.type === "bill" && t.status !== "done").slice(0, 4);
 
   // Help requests to/from me — the "needs your attention" companions.
@@ -646,6 +666,32 @@ function AdminToday() {
                   {todayEvents.length > 3 ? (
                     <T kind="detail" color={colors.ember}>+{todayEvents.length - 3} more today</T>
                   ) : null}
+                  {/* The tasks half of "coming up" — mine, dated, tinted MY colour (Q1:
+                      "these are my tasks… they should share my color", not the generic
+                      blue), and tapping goes to the Tasks page whose Back now returns
+                      here (BUG-04). */}
+                  {comingTasks.map((t) => {
+                    const mine = memberColor(colors, members.find((m) => m.actorId === (t.assignedMemberId ?? t.createdBy))) ?? colors.sky;
+                    const at = new Date(t.dueAt ?? t.startAt ?? "");
+                    return (
+                      <PressableScale
+                        key={t.id}
+                        onPress={() => router.push("/tasks")}
+                        haptic="select"
+                        accessibilityRole="button"
+                        accessibilityLabel={`Task: ${t.title}. Opens Tasks`}
+                        style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, borderRadius: 10, backgroundColor: fade(mine, 0.10), paddingHorizontal: spacing.md, paddingVertical: 8 }}
+                      >
+                        <Sym name="checkmark.circle" size={14} color={mine} />
+                        <T kind="subMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={1}>{t.title}</T>
+                        {!Number.isNaN(+at) ? (
+                          <T kind="caption" color={colors.textFaint}>
+                            {at.toLocaleDateString(undefined, { weekday: "short" })} {at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                          </T>
+                        ) : null}
+                      </PressableScale>
+                    );
+                  })}
                 </View>
               ) : null}
             </PressableCard>

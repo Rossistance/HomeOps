@@ -5,17 +5,18 @@
 // edits write back two-way); ICS-fed events are read-only mirrors that expand
 // inline. Each subscribed calendar gets its own accent color on its cards.
 // Bottom: calendar subscriptions with sync status (feeds managed in Connections).
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
-import { api, type CalendarSubscription, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
+import { api, type NestRec, type CalendarSubscription, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { LinearGradient } from "expo-linear-gradient";
 import { fade, memberAccent, memberColor } from "@/lib/member-colors";
+import * as SecureStore from "expo-secure-store";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
 // still shadows the ui/ directory until old screens are deleted centrally.
-import { Badge } from "@/components/ui/badge";
+import { Badge, Chip } from "@/components/ui/badge";
 import { Coach } from "@/components/ui/coach";
 import { ScreenTour } from "@/components/ui/screen-tour";
 import { Button } from "@/components/ui/button";
@@ -98,9 +99,26 @@ export default function CalendarScreen() {
   const [syncing, setSyncing] = useState<string | null>(null);
   const [syncingAll, setSyncingAll] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
+  const [nests, setNests] = useState<NestRec[]>([]);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
   // Guards the auto-sync interval against overlapping runs (a slow sync + a 60s tick).
   const syncBusyRef = useRef(false);
+
+  /* Cluster H — "a filter right next to the sync button that allows me to select from
+   * seeing the entire family's calendar, my nest's calendar, or just my calendar… that
+   * setting should stick and always be what that calendar view comes back with every time
+   * I access the app. Just me means events that are ONLY me — not ones that are shared."
+   * Persisted per device: which lens you read the family through is a personal habit. */
+  const [calScope, setCalScope] = useState<"family" | "nest" | "me">("family");
+  useEffect(() => {
+    void SecureStore.getItemAsync("familios_cal_scope").then((v) => {
+      if (v === "nest" || v === "me") setCalScope(v);
+    }).catch(() => {});
+  }, []);
+  const pickScope = (v: "family" | "nest" | "me") => {
+    setCalScope(v);
+    void SecureStore.setItemAsync("familios_cal_scope", v).catch(() => {});
+  };
 
   const load = useCallback(async () => {
     // api.* swallow network errors into empty arrays, so probe /health for honesty.
@@ -108,9 +126,12 @@ export default function CalendarScreen() {
     // should show up in a consolidated view." So dated tasks are fetched and shown under the
     // day they fall on, clearly as tasks — not converted into fake events, which is how a
     // checkbox ends up in an event editor that can't save it.
-    const [health, ev, mem, s, tks] = await Promise.all([api.health(), api.events(), api.members(), api.calendarSubscriptions(), api.tasks()]);
+    const [health, ev, mem, s, tks, ns] = await Promise.all([
+      api.health(), api.events(), api.members(), api.calendarSubscriptions(), api.tasks(),
+      api.nests().catch(() => ({ nests: [] as NestRec[], invitations: [] as NestRec[] })),
+    ]);
     if (!health) { setPhase("error"); return; }
-    setEvents(ev); setMembers(mem); setSubs(s); setTasks(tks);
+    setEvents(ev); setMembers(mem); setSubs(s); setTasks(tks); setNests(ns.nests);
     setPhase("ready");
   }, []);
 
@@ -119,7 +140,26 @@ export default function CalendarScreen() {
 
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
-  const conflictCount = useMemo(() => events.filter((e) => conflictOf(e)).length, [events]);
+  /* The lens itself. Family: everything visible. My Nest: events involving a nest member
+   * (owner or participant) — his example keeps Amelia's dance and drops GPop's ride. Just
+   * me: events that are MINE ALONE — owned by me with nobody else on them — "only the
+   * fully green events… not ones that are even shared." */
+  const nestMemberIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const n of nests) for (const m of (n.members ?? [])) ids.add(typeof m === "string" ? m : m.actorId);
+    if (session?.actorId) ids.add(session.actorId);
+    return ids;
+  }, [nests, session?.actorId]);
+  const inLens = useCallback((e: EventRec) => {
+    if (calScope === "family") return true;
+    const people = [e.ownerId, ...(e.participantIds ?? [])].filter(Boolean) as string[];
+    if (calScope === "nest") return people.some((id) => nestMemberIds.has(id));
+    const me = session?.actorId;
+    return e.ownerId === me && (e.participantIds ?? []).every((id) => id === me);
+  }, [calScope, nestMemberIds, session?.actorId]);
+  const lensedEvents = useMemo(() => events.filter(inLens), [events, inLens]);
+
+  const conflictCount = useMemo(() => lensedEvents.filter((e) => conflictOf(e)).length, [lensedEvents]);
 
   // H6 — dated, still-open tasks, grouped by the day they land on.
   const tasksByDay = useMemo(() => {
@@ -246,11 +286,11 @@ export default function CalendarScreen() {
 
   // Upcoming = anything undated, starting within the last 12h onward, or a
   // multi-day event still running (its END hasn't passed the window).
-  const upcoming = useMemo(() => [...events]
+  const upcoming = useMemo(() => [...lensedEvents]
     .filter((e) => !e.startAt
       || new Date(e.startAt).getTime() >= Date.now() - 12 * 3600e3
       || (e.endAt ? new Date(e.endAt).getTime() >= Date.now() - 12 * 3600e3 : false))
-    .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))), [events]);
+    .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))), [lensedEvents]);
   // ISS-121: events whose source account can no longer refresh (server-derived flag).
   const staleEvents = useMemo(() => events.filter((e) => e.staleSource), [events]);
   const byDay = useMemo(() => {
@@ -500,6 +540,11 @@ export default function CalendarScreen() {
               loading={syncingAll}
               onPress={() => void syncAll()}
             />
+            {/* Cluster H — the lens, in his order, remembered across launches. My Nest only
+                offers itself when a nest exists to mean something by it. */}
+            <Chip label="Family" icon="house.fill" selected={calScope === "family"} onPress={() => pickScope("family")} />
+            {nests.length > 0 ? <Chip label="My Nest" icon="person.2.fill" selected={calScope === "nest"} onPress={() => pickScope("nest")} /> : null}
+            <Chip label="Just me" icon="lock" selected={calScope === "me"} onPress={() => pickScope("me")} />
             {conflictCount > 0 ? (
               <Badge
                 label={`${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`}
