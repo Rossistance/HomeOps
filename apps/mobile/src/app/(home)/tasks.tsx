@@ -22,6 +22,15 @@ const TYPE_GROUP: Record<string, string> = {
   chore: "Chores", reminder: "Reminders", errand: "Errands", bill: "Bills", list: "Groceries", task: "Tasks",
 };
 // Inverse mapping for the composer: which {type, listName} a new task gets per group.
+/* Cluster N — the same offsets the server validates (reminders.mjs REMINDER_CHOICES). */
+const CREATE_REMINDERS: { minutes: number; label: string }[] = [
+  { minutes: 0, label: "At the time" },
+  { minutes: 15, label: "15 min" },
+  { minutes: 30, label: "30 min" },
+  { minutes: 60, label: "1 hour" },
+  { minutes: 1440, label: "1 day" },
+];
+
 const GROUP_CREATE: Record<string, { type: string; listName?: string }> = {
   Chores: { type: "chore" }, Reminders: { type: "reminder" }, Errands: { type: "errand" },
   Bills: { type: "bill" }, Groceries: { type: "list", listName: "Groceries" }, Tasks: { type: "task" },
@@ -185,6 +194,7 @@ export default function TasksScreen() {
   // Composer
   const [title, setTitle] = useState("");
   const [quickDue, setQuickDue] = useState<QuickDue>(null);
+  const [createReminds, setCreateReminds] = useState<Set<number>>(new Set());
   const [assignee, setAssignee] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);
@@ -366,6 +376,7 @@ export default function TasksScreen() {
       // A picked date beats a chip; a chip beats nothing.
       dueAt: quickDue === "custom" ? dueAt.toISOString() : dueFromQuick(quickDue),
       startAt: quickDue === "custom" ? startAt.toISOString() : undefined,
+      ...(createReminds.size ? { remindOffsets: [...createReminds] } : {}),
       assignedMemberId: assignee, listName: target.listName,
       // Whatever the picker says. Private is still the default it starts on: "not everybody
       // wants everyone in the family to see a task they have and offer help for it."
@@ -395,7 +406,7 @@ export default function TasksScreen() {
       // "If I selected just me, it would actually disappear out of this family group and get
       // added underneath the just me." Followed, not vanished.
       setJustMe(created.visibility === "private");
-      setTitle(""); setQuickDue(null); setAssignee(null);
+      setTitle(""); setQuickDue(null); setAssignee(null); setCreateReminds(new Set());
       setScope({ visibility: landedIn ? "nest" : "private", nestId: landedIn });
       tapHaptic("success");
     } else {
@@ -597,6 +608,30 @@ export default function TasksScreen() {
                   nests={nests.map((n) => ({ id: n.id, label: n.label }))}
                   onChange={setScope}
                 />
+                {/* Cluster N — "this Remind needs to be available during creation, similar
+                    to the way that the date and time creation is available." Multi-select,
+                    same menu as the edit sheet, only offered once the task has a WHEN to
+                    remind relative to. */}
+                {quickDue !== null ? (
+                  <View style={{ gap: 6 }}>
+                    <T kind="eyebrow">Remind</T>
+                    <ChipRow>
+                      {CREATE_REMINDERS.map((r) => (
+                        <Chip
+                          key={String(r.minutes)}
+                          label={r.label}
+                          icon={createReminds.has(r.minutes) ? "bell.fill" : undefined}
+                          selected={createReminds.has(r.minutes)}
+                          onPress={() => setCreateReminds((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(r.minutes)) next.delete(r.minutes); else next.add(r.minutes);
+                            return next;
+                          })}
+                        />
+                      ))}
+                    </ChipRow>
+                  </View>
+                ) : null}
                 {members.length > 0 ? (
                   <View style={{ gap: 6 }}>
                     <T kind="eyebrow">Assign to</T>

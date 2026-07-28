@@ -184,8 +184,11 @@ export default function AgentsScreen() {
         </View>
       </Rise>
 
+      {/* AA — "that's really not true anymore. Agents can run or change in any account —
+          they're siloed within that." The old sentence described household agents and read
+          as a blanket ban to someone looking at their OWN list. */}
       {!canManage && visible.length > 0 ? (
-        <T kind="caption" center color={colors.textFaint}>Only an Owner or Adult Admin can run or change agents.</T>
+        <T kind="caption" center color={colors.textFaint}>Your agents and your nest&apos;s are yours to run and change. The household&apos;s shared agents need an Owner or Adult Admin.</T>
       ) : null}
 
       {visible.length === 0 ? (

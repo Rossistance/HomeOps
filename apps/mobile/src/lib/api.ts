@@ -1016,7 +1016,7 @@ export const api = {
     const r = await req<{ ok?: boolean; tasksRemoved?: number; error?: string }>(`/task-lists/${encodeURIComponent(id)}`, { method: "DELETE" });
     return r.data ?? { error: "network" };
   },
-  async createTask(body: { title: string; type?: string; dueAt?: string | null; startAt?: string | null; endAt?: string | null; assignedMemberId?: string | null; priority?: string; listName?: string; visibility?: string; nestId?: string }): Promise<{ task?: TaskRec; error?: string }> {
+  async createTask(body: { title: string; type?: string; dueAt?: string | null; startAt?: string | null; endAt?: string | null; assignedMemberId?: string | null; priority?: string; listName?: string; visibility?: string; nestId?: string; remindOffsets?: number[] }): Promise<{ task?: TaskRec; error?: string }> {
     const r = await req<{ task?: TaskRec; error?: string }>("/tasks", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };

@@ -666,7 +666,8 @@ export default function CalendarScreen() {
                     visibly a different kind of thing. Tapping opens Tasks, where it can
                     actually be edited and checked off. */}
                 {(tasksByDay[k] ?? []).map((t) => (
-                  <DayTask key={t.id} t={t} name={t.assignedMemberId ? nameOf(t.assignedMemberId) : null} />
+                  <DayTask key={t.id} t={t} name={t.assignedMemberId ? nameOf(t.assignedMemberId) : null}
+                    tone={colorOf(t.assignedMemberId ?? t.createdBy ?? null)} />
                 ))}
               </View>
             </Rise>
@@ -731,16 +732,22 @@ export default function CalendarScreen() {
 /** One agenda entry: time rail on the left, event card on the right. */
 /** H6 — a dated task, shown under its day but never dressed up as an event. Tapping goes to
  *  Tasks, which is where it can be edited and checked off; an event editor can do neither. */
-function DayTask({ t, name }: { t: TaskRec; name: string | null }) {
+function DayTask({ t, name, tone }: { t: TaskRec; name: string | null; tone?: string | null }) {
   const { colors, spacing, radii } = useTheme();
   const at = t.startAt ?? t.dueAt;
   const d = at ? new Date(at) : null;
   const overdue = !!at && Date.parse(at) < Date.now();
   const time = d && !Number.isNaN(+d) ? d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : null;
+  /* Q1 — "these are my tasks… they should share my color. They're blue right here." Whose
+   * task it is tints it; the generic sky only remains for a task nobody holds. Overdue
+   * still shouts coral — lateness outranks identity. */
+  const accent = overdue ? colors.coral : (tone ?? colors.sky);
   return (
     <PressableScale
       haptic="select"
-      onPress={() => router.push("/(settings)/tasks")}
+      /* BUG-04 follow-through: the group-qualified path died when /tasks moved to the home
+         stack; the bare path resolves wherever it lives. */
+      onPress={() => router.push("/tasks")}
       accessibilityRole="button"
       accessibilityLabel={`Task: ${t.title}${time ? ` at ${time}` : ""}`}
       accessibilityHint="Opens Tasks"
@@ -748,10 +755,10 @@ function DayTask({ t, name }: { t: TaskRec; name: string | null }) {
         flexDirection: "row", alignItems: "center", gap: spacing.sm,
         backgroundColor: colors.surfaceSunken, borderRadius: radii.sm, borderCurve: "continuous",
         paddingHorizontal: spacing.md, paddingVertical: 10,
-        borderLeftWidth: 3, borderLeftColor: overdue ? colors.coral : colors.sky,
+        borderLeftWidth: 3, borderLeftColor: accent,
       }}
     >
-      <Sym name="checklist" size={14} color={overdue ? colors.coral : colors.sky} />
+      <Sym name="checklist" size={14} color={accent} />
       <View style={{ flex: 1 }}>
         {/* Never clamped — "people need to be able to read their entire name… this happens
             throughout the application." */}
