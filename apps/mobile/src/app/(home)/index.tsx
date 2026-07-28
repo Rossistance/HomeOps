@@ -524,7 +524,11 @@ function AdminToday() {
                 scrollEventThrottle={32}
                 contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: spacing.lg, alignItems: "flex-start" }}
               >
-                {members.map((m) => {
+                {/* Cluster B — "I would not be pictured here as this does not do anything on
+                    click… then what's left would be my family members. That gives a better
+                    indication: I'm all good as me, these are the people in my family." You
+                    live in the top-right corner (tap = your profile); the strip is THEM. */}
+                {members.filter((m) => m.actorId !== session?.actorId).map((m) => {
                   const dest = isChild(m) ? "/kid" : isGrandparent(m) ? "/grandparent" : isHelper(m) ? "/sitter" : null;
                   return (
                     <PressableScale

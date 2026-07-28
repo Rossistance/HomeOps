@@ -175,8 +175,18 @@ export default function SettingsScreen() {
             )}
           <View style={{ flex: 1, gap: 2 }}>
             <T kind="rowTitle">{session?.actorName}</T>
-            <T kind="detail">{session?.role}{householdName ? ` · ${householdName}` : ""}</T>
+            <T kind="detail">{session?.role}{householdName ? ` · ${householdName}` : ""} · tap to edit</T>
           </View>
+          {/* Cluster B, Settings edition — "there's no need to have myself here to tap to
+              edit; that could be available up here, noting whose account I am. This should
+              be me up here, and their family members down below." */}
+          <PressableScale
+            onPress={() => { const me = members.find((m) => m.isCurrentUser || m.actorId === session?.actorId); if (me) setEditingMember(me); }}
+            haptic="select" hitSlop={10} accessibilityRole="button" accessibilityLabel="Edit my profile"
+            style={{ padding: 6 }}
+          >
+            <Sym name="pencil" size={15} color={colors.textSecondary} />
+          </PressableScale>
         </Card>
       </Rise>
 
@@ -201,7 +211,7 @@ export default function SettingsScreen() {
             />
             <Coach id="settings.household">
             <Card padded={false}>
-              {members.map((m) => {
+              {members.filter((m) => !(m.isCurrentUser || m.actorId === session?.actorId)).map((m) => {
                 const removable = canInvite && !m.isCurrentUser && m.role !== "Owner";
                 // Owners/Adult Admins edit anyone; everyone can self-serve name + color.
                 const editable = canManage || m.isCurrentUser;

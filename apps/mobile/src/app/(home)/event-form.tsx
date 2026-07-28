@@ -11,6 +11,7 @@ import { api, type ApprovalRec, type AttendeeRec, type EventRec, type MemberRec 
 import { useSession } from "@/lib/session";
 import { loadDraft, saveDraft, clearDraft, isEmptyDraft, type EventDraft } from "@/lib/event-drafts";
 import { useTheme, tapHaptic } from "@/theme";
+import { depth, rimColor, rimGlow } from "@/theme/neumorph";
 import { AddressField } from "@/components/AddressField";
 import { ActionBar, ACTION_BAR_HEIGHT } from "@/components/ui/action-bar";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
@@ -102,7 +103,7 @@ export default function EventFormScreen() {
   const id = typeof params.id === "string" && params.id ? params.id : null;
   const isEdit = !!id;
   const { session } = useSession();
-  const { colors, spacing, type } = useTheme();
+  const { colors, dark, spacing, type } = useTheme();
   const canManage = MANAGE_ROLES.includes(session?.role ?? "");
 
   const [loading, setLoading] = useState(true);
@@ -163,6 +164,7 @@ export default function EventFormScreen() {
 
   const [busy, setBusy] = useState<"save" | "delete" | "push" | null>(null);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
+  const [sourceInfoOpen, setSourceInfoOpen] = useState(false);
   // Google push (canonical events only) — approval-gated exactly as web does it.
   const [googleEventId, setGoogleEventId] = useState<string | null>(null);
   const [pushApproval, setPushApproval] = useState<ApprovalRec | null>(null);
@@ -499,12 +501,38 @@ export default function EventFormScreen() {
          * the web app"), which is a strange thing for the app to say about an event it is
          * already showing. Its time and place really do belong to the other calendar; the
          * rest is ours, so say which is which and let him get on with it. */
-        <Notice
-          ok={canAppend}
-          text={canAppend
-            ? "From another calendar — its time, place and description change there. Everything below is yours: your notes, who's coming, what to bring. None of it syncs back out."
-            : "Read-only — this is synced from another calendar (you can only edit your own). Edit it at the source."}
-        />
+        /* Cluster E — "this does not need to be displayed on every single calendar… this
+           just used to be a little i symbol for information, expandable if the user taps
+           the i, with some sort of animation that makes it look like it's glowing." The
+           paragraph earned its keep once; as furniture on every mirrored event it was
+           real estate. Now it's a glowing dot that says everything only when asked. */
+        <View style={{ alignItems: "flex-start", gap: spacing.sm }}>
+          <PressableScale
+            onPress={() => setSourceInfoOpen((v) => !v)}
+            haptic="select"
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: sourceInfoOpen }}
+            accessibilityLabel="About this synced event"
+            style={{
+              width: 26, height: 26, borderRadius: 13,
+              alignItems: "center", justifyContent: "center",
+              backgroundColor: colors.skyBg,
+              borderWidth: 1, borderColor: rimColor(colors, dark),
+              boxShadow: `${depth("raisedSm", colors, dark)}, ${rimGlow(colors, dark)}`,
+            }}
+          >
+            <Sym name="info" size={12} color={colors.sky} />
+          </PressableScale>
+          {sourceInfoOpen ? (
+            <Notice
+              ok={canAppend}
+              text={canAppend
+                ? "From another calendar — its time, place and description change there. Everything below is yours: your notes, who's coming, what to bring. None of it syncs back out."
+                : "Read-only — this is synced from another calendar (you can only edit your own). Edit it at the source."}
+            />
+          ) : null}
+        </View>
       ) : null}
       {linkedGoogle ? (
         <Notice text="Synced from Google Calendar — changes you save here update it in Google too." ok />

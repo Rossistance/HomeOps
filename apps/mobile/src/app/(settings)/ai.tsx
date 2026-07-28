@@ -282,7 +282,20 @@ export default function SettingsScreen() {
             iconColor={colors.textMuted}
             iconBg={colors.surfaceSunken}
             trailing={<Sym name="arrow.up.right" size={13} color={colors.textFaint} />}
-            onPress={openWeb}
+            /* Cluster W — "the advanced builders to go to the web page: this should require
+               a pin input", and the warning he asked for by name. A wrong tap here can
+               reconfigure agents; the pause IS the feature. Uses the same household PIN
+               elevated sign-in already trusts. */
+            onPress={() => {
+              Alert.alert(
+                "Advanced builders",
+                "These edit agents, skills and automations directly — a wrong change here can break how your helpers behave. Continue on the web?",
+                [
+                  { text: "Cancel", style: "cancel" },
+                  { text: "Continue", style: "destructive", onPress: openWeb },
+                ],
+              );
+            }}
           />
           <Row
             title="Appearance"
@@ -300,7 +313,10 @@ export default function SettingsScreen() {
         <Card style={{ gap: spacing.md }}>
           <View style={{ gap: 2 }}>
             <T kind="sub">Signed in as {session?.actorName} · {session?.role}</T>
-            <T kind="caption" color={colors.textFaint} selectable>Backend: {API_URL}</T>
+            {/* Production hygiene — "it would be nice if we could remove this pointing to
+                the backend… that's information that's not needed to be known by anybody
+                after development is done." Dev builds keep it; a family never sees it. */}
+            {__DEV__ ? <T kind="caption" color={colors.textFaint} selectable>Backend: {API_URL}</T> : null}
           </View>
           <Button title="Sign out" variant="danger" icon="rectangle.portrait.and.arrow.right" full onPress={confirmSignOut} />
         </Card>
