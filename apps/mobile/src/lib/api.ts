@@ -108,7 +108,12 @@ export interface ConversationRec {
 // gated step's REAL resolved input (the approval record itself only carries a hash).
 export interface RunStepRec { index: number; toolId: string | null; title: string; detail: string; status: string; approvalId: string | null; input: Record<string, unknown> }
 export interface EmailReviewMessageRec { id: string; subject: string; from: string; snippet: string; added: string[]; removed: string[] }
-export interface RunRec { id: string; title: string; status: string; steps: RunStepRec[] }
+export interface RunRec {
+  id: string; title: string; status: string; steps: RunStepRec[];
+  /* Cluster T — "is this what I did, or what the agent did?" The ledger can only answer if
+   * the record says. agentName when an agent ran it; actorId when a person asked. */
+  agentId?: string | null; agentName?: string | null; actorId?: string | null; source?: string | null;
+}
 // Risk-class overrides (item 9) — admin-set, server-enforced.
 export interface RiskOverrideRec { id: string; toolId: string; riskClass: string | null; skipApproval: boolean; setBy: string; setAt: string }
 export interface CatalogToolRec {

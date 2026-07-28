@@ -396,21 +396,28 @@ function AdminToday() {
      * separate runs — the same thing really did happen twice — so silently collapsing them
      * would hide a double-execution, and listing both reads as a rendering bug. Grouped by
      * title with a count instead: one row, and it says it happened twice. */
-    const byTitle = new Map<string, { title: string; done: number; steps: number; times: number }>();
+    const byTitle = new Map<string, { title: string; done: number; steps: number; times: number; who: string; what: string }>();
     for (const r of runs.filter((r) => ["completed", "succeeded"].includes(r.status))) {
       const title = r.title || "Run completed";
       const done = r.steps.filter((s) => ["done", "completed", "succeeded"].includes(s.status)).length;
+      /* Cluster T — "is this what I did? Is this what the agent did? What really happened?"
+       * WHO: the agent's name when an agent ran it, "You asked" when it came from chat.
+       * WHAT: the last completed step's own title — the closest thing a run has to an
+       * outcome sentence without inventing one. */
+      const who = r.agentName ? r.agentName : r.actorId === session?.actorId ? "You asked" : r.agentId ? "An agent" : "Famili";
+      const lastStep = [...r.steps].reverse().find((st) => ["done", "completed", "succeeded"].includes(st.status));
+      const what = (lastStep?.title ?? "").slice(0, 60);
       const prev = byTitle.get(title);
       if (prev) { prev.times += 1; continue; }
-      byTitle.set(title, { title, done, steps: r.steps.length, times: 1 });
+      byTitle.set(title, { title, done, steps: r.steps.length, times: 1, who, what });
     }
     return [...byTitle.values()].slice(0, 4).map((g) => ({
       key: `r-${g.title}`,
       icon: "checkmark.circle.fill", fg: colors.sage, bg: colors.sageBg,
       title: g.title,
-      subtitle: `Completed · ${g.done}/${g.steps} step${g.steps === 1 ? "" : "s"}${g.times > 1 ? ` · ${g.times}×` : ""}`,
+      subtitle: `${g.who} · ${g.what ? `${g.what} · ` : ""}${g.done}/${g.steps} step${g.steps === 1 ? "" : "s"}${g.times > 1 ? ` · ${g.times}×` : ""}`,
     }));
-  }, [runs, colors]);
+  }, [runs, colors, session?.actorId]);
 
   // Meals and Tasks sit up front (not buried in Settings) — the two most-used
   // everyday surfaces after the calendar.

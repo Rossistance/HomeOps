@@ -5200,6 +5200,10 @@ function publicApproval(a) {
 function publicRun(r) {
   return {
     id: r.id, householdId: r.householdId, actorId: r.actorId, source: r.source, sourceRef: r.sourceRef,
+    /* Cluster T — the ledger can only say WHO if the record carries it. Resolved at read
+     * time so a renamed agent shows its current name, not a stale copy. */
+    agentId: r.agentId ?? null,
+    agentName: r.agentId ? (getAgent(r.agentId)?.name ?? null) : null,
     title: r.title, summary: r.summary, status: r.status, cursor: r.cursor, error: r.error,
     createdAt: r.createdAt, updatedAt: r.updatedAt, startedAt: r.startedAt, finishedAt: r.finishedAt,
     steps: (r.steps ?? []).map((s) => ({

@@ -7,6 +7,7 @@ import { Image } from "expo-image";
 import { useLocalSearchParams } from "expo-router";
 import { api, type RunRec, type ArtifactRec, type FileRec, type KnowledgeRec, type MemoryRec, type NestRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { fade } from "@/lib/member-colors";
 import { useTheme, tapHaptic } from "@/theme";
 import {
   Badge, Button, Card, Chip, ChipRow, CollapsibleSection, EmptyState, HScreen, HSheet, MarkdownText, Notice, PressableScale, Rise,
@@ -334,7 +335,15 @@ export default function LibraryScreen() {
               const b = badgeFor(f);
               return (
                 <Rise key={f.id} index={Math.min(i + 3, 8)}>
-                  <Card padded={false}>
+                  {/* Cluster U — "these should have a hue around them to match this colour…
+                      home green, medical purple, school blue, bills yellow." The category's
+                      own glow on the card edge, and the file icon takes the category tone —
+                      so which room a document lives in is readable at arm's length, the same
+                      trick the calendar plays with member colours. */}
+                  <Card padded={false} style={{
+                    borderColor: fade(spaceTone(colors, spaceOf(f)).fg, 0.45),
+                    boxShadow: `0 0 14px -6px ${spaceTone(colors, spaceOf(f)).fg}`,
+                  }}>
                     <PressableScale
                       scaleTo={0.99}
                       haptic="select"
@@ -343,7 +352,7 @@ export default function LibraryScreen() {
                       accessibilityLabel={`${f.name}, ${fmtSize(f.sizeBytes)}${open ? ", close preview" : ", open preview"}`}
                     >
                       <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, padding: spacing.lg }}>
-                        <SymTile name={fileIcon(f.mime)} color={colors.textSecondary} bg={colors.surfaceSunken} size={36} iconSize={16} />
+                        <SymTile name={fileIcon(f.mime)} color={spaceTone(colors, spaceOf(f)).fg} bg={spaceTone(colors, spaceOf(f)).bg} size={36} iconSize={16} />
                         <View style={{ flex: 1, gap: 2 }}>
                           <T kind="rowTitle">{f.name}</T>
                           <T kind="detail" numberOfLines={1}>
