@@ -52,7 +52,38 @@
 > | 5.3 Repair path bypassed `orchestrate` | **fixed** — inherits the original run's `agentId`, `skillId`, `via`, `goal`, `visibility`. Without an agentId the engine's whole policy block was skipped *and* `notify_contact` hard-refused, so a "successful" repair still couldn't deliver. |
 > | 5.6 Web ignored server `phase` events | **fixed** — wired with a phase lock so the token heuristic can't flicker the label back mid-search. Also deleted the `EventSource` that fired a real GET at the stream endpoint on every chat turn before aborting itself. |
 >
-> **Remaining in Week 3: WP-A household autonomy presets** (§Severity 4). Unchanged estimate **5–8 days**, because the dial has to land on a repaired control surface — the PIN asymmetry, the decorative web `autoAllow` editor, the four inert dials, and the `duplicate`/`rollback` policy laundering. Half-landing it would ship another toggle that looks like it works, which is the exact defect class this document tracks.
+---
+
+> ## ✅ WP-A SHIPPED — commits `875ee81` (repairs) + `601bb7c` (presets), 2026-07-30
+>
+> **1086 server tests, 0 failures (27 new).** Typechecks + build clean. The web surface was verified in the running app, not only in tests.
+>
+> Landed in two parts deliberately: the presets could not go on top of controls that didn't work, so the surface was repaired first and shipped on its own.
+>
+> ### `875ee81` — the permission surface stops lying
+>
+> | Item | Status |
+> |---|---|
+> | PIN asymmetry | **fixed** — `unattended.includeHighRisk` now needs the household PIN, which re-classing a *single tool* already did. Only the raise is gated; revoking stays straight-through. |
+> | PIN leaked onto the agent record | **fixed** — found while fixing the above: both writers spread the patch verbatim and `publicAgent` returns every field as "non-secret", so the gate would have stored the PIN in plaintext and served it to every member. Stripped at the point of use; a test fails if the strip is removed. |
+> | Web risk-override card | **fixed** — it could not save on *any* household with a PIN (no `pin` in the request), so it was dead in production and alive on mobile. Now asks and retries. |
+> | Decorative `autoAllow`/`alwaysApprove` editor | **fixed** — free prose written into fields `policy.mjs` matches by capability id. Replaced with a real per-capability control on the rows that already existed. |
+> | …and the prose that **shipped** | **fixed** — seeded/template agents carried English sentences in those fields on every household ("Require approval before placing any grocery order"). Five write sites, incl. one mapping plan steps by `s.title` with `s.toolId` beside it. All now write empty lists; the sentences were already going to `safetyLimits`. Deliberately *not* mapped onto real ids — guessing would newly waive gates. |
+> | `duplicate` / `rollback` laundering | **fixed** — Duplicate re-stamps attribution and drops the high-risk tier; Rollback restores *what a helper does, not what it may do*, which fixes the error in both directions. |
+> | `runsUnattended` false green bolt | **fixed** — it read true when a send tool was merely unconnected. "Runs unattended" and "can't run yet" no longer share a colour. Scoped to the helper's own skills, or the open allow-list would mark every helper blocked. |
+> | `safetyLimits` false shield | **fixed** — read by nothing on the server, rendered with a green ShieldCheck under "Safety limits". Now stated as notes, pointing at where enforcement lives. |
+>
+> ### `601bb7c` — the presets
+>
+> **Cautious / Balanced / Trusted**, enforced in `policy.mjs` rule 7 and nowhere else — no bulk-writing of per-helper flags. Trusted is PIN-gated and attributed like rule 6b's high tier; Balanced needs no PIN because it provably cannot reach a delivering capability; coming back down is never gated.
+>
+> Two decisions worth keeping visible:
+> - **The bound is `reachesOutside`, not `isHighStakes`.** The latter is the *agent-level* bound and counts every Write, so reusing it would have left Balanced unable to clear "add a task to our own list" — the exact work the preset exists to stop interrupting. Caught by a test.
+> - **An absent stance means Cautious**; Balanced is written at signup. Flipping the meaning of "unset" would have loosened approvals for every existing household retroactively, without anyone choosing it.
+>
+> **Found by running it, not reading it:** GET and POST `/settings` were two hand-maintained copies of one projection and had already drifted — the write answered without `autonomy`, so the card showed the *old* stance right after saving. One `settingsView()` now serves both. Mobile also collapsed every 403 into `insufficient_role`, which would have made the PIN flow impossible. And `scripts/dev.mjs` let the browser-runtime inherit `PORT`, so it raced Vite for 5173 and intermittently served JSON instead of the app.
+>
+> **Not done:** the mobile per-capability approval matrix (web is the advanced-builder surface); the mobile picker typechecks but was not run on a simulator.
 
 ---
 

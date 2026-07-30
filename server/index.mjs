@@ -13,7 +13,7 @@ import {
   getConnectorConfig, setConnectorConfig, revokeConnector, getSecret,
   appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings, getDataRev,
   getDataRevForTenant, revEmitter,
-  quarantinedCollections, acknowledgeQuarantine, CURRENT_TENANT, forEachTenant, runWithTenant,
+  quarantinedCollections, acknowledgeQuarantine, CURRENT_TENANT, forEachTenant, runWithTenant, currentTenant,
   tenantEngine, sysDoc, putSysDoc, deleteSessionsForHousehold, getPlan, setPlanFromEntitlement,
   createSession, deleteSession, deleteSessionsForActor, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
@@ -605,15 +605,27 @@ const JOBS = [
 ];
 const jobTimers = new Map();
 let schedulerStarted = false;
-async function runJob(job, trigger = "schedule") {
+/* Runs as ONE household — the caller says which.
+ *
+ * This read `CURRENT_TENANT` for both the kill-switch check and the tool call. CURRENT_TENANT
+ * is a constant, not a lookup, so `rss-poll`, `weather-morning` and every `connector_event`
+ * trigger downstream of them fired only for the resident household and never for a single
+ * signed-up family. The old comment said so and pointed at a ticket. It's a one-line fix now
+ * that forEachTenant exists, and until it landed the scheduled half of the product simply did
+ * not run for anyone who paid for it.
+ *
+ * The remaining tenant-sensitive calls here — setJobState, getJobState, appendAudit,
+ * connectorById, readinessOf — are all store reads that follow the ambient tenant context, so
+ * they come out right as long as this is invoked inside one. That is what forEachTenant and
+ * the manual route below both do; the default argument keeps a bare call honest. */
+async function runJob(job, trigger = "schedule", householdId = currentTenant()) {
   const c = connectorById(job.connectorId);
   const readiness = c ? readinessOf(c) : "not_configured";
   const ready = ["connected", "authorized_write", "authorized_readonly", "local_only"].includes(readiness);
   setJobState(job.id, { lastRun: Date.now(), lastTrigger: trigger, running: true });
-  // Scheduler jobs run for the resident household until C1.3 makes loops per-tenant.
-  if (!externalActionsEnabled(CURRENT_TENANT)) { setJobState(job.id, { running: false, lastStatus: "blocked_kill_switch" }); appendAudit({ type: "job.run", jobId: job.id, connectorId: job.connectorId, ok: false, error: "kill_switch", trigger }); return { ok: false, error: "external_actions_disabled" }; }
+  if (!externalActionsEnabled(householdId)) { setJobState(job.id, { running: false, lastStatus: "blocked_kill_switch" }); appendAudit({ type: "job.run", jobId: job.id, connectorId: job.connectorId, ok: false, error: "kill_switch", trigger }); return { ok: false, error: "external_actions_disabled" }; }
   if (!ready) { setJobState(job.id, { running: false, lastStatus: `connector_${readiness}` }); appendAudit({ type: "job.run", jobId: job.id, connectorId: job.connectorId, ok: false, error: `connector_${readiness}`, trigger }); return { ok: false, error: `connector_${readiness}` }; }
-  const out = await executeTool(job.toolId, {}, { actorId: "scheduler", householdId: CURRENT_TENANT });
+  const out = await executeTool(job.toolId, {}, { actorId: "scheduler", householdId });
   setJobState(job.id, { running: false, lastStatus: out.ok ? "success" : `error:${out.error}`, nextRun: Date.now() + job.intervalMs });
   appendAudit({ type: "job.run", jobId: job.id, connectorId: job.connectorId, ok: out.ok, error: out.ok ? undefined : out.error, trigger });
   // Connector-event triggers (Slice 6): fire only when the poll returns NEW data
@@ -631,8 +643,10 @@ function startScheduler() {
   if (schedulerStarted) return;
   schedulerStarted = true;
   for (const job of JOBS) {
-    setJobState(job.id, { nextRun: Date.now() + job.intervalMs, lastStatus: getJobState(job.id)?.lastStatus ?? "scheduled" });
-    jobTimers.set(job.id, setInterval(() => { runJob(job).catch(() => {}); }, job.intervalMs));
+    // Seed each household's own state, not just the resident's — otherwise a family's jobs
+    // screen reports "scheduled" for something that has never been scheduled for them.
+    void forEachTenant(() => setJobState(job.id, { nextRun: Date.now() + job.intervalMs, lastStatus: getJobState(job.id)?.lastStatus ?? "scheduled" }));
+    jobTimers.set(job.id, setInterval(() => { void forEachTenant((t) => runJob(job, "schedule", t).catch(() => {})); }, job.intervalMs));
   }
 }
 function jobView(job) {
@@ -4714,7 +4728,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const job = JOBS.find((x) => x.id === jobRun[1]);
       if (!job) return json(res, 404, { error: "unknown_job" }, req);
-      const out = await runJob(job, "manual");
+      // Explicit rather than relying on the request's ambient context: "Run now" must run for
+      // the household that pressed it, and be obvious about that at the call site.
+      const out = await runJob(job, "manual", g.session.householdId);
       audit({ type: "job.manual_run", jobId: job.id, ok: out.ok, error: out.ok ? undefined : out.error }, req, g.session);
       return json(res, out.ok ? 200 : 422, { job: jobView(job), result: out }, req);
     }
@@ -5578,7 +5594,13 @@ server.listen(PORT, () => {
   // account's status describes the last thing that happened to touch it rather than what the
   // credential can do now, which is how "needs reconnect" outlived the problem it named.
   // Every 5 minutes; each account is throttled to one real probe per 15.
-  setInterval(() => { void forEachTenant(() => sweepAccountHealth({ householdId: CURRENT_TENANT })); }, 5 * 60_000);
+  /* forEachTenant hands the callback the household it is running as. This one ignored it and
+   * passed the RESIDENT constant every iteration — so the loop faithfully visited every
+   * household and swept the same one N times. For every signed-up family, an account's status
+   * therefore went on describing the last thing that happened to touch it: precisely the
+   * "needs reconnect" that outlives the problem it names, which is the bug accounts.mjs
+   * sweepAccountHealth exists to prevent. */
+  setInterval(() => { void forEachTenant((t) => sweepAccountHealth({ householdId: t })); }, 5 * 60_000);
   // Calendar auto-sync: re-pull url/google subscriptions that have gone stale so linked
   // events stay fresh without a manual "Sync now". Pasted imports are static — skipped.
   // Staleness window via HOMEOPS_CAL_SYNC_MINUTES (default 6h); swept every 15 minutes.
