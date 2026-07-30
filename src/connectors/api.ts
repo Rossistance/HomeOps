@@ -803,12 +803,17 @@ export const backend = {
   },
   // SSE streaming assistant — fires onProgress with a token count while the AI is
   // generating, then resolves with the final parsed AssistantResult.
-  streamAssistant(body: { message: string; context?: Record<string, unknown>; providerId?: string; conversationId?: string }, onProgress?: (tokens: number) => void): Promise<AssistantResult> {
+  streamAssistant(
+    body: { message: string; context?: Record<string, unknown>; providerId?: string; conversationId?: string },
+    onProgress?: (tokens: number) => void,
+    onPhase?: (phase: string) => void,
+  ): Promise<AssistantResult> {
     return new Promise((resolve) => {
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (csrfToken) headers["x-homeops-csrf"] = csrfToken;
-      const es = new EventSource("/api/assistant/stream"); // fallback path — actually use fetch+ReadableStream below
-      es.close(); // not used; EventSource doesn't support POST — use fetch instead
+      // (Removed: an `new EventSource("/api/assistant/stream")` immediately followed by
+      // .close(). EventSource cannot POST, so it was never the transport — but it DID fire a
+      // real GET at the streaming endpoint on every single chat turn before aborting it.)
       fetch("/api/assistant/stream", { method: "POST", credentials: "same-origin", headers, body: JSON.stringify(body) })
         .then(async (res) => {
           if (!res.ok || !res.body) {
@@ -833,6 +838,12 @@ export const backend = {
               try {
                 const ev = JSON.parse(line.slice(6));
                 if (ev.type === "progress" && onProgress) onProgress(ev.tokens as number);
+                // The server has always emitted `phase` ("searching" / "creating"), it is
+                // covered end-to-end by server/test/assistant-phase.test.mjs, and MOBILE has
+                // shown it for a while — the web client just dropped it on the floor. So a
+                // web user watching a live web lookup read "Generating…" through the slowest
+                // part of the request, with nothing saying the assistant was out searching.
+                if (ev.type === "phase" && onPhase && typeof ev.phase === "string") onPhase(ev.phase);
                 if (ev.type === "done") { resolve(ev.result as AssistantResult); return; }
               } catch {}
             }

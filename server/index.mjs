@@ -195,6 +195,23 @@ async function requireHouseholdPin(session, pin) {
   return null;
 }
 
+/** The room a chat-born run belongs to.
+ *
+ * runAssistantPlan never forwarded a visibility, so every chat run took startRun's
+ * "household" default — including plans born in a PERSONAL conversation, whose approvals
+ * then fanned out to every approver in the family. Someone's private ask announced itself to
+ * everyone. memory-capture.mjs already inherits the room an exchange happened in; runs now
+ * do too.
+ *
+ * startRun distinguishes only personal from household, so a NEST conversation resolves to
+ * household rather than silently narrowing to one person — a nest's approvers are
+ * household-level, and under-notifying an approval is the worse of the two errors. */
+function chatRunVisibility(conversationId) {
+  if (!conversationId) return undefined;
+  const v = getConversation(conversationId)?.visibility;
+  return (v === "personal" || v === "private") ? "personal" : undefined;
+}
+
 /* Cluster W's reach, applied to contact methods: Owner → everyone; adults → self + nest;
  * everyone else → self. A closure over the session so list filters read cleanly. */
 function contactReach(session) {
@@ -4800,7 +4817,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
           // agent identity so per-agent-gated tools (notably homeops.notify_contact) run
           // from a plain ask with the WP-003 visible-skip clamp. Rollbacks: env
           // HOMEOPS_CHAT_AGENT_ATTRIBUTION=off (attribution) / HOMEOPS_ORCHESTRATE_ENTRY=off.
-          const { run } = await orchestrate({ source: "assistant", via: "chat", plan: out.plan, session: g.session, conversationId: body.conversationId ?? null });
+          const { run } = await orchestrate({ source: "assistant", via: "chat", plan: out.plan, session: g.session, conversationId: body.conversationId ?? null, goal: body.message, visibility: chatRunVisibility(body.conversationId) });
           out.run = publicRun(run);
           audit({ type: "run.start", runId: run.id, source: "assistant", ok: true }, req, g.session);
         } catch (e) {
@@ -4890,7 +4907,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
           try {
             // WP-006 slice 1 — same single orchestrate() choke point as POST /api/assistant
             // (see the comment there); the streaming route must attribute identically.
-            const { run } = await orchestrate({ source: "assistant", via: "chat", plan: out.plan, session: g.session, conversationId: body.conversationId ?? null });
+            const { run } = await orchestrate({ source: "assistant", via: "chat", plan: out.plan, session: g.session, conversationId: body.conversationId ?? null, goal: body.message, visibility: chatRunVisibility(body.conversationId) });
             out.run = publicRun(run);
             audit({ type: "run.start", runId: run.id, source: "assistant", ok: true }, req, g.session);
           } catch (e) {

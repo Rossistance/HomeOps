@@ -1528,14 +1528,27 @@ export const useStore = create<Store>((set, get) => {
       // Pass conversationId so the server persists the turn into the durable thread
       // (when the conversation is server-owned). The server also re-grounds on its own
       // visibility-filtered view of the household — the client context is just a hint.
+      // A server `phase` outranks the token-count guess: "searching" means the assistant is
+      // out fetching pages, which is the SLOWEST part of a lookup and the part a token count
+      // cannot see. Once a phase has been reported, the token heuristic stops overwriting it
+      // — otherwise the label would flicker back to "Generating…" mid-search, which is the
+      // same wrong-but-confident status the mobile client fixed with its phaseLockedRef.
+      let phaseLocked = false;
       const r = await backend.streamAssistant({ message: t, context: ctx, conversationId }, (tokens) => {
-        if (tokens === 4) {
+        if (tokens === 4 && !phaseLocked) {
           commit((d) => {
             const c = d.conversations?.find((x) => x.id === conversationId); if (!c) return;
             const m = c.messages.find((x) => x.id === aMsgId); if (!m) return;
             m.status = "streaming";
           });
         }
+      }, (phase) => {
+        phaseLocked = true;
+        commit((d) => {
+          const c = d.conversations?.find((x) => x.id === conversationId); if (!c) return;
+          const m = c.messages.find((x) => x.id === aMsgId); if (!m) return;
+          m.status = phase === "searching" ? "searching" : phase === "creating" ? "creating" : "streaming";
+        });
       });
       commit((d) => {
         const c = d.conversations?.find((x) => x.id === conversationId); if (!c) return;

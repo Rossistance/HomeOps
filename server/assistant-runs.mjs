@@ -430,10 +430,31 @@ async function repairFailedRun(run) {
   }
   const plan = normalizePlan(parsed.plan, catalog, run.title);
   appendAudit({ type: "run.auto_repair", fromRunId: run.id, diagnosis: String(parsed.diagnosis ?? "").slice(0, 300) });
+  // CARRY THE ORIGINAL RUN'S IDENTITY, GOAL AND ROOM.
+  //
+  // The repair used to start with a bare sourceRef, which had three consequences nobody
+  // asked for. Without an agentId the engine's whole agent-policy block (engine.mjs, gated
+  // on `run.sourceRef?.agentId`) was SKIPPED — so a repaired plan ran with no permission
+  // re-validation at all, and `homeops.notify_contact` hard-refused `no_acting_agent`,
+  // meaning the one thing the family wanted (the message actually going out) was precisely
+  // what a successful repair still could not do. Without the goal, the repaired run's
+  // step-level model calls fell back to a title. Without the visibility, a repair of a
+  // personal run announced its approvals to the whole household.
+  //
+  // Inheriting rather than re-deriving is deliberate: a repair is the SAME request, retried.
+  // It must not be able to acquire authority the original run did not have, and copying the
+  // original's agentId gives it exactly that and no more.
   const repaired = await startRun({
     source: "assistant",
-    sourceRef: { conversationId, isRepair: true, repairedFrom: run.id, originalTitle: run.title },
+    sourceRef: {
+      conversationId, isRepair: true, repairedFrom: run.id, originalTitle: run.title,
+      agentId: run.sourceRef?.agentId ?? null,
+      skillId: run.sourceRef?.skillId ?? null,
+      via: run.sourceRef?.via ?? "chat",
+    },
     plan, session, title: plan.title,
+    goal: run.goal ?? null,
+    visibility: run.visibility,
   });
   appendToConversation(run, {
     kind: "status",

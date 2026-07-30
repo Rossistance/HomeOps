@@ -286,6 +286,11 @@ function Conversation({ conv, conversations, scope, onScope, onOpen, onSend }: {
 function PhaseStrip({ status, runView }: { status?: string; runView?: RunStatusView }) {
   const phase =
     status === "thinking" ? { icon: "Loader2" as const, label: "Routing…", spin: true } :
+    // Server-reported phases. "Searching the web…" is the honest label for the part of a
+    // lookup that actually takes the time — up to three searches and two page reads, in
+    // series — and saying "Generating…" through it was the app looking stuck for no reason.
+    status === "searching" ? { icon: "Search" as const, label: "Searching the web…", spin: false } :
+    status === "creating" ? { icon: "Loader2" as const, label: "Setting that up…", spin: true } :
     status === "streaming" ? { icon: "Loader2" as const, label: "Generating…", spin: true } :
     // WP-003 slice 1 — the cause-specific label from runStatusView, never a raw or
     // collapsed status string: "Needs a connection" / "Needs an AI provider" read very

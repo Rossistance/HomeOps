@@ -906,7 +906,11 @@ export interface AppSettings {
 /* Assistant — the conversational NL → plan → approval → execution loop     */
 /* ----------------------------------------------------------------------- */
 
-export type AssistantMessageStatus = "thinking" | "streaming" | "answered" | "planned" | "running" | "done" | "error" | "built";
+// "searching" / "creating" come from the server's own `phase` events (assistant/stream),
+// which the web client used to discard — so a live web lookup read "Generating…" through the
+// slowest part of the request. Mobile has shown these for a while; these two members are what
+// let the web say the same true thing.
+export type AssistantMessageStatus = "thinking" | "streaming" | "searching" | "creating" | "answered" | "planned" | "running" | "done" | "error" | "built";
 
 export interface AssistantMessage {
   id: string;

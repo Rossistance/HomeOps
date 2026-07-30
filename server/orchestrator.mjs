@@ -251,7 +251,7 @@ export async function runSkill({ skillId, params = {}, session, agentId, source 
 // disallowed steps into honest, visible skips (WP-003 ISS-005) — never a silent drop,
 // never a silent run, and never (this is the part engine.mjs's OWN runtime re-check
 // would otherwise turn into) a hard failure of the whole run over one denied step.
-export async function runAssistantPlan({ plan, session, conversationId, agentId = DEFAULT_HOUSEHOLD_AGENT_ID, via = "chat" }) {
+export async function runAssistantPlan({ plan, session, conversationId, agentId = DEFAULT_HOUSEHOLD_AGENT_ID, via = "chat", goal = null, visibility }) {
   // WP-101 slice 1 — the same preflight runSkill uses. resolveActingAgent() performs the
   // identical self-heal + pristine-allow-list widening this line used to do inline
   // (ensureOpenDefaultAgent), and additionally scope-checks the result the way the engine
@@ -275,6 +275,14 @@ export async function runAssistantPlan({ plan, session, conversationId, agentId 
     source: "assistant",
     sourceRef: { conversationId, agentId: agent ? agent.id : null, skillId: null, via },
     plan: clampedPlan, session, title: plan?.title ?? "Assistant plan",
+    // The request in the person's own words, carried to the step-level model calls that
+    // read run.goal. Without it they fell back to the plan TITLE — see startRun.
+    goal,
+    // A plan born in a PERSONAL conversation kept the startRun default of "household", so
+    // its approvals fanned out to the whole family: someone's private ask announced itself
+    // to everyone with an approver role. memory-capture.mjs already inherits the room a
+    // thing was said in; runs now do too.
+    visibility,
   });
   addRouting({ runId: run.id, agentId: agent ? agent.id : null, skillId: null, mode: "planner", reason: "assistant chat plan", stepCount: steps.length, droppedSteps: dropped });
   return { ok: true, run, droppedSteps: dropped };
@@ -328,7 +336,7 @@ export async function orchestrate({
   //    default agent and applies the WP-003 visible-skip clamp. (via:"chat" both ways —
   //    it predates WP-006, so the flag never changes chat.)
   if (isChat) {
-    return await runAssistantPlan({ plan, session, conversationId, agentId: agentId ?? DEFAULT_HOUSEHOLD_AGENT_ID, via: "chat" });
+    return await runAssistantPlan({ plan, session, conversationId, agentId: agentId ?? DEFAULT_HOUSEHOLD_AGENT_ID, via: "chat", goal, visibility });
   }
   // 2) AGENT — an explicit agent run, or a trigger whose target is an agent (goal|skill).
   //    runAgent selects + clamps to the agent's permitted∩available set; the engine
@@ -404,7 +412,10 @@ export async function runAgent({ agentId, goal, skillId, params = {}, session, s
   const dropped = clamped.filter((s) => s.clampedOut).length;
   // WP-101 slice 1 — agentId stamped LAST (see runSkill): `agent` is always a real,
   // server-selected identity here, and no caller sourceRef may null it out.
-  const run = await startRun({ source, sourceRef: { skillId: null, ...sourceRef, agentId: agent.id }, plan: { ...plan, steps: clamped }, params, session, title: agent.name, visibility: agent.visibility });
+  // `goal` rides along for the same reason it does on a chat run: the step-level reasoning
+  // and input-fill calls read run.goal, and without it they saw only the plan title — here
+  // that is the AGENT'S NAME, which tells a model nothing about what was asked of it.
+  const run = await startRun({ source, sourceRef: { skillId: null, ...sourceRef, agentId: agent.id }, plan: { ...plan, steps: clamped }, params, session, title: agent.name, goal: goal ?? null, visibility: agent.visibility });
   addRouting({ runId: run.id, agentId: agent.id, skillId: null, mode, reason: goal ? "agent goal" : "agent read-only run", stepCount: clamped.length, droppedSteps: dropped });
   return { ok: true, run, droppedSteps: dropped };
 }

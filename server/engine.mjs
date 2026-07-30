@@ -417,7 +417,7 @@ export function releaseAllLeases() {
   return released;
 }
 
-export async function startRun({ source = "manual", sourceRef = {}, plan, params = {}, session, title, visibility } = {}) {
+export async function startRun({ source = "manual", sourceRef = {}, plan, params = {}, session, title, visibility, goal } = {}) {
   // Callers treat the return as a run record, so refuse loudly while draining
   // (the window is seconds long; clients surface the message and retry).
   if (_draining) throw new Error("server_restarting: an update is deploying — try again in about a minute.");
@@ -473,6 +473,21 @@ export async function startRun({ source = "manual", sourceRef = {}, plan, params
     source,
     sourceRef,
     title: title ?? plan?.title ?? "Run",
+    // WHAT THE FAMILY ACTUALLY ASKED FOR.
+    //
+    // Two step-level LLM calls — the reasoning step and the input fill — both read
+    // `run.goal ?? run.plan?.title` and label the result "Run goal". Nothing ever wrote a
+    // `goal`, so for every run in the product's history that fallback was the ONLY branch
+    // taken: a model-generated plan TITLE stood in for the request. Every reasoning step and
+    // every threaded input was working from a summary of a summary, with the person's own
+    // words — the sentence carrying the names, dates, quantities and intent — discarded
+    // before any step ran. It is the cheapest large quality fix in this codebase.
+    //
+    // Kept separate from `title` rather than overwriting it: the title is what a human scans
+    // in Activity, the goal is what a model needs to act correctly, and collapsing them
+    // would trade one of those away. Trimmed, because a pasted wall of text is a prompt
+    // hazard, not extra context.
+    goal: goal ? String(goal).trim().slice(0, 2000) : null,
     summary: plan?.summary ?? "",
     status: "queued",
     params,
