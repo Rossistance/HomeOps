@@ -112,11 +112,22 @@ export function setActiveProvider(id, householdId) {
 
 /* Env bootstrap for hosted deployments: hand keys via environment variables
  * (OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY) instead of pasting into
- * Settings after every fresh deploy. Runs once at startup. It NEVER overwrites a
- * provider that already has a key in the vault (a person's Settings choice wins),
- * and it only claims the active slot when no provider is active yet.
- * HOMEOPS_AI_MODEL sets the bootstrapped provider's model (e.g. "gpt-5.5"). */
-export function bootstrapAIFromEnv() {
+ * Settings after every fresh deploy. It NEVER overwrites a provider that already has a key
+ * in the vault (a person's Settings choice wins), and it only claims the active slot when no
+ * provider is active yet. HOMEOPS_AI_MODEL sets the bootstrapped provider's model.
+ *
+ * PER HOUSEHOLD (2026-07-30). This ran exactly once at boot, with no tenant context — so
+ * `currentTenant()` fell back to the resident household and the deployment's own keys
+ * configured that one family and nobody else. Every household that signed up afterwards had
+ * NO AI provider and no way to get one but pasting a personal API key into Settings, which
+ * for a paid product is not a rough edge, it is the product not working. The keys are
+ * per-deployment, so every tenant is entitled to them; the caller now runs this once per
+ * household at boot AND at signup, so a family created between restarts isn't left out.
+ *
+ * Still idempotent and still hands-off: a household that has set its own key — or pointed
+ * itself at a local Ollama for privacy — keeps that choice untouched, which is what makes it
+ * safe to call on every boot. */
+export function bootstrapAIFromEnv(householdId) {
   const sources = [
     { id: "openai", env: "OPENAI_API_KEY" },
     { id: "anthropic", env: "ANTHROPIC_API_KEY" },
@@ -130,8 +141,7 @@ export function bootstrapAIFromEnv() {
     const body = { apiKey: String(key).trim() };
     if (process.env.HOMEOPS_AI_MODEL) body.model = String(process.env.HOMEOPS_AI_MODEL).trim();
     setProviderConfig(s.id, body);
-    // Boot-time bootstrap configures the resident household (env keys are per-deployment).
-    if (!getSettings().aiActiveProvider) setActiveProvider(s.id);
+    if (!getSettings(householdId).aiActiveProvider) setActiveProvider(s.id, householdId);
     applied.push(s.id);
   }
   return applied;

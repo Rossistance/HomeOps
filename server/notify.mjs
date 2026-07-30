@@ -5,6 +5,7 @@ import { getPushTokens, addNotification, appendAudit, getContactMethod, getMembe
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { executeTool, listConnectors, readinessOf } from "./connectors.mjs";
+import { sendPlatformEmail, platformMailReady } from "./mailer.mjs";
 
 // Who should be pinged for THIS approval. A personal action (or one the requester can
 // approve themselves) notifies only the requester — a scheduled personal briefing must
@@ -185,6 +186,28 @@ If you didn't ask for this, you can ignore it — nothing about your account has
     : `Your FamiliOS recovery code is ${code}.
 
 It expires in 15 minutes and can be used once. If you didn't ask to reset your password, you can ignore this — your password hasn't changed.`;
+  // PLATFORM TRANSPORT FIRST, and deliberately NOT behind the household kill switch.
+  //
+  // This is the message that lets someone back into their own account, and routing it
+  // through the household's Gmail made it circular: the households that need it most are
+  // the new ones, which have no Google connection yet and cannot make one without signing
+  // in. It also sat behind "pause external actions", so a family that flipped that switch
+  // had quietly locked itself out of password reset with no way back.
+  //
+  // The kill switch governs the HOUSEHOLD acting on the world. A recovery code is FamiliOS
+  // talking to a registered account holder about their own credentials — not a household
+  // action, and not something a household setting should be able to withhold from its own
+  // members. Audited distinctly (transport: "platform") so the bypass is visible.
+  if (platformMailReady()) {
+    const p = await sendPlatformEmail({ to: email, subject, text: body });
+    appendAudit({
+      type: "identity.recovery_send", kind, householdId, transport: "platform", ok: !!p.ok,
+      ...(p.ok ? {} : { error: p.error ?? "send_failed", detail: p.message }),
+    });
+    if (p.ok) return { ok: true, channel: "email", delivered: true, transport: "platform", message: `Emailed ${email}.` };
+    // fall through: a configured-but-failing platform sender should still try the household's
+    // own transport rather than stranding the person.
+  }
   const out = await deliverViaChannel({
     session: { householdId, actorId },
     channel: "email",
@@ -194,7 +217,7 @@ It expires in 15 minutes and can be used once. If you didn't ask to reset your p
     recipientActorId: actorId,
   });
   appendAudit({
-    type: "identity.recovery_send", kind, householdId, ok: !!out.ok,
+    type: "identity.recovery_send", kind, householdId, transport: "household", ok: !!out.ok,
     ...(out.ok ? {} : { error: out.needsSetup ?? "send_failed", detail: out.message }),
   });
   return out;
@@ -253,7 +276,20 @@ async function deliverViaChannel({ session, channel, to, subject: rawSubject, bo
         account = listAccountsFor(session.householdId, actorId).find((a) => a.provider === "google");
         if (account) break;
       }
-      if (!account) return { ok: false, channel, delivered: false, needsSetup: "google", message: "Connect a Google account (with Send email) in Connections to deliver by email." };
+      if (!account) {
+        // No Google connection. Rather than refuse outright — which is what a brand-new
+        // household always got, since it cannot have one yet — fall back to the platform
+        // sender when the deployment has one. Audited as a distinct transport so nobody
+        // later mistakes a noreply@ delivery for mail the family sent themselves.
+        if (platformMailReady()) {
+          const p = await sendPlatformEmail({ to, subject, text });
+          appendAudit({ type: "notify.deliver", channel, transport: "platform", ok: !!p.ok, householdId: session.householdId, ...(p.ok ? {} : { error: p.error }) });
+          return p.ok
+            ? { ok: true, channel, delivered: true, transport: "platform", message: `Emailed ${to} from FamiliOS.` }
+            : { ok: false, channel, delivered: false, needsSetup: "google", message: `Couldn't send: ${p.message} Connect a Google account (with Send email) in Connections to send as your household instead.` };
+        }
+        return { ok: false, channel, delivered: false, needsSetup: "google", message: "Connect a Google account (with Send email) in Connections to deliver by email." };
+      }
       // WP-005: a STALE account is not a working one. An expired/revoked Google grant
       // would otherwise sail past these guards and fail deep inside the Gmail call,
       // surfacing as an opaque provider error rather than the one thing the family can

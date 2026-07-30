@@ -3,7 +3,19 @@
 // to select and execute out of the box. The seeded skill uses only internal
 // functions (+ a gated sign-off step), so it runs end-to-end with no external
 // account — demonstrating the full approval→resume→execute→audit→memory loop.
-import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction, listMembers, putMember, listPlaybooks, putPlaybook, listContactMethods, putContactMethod, getSettings, setSettings } from "./store.mjs";
+import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction, listMembers, putMember, listPlaybooks, putPlaybook, listContactMethods, putContactMethod, getSettings, setSettings, currentTenant } from "./store.mjs";
+
+/** The household these seed records belong to — the one whose database they are being
+ *  written INTO, which is what `currentTenant()` resolves to for every put* call below.
+ *
+ *  This was the literal string "local". Harmless while seeding only ever ran at boot with
+ *  no tenant context (where currentTenant() IS "local" — identical behaviour), but it made
+ *  a latent trap: several readers still carry a legacy `|| householdId === "local"` clause
+ *  that treats a "local"-stamped record as shared, so a seed run inside a stranger's
+ *  database would have written records that household could not own and other code might
+ *  treat as everyone's. Stamping what we're actually writing to removes the trap without
+ *  changing today's behaviour. */
+const SEED_TENANT = () => currentTenant();
 
 /* ============================================================== *
  * WP-004 (ISS-008, FEAT-019/005) — default "Family Chore Board" mini app for NEW
@@ -67,7 +79,7 @@ export function seedDefaults() {
   // server-side role change is never clobbered by a reboot.
   const haveMembers = new Set(listMembers().map((m) => m.actorId));
   for (const m of SEED_MEMBERS) {
-    if (!haveMembers.has(m.actorId)) putMember({ ...m, householdId: "local" });
+    if (!haveMembers.has(m.actorId)) putMember({ ...m, householdId: SEED_TENANT() });
   }
 
   // Contact methods — the server-owned delivery registry. Same ids/state as the
@@ -92,14 +104,14 @@ export function seedDefaults() {
     { id: "ct-sam-text", memberId: "m-sam", label: "Mobile", type: "Phone/Text", value: "(555) 044-3311", verified: false, optInStatus: "Pending" },
   ]) {
     if (!haveContacts.has(c.id) && activeMembers.has(c.memberId)) {
-      putContactMethod({ ...c, householdId: "local", allowedAgentIds: [], createdBy: "system", createdAt: nowISO, updatedAt: nowISO });
+      putContactMethod({ ...c, householdId: SEED_TENANT(), allowedAgentIds: [], createdBy: "system", createdAt: nowISO, updatedAt: nowISO });
     }
   }
 
   if (!listAgents().some((a) => a.id === "agt_household")) {
     putAgent({
       id: "agt_household",
-      householdId: "local",
+      householdId: SEED_TENANT(),
       name: "Household Assistant",
       icon: "Bot",
       purpose: "General family operations helper.",
@@ -122,7 +134,7 @@ export function seedDefaults() {
   if (!listSkills().some((s) => s.id === "skl_morning_brief")) {
     putSkill({
       id: "skl_morning_brief",
-      householdId: "local",
+      householdId: SEED_TENANT(),
       name: "Morning Family Briefing",
       description: "Note the briefing in memory, draft a briefing artifact, then request household sign-off before sharing.",
       domain: "Family",
@@ -162,7 +174,7 @@ export function seedDefaults() {
   if (!fnExists("fn_note_to_memory")) {
     putFunction({
       id: "fn_note_to_memory",
-      householdId: "local",
+      householdId: SEED_TENANT(),
       name: "Note to family memory",
       description: "Write a short note into the household's shared memory. A safe, low-risk function backed by an internal handler — testable with no external account.",
       type: "internal",
@@ -187,7 +199,7 @@ export function seedDefaults() {
   if (!fnExists("fn_gmail_recent")) {
     putFunction({
       id: "fn_gmail_recent",
-      householdId: "local",
+      householdId: SEED_TENANT(),
       name: "Recent inbox digest",
       description: "Search the connected Gmail account for recent messages. Read-only — wraps the real gmail.search tool. Stays in needs_connector until Gmail is connected.",
       type: "connector_api",
@@ -219,7 +231,7 @@ export function seedDefaults() {
    * ============================================================== */
   const agentExists = (id) => listAgents().some((a) => a.id === id);
   const baseAgent = (id, name, purpose) => ({
-    id, householdId: "local", name, icon: "Bot", purpose,
+    id, householdId: SEED_TENANT(), name, icon: "Bot", purpose,
     instructions: "Run the assigned use-case skill. Always deliver only to verified, allowlisted contact methods; pause for approval on any sign-off step.",
     status: "Active", spaceType: "Family", system: true,
     skillIds: [], allowedToolIds: [], allowedFunctionIds: [], deniedFunctionIds: [],
@@ -234,7 +246,7 @@ export function seedDefaults() {
 
   const skillExists = (id) => listSkills().some((s) => s.id === id);
   const baseSkill = (over) => ({
-    householdId: "local", domain: "Family", mode: "deterministic", defaultAgentId: null,
+    householdId: SEED_TENANT(), domain: "Family", mode: "deterministic", defaultAgentId: null,
     planner_guidance: "", input_schema: [], output_schema: [],
     required_connectors: [], required_tools: [], required_functions: [],
     optional_tools: [], optional_functions: [], approval_policy: {}, risk_level: "Low",
@@ -378,7 +390,7 @@ export function seedDefaults() {
   const havePlaybookNames = new Set(existingPlaybooks.map((p) => String(p.name ?? "").trim().toLowerCase()));
   const seedPlaybook = (p) => {
     if (havePlaybooks.has(p.id) || havePlaybookNames.has(p.name.trim().toLowerCase())) return;
-    putPlaybook({ householdId: "local", archived: false, system: true, createdBy: "system", createdAt: nowISO, updatedAt: nowISO, ...p });
+    putPlaybook({ householdId: SEED_TENANT(), archived: false, system: true, createdBy: "system", createdAt: nowISO, updatedAt: nowISO, ...p });
   };
   seedPlaybook({
     id: "pb_school_form",

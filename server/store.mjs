@@ -624,17 +624,31 @@ export function consumeApproval({ id, actorId, householdId, toolId, input }) {
   return { ok: true, approval: a };
 }
 
-/* ---- OAuth state (server-persisted, bound to session + connector + PKCE verifier) ---- */
+/* ---- OAuth state (server-persisted, bound to session + connector + PKCE verifier) ----
+ *
+ * SYSTEM TENANT, not the household's — for the same reason sessions and identities live
+ * there: at callback time we do not yet know which household the caller belongs to. The
+ * provider redirects the browser straight to the backend origin with no session cookie, so
+ * the callback ran with no tenant context and `currentTenant()` fell back to the resident
+ * household. The state had been written into `hh_*` when the flow STARTED (a request that
+ * did have a session), so the callback looked in the wrong database, found nothing, and
+ * returned `invalid_state`. Every signed-up household was therefore unable to connect
+ * Google, Microsoft, Slack — anything — and the failure looked like an expired link.
+ *
+ * The state key is a 16-byte random nonce and the record carries its own householdId, so a
+ * cross-household registry is safe here: possessing the token is the authorisation, exactly
+ * as it is for a session token. No migration needed — the TTL is 10 minutes, so any state
+ * written under the old scheme has already expired. */
 const OAUTH_TTL_MS = 10 * 60 * 1000;
 export function putOAuthState(state, data) {
-  const all = readJSON("oauth_states.json", {});
+  const all = sysDoc("oauth_states.json", {});
   all[state] = { ...data, createdAt: Date.now(), expiresAt: Date.now() + OAUTH_TTL_MS };
-  writeJSON("oauth_states.json", all);
+  putSysDoc("oauth_states.json", all);
 }
 export function takeOAuthState(state) {
-  const all = readJSON("oauth_states.json", {});
+  const all = sysDoc("oauth_states.json", {});
   const s = all[state];
-  if (s) { delete all[state]; writeJSON("oauth_states.json", all); }
+  if (s) { delete all[state]; putSysDoc("oauth_states.json", all); }
   if (!s || s.expiresAt < Date.now()) return null;
   return s;
 }

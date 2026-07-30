@@ -42,6 +42,7 @@ import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEm
 import { revertEvolution, resolveEvolutionBefore, canRevertEvolution, listEvolutionArchive } from "./evolution-revert.mjs";
 import { createBackup, listBackups, readBackup, restoreBackup, backupTick, deleteBackupsFor, listLegacyBackups, readLegacyBackup, restoreLegacyBundle } from "./backup.mjs";
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
+import { platformMailReady, sendPlatformEmail, platformMailStatus } from "./mailer.mjs";
 import { closeBrowser } from "./browser.mjs";
 import { orchestrate, ensureOpenDefaultAgent } from "./orchestrator.mjs";
 import { sandboxEnabled, seedSandboxAccounts, listSandboxEffects } from "./sandbox-connectors.mjs";
@@ -652,6 +653,12 @@ const handleRequest = async (req, res) => {
         memoryProvider: { ok: !!memHealth?.ok, degraded: !!memHealth?.degraded, backend: memHealth?.backend ?? memoryProvider.backend },
         externalActionsEnabled: externalActionsEnabled(CURRENT_TENANT),
         webhookBaseUrl: (process.env.HOMEOPS_PUBLIC_URL || `http://localhost:${PORT}`).split(",")[0].trim().replace(/\/$/, ""),
+        /* Whether FamiliOS can send its OWN transactional mail — password resets, recovery
+         * codes, email confirmation. `not_configured` here means a new household can sign up
+         * and then never get back in, which is the kind of thing that should be visible on a
+         * health check rather than discovered by a locked-out customer. Names the From so a
+         * misconfigured sender is diagnosable; never exposes the key. */
+        mail: platformMailStatus(),
         authRequired: true,
       }, req);
     }
@@ -690,13 +697,24 @@ const handleRequest = async (req, res) => {
       try {
         const ex = await exchangeCode(provider, { code, codeVerifier: st.codeVerifier, redirectUri: oauthRedirectUri() });
         if (!ex.ok) {
-          audit({ type: "oauth.callback", provider: st.provider, ok: false, error: "token_exchange_failed" }, req);
+          // Filed in the household that started the flow — a family debugging a failed
+          // connection should find it in their own audit log, not the resident one's.
+          runWithTenant(st.householdId, () => audit({ type: "oauth.callback", provider: st.provider, ok: false, error: "token_exchange_failed", householdId: st.householdId }, req));
           if (isMobileFlow) return finishMobile({ ok: "0", provider: provider.name, error: "exchange_failed", message: "The provider did not return an access token. Please try connecting again." });
           res.writeHead(200, { "content-type": "text/html" });
           return res.end(htmlMessage("Authorization error", "The provider did not return an access token. Please try connecting again."));
         }
-        const acct = await upsertAccount({ provider: st.provider, householdId: st.householdId, actorId: st.actorId, tokens: ex.tokens });
-        appendAudit({ type: "oauth.callback", provider: st.provider, ok: true, actorId: st.actorId, accountId: acct.id });
+        // The account and its vault tokens must land in the CONNECTING household's
+        // database. This request carries no session, so nothing has set a tenant context:
+        // putAccount would write into the resident household while stamping the record
+        // `householdId: hh_*`, producing a connection the owning household cannot see and
+        // the resident household should never have had. The state record knows whose flow
+        // this is; enter that tenant explicitly.
+        const acct = await runWithTenant(st.householdId, async () => {
+          const a = await upsertAccount({ provider: st.provider, householdId: st.householdId, actorId: st.actorId, tokens: ex.tokens });
+          appendAudit({ type: "oauth.callback", provider: st.provider, ok: true, actorId: st.actorId, accountId: a.id, householdId: st.householdId });
+          return a;
+        });
         // Mobile-initiated flows: hand control back to the app via the familios:// scheme.
         // Web flows: postMessage to the opener window.
         if (isMobileFlow) {
@@ -706,7 +724,7 @@ const handleRequest = async (req, res) => {
         res.writeHead(200, { "content-type": "text/html" });
         return res.end(`<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;background:#f4f0e9;color:#1f2535;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:40px">✓</div><h2>${escapeHtml(provider.name)} connected</h2><p style="color:#4a5568">Signed in as ${escapeHtml(acct.displayName)} — returning to FamiliOS…</p></div><script>try{window.opener&&window.opener.postMessage({type:"homeops-oauth",provider:${JSON.stringify(st.provider)},ok:true},${JSON.stringify(target)})}catch(e){}setTimeout(()=>window.close(),900)</script></body>`);
       } catch (e) {
-        appendAudit({ type: "oauth.callback", provider: st.provider, ok: false, error: "exception" });
+        runWithTenant(st.householdId, () => appendAudit({ type: "oauth.callback", provider: st.provider, ok: false, error: "exception", householdId: st.householdId }));
         if (isMobileFlow) return finishMobile({ ok: "0", provider: provider.name, error: "server_error", message: "Something went wrong completing the connection." });
         res.writeHead(200, { "content-type": "text/html" });
         return res.end(htmlMessage("Connection failed", "Something went wrong completing the connection."));
@@ -1130,18 +1148,38 @@ const handleRequest = async (req, res) => {
       await runWithTenant(householdId, () => {
         putMember({ actorId, displayName: ownerName, role, relationship, householdId });
         if (!invite) setSettings({ householdName: String(body.householdName).trim().slice(0, 60), householdCreatedAt: Date.now() }, householdId);
+        // The deployment's AI keys, for this household, now — not at the next restart. A
+        // family that signs up and finds the assistant unable to think has no reason to
+        // come back, and "wait for a deploy" is not an onboarding step.
+        try { bootstrapAIFromEnv(householdId); } catch { /* non-fatal: Settings can still add one */ }
         appendAudit({ type: invite ? "household.join" : "household.signup", email, actorId, role });
       });
       const s = createSession({ actorId, actorName: ownerName, role, householdId });
       maybeSeedSandbox(s);
       const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
       const wantToken = req.headers["x-homeops-bearer"] === "1";
-      // Honest verification status: sending needs an email channel this fresh
-      // household hasn't connected yet. The token exists; verification is
-      // non-blocking until C2 compliance work wires a real sender.
+      // The verification email now actually goes out — over the PLATFORM sender, because a
+      // household one second old has no Google connection and never could have. Still
+      // non-blocking: an unverified account works, so a mail outage can't wall someone out
+      // of the product they just signed up for. Reported honestly either way, with the
+      // reason named, so the client never claims a send that didn't happen.
+      let emailVerification = { sent: false, required: false, reason: "mail_not_configured" };
+      const verifyToken = made.identity?.verifyToken;
+      if (platformMailReady() && verifyToken) {
+        const link = `${(process.env.HOMEOPS_PUBLIC_URL || `http://localhost:${PORT}`).split(",")[0].trim().replace(/\/$/, "")}/api/verify-email?token=${encodeURIComponent(verifyToken)}`;
+        const sent = await sendPlatformEmail({
+          to: email,
+          subject: "Confirm your email for FamiliOS",
+          text: `Welcome to FamiliOS, ${ownerName}.\n\nConfirm this address so we can reach you about your household — password resets and account notices go here:\n\n${link}\n\nIf you didn't create a FamiliOS account, you can ignore this email.`,
+        });
+        emailVerification = sent.ok
+          ? { sent: true, required: false }
+          : { sent: false, required: false, reason: sent.error ?? "send_failed" };
+        await runWithTenant(householdId, () => appendAudit({ type: "identity.verify_send", email, ok: !!sent.ok, ...(sent.ok ? {} : { error: sent.error, detail: sent.message }) }));
+      }
       return json(res, 200, {
         session: sessionView, household: { id: householdId }, ...(wantToken ? { token: s.token } : {}),
-        emailVerification: { sent: false, required: false, reason: "no_email_channel_yet" },
+        emailVerification,
       }, req, { "set-cookie": sessionCookie(s.token) });
     }
     if (path === "/api/login" && method === "POST") {
@@ -1157,6 +1195,18 @@ const handleRequest = async (req, res) => {
       const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
       const wantToken = req.headers["x-homeops-bearer"] === "1";
       return json(res, 200, { session: sessionView, ...(wantToken ? { token: s.token } : {}) }, req, { "set-cookie": sessionCookie(s.token) });
+    }
+    /* Clicking the link in the verification email. A GET that changes state is normally a
+     * smell, but a link in an email cannot be anything else, and the standard protections
+     * apply: the token is 32 bytes of entropy, single-use, and carries no authority beyond
+     * marking one address confirmed. Renders a page rather than JSON because a human is
+     * looking at it. The POST form below stays for clients that hold the token themselves. */
+    if (path === "/api/verify-email" && method === "GET") {
+      const idn = consumeVerifyToken(url.searchParams.get("token") ?? "");
+      res.writeHead(200, { "content-type": "text/html" });
+      return res.end(idn
+        ? htmlMessage("Email confirmed", `${escapeHtml(idn.email)} is confirmed. You can close this tab and carry on in FamiliOS.`)
+        : htmlMessage("Link expired", "This confirmation link is invalid or has already been used. Sign in and request a new one if you still need to confirm your address."));
     }
     if (path === "/api/verify-email" && method === "POST") {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
@@ -5388,9 +5438,15 @@ function htmlMessage(title, body) {
 
 server.listen(PORT, () => {
   seedDefaults();          // ensure a real agent + runnable hybrid skill exist
-  // Hosted deployments hand AI keys via env — configure + activate once, never
-  // overwriting a Settings-made choice (see bootstrapAIFromEnv).
-  try { const boot = bootstrapAIFromEnv(); if (boot.length) console.log(`[ai] bootstrapped from env: ${boot.join(", ")}`); } catch { /* non-fatal */ }
+  // Hosted deployments hand AI keys via env — configure + activate, never overwriting a
+  // Settings-made choice (see bootstrapAIFromEnv). ONCE PER HOUSEHOLD: the keys belong to
+  // the deployment, so every tenant is entitled to them, and running this bare configured
+  // only the resident family — leaving every household that ever signed up with no AI
+  // provider and no route to one but pasting a personal API key into Settings. Idempotent,
+  // so a family that chose its own provider (or a local Ollama) keeps it.
+  void forEachTenant(async (t) => {
+    try { const boot = bootstrapAIFromEnv(t); if (boot.length) console.log(`[ai] bootstrapped ${t} from env: ${boot.join(", ")}`); } catch { /* one household must not break the rest */ }
+  });
   registerAssistantRunHooks(); // inline chat results + one-shot self-repair for conversation runs
   registerTriggerRunHooks();   // WP-001: write each run's TERMINAL status back to its trigger
   // Recovery + sweeps + trigger tick run once PER HOUSEHOLD, each inside that

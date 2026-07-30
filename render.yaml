@@ -106,6 +106,26 @@ services:
       # in with it, then optionally change it in Settings (which takes precedence).
       - key: HOMEOPS_BOOTSTRAP_PIN
         sync: false
+      # PLATFORM TRANSACTIONAL EMAIL — password resets, recovery codes, address
+      # confirmation. Without this FamiliOS has NO email of its own: the only transport is a
+      # household's connected Gmail, which a household one second old does not have, so a
+      # family can sign up and then never get back into their account. /api/health reports
+      # `mail.readiness` so a missing key is visible rather than discovered by a locked-out
+      # customer. FAMILIOS_MAIL_FROM must be a domain verified with the provider — the
+      # default sandbox sender only delivers to the provider account's own address.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: FAMILIOS_MAIL_FROM
+        sync: false
+      # Cross-household operator surface (admin household list, invite minting, and the
+      # pre-2026-07-30 all-tenant backup bundles). Deliberately NOT a household role: no
+      # value of session.role can express a cross-tenant capability without putting that
+      # reach inside a field a household Owner controls. Empty means NOBODY is an operator
+      # and those routes 404 — correct for a self-hosted copy. It was set on the service by
+      # hand but absent from this blueprint, so a service rebuild would have silently
+      # dropped it and taken the operator console with it.
+      - key: HOMEOPS_OPERATOR_EMAILS
+        sync: false
       # Optional OAuth providers. Fill these in the Render dashboard.
       - key: HOMEOPS_OAUTH_GOOGLE_CLIENT_ID
         sync: false
