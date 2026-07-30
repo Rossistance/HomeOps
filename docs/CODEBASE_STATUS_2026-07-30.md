@@ -41,6 +41,19 @@
 >
 > **2.2 per-tenant seeding — also done**, in a follow-up within the same push. `ensureSystemSkills(householdId)` uses the **resident household as the template** rather than duplicating 150 lines of inline definitions into a second code path: one source of truth, and a new household provably gets what this deployment actually ships. Filtered to `system: true` + `skl_` ids so a family's own authored skills never cross a tenant boundary, idempotent by id, and non-fatal. Stated trade-off: editing the resident household's system skills changes what new households inherit — intended for a self-hosted deployment tuning its own catalogue, and better than a second hard-coded list that drifts silently.
 
+> ## ✅ WEEK 3a SHIPPED — commit `0292ffe`, pushed to `main` 2026-07-30
+>
+> **1033 server tests, 0 failures (6 new).** Typechecks + build clean; app boots with no console errors.
+>
+> | Item | Status |
+> |---|---|
+> | 5.1 `run.goal` never set | **fixed** — `startRun` stores it; chat routes pass the message; `runAgent` passes its goal (where the title is the agent's *name*). Kept separate from `title`; trimmed to 2000; honest `null` when there is no user sentence. |
+> | 5.4 Chat runs always `household` visibility | **fixed** — inherited from the conversation. A nest conversation deliberately resolves to household: `startRun` only knows personal vs household, and under-notifying an approval is the worse error. |
+> | 5.3 Repair path bypassed `orchestrate` | **fixed** — inherits the original run's `agentId`, `skillId`, `via`, `goal`, `visibility`. Without an agentId the engine's whole policy block was skipped *and* `notify_contact` hard-refused, so a "successful" repair still couldn't deliver. |
+> | 5.6 Web ignored server `phase` events | **fixed** — wired with a phase lock so the token heuristic can't flicker the label back mid-search. Also deleted the `EventSource` that fired a real GET at the stream endpoint on every chat turn before aborting itself. |
+>
+> **Remaining in Week 3: WP-A household autonomy presets** (§Severity 4). Unchanged estimate **5–8 days**, because the dial has to land on a repaired control surface — the PIN asymmetry, the decorative web `autoAllow` editor, the four inert dials, and the `duplicate`/`rollback` policy laundering. Half-landing it would ship another toggle that looks like it works, which is the exact defect class this document tracks.
+
 ---
 
 ## SEVERITY 1 — Fix before any stranger has an account
