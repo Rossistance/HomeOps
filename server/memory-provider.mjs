@@ -55,7 +55,35 @@ function resolveDataDir() {
 }
 
 const DEFAULT_TIMEOUT_MS = 1000;
-const DEFAULT_CONTAINER = "default";
+
+/* THE SHARED BUCKET.
+ *
+ * `containerTag` IS the tenant boundary in this store: one sqlite file holds every
+ * household's memories and `container_tag` is the only thing keeping them apart. It used to
+ * default to the literal string "default", so any call that reached here without a household —
+ * a JS default parameter fires on `undefined`, which is what `{ containerTag: ctx.householdId }`
+ * produces the moment that field is missing — wrote into a bucket EVERY household shares, and
+ * searched it too. One family's memories would surface in another family's assistant, and
+ * nothing about it would look like an error: the write succeeds, the search returns rows.
+ *
+ * There is no correct value to guess here, so it doesn't guess. A memory operation with no
+ * household is a bug in the caller, and it now says so instead of silently picking a bucket.
+ * The refusal keeps the module's fail-soft contract — a shaped result, never a throw, so
+ * planner and write-path code can still call this unconditionally — but `degraded: false`
+ * marks it as a real refusal rather than a backend that's having a bad day.
+ *
+ * `null` matters as much as `undefined`: a default parameter does NOT fire on null, so that
+ * case used to sail through and land in a bucket literally named "null". Both are rejected. */
+function requireTag(containerTag) {
+  const t = String(containerTag ?? "").trim();
+  if (!t || t === "undefined" || t === "null" || t === "default") return null;
+  return t;
+}
+const NO_TAG = (backend, extra = {}) => ({
+  ok: false, degraded: false, error: "no_container_tag",
+  message: "A memory operation needs the household it belongs to. Refusing rather than writing to a bucket every household shares.",
+  backend, ...extra,
+});
 
 // How long a write waits for another process's lock before giving up. node:sqlite opens
 // with busy_timeout = 0 (verified: `PRAGMA busy_timeout` reads 0 on a default
@@ -133,28 +161,32 @@ function createSqliteBackend({ dataDir }) {
     }
   }
 
-  async function add(text, { containerTag = DEFAULT_CONTAINER, scope, type, sourceActorId, id } = {}) {
+  async function add(text, { containerTag, scope, type, sourceActorId, id } = {}) {
     try {
+      const tag = requireTag(containerTag);
+      if (!tag) return NO_TAG("sqlite-fts5");
       const memText = String(text ?? "").trim();
       if (!memText) return { ok: false, degraded: false, error: "empty_text", backend: "sqlite-fts5" };
       const database = ensureOpen();
       if (id) {
-        const existing = database.prepare("SELECT rowid FROM memories WHERE id = ? AND container_tag = ?").get(id, containerTag);
+        const existing = database.prepare("SELECT rowid FROM memories WHERE id = ? AND container_tag = ?").get(id, tag);
         if (existing) return { ok: true, degraded: false, id, deduped: true, backend: "sqlite-fts5" };
       }
       const recId = id ?? `sm_${crypto.randomBytes(8).toString("hex")}`;
       database
         .prepare("INSERT INTO memories (id, container_tag, text, scope, type, source_actor_id, created_at) VALUES (?,?,?,?,?,?,?)")
-        .run(recId, String(containerTag), memText, scope ?? null, type ?? null, sourceActorId ?? null, Date.now());
+        .run(recId, tag, memText, scope ?? null, type ?? null, sourceActorId ?? null, Date.now());
       return { ok: true, degraded: false, id: recId, backend: "sqlite-fts5" };
     } catch (e) {
       return { ok: false, degraded: true, error: String(e?.message ?? e), backend: "sqlite-fts5" };
     }
   }
 
-  async function search(query, { containerTag = DEFAULT_CONTAINER, limit = 10 } = {}) {
+  async function search(query, { containerTag, limit = 10 } = {}) {
     const t0 = Date.now();
     try {
+      const tag = requireTag(containerTag);
+      if (!tag) return NO_TAG("sqlite-fts5", { results: [], latencyMs: Date.now() - t0 });
       const database = ensureOpen();
       const q = String(query ?? "").trim();
       const cap = Math.max(1, Math.min(50, Number(limit) || 10));
@@ -162,7 +194,7 @@ function createSqliteBackend({ dataDir }) {
       if (!q) {
         rows = database
           .prepare("SELECT id, text, scope, type, source_actor_id as sourceActorId, created_at as createdAt FROM memories WHERE container_tag = ? ORDER BY created_at DESC LIMIT ?")
-          .all(String(containerTag), cap);
+          .all(tag, cap);
       } else {
         const match = ftsQuery(q);
         if (!match) {
@@ -177,7 +209,7 @@ function createSqliteBackend({ dataDir }) {
             .prepare(
               "SELECT id, text, scope, type, source_actor_id as sourceActorId, created_at as createdAt, bm25(memories) as rank FROM memories WHERE container_tag = ? AND memories MATCH ? ORDER BY rank LIMIT ?",
             )
-            .all(String(containerTag), match, cap * 3);
+            .all(tag, match, cap * 3);
           rows = raw
             .map((r) => ({ ...r, _hybrid: r.rank + (now - r.createdAt) / (1000 * 60 * 60 * 24 * 365) }))
             .sort((a, b) => a._hybrid - b._hybrid)
@@ -191,12 +223,14 @@ function createSqliteBackend({ dataDir }) {
     }
   }
 
-  async function profile({ containerTag = DEFAULT_CONTAINER } = {}) {
+  async function profile({ containerTag } = {}) {
     try {
+      const tag = requireTag(containerTag);
+      if (!tag) return NO_TAG("sqlite-fts5", { containerTag: null, totalMemories: 0, byType: {}, byScope: {}, highlights: [] });
       const database = ensureOpen();
       const rows = database
         .prepare("SELECT text, scope, type, source_actor_id as sourceActorId, created_at as createdAt FROM memories WHERE container_tag = ? ORDER BY created_at DESC LIMIT 200")
-        .all(String(containerTag));
+        .all(tag);
       const byType = {};
       const byScope = {};
       for (const r of rows) {
@@ -208,7 +242,7 @@ function createSqliteBackend({ dataDir }) {
       return {
         ok: true,
         degraded: false,
-        containerTag,
+        containerTag: tag,
         totalMemories: rows.length,
         byType,
         byScope,
@@ -258,26 +292,35 @@ function createSidecarBackend({ url, timeoutMs }) {
     }
   }
 
-  const add = (text, { containerTag = DEFAULT_CONTAINER, scope, type, sourceActorId, id } = {}) =>
+  // The sidecar gets the same refusal as the sqlite backend. It is a SHARED service — one
+  // process for the whole deployment — so an untagged call there pools households in someone
+  // else's store, where this codebase can't even see it happen.
+  const add = (text, { containerTag, scope, type, sourceActorId, id } = {}) =>
     withTimeout(async () => {
-      const data = await callJSON("/v3/memories", { method: "POST", body: { content: String(text ?? ""), containerTag, id, metadata: { scope, type, sourceActorId } } });
+      const tag = requireTag(containerTag);
+      if (!tag) return NO_TAG("supermemory-sidecar");
+      const data = await callJSON("/v3/memories", { method: "POST", body: { content: String(text ?? ""), containerTag: tag, id, metadata: { scope, type, sourceActorId } } });
       return { ok: true, degraded: false, id: data?.id ?? id ?? null, backend: "supermemory-sidecar" };
     }, timeoutMs);
 
-  const search = (query, { containerTag = DEFAULT_CONTAINER, limit = 10 } = {}) =>
+  const search = (query, { containerTag, limit = 10 } = {}) =>
     withTimeout(async () => {
       const t0 = Date.now();
-      const data = await callJSON("/v3/search", { method: "POST", body: { q: String(query ?? ""), containerTag, limit } });
+      const tag = requireTag(containerTag);
+      if (!tag) return NO_TAG("supermemory-sidecar", { results: [], latencyMs: 0 });
+      const data = await callJSON("/v3/search", { method: "POST", body: { q: String(query ?? ""), containerTag: tag, limit } });
       const results = Array.isArray(data?.results)
         ? data.results.map((r) => ({ id: r.id, text: r.content ?? r.text, scope: r.metadata?.scope, type: r.metadata?.type, sourceActorId: r.metadata?.sourceActorId, createdAt: r.createdAt }))
         : [];
       return { ok: true, degraded: false, results, latencyMs: Date.now() - t0, backend: "supermemory-sidecar" };
     }, timeoutMs);
 
-  const profile = ({ containerTag = DEFAULT_CONTAINER } = {}) =>
+  const profile = ({ containerTag } = {}) =>
     withTimeout(async () => {
-      const data = await callJSON(`/v3/profile?containerTag=${encodeURIComponent(containerTag)}`);
-      return { ok: true, degraded: false, containerTag, ...data, backend: "supermemory-sidecar" };
+      const tag = requireTag(containerTag);
+      if (!tag) return NO_TAG("supermemory-sidecar", { containerTag: null });
+      const data = await callJSON(`/v3/profile?containerTag=${encodeURIComponent(tag)}`);
+      return { ok: true, degraded: false, containerTag: tag, ...data, backend: "supermemory-sidecar" };
     }, timeoutMs);
 
   const health = () =>

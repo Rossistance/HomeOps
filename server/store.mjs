@@ -86,24 +86,86 @@ function loadKey() {
   fs.writeFileSync(KEY_FILE, key.toString("hex"), { mode: 0o600 });
   return key;
 }
-const KEY = loadKey();
+const MASTER_KEY = loadKey();
+
+/* ONE KEY FOR EVERY HOUSEHOLD.
+ *
+ * The vault encrypted every family's connector secrets — Google refresh tokens, Twilio auth
+ * tokens, API keys — under a single deployment-wide key. That is not a leak on its own: the
+ * key file sits in the same DATA_DIR as the databases, so anyone holding one holds both.
+ *
+ * What it cost was STRUCTURAL protection against the bug this codebase keeps producing. Every
+ * accessor here resolves its household from the ambient tenant context, and this session alone
+ * found five places where that context was silently the wrong one — the resident household
+ * standing in for everybody. With one key, such a bug reads another family's `connectors.json`
+ * and DECRYPTS IT: live credentials, no error, nothing in an audit log. With a key derived per
+ * household, the identical bug yields nulls. The protection stops depending on every future
+ * caller getting the tenant right.
+ *
+ * HKDF over the master key, so there is still exactly one root secret to manage and no new
+ * key-distribution problem — the per-household keys are derived, never stored.
+ *
+ * MIGRATION IS THE RISK HERE, and it is handled by reading both formats. Existing blobs are
+ * `iv.tag.ct` under the master key; new ones are `v2.iv.tag.ct` under the household's derived
+ * key. Getting this wrong would mean every family losing every connector credential at once,
+ * so old blobs are never re-interpreted — the format is read off the value itself, and a v1
+ * blob is decrypted the way it was written. `migrateVaultToTenantKeys()` (called per household
+ * at boot) rewrites them opportunistically; anything it can't decrypt is left exactly as-is
+ * rather than replaced. */
+const VAULT_INFO = Buffer.from("familios:vault:v2");
+const _tenantKeys = new Map();
+function vaultKey(tenant) {
+  const t = String(tenant || RESIDENT_TENANT);
+  let k = _tenantKeys.get(t);
+  if (!k) {
+    k = Buffer.from(crypto.hkdfSync("sha256", MASTER_KEY, Buffer.from(t, "utf8"), VAULT_INFO, 32));
+    _tenantKeys.set(t, k);
+  }
+  return k;
+}
 
 export function encrypt(plain) {
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", KEY, iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", vaultKey(T()), iv);
   const ct = Buffer.concat([cipher.update(String(plain), "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return `${iv.toString("base64")}.${tag.toString("base64")}.${ct.toString("base64")}`;
+  return `v2.${iv.toString("base64")}.${tag.toString("base64")}.${ct.toString("base64")}`;
 }
 export function decrypt(blob) {
   try {
-    const [iv, tag, ct] = blob.split(".");
-    const decipher = crypto.createDecipheriv("aes-256-gcm", KEY, Buffer.from(iv, "base64"));
+    const parts = String(blob).split(".");
+    // The format is read off the value, never assumed: a v1 blob written under the master key
+    // must keep decrypting under it, or a deployment loses every credential it holds.
+    const v2 = parts.length === 4 && parts[0] === "v2";
+    const [iv, tag, ct] = v2 ? parts.slice(1) : parts;
+    const decipher = crypto.createDecipheriv("aes-256-gcm", v2 ? vaultKey(T()) : MASTER_KEY, Buffer.from(iv, "base64"));
     decipher.setAuthTag(Buffer.from(tag, "base64"));
     return Buffer.concat([decipher.update(Buffer.from(ct, "base64")), decipher.final()]).toString("utf8");
   } catch {
     return null;
   }
+}
+
+/** Re-encrypt this household's v1 vault blobs under its own derived key. Returns a count.
+ *
+ *  Deliberately conservative: a blob that doesn't decrypt is LEFT ALONE, not dropped and not
+ *  overwritten. The failure mode of being too eager here is a family silently losing their
+ *  Google connection, which is far worse than a secret staying on the old key one more boot. */
+export function migrateVaultToTenantKeys() {
+  const all = readJSON("connectors.json", null);
+  if (!all || typeof all !== "object") return 0;
+  let moved = 0;
+  for (const cfg of Object.values(all)) {
+    for (const [field, blob] of Object.entries(cfg?.secrets ?? {})) {
+      if (typeof blob !== "string" || blob.startsWith("v2.")) continue;
+      const plain = decrypt(blob);
+      if (plain == null) continue;          // unreadable: leave it exactly as found
+      cfg.secrets[field] = encrypt(plain);
+      moved++;
+    }
+  }
+  if (moved) writeJSON("connectors.json", all);
+  return moved;
 }
 
 // Corruption quarantine: storage that can't be read cleanly (a tenant db that

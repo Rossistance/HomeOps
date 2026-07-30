@@ -101,7 +101,21 @@
 >
 > **Deliberately unchanged:** the shared connector endpoint `/api/webhooks/webhook` keeps its resident behaviour. connectors.mjs publishes it as a fixed path with no household in the URL, so there is nothing to route on; giving it a tenant would mean inventing one. Non-resident households reach the feature through a webhook **trigger**, which carries its own URL and secret.
 >
-> **Still open in Severity 2:** 2.3 billing client (blocked — no Apple bank account yet), 2.7 shared vault key / memory `"default"` bucket, 2.8 per-household export + rate limits, 2.9 Sign in with Apple.
+> **Still open in Severity 2:** 2.3 billing client (blocked — no Apple bank account yet), 2.8 per-household export + rate limits, 2.9 Sign in with Apple.
+
+---
+
+> ## ✅ 2.7 SHIPPED — per-tenant secret isolation, 2026-07-30
+>
+> **1146 server tests, 0 failures (28 new).** Both halves were the same weakness: a shared thing that only stayed separate as long as every caller passed the right household.
+>
+> **The memory bucket.** `containerTag` *is* the tenant boundary — one sqlite file holds every household's memories and `container_tag` is all that separates them — and it defaulted to the literal string `"default"`. A JS default parameter fires on `undefined`, which is exactly what `{ containerTag: ctx.householdId }` produces when that field is missing, so an untagged call wrote into a bucket **every household shares** and searched it too. One family's memories surfacing in another's assistant, with nothing that looks like an error: the write succeeds, the search returns rows. There is no correct value to guess, so it no longer guesses — `undefined`, `null` (which a default parameter does *not* catch, and which became the bucket `"null"`), empty, and `"default"` itself are all refused with `no_container_tag`. The refusal keeps the module's fail-soft contract: a shaped result, never a throw, because planner and write-path code call this unconditionally.
+>
+> **The vault key.** Every family's connector credentials were encrypted under one deployment-wide key. That isn't a leak by itself — the key file sits in the same `DATA_DIR` as the databases. What it cost was *structural* protection against the bug this codebase keeps producing: **this session alone found five places where the ambient tenant was silently the resident household**. With one key, such a bug reads another family's `connectors.json` and decrypts it — live credentials, no error, nothing in an audit log. With HKDF-derived per-household keys, the identical bug yields `null`. The protection stops depending on every future caller getting the tenant right. One root secret still, and per-household keys are derived, never stored.
+>
+> **The migration was the risk**, since getting it wrong means every family losing every credential at once. Format is read off the value, never assumed: `iv.tag.ct` stays on the master key, `v2.iv.tag.ct` uses the derived one. A boot pass rewrites v1 blobs per household, deferred and unref'd (same SQLite-contention reason as the backup tick), idempotent, and **a blob that won't decrypt is left exactly as found** rather than dropped or overwritten.
+>
+> **Verified on real data, not just fixtures:** the local dev household's genuine pre-existing OpenAI key decrypted and made a live authenticated call (125 models) *before* migration; the boot pass then rekeyed 8 real secrets; the same call succeeded again afterwards, with all 5 live connectors unchanged.
 
 ---
 

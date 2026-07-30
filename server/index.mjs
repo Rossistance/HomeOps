@@ -14,6 +14,7 @@ import {
   appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings, getDataRev,
   getDataRevForTenant, revEmitter,
   quarantinedCollections, acknowledgeQuarantine, CURRENT_TENANT, forEachTenant, runWithTenant, currentTenant,
+  migrateVaultToTenantKeys,
   tenantEngine, sysDoc, putSysDoc, deleteSessionsForHousehold, getPlan, setPlanFromEntitlement,
   createSession, deleteSession, deleteSessionsForActor, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
@@ -5715,6 +5716,23 @@ server.listen(PORT, () => {
     }
   }), 15 * 60_000);
   startScheduler();
+  /* Move each household's connector secrets onto its OWN derived vault key (see store.mjs).
+   *
+   * Deferred and unref'd for the same reason the backup tick is: a first pass rewrites
+   * connectors.json for every tenant, and doing that while the process is still opening those
+   * same SQLite files is how the concurrent suite went flaky on Windows once already.
+   *
+   * Idempotent — a blob already on v2 is skipped — so it costs one read per household per boot
+   * after the first, and a blob that won't decrypt is left exactly as found rather than
+   * replaced. Failing here must never cost a family their Google connection. */
+  setTimeout(() => {
+    void forEachTenant((t) => {
+      try {
+        const moved = migrateVaultToTenantKeys();
+        if (moved) appendAudit({ type: "vault.rekeyed", secrets: moved, householdId: t });
+      } catch { /* the old key still decrypts; nothing is lost by trying again next boot */ }
+    });
+  }, 45_000).unref?.();
   // Probe the browser runtime once at boot (in-process Playwright first, then
   // any external BROWSER_RUNTIME_URL) so the connector's readiness — and the
   // /api/health browserRuntime flag — reflect reality from the start.
