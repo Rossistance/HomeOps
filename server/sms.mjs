@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import {
   listContactMethods, getMember, listConversations, putConversation,
   appendConversationMessage, getSecret, patchContactMethod, appendAudit,
+  forEachTenant, runWithTenant,
 } from "./store.mjs";
 import { assistantRespond } from "./planner.mjs";
 
@@ -206,29 +207,90 @@ export function smsReplyText(out) {
  * caller renders TwiML. The assistant runs AS the sender (their role gates the
  * tool catalog exactly like a signed-in session).
  */
+/* WHOSE TEXT IS THIS?
+ *
+ * Every store call below — listContactMethods, getMember, the conversation writers — follows
+ * the ambient tenant context. An inbound webhook has none, so they all read the RESIDENT
+ * household. A member of any signed-up family who texted the number therefore resolved to
+ * nobody and got silence, and their STOP was recorded against a household they aren't in.
+ * Multi-tenant SMS was broken before it shipped, and it failed the quiet way: no error, no log,
+ * just an assistant that never answers.
+ *
+ * Resolution is by SENDER, not by the `To` number, because a deployment shares one Twilio
+ * number across every household — `To` cannot tell two families apart. So: ask every household
+ * whether it knows this number.
+ */
+export async function householdsForNumber(from) {
+  const hits = [];
+  await forEachTenant((householdId) => {
+    const methods = smsMethodsForNumber(from);
+    if (methods.length) hits.push({ householdId, methods });
+  });
+  return hits;
+}
+
 export async function handleInboundSms({ from, body }) {
-  // COMPLIANCE KEYWORDS FIRST. A STOP is a legal instruction, not a conversational turn:
-  // it must be honoured before any model sees it, must work for a sender who is opted out
-  // or unverified (and so unresolvable below), and must never depend on an AI provider
-  // being configured. START and HELP ride the same path for the same reason.
+  const matches = await householdsForNumber(from);
+  if (matches.length === 0) return { replyText: null, unknownSender: true };
+
   const keyword = classifySmsKeyword(body);
   if (keyword) {
-    const applied = applySmsKeyword({ kind: keyword, from });
-    if (!applied) return { replyText: null, unknownSender: true };
-    // Thread it into the member's own conversation when we can attribute it, so the family
-    // can see in the app that the opt-out happened and exactly when.
-    let conversationId = null;
-    const member = applied.memberId ? getMember(applied.memberId) : null;
-    if (member && !member.archived) {
-      const conv = smsConversationFor(member, member.householdId ?? applied.householdId ?? "local");
-      const at = new Date().toISOString();
-      appendConversationMessage(conv.id, { role: "user", text: String(body), channel: "sms", at });
-      appendConversationMessage(conv.id, { role: "assistant", kind: "status", text: applied.replyText, channel: "sms", at });
-      conversationId = conv.id;
+    /* A KEYWORD APPLIES EVERYWHERE THIS NUMBER IS KNOWN.
+     *
+     * Someone texting STOP is asking to be left alone, not asking to be left alone by one of
+     * the two families that have their number. Honouring it in a single household would leave
+     * the others texting them, which is both the wrong answer to a plain request and a
+     * compliance failure. Opting back IN fans out for symmetry — they asked for it — and HELP
+     * is answered once because the text is identical either way. */
+    const applied = [];
+    for (const m of matches) {
+      const r = await runWithTenant(m.householdId, () => applyKeywordInTenant({ kind: keyword, from, body }));
+      if (r) applied.push(r);
     }
-    return { replyText: applied.replyText, conversationId, actorId: member?.actorId ?? null, kind: "keyword", keyword, action: applied.action };
+    if (!applied.length) return { replyText: null, unknownSender: true };
+    // One reply per text. The first household's wording is used; they say the same thing, and
+    // "you're opted out (×3)" is not a better message.
+    const lead = applied[0];
+    return { replyText: lead.replyText, conversationId: lead.conversationId, actorId: lead.actorId, kind: "keyword", keyword, action: lead.action, households: applied.length };
   }
 
+  /* A CONVERSATION NEEDS EXACTLY ONE HOUSEHOLD. If a number is registered to two, there is no
+   * way to tell which family's assistant they meant — and guessing means answering with
+   * another family's calendar. Say so, once, and let them choose in the app. */
+  if (matches.length > 1) {
+    appendAudit({ type: "sms.ambiguous_sender", from, households: matches.length });
+    return {
+      replyText: "This number is set up with more than one FamiliOS household, so I can't tell which one you're asking about. Open the app to pick, or reply STOP to turn texts off everywhere.",
+      conversationId: null, actorId: null, kind: "ambiguous",
+    };
+  }
+  return await runWithTenant(matches[0].householdId, () => respondInTenant({ from, body }));
+}
+
+/** The keyword path, inside one household's context. */
+function applyKeywordInTenant({ kind, from, body }) {
+  const applied = applySmsKeyword({ kind, from });
+  if (!applied) return null;
+  // Thread it into the member's own conversation when we can attribute it, so the family can
+  // see in the app that the opt-out happened and exactly when.
+  let conversationId = null;
+  const member = applied.memberId ? getMember(applied.memberId) : null;
+  if (member && !member.archived) {
+    const conv = smsConversationFor(member, member.householdId ?? applied.householdId ?? "local");
+    const at = new Date().toISOString();
+    appendConversationMessage(conv.id, { role: "user", text: String(body), channel: "sms", at });
+    appendConversationMessage(conv.id, { role: "assistant", kind: "status", text: applied.replyText, channel: "sms", at });
+    conversationId = conv.id;
+  }
+  return { replyText: applied.replyText, conversationId, actorId: member?.actorId ?? null, action: applied.action };
+}
+
+/* The assistant path, inside the one household this text belongs to. Keywords are handled by
+ * the dispatcher above and never reach here — a STOP is a legal instruction, not a
+ * conversational turn, and must be honoured before any model sees it, for a sender who may be
+ * opted out or unverified (and so unresolvable here), without depending on an AI provider
+ * being configured at all. */
+async function respondInTenant({ from, body }) {
   const sender = resolveSmsSender(from);
   if (!sender) return { replyText: null, unknownSender: true };
   const { member } = sender;
