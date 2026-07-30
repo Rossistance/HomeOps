@@ -116,7 +116,22 @@ export function buildSeedData(): AppData {
       memoryIds: [],
       knowledgeItemIds: [],
       fileIds: [],
-      approvalPolicy: { autoAllow: t?.defaultAutoAllow ?? [], alwaysApprove: t?.defaultApprovalRules ?? [] },
+      /* THE PROSE THAT SHIPPED AS A RULE.
+       *
+       * policy.mjs matches `autoAllow` / `alwaysApprove` against CAPABILITY IDS. Every agent
+       * created from a template was seeded with English sentences instead — "Require approval
+       * before placing any grocery order or purchase." — so the field a family would point at
+       * to explain how their household is protected matched no capability, ever, on any
+       * household. It read like the strictest rule in the product and did nothing.
+       *
+       * The same sentences already go to `safetyLimits` on the next line, which is where
+       * human-readable intent belongs and is now labelled as notes rather than enforcement.
+       * So the policy lists start empty and are filled by id from the Capabilities tab. This
+       * changes no enforcement anywhere — the prose never matched — it stops the product from
+       * claiming otherwise. (Mapping the sentences onto real ids was the other option and is
+       * the wrong one: guessing that "Read incoming messages" means gmail.search would newly
+       * WAIVE a gate nobody consciously waived.) */
+      approvalPolicy: { autoAllow: [], alwaysApprove: [] },
       safetyLimits: t?.defaultApprovalRules ?? ["Asks before acting outside the household."],
       createdAt: ago(72),
       updatedAt: ago(2),

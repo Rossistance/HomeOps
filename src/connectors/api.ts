@@ -349,6 +349,10 @@ export interface EffectivePolicy {
   risk: string;
   baseRequiresApproval: boolean;
   riskOverridden: boolean;
+  /** Whether per-capability "run this without asking" can take effect at all. False for
+   *  anything high-risk or delivering — policy.mjs rule 6 refuses it there. Answered up front
+   *  so a control can be greyed with a reason instead of accepted and then ignored. */
+  canAutoAllow?: boolean;
 }
 
 export interface AgentContext {
@@ -950,7 +954,10 @@ export const backend = {
   async riskOverrides(): Promise<{ overrides: RiskOverride[]; catalog: CatalogTool[] } | null> {
     try { return await req("/risk-overrides"); } catch { return null; }
   },
-  async setRiskOverride(toolId: string, patch: { riskClass?: string | null; skipApproval?: boolean }): Promise<{ override?: RiskOverride; error?: string }> {
+  /* `pin` is not optional in practice: the server requires the household PIN for this write
+   * whenever one is set. Omitting it returned `pin_required`, which the UI showed as a plain
+   * failure — so the card looked broken rather than gated. Caller collects and retries. */
+  async setRiskOverride(toolId: string, patch: { riskClass?: string | null; skipApproval?: boolean; pin?: string }): Promise<{ override?: RiskOverride; error?: string; message?: string }> {
     try { return await req("/risk-overrides", { method: "PUT", body: JSON.stringify({ toolId, ...patch }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
   async clearRiskOverride(toolId: string): Promise<{ ok: boolean; error?: string }> {

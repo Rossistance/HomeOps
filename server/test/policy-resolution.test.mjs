@@ -29,6 +29,36 @@ test("a gated capability needs approval by default", () => {
   assert.equal(r.requiresApproval, true);
 });
 
+/* ---- canAutoAllow: the refusal in rule 6, answered BEFORE it is set ---- */
+
+test("canAutoAllow says up front where \"run without asking\" can apply…", () => {
+  assert.equal(resolveEffectivePolicy({ cap: gatedLow }).canAutoAllow, true);
+  assert.equal(resolveEffectivePolicy({ cap: lowRead }).canAutoAllow, true);
+});
+
+test("…and where it cannot, so a control is greyed instead of quietly ignored", () => {
+  // The web now offers per-capability "Don't ask" and reads this to decide whether the button
+  // is live. Rule 6 refuses it for anything high-stakes; a family shouldn't have to set it,
+  // leave, come back and read `agent.auto_allow_refused` to find that out.
+  assert.equal(resolveEffectivePolicy({ cap: highSend }).canAutoAllow, false);
+  const deliversButReadsLow = { id: "mail.send", name: "Send mail", requiresApproval: true, risk: "Low", action: "Write", delivers: true };
+  assert.equal(resolveEffectivePolicy({ cap: deliversButReadsLow }).canAutoAllow, false,
+    "delivering is what matters, not the label on the risk");
+});
+
+test("canAutoAllow follows a household risk override, because rule 6 does", () => {
+  // A household that re-classed this tool UP has changed the answer for its own family; the
+  // control has to move with it or it goes back to lying, just in the other direction.
+  const r = resolveEffectivePolicy({ cap: gatedLow, override: { riskClass: "High" } });
+  assert.equal(r.canAutoAllow, false);
+});
+
+test("canAutoAllow is present on every decision, including refusals and blocks", () => {
+  const blocked = resolveEffectivePolicy({ cap: highSend, settings: { externalActionsEnabled: false } });
+  assert.equal(blocked.decision, BLOCKED);
+  assert.equal(typeof blocked.canAutoAllow, "boolean", "a UI reading this field must never get undefined");
+});
+
 test("a freshly generated agent inherits with NO manual configuration", () => {
   // The acceptance criterion: an agent created with an empty policy behaves exactly like
   // the household/capability defaults — no per-entity toggling required to be correct.

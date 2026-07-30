@@ -4478,6 +4478,31 @@ function mayWriteAgent(session, agent, nextVisibility) {
           req.__prereadBody = bodyPeek;
         }
         const body = req.__prereadBody ?? await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+        // THE PIN, for the one switch that most deserved it and had it least.
+        //
+        // requireHouseholdPin appeared in exactly three places in this server: its own
+        // definition, the risk-override write, and the three "runs unsupervised" settings.
+        // It did NOT appear here — so re-classing a single tool demanded the household PIN,
+        // while `unattended.includeHighRisk` ("emails, texts and payments go out without
+        // asking", for every capability that helper can reach) needed only an Adult Admin
+        // session. The most powerful autonomy grant in the product had the weakest gate.
+        //
+        // Only the RAISE is gated, and deliberately so: the same asymmetry the rest of this
+        // policy runs on (see policy.mjs). Turning a waiver OFF, or setting the low-risk
+        // tier, goes straight through — making someone prove themselves in order to become
+        // MORE careful is how you teach them to leave it on.
+        if (body?.approvalPolicy?.unattended?.enabled === true && body.approvalPolicy.unattended.includeHighRisk === true) {
+          const gated = await requireHouseholdPin(g.session, body.pin);
+          if (gated) return json(res, 403, gated, req);
+        }
+        // …and the PIN does NOT travel any further than the check.
+        //
+        // Both writers spread the patch verbatim over the existing record, and publicAgent
+        // returns the whole agent with the comment "all fields non-secret". Leaving `pin` on
+        // the body would persist the household PIN as plaintext on the agent and hand it to
+        // every member who can list helpers. Deleted here rather than filtered downstream:
+        // the credential should stop existing at the point it was consumed.
+        if (body && "pin" in body) delete body.pin;
         // The session travels so approvalPolicy.unattended can be attributed to a real
         // person with real standing (agents.mjs sanitizeApprovalPolicy) — its high-risk tier
         // is only honoured for an Owner/Adult Admin, and a request body can't claim that.

@@ -209,13 +209,33 @@ export function deleteAgent(id) {
   return { ok: true };
 }
 
+/* THE COPY BUTTON WAS A WAY AROUND THE STAMP.
+ *
+ * sanitizeApprovalPolicy exists so `unattended.setByRole` can only ever be written by the
+ * server from a real session — that claim is the entire basis on which policy.mjs rule 6b
+ * lets a helper send without asking. This function spread `...existing` and never called it.
+ * So the grant, its Owner attribution and its original timestamp all rode along into a helper
+ * nobody had decided about, made by whoever clicked Duplicate — no PIN, no re-decision, and
+ * an audit trail claiming an Owner granted blanket send authority to a helper that did not
+ * exist when they granted it.
+ *
+ * Two things are true of a copy: the person duplicating is present and identified, and the
+ * copy is a DIFFERENT helper that will be edited into something else. So attribution is
+ * re-stamped to whoever is actually doing this, and the high-risk tier does not survive the
+ * copy — `includeHighRisk` is decided per-helper, about a specific reach, and has to be
+ * asked for again (with the PIN) for the new one. The low tier carries over, so the config
+ * isn't silently lost; only the part that can send money and messages must be re-granted. */
 export function duplicateAgent(id, session) {
   const existing = getAgent(id);
   if (!existing) return null;
   const newId = "agt_" + crypto.randomBytes(10).toString("hex");
   const now = new Date().toISOString();
+  const policy = sanitizeApprovalPolicy(existing.approvalPolicy, null, session);
   const copy = {
     ...existing,
+    ...(policy.unattended
+      ? { approvalPolicy: { ...policy, unattended: { ...policy.unattended, includeHighRisk: false, setByRole: null } } }
+      : { approvalPolicy: policy }),
     id: newId,
     name: `${existing.name} (copy)`,
     status: "Draft",
@@ -229,6 +249,23 @@ export function duplicateAgent(id, session) {
   return copy;
 }
 
+/* …AND SO WAS UNDO.
+ *
+ * A rollback restored a snapshot verbatim. Revoking a helper's blanket send authority is
+ * recorded as a new version, so "restore the previous version" RE-GRANTED it — bypassing
+ * sanitizeApprovalPolicy, keeping the original Owner stamp, and reachable by anyone who can
+ * open the version history. Revocation that another button silently undoes is not revocation.
+ *
+ * THE RULE: undo restores what a helper DOES, not what it is ALLOWED to do. Name, purpose,
+ * instructions, skills, tools, deny-lists — all roll back. `approvalPolicy` does not: it is a
+ * live decision about how much this household trusts this helper right now, and it changes
+ * only through the routes built for it, which have the PIN and the audit entry.
+ *
+ * That single rule fixes the error in BOTH directions. A revoked grant can't come back (the
+ * current state has none, so none is kept), and reverting an unrelated change can't quietly
+ * strip a grant the family does want (the current state has it, so it stays). Deriving it
+ * from the session instead would have gotten the second case wrong — an AI-change revert runs
+ * with no session, and would have silently downgraded a tier the Owner deliberately set. */
 export function rollbackAgent(id, targetVersion) {
   const versions = listAgentVersions(id);
   if (!versions.length) return { error: "no_versions" };
@@ -239,7 +276,12 @@ export function rollbackAgent(id, targetVersion) {
   if (existing.system) return { error: "system_agent_protected" };
   snapshotAgent(existing);
   const { snapshotAt, ...rest } = snap;
-  const restored = { ...rest, version: (existing.version ?? 1) + 1, updatedAt: new Date().toISOString() };
+  const restored = {
+    ...rest,
+    approvalPolicy: existing.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] },
+    version: (existing.version ?? 1) + 1,
+    updatedAt: new Date().toISOString(),
+  };
   putAgent(restored);
   return restored;
 }
@@ -310,10 +352,12 @@ export function agentContext(agent, session) {
   // G2 — [18:06] "It says it runs the assigned use case skill. Well, what IS that skill?"
   // The agent detail screen showed that sentence with no way to find out. Name them, say how
   // many steps each has, and say whether it can actually run today.
+  const skillToolIds = new Set();
   const skills = (agent.skillIds ?? []).map((sid) => {
     const s = getSkill(sid);
     if (!s) return { id: sid, name: "Missing skill", stepCount: 0, ready: false, blockedReason: "It no longer exists." };
     const readiness = skillReadiness(s, session);
+    for (const st of s.steps ?? []) if (st?.tool_id) skillToolIds.add(String(st.tool_id));
     return {
       id: s.id,
       name: s.name ?? "Untitled skill",
@@ -325,6 +369,26 @@ export function agentContext(agent, session) {
     };
   });
 
+  /* THE GREEN BOLT THAT MEANT "NOT SET UP YET".
+   *
+   * gatedNow only counts capabilities that are permitted AND AVAILABLE. So a helper whose job
+   * needs Gmail send, before Gmail is connected, produced an empty gate list — and the detail
+   * screen showed the green bolt and "Runs start to finish without you". The truth was the
+   * opposite: it couldn't run at all. Then connecting Gmail silently changed the answer, and
+   * whichever claim the family read first was wrong.
+   *
+   * "Runs unattended" and "can't run yet" are different states and must not share a colour.
+   * These two lists separate them, scoped to what the helper would ACTUALLY use — its skills'
+   * steps. Scoping matters: with the default open allow-list, "permitted" means the entire
+   * catalogue, so measuring against that would report every helper as blocked by some
+   * unconnected tool it was never going to touch. */
+  const capById = new Map([...toolView.map((t) => [t.toolId, t]), ...fnView.map((f) => [f.id, f])]);
+  const skillCaps = [...skillToolIds].map((id) => capById.get(id)).filter(Boolean);
+  const gatedWhenReady = skillCaps
+    .filter((c) => c.permitted && !c.available && c.policy?.requiresApproval)
+    .map((c) => c.name);
+  const blockedSkillNames = skills.filter((s) => !s.ready).map((s) => s.name);
+
   return {
     agentId: agent.id,
     openAllowList: allowTools.length === 0 && allowFns.length === 0, // permissive (deny-only) default
@@ -333,10 +397,18 @@ export function agentContext(agent, session) {
       ? { enabled: true, includeHighRisk: !!unattended.includeHighRisk, setByRole: unattended.setByRole ?? null, setAt: unattended.setAt ?? null }
       : { enabled: false, includeHighRisk: false, setByRole: null, setAt: null },
     // The honest answer, and the exact steps that would still park. An empty list with
-    // executables present is the only thing that means "this runs start to finish alone".
-    runsUnattended: gatedNow.length === 0 && executable.length > 0,
+    // executables present is the only thing that means "this runs start to finish alone" —
+    // and only while nothing it needs is still waiting to be set up (see above).
+    runsUnattended: gatedNow.length === 0 && executable.length > 0
+      && gatedWhenReady.length === 0 && blockedSkillNames.length === 0,
     gatedCapabilityNames: gatedNow.slice(0, 8),
     gatedCount: gatedNow.length,
+    /* The third state, named so a screen can say it instead of guessing. `notReady` is "this
+     * can't run yet"; `gatedWhenReady` is "…and when it can, these will stop and wait anyway",
+     * which is the claim the old boolean was quietly making in reverse. */
+    notReady: blockedSkillNames.length > 0 || gatedWhenReady.length > 0,
+    notReadySkillNames: blockedSkillNames.slice(0, 8),
+    gatedWhenReadyNames: gatedWhenReady.slice(0, 8),
     // ISS-124: tools and functions carry INDEPENDENT allow-lists, so a single
     // "openAllowList" boolean can't describe the state honestly — restricting tools while
     // leaving functions open reads as "explicit" overall even though every function is

@@ -24,7 +24,7 @@ import { canManageHousehold } from "@/lib/roles";
 import { useTheme, statusColor, tapHaptic, type HearthColors } from "@/theme";
 import {
   T, Card, Badge, Chip, ChipRow, Row, SectionHeader, SkeletonCards, ErrorState,
-  Rise, HScreen, PressableScale, Sym, ExpandCard, useConfirmFlash,
+  Rise, HScreen, PressableScale, Sym, ExpandCard, useConfirmFlash, PinPrompt,
 } from "@/components/ui";
 import { AgentEditSheet, type AgentEdits } from "@/components/sheets/agent-edit-sheet";
 import { agentIcon, agentTint, humanSchedule } from "@/lib/agent-meta";
@@ -166,32 +166,53 @@ export default function AgentDetailScreen() {
   }, [agent, load, show]);
 
   /* ---- G4: run unattended, in two honest tiers ---- */
-  const setUnattended = useCallback(async (enabled: boolean, includeHighRisk: boolean) => {
-    if (!agent) return;
+  const setUnattended = useCallback(async (enabled: boolean, includeHighRisk: boolean, pin?: string) => {
+    if (!agent) return { ok: false as const, error: "no_agent" };
     const r = await api.patchAgent(agent.id, {
       approvalPolicy: {
         autoAllow: agent.approvalPolicy?.autoAllow ?? [],
         alwaysApprove: agent.approvalPolicy?.alwaysApprove ?? [],
         unattended: enabled ? { enabled: true, includeHighRisk } : { enabled: false },
       },
+      ...(pin ? { pin } : {}),
     });
     if (!r.agent) {
-      Alert.alert("Couldn't change that", r.error === "insufficient_role" ? "Only an Owner or Adult Admin can do that." : "Something went wrong.");
-      return;
+      // A missing/incorrect PIN is a different problem from "you can't do this", and the
+      // caller decides how to surface it — the PIN sheet shows it inline rather than in an
+      // Alert that would dismiss the sheet the person is still typing into.
+      return { ok: false as const, error: r.error ?? "unknown", message: (r as { message?: string }).message };
     }
     tapHaptic("success");
     await load();          // re-read the policy: the tier that APPLIES may not be the one asked for
+    return { ok: true as const };
   }, [agent, load]);
 
-  const confirmHighRisk = useCallback(() => {
-    Alert.alert(
-      "Let it send and spend on its own?",
-      "It will email, text, and pay without stopping to ask you. Steps you've marked “always ask me” still pause, and the household's external-actions switch still overrides everything.",
-      [
-        { text: "Cancel", style: "cancel" },
-        { text: "Allow", style: "destructive", onPress: () => void setUnattended(true, true) },
-      ],
-    );
+  /* THE PIN, for the raise only.
+   *
+   * Granting send-and-spend used to be a destructive Alert button and nothing more — the
+   * single most powerful autonomy switch in the product, behind one tap, while re-classing
+   * one tool demanded the household PIN. The server now requires the PIN here too; this is
+   * the surface that collects it, reusing the same PinPrompt the risk-override list uses so
+   * the two dangerous switches feel like the same act.
+   *
+   * Turning it back OFF stays a straight-through tap: making someone prove themselves in
+   * order to become MORE careful is how you teach them to leave it on. */
+  const [pinOpen, setPinOpen] = useState(false);
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinErr, setPinErr] = useState<string | null>(null);
+
+  const confirmHighRisk = useCallback(() => { setPinErr(null); setPinOpen(true); }, []);
+  const submitHighRisk = useCallback(async (pin: string) => {
+    setPinBusy(true); setPinErr(null);
+    const r = await setUnattended(true, true, pin);
+    setPinBusy(false);
+    if (!r.ok) {
+      setPinErr(r.error === "insufficient_role"
+        ? "Only an Owner or Adult Admin can allow this."
+        : (r.message ?? "Couldn't save that."));
+      return;
+    }
+    setPinOpen(false);
   }, [setUnattended]);
 
   if (loading) return <HScreen><SkeletonCards count={3} /></HScreen>;
@@ -200,6 +221,8 @@ export default function AgentDetailScreen() {
   const tint = agentTint(colors, agent.status);
   const un = ctx?.unattended;
   const gated = ctx?.gatedCount ?? 0;
+  // The one condition that earns the green bolt: active, nothing parks, nothing outstanding.
+  const running = !!ctx?.runsUnattended && agent.status === "Active";
 
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh}>
@@ -239,22 +262,29 @@ export default function AgentDetailScreen() {
         <Rise index={2}>
           <SectionHeader title="Running on its own" />
           <ExpandCard
+            /* "Can't run yet" gets its own headline and its own colour. It used to render as
+             * the green bolt — a helper waiting on an unconnected Gmail had nothing that could
+             * be counted as a gate, so the screen said "runs start to finish without you"
+             * about something that couldn't run at all. Three states, three answers. */
             title={
               agent.status !== "Active" ? `It won't run on its own while it's ${agent.status.toLowerCase()}`
+              : ctx.notReady ? "It can't run on its own yet"
               : ctx.runsUnattended ? "Runs start to finish without you"
               : gated === 1 ? "One step will stop and wait for you"
               : `${gated} steps will stop and wait for you`
             }
-            icon={ctx.runsUnattended && agent.status === "Active" ? "bolt.fill" : "hand.raised.fill"}
-            iconColor={ctx.runsUnattended && agent.status === "Active" ? colors.sage : colors.amber}
-            iconBg={ctx.runsUnattended && agent.status === "Active" ? colors.sageBg : colors.amberBg}
+            icon={running ? "bolt.fill" : ctx.notReady && agent.status === "Active" ? "wrench.and.screwdriver.fill" : "hand.raised.fill"}
+            iconColor={running ? colors.sage : colors.amber}
+            iconBg={running ? colors.sageBg : colors.amberBg}
             badge={un?.enabled ? { label: un.includeHighRisk ? "Unattended · full" : "Unattended", fg: colors.sage, bg: colors.sageBg } : undefined}
             summary={
-              un?.enabled
-                ? un.includeHighRisk
-                  ? `An ${un.setByRole ?? "admin"} allowed it to send and spend on its own.`
-                  : "It runs low-risk steps on its own. Anything that sends or spends still pauses for you."
-                : "It pauses for your approval on gated steps."
+              ctx.notReady && agent.status === "Active"
+                ? "Something it needs isn't set up yet. Once it is, this will say what it does on its own."
+                : un?.enabled
+                  ? un.includeHighRisk
+                    ? `An ${un.setByRole ?? "admin"} allowed it to send and spend on its own.`
+                    : "It runs low-risk steps on its own. Anything that sends or spends still pauses for you."
+                  : "It pauses for your approval on gated steps."
             }
             chips={[
               { label: `${ctx.executableCount} can run now`, icon: "bolt", tone: ctx.executableCount > 0 ? "good" : "warn" },
@@ -275,6 +305,31 @@ export default function AgentDetailScreen() {
                 {gated > ctx.gatedCapabilityNames.length ? (
                   <T kind="caption" color={colors.textFaint}>…and {gated - ctx.gatedCapabilityNames.length} more</T>
                 ) : null}
+              </View>
+            ) : null}
+
+            {/* Say WHAT is outstanding. "Can't run yet" without the reason is just a shrug. */}
+            {ctx.notReadySkillNames.length > 0 ? (
+              <View style={{ gap: 6 }}>
+                <T kind="eyebrow">Still needs setting up</T>
+                {ctx.notReadySkillNames.map((n) => (
+                  <View key={n} style={{ flexDirection: "row", gap: spacing.sm, alignItems: "center" }}>
+                    <Sym name="wrench.and.screwdriver" size={12} color={colors.amber} />
+                    <T kind="sub" style={{ flex: 1 }}>{n}</T>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            {ctx.gatedWhenReadyNames.length > 0 ? (
+              <View style={{ gap: 6 }}>
+                <T kind="eyebrow">Will wait for you once connected</T>
+                {ctx.gatedWhenReadyNames.map((n) => (
+                  <View key={n} style={{ flexDirection: "row", gap: spacing.sm, alignItems: "center" }}>
+                    <Sym name="hand.raised" size={12} color={colors.textFaint} />
+                    <T kind="sub" style={{ flex: 1 }}>{n}</T>
+                  </View>
+                ))}
               </View>
             ) : null}
 
@@ -564,6 +619,18 @@ export default function AgentDetailScreen() {
       )}
 
       <AgentEditSheet visible={editing} agent={agent} saving={saving} onClose={() => setEditing(false)} onSave={saveEdits} />
+      {/* The raise, and only the raise, asks who you are — same sheet the risk-override list
+          uses, so the two switches that let something happen to this family without anyone
+          being asked first feel like the same deliberate act. */}
+      <PinPrompt
+        visible={pinOpen}
+        title="Let it send and spend on its own?"
+        warning="It will email, text and pay without stopping to ask you. Steps you've marked “always ask me”, and the household's external-actions switch, still override this."
+        busy={pinBusy}
+        error={pinErr}
+        onCancel={() => { setPinOpen(false); setPinErr(null); }}
+        onConfirm={(pin) => void submitHighRisk(pin)}
+      />
       {flash}
     </HScreen>
   );

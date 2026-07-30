@@ -70,7 +70,7 @@ export function reachesOutside(cap) {
  * @param agent    {{ approvalPolicy?, allowedToolIds?, deniedToolIds? }|null} the acting agent
  * @param settings {{ externalActionsEnabled? }} household settings
  * @param override {{ skipApproval?, riskClass? }|null} household risk override for this capability
- * @returns {{ decision, rule, reason, requiresApproval, risk, baseRequiresApproval, riskOverridden }}
+ * @returns {{ decision, rule, reason, requiresApproval, risk, baseRequiresApproval, riskOverridden, canAutoAllow }}
  */
 export function resolveEffectivePolicy({ cap, agent = null, settings = {}, override = null } = {}) {
   const base = {
@@ -82,6 +82,13 @@ export function resolveEffectivePolicy({ cap, agent = null, settings = {}, overr
   const decide = (decision, rule, reason) => ({
     ...base, decision, rule, reason,
     requiresApproval: decision === NEEDS_APPROVAL,
+    /* Can "run this without asking" actually take effect here? Rule 6 refuses it for anything
+     * high-stakes and reports `agent.auto_allow_refused`, which is honest — but only AFTER a
+     * family has set it and come back to find it didn't hold. Answered up front, from the same
+     * predicate rule 6 uses, so a screen can grey the control and say why instead of offering
+     * a switch that quietly means nothing. Computed here rather than in the client for the
+     * usual reason: two copies of a security rule eventually disagree. */
+    canAutoAllow: !isHighStakes(effectiveCap),
   });
 
   // 1. Household kill switch. A hard stop on anything that leaves the household — no

@@ -204,7 +204,8 @@ function CreateAgentModal({ open, onClose, onCreate, templates }: {
           purpose: pkg.summary,
           instructions: pkg.instructions,
           status: "Active",
-          approvalPolicy: { autoAllow: pkg.autoAllow, alwaysApprove: pkg.approvalRules },
+          // Prose, not capability ids — see src/data/seed.ts. The rules stay as notes.
+          approvalPolicy: { autoAllow: [], alwaysApprove: [] },
           safetyLimits: pkg.approvalRules.length ? pkg.approvalRules : ["Asks before acting outside the household."],
         });
 
@@ -451,9 +452,16 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
                 <div key={x.l} className="well p-3"><p className="text-xs text-ink-400">{x.l}</p><p className="font-display text-lg font-semibold text-ink-800">{x.v}</p></div>
               ))}
             </div>
-            <Section title="Safety limits">
-              <ul className="space-y-1">{agent.safetyLimits.map((s, i) => <li key={i} className="flex items-start gap-2 text-sm text-ink-600"><Icon name="ShieldCheck" size={14} className="mt-0.5 text-sage-500" />{s}</li>)}</ul>
-            </Section>
+            {/* A green ShieldCheck beside each line, under the heading "Safety limits", on a
+                field the server reads for nothing. It looked exactly like the enforced policy
+                two tabs over. Same sentences, stated as what they are — the enforcement lives
+                in Capabilities and says so there. */}
+            {agent.safetyLimits.length > 0 && (
+              <Section title="Notes on limits">
+                <p className="mb-1.5 text-xs text-ink-400">Written by your family as a reminder of intent. Not enforced — the rules the runner applies are in <button className="font-medium text-ink-600 underline" onClick={() => setTab("capabilities")}>Capabilities</button>.</p>
+                <ul className="space-y-1">{agent.safetyLimits.map((s, i) => <li key={i} className="flex items-start gap-2 text-sm text-ink-600"><Icon name="StickyNote" size={14} className="mt-0.5 text-ink-300" />{s}</li>)}</ul>
+              </Section>
+            )}
             {playbooks.length > 0 && <Section title="Playbooks"><div className="flex flex-wrap gap-2">{playbooks.map((p) => <button key={p.id} onClick={() => navigate("playbooks", { id: p.id })} className="chip bg-surface-sunken text-ink-600 hover:bg-ink-900/[0.05]"><Icon name="ScrollText" size={12} /> {p.name}</button>)}</div></Section>}
             {knowledge.length > 0 && <Section title="Knowledge"><div className="flex flex-wrap gap-2">{knowledge.map((k) => <span key={k.id} className="chip bg-surface-sunken text-ink-600"><Icon name="BookOpen" size={12} /> {k.title}</span>)}</div></Section>}
           </div>
@@ -570,9 +578,22 @@ function AgentDetail({ agent, onClose, onDelete }: { agent: Agent; onClose: () =
             <Section title="What can this agent do?">
               {enabledTools.length === 0 ? <p className="text-sm text-ink-400">No connector tools enabled yet — pick some in “Connections & tools”.</p> : <ul className="space-y-1">{enabledTools.map((x, i) => <li key={i} className="flex items-center gap-2 text-sm text-ink-600"><Icon name="Wrench" size={13} className="text-ink-400" /> {x.tool.name} <span className="text-xs text-ink-400">via {x.conn}</span>{x.tool.requiresApproval && <Badge color="coral">approval</Badge>}</li>)}</ul>}
             </Section>
-            <ListEditor title="Runs without approval (low-risk)" items={agent.approvalPolicy.autoAllow} onSave={(items) => updateAgent(agent.id, { approvalPolicy: { ...agent.approvalPolicy, autoAllow: items } })} />
-            <ListEditor title="Always requires your approval" items={agent.approvalPolicy.alwaysApprove} onSave={(items) => updateAgent(agent.id, { approvalPolicy: { ...agent.approvalPolicy, alwaysApprove: items } })} />
-            <ListEditor title="Safety limits" items={agent.safetyLimits} onSave={(items) => updateAgent(agent.id, { safetyLimits: items })} />
+            {/* THE TWO TEXTBOXES THAT WERE NEVER READ.
+                "Runs without approval (low-risk)" and "Always requires your approval" wrote
+                free prose into the same server fields policy.mjs matches by CAPABILITY ID.
+                Every line a family typed here saved, displayed, and matched nothing — a
+                permission control that agreed with you and then did as it liked. The real
+                controls are per-capability, one tap, server-enforced, and now carry the
+                approval axis too; the textboxes are gone rather than relabelled, because
+                there is nothing a family could have written here that would have worked. */}
+            <div className="rounded-2xl border border-ink-900/[0.06] bg-surface-rim p-3">
+              <p className="text-sm text-ink-700">Approvals are set per capability.</p>
+              <p className="mt-1 text-xs text-ink-500">Choose <strong>Always ask</strong> or <strong>Don&apos;t ask</strong> next to each tool in <button className="font-medium text-ink-700 underline" onClick={() => setTab("capabilities")}>Capabilities</button>. Those choices are enforced by the runner on every step; anything that sends, spends or leaves the house can&apos;t have its approval waived there at all.</p>
+            </div>
+            {/* `safetyLimits` is read by nothing on the server — no rule, no run step, no
+                gate. Left in place it sat under a shield in a Permissions tab and read as
+                enforcement. It's notes, so it says it's notes. */}
+            <ListEditor title="Notes on limits (not enforced)" items={agent.safetyLimits} onSave={(items) => updateAgent(agent.id, { safetyLimits: items })} />
           </div>
         )}
         {tab === "capabilities" && <AgentCapabilities agentId={agent.id} agentName={agent.name} />}
@@ -624,6 +645,31 @@ function AgentCapabilities({ agentId, agentName }: { agentId: string; agentName:
     setSaving(false);
   };
 
+  /* THE APPROVAL AXIS, WHICH USED TO BE A TEXTBOX.
+   *
+   * policy.mjs rules 5 and 6 match `alwaysApprove` and `autoAllow` against CAPABILITY IDS
+   * (`alwaysApprove.includes(cap.id)`). The web collected them as free prose, one per line, in
+   * a Permissions tab under two headings that read like promises: "Runs without approval
+   * (low-risk)" and "Always requires your approval". Typing "anything involving money" there
+   * saved successfully, showed up in the list afterwards, and matched no id ever — so the
+   * family had written down a rule the product had already agreed to and would never apply.
+   *
+   * Same list, same server field, written by id from the capability rows that were already
+   * here. Nothing about the enforcement changed; it just became reachable. */
+  const setApproval = async (id: string, next: "ask" | "inherit" | "dont_ask") => {
+    if (!server) return;
+    setSaving(true);
+    const pol = server.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] };
+    const auto = new Set(pol.autoAllow ?? []);
+    const always = new Set(pol.alwaysApprove ?? []);
+    auto.delete(id); always.delete(id);
+    if (next === "ask") always.add(id);
+    if (next === "dont_ask") auto.add(id);
+    const r = await backend.patchAgent(agentId, { approvalPolicy: { ...pol, autoAllow: [...auto], alwaysApprove: [...always] } } as Partial<ServerAgent>);
+    if (r.agent) { setServer(r.agent); setCtx(await backend.agentContext(agentId)); }
+    setSaving(false);
+  };
+
   // "Run via server" collapsed into the drawer's single "Run now" (one run world —
   // both did the same thing once Run now went through the server endpoint).
 
@@ -636,6 +682,31 @@ function AgentCapabilities({ agentId, agentName }: { agentId: string; agentName:
   );
 
   const stateColor = (s: string) => s === "available" ? "sage" : s === "deprecated" ? "lavender" : "amber";
+  const pol = server?.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] };
+  /** Ask / default / don't-ask, by capability id — the same two server lists, reachable at last. */
+  const ApprovalState = ({ id, canAutoAllow }: { id: string; canAutoAllow: boolean }) => {
+    const cur = (pol.alwaysApprove ?? []).includes(id) ? "ask" : (pol.autoAllow ?? []).includes(id) ? "dont_ask" : "inherit";
+    const opts = [
+      { key: "ask" as const, label: "Always ask", on: true },
+      { key: "inherit" as const, label: "—", on: true },
+      // Offered as disabled rather than hidden: "you can't waive approval on sending money"
+      // is worth seeing. Hiding it just makes the control look inconsistent between rows.
+      { key: "dont_ask" as const, label: "Don't ask", on: canAutoAllow },
+    ];
+    return (
+      <div className="flex shrink-0 overflow-hidden rounded-lg border border-ink-900/10">
+        {opts.map((o) => (
+          <button key={o.key} disabled={saving || !o.on} onClick={() => setApproval(id, o.key)}
+            title={o.on ? undefined : "This one sends, spends or leaves the house — approval can't be waived per-tool."}
+            className={`px-2 py-0.5 text-[11px] font-medium transition-colors ${
+              cur === o.key ? (o.key === "ask" ? "bg-amber-500 text-white" : o.key === "dont_ask" ? "bg-sage-500 text-white" : "bg-ink-700 text-white")
+              : o.on ? "bg-surface-raised text-ink-500 hover:bg-ink-900/[0.05]" : "cursor-not-allowed bg-surface-raised text-ink-300"}`}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+    );
+  };
   const TriState = ({ kind, id, allowed, denied }: { kind: "tool" | "function"; id: string; allowed: boolean; denied: boolean }) => {
     const cur = denied ? "deny" : allowed ? "allow" : "inherit";
     return (
@@ -693,7 +764,10 @@ function AgentCapabilities({ agentId, agentName }: { agentId: string; agentName:
                 {t.policy && <p className="text-[11px] text-ink-500">{POLICY_LABEL[t.policy.decision]} — {t.policy.reason}</p>}
               </div>
               <StatusDot color={t.available ? "sage" : "amber"} label={t.available ? "Available" : "Unavailable"} />
-              <TriState kind="tool" id={t.toolId} allowed={t.permitted && !ctx?.openAllowList} denied={t.denied} />
+              <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                <TriState kind="tool" id={t.toolId} allowed={t.permitted && !ctx?.openAllowList} denied={t.denied} />
+                <ApprovalState id={t.toolId} canAutoAllow={t.policy?.canAutoAllow !== false} />
+              </div>
             </div>
           ))}
         </div>
@@ -709,7 +783,10 @@ function AgentCapabilities({ agentId, agentName }: { agentId: string; agentName:
                   <p className="truncate text-[11px] text-ink-400">{f.type}</p>
                 </div>
                 <Badge color={stateColor(f.state)}>{f.state}</Badge>
-                <TriState kind="function" id={f.id} allowed={f.permitted && !ctx?.openAllowList} denied={f.denied} />
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                  <TriState kind="function" id={f.id} allowed={f.permitted && !ctx?.openAllowList} denied={f.denied} />
+                  <ApprovalState id={f.id} canAutoAllow={f.policy?.canAutoAllow !== false} />
+                </div>
               </div>
             ))}
           </div>

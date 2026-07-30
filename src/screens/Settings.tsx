@@ -274,7 +274,29 @@ function RiskOverridesCard() {
   };
   useEffect(() => { if (open && !loaded) void load(); }, [open, loaded]);
 
+  /* THIS CARD COULD NOT SAVE. The server has required the household PIN on a risk-override
+   * write since Cluster W; the web client never sent one, so on any household that has set a
+   * PIN — which is every household that has configured autonomy, and production — every
+   * toggle here returned 403 `pin_required` and surfaced as a generic "Couldn't save".
+   * Mobile passed the PIN and worked, so the control existed on paper and was dead on the
+   * larger surface people actually use for it. Now it asks, once, at the moment of the act.
+   *
+   * Only the DANGEROUS direction can trip the prompt; clearing an override goes straight
+   * through, matching the server (which gates the write, not the reset). */
+  const [pending, setPending] = useState<{ tool: CatalogTool; next: { riskClass: string | null; skipApproval: boolean }; skipping: boolean } | null>(null);
+  const [pin, setPin] = useState("");
+  const [pinErr, setPinErr] = useState<string | null>(null);
+  const [pinBusy, setPinBusy] = useState(false);
+
   const ovFor = (toolId: string) => overrides.find((o) => o.toolId === toolId);
+
+  const save = async (t: CatalogTool, next: { riskClass: string | null; skipApproval: boolean }, skipping: boolean, withPin?: string) => {
+    const r = await backend.setRiskOverride(t.toolId, { ...next, ...(withPin ? { pin: withPin } : {}) });
+    if (!r.override) return { ok: false as const, error: r.error, message: (r as { message?: string }).message };
+    if (skipping) toast({ kind: "warn", title: "Approval skipped for this tool", message: `${t.name} will now run without asking. Every use is still audited. Undo here anytime.` });
+    return { ok: true as const };
+  };
+
   const apply = async (t: CatalogTool, patch: { riskClass?: string | null; skipApproval?: boolean }) => {
     const current = ovFor(t.toolId);
     const next = { riskClass: patch.riskClass !== undefined ? patch.riskClass : (current?.riskClass ?? null), skipApproval: patch.skipApproval !== undefined ? patch.skipApproval : (current?.skipApproval ?? false) };
@@ -282,11 +304,28 @@ function RiskOverridesCard() {
     if (next.riskClass == null && !next.skipApproval) {
       const r = await backend.clearRiskOverride(t.toolId);
       if (!r.ok && current) { toast({ kind: "error", title: "Couldn't reset", message: r.error }); return; }
-    } else {
-      const r = await backend.setRiskOverride(t.toolId, next);
-      if (!r.override) { toast({ kind: "error", title: "Couldn't save", message: r.error }); return; }
-      if (patch.skipApproval) toast({ kind: "warn", title: "Approval skipped for this tool", message: `${t.name} will now run without asking. Every use is still audited. Undo here anytime.` });
+      await load();
+      return;
     }
+    const out = await save(t, next, !!patch.skipApproval);
+    if (!out.ok) {
+      // The one error that is a QUESTION rather than a failure: ask for the PIN and retry
+      // the identical write, instead of reporting "couldn't save" for a change the person
+      // is perfectly entitled to make.
+      if (out.error === "pin_required") { setPin(""); setPinErr(null); setPending({ tool: t, next, skipping: !!patch.skipApproval }); return; }
+      toast({ kind: "error", title: "Couldn't save", message: out.message ?? out.error });
+      return;
+    }
+    await load();
+  };
+
+  const confirmWithPin = async () => {
+    if (!pending || !pin) return;
+    setPinBusy(true); setPinErr(null);
+    const out = await save(pending.tool, pending.next, pending.skipping, pin);
+    setPinBusy(false);
+    if (!out.ok) { setPinErr(out.message ?? "That didn't work. Nothing was changed."); return; }
+    setPending(null); setPin("");
     await load();
   };
 
@@ -333,6 +372,34 @@ function RiskOverridesCard() {
           ))}
         </div>
       )}
+      <Modal
+        open={!!pending}
+        onClose={() => { setPending(null); setPin(""); setPinErr(null); }}
+        title="Confirm with your household PIN"
+        icon="ShieldCheck"
+        size="sm"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => { setPending(null); setPin(""); setPinErr(null); }}>Cancel</Button>
+            <Button variant="primary" disabled={!pin || pinBusy} onClick={confirmWithPin}>{pinBusy ? "Saving…" : "Confirm change"}</Button>
+          </>
+        }
+      >
+        {pending && (
+          <>
+            <p className="text-sm text-ink-600">
+              {pending.skipping
+                ? <>You're allowing <strong>{pending.tool.name}</strong> to run without asking anyone first.</>
+                : <>You're changing how <strong>{pending.tool.name}</strong> is classed, which changes when FamiliOS stops to ask.</>}
+            </p>
+            <p className="mt-1.5 text-sm text-ink-500">Changing who has to approve what needs the household PIN — the same one that protects Owner sign-in.</p>
+            <form className="mt-3" onSubmit={(e) => { e.preventDefault(); void confirmWithPin(); }}>
+              <TextInput type="password" value={pin} autoFocus placeholder="Household PIN" aria-label="Household PIN" onChange={(e) => { setPin(e.target.value); setPinErr(null); }} />
+            </form>
+            {pinErr && <p className="mt-2 text-sm text-coral-600">{pinErr}</p>}
+          </>
+        )}
+      </Modal>
     </Card>
   );
 }

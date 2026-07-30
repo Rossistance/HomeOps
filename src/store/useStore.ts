@@ -1198,7 +1198,9 @@ export const useStore = create<Store>((set, get) => {
         connectionIds: connIds,
         allowedToolIds: toolIdsForConnectorIds(connIds, get().connectors, get().providers),
         playbookIds,
-        approvalPolicy: { autoAllow: tmpl?.defaultAutoAllow ?? [], alwaysApprove: tmpl?.defaultApprovalRules ?? [] },
+        // Prose can't match a capability id — see the note in src/data/seed.ts. The sentences
+        // go to safetyLimits (notes); the policy lists are filled by id from Capabilities.
+        approvalPolicy: { autoAllow: [], alwaysApprove: [] },
         safetyLimits: tmpl?.defaultApprovalRules ?? [],
       });
     },
@@ -1216,10 +1218,10 @@ export const useStore = create<Store>((set, get) => {
         spaceId: space?.id,
         connectionIds: connIds,
         allowedToolIds: toolIdsForConnectorIds(connIds, get().connectors, get().providers),
-        approvalPolicy: {
-          autoAllow: ["Create a draft", "Create a reminder", "Add a task", "Generate a summary", "Tag a file"],
-          alwaysApprove: parsed.approvalGates,
-        },
+        // These five strings were the clearest case of the problem: a hardcoded list of things
+        // the helper may do without asking, none of which is a capability id, so none of which
+        // ever cleared a single gate. See src/data/seed.ts.
+        approvalPolicy: { autoAllow: [], alwaysApprove: [] },
         safetyLimits: parsed.approvalGates.length ? parsed.approvalGates : ["Asks before acting outside the household."],
       });
     },
@@ -1306,10 +1308,13 @@ export const useStore = create<Store>((set, get) => {
         spaceId: space?.id,
         connectionIds: opts?.connectorIds ?? plan.connectorIds,
         allowedToolIds,
-        approvalPolicy: {
-          autoAllow: plan.steps.filter((s) => s.toolId && !s.requiresApproval).map((s) => s.title),
-          alwaysApprove: plan.approvalGates,
-        },
+        /* This one was the closest to working and still didn't: it mapped the plan's ungated
+         * steps into autoAllow by `s.title` — the human label — when `s.toolId` was right
+         * there. A helper a family built by talking to it therefore came out with a list of
+         * waivers that matched nothing. Left EMPTY rather than switched to s.toolId: writing
+         * the ids would silently grant real per-capability waivers at creation time, which is
+         * a decision for the family, not a side effect of how the plan happened to parse. */
+        approvalPolicy: { autoAllow: [], alwaysApprove: [] },
         safetyLimits: plan.approvalGates.length ? plan.approvalGates : ["Asks before any action that leaves the household."],
       });
     },

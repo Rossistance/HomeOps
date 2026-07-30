@@ -1211,6 +1211,9 @@ export interface AgentRec {
     unattended?: { enabled?: boolean; includeHighRisk?: boolean; setByRole?: string | null; setAt?: string | null };
   };
   skillIds?: string[];
+  /** The household PIN, required by the server ONLY when raising
+   *  approvalPolicy.unattended.includeHighRisk — the send-and-spend grant. Never stored. */
+  pin?: string;
 }
 // E1 — one address suggestion: the name a family recognises, the address under it, and the
 // full string that goes INTO the field (a label alone won't navigate anywhere).
@@ -1237,6 +1240,8 @@ export interface EffectivePolicyRec {
   decision: "allowed" | "needs_approval" | "blocked";
   rule: string; reason: string; requiresApproval: boolean;
   risk: string; baseRequiresApproval: boolean; riskOverridden: boolean;
+  /** Whether per-capability "run without asking" can take effect (false for send/spend). */
+  canAutoAllow?: boolean;
 }
 export interface AgentContextRec {
   agentId: string;
@@ -1255,6 +1260,11 @@ export interface AgentContextRec {
   runsUnattended: boolean;
   gatedCapabilityNames: string[];
   gatedCount: number;
+  /** "Can't run yet" is its own state — it used to render as the green "runs on its own" bolt
+   *  purely because an unconnected send tool couldn't be counted as a gate. */
+  notReady: boolean;
+  notReadySkillNames: string[];
+  gatedWhenReadyNames: string[];
 }
 export interface TriggerRec {
   id: string; name: string; type: string; enabled: boolean; agentId?: string | null;
