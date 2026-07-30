@@ -174,7 +174,17 @@ export function deleteBackupsFor(householdId) {
   if (!fs.existsSync(dir)) return 0;
   const n = fs.readdirSync(dir).filter((f) => NAME_RE.test(f)).length;
   fs.rmSync(dir, { recursive: true, force: true });
-  appendAudit({ type: "backup.purged_for_deleted_household", householdId, files: n });
+  /* Deliberately NOT audited here.
+   *
+   * appendAudit writes to the AMBIENT tenant's audit.jsonl, and the only caller is the
+   * account-deletion route — which runs as the household it has just deleted. So this line
+   * recreated `tenants/<householdId>/audit.jsonl` moments after deleteTenant removed it,
+   * resurrecting a directory for a family that no longer exists and leaving their id on disk
+   * indefinitely. Caught by deleting a throwaway household and looking at the filesystem
+   * afterwards rather than trusting the 200.
+   *
+   * The count is returned instead, and the caller records it on the durable tombstone in the
+   * system tenant, which is where a fact about a deleted household belongs. */
   return n;
 }
 

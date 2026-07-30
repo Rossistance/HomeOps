@@ -378,6 +378,10 @@ export interface BackendSettings {
    *  null means unmetered, which is the default. `aiCallsToday` is the count it measures. */
   aiDailyCallBudget?: number | null;
   aiCallsToday?: number;
+  /** Whether this profile signs in with an email account. Only those can be deleted — a
+   *  resident-household PIN profile has no identity behind it, so the control is omitted
+   *  rather than shown refusing. */
+  hasIdentity?: boolean;
 }
 
 export interface AgentContext {
@@ -775,6 +779,17 @@ export const backend = {
       URL.revokeObjectURL(url);
       return { ok: true };
     } catch { return { ok: false, error: "backend_unreachable" }; }
+  },
+  /* Delete the SIGNED-IN PERSON's FamiliOS account — not `revokeAccount`, which disconnects a
+   * connected provider. The names are close and the consequences are not.
+   *
+   * The blast radius is decided server-side from the caller's role and is NOT symmetric: an
+   * Owner deletes the ENTIRE household (tenant, identities, sessions, backups — everyone's
+   * data), anyone else deletes only themselves. `deleted` says which happened, so the UI can
+   * confirm what actually occurred instead of guessing. */
+  async deleteMyAccount(password: string): Promise<{ ok?: boolean; deleted?: "household" | "account"; error?: string; message?: string }> {
+    try { return await req("/account", { method: "DELETE", body: JSON.stringify({ password }), mutation: true }); }
+    catch { return { error: "backend_unreachable" }; }
   },
   async getSettings(): Promise<BackendSettings> {
     try { return (await req<{ settings: BackendSettings }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }

@@ -259,6 +259,11 @@ function settingsView(s, session) {
      * unmetered, which is the default. */
     aiDailyCallBudget: Number.isFinite(Number(s.aiDailyCallBudget)) && Number(s.aiDailyCallBudget) > 0 ? Math.floor(Number(s.aiDailyCallBudget)) : null,
     aiCallsToday: getAiUsage(session.householdId)?.total ?? 0,
+    /* Does THIS profile sign in with an email account? Only those can be deleted — the resident
+     * family's PIN profiles have no identity behind them, and DELETE /api/account tells them so.
+     * Surfaced here so a client can omit the button entirely instead of offering one that can
+     * only ever refuse, which is the shape of dead control this release has been removing. */
+    hasIdentity: !!listIdentitiesForHousehold(session.householdId).find((i) => i.actorId === session.actorId),
   };
 }
 
@@ -1729,15 +1734,20 @@ function mayWriteAgent(session, agent, nextVisibility) {
         appendAudit({ type: "account.delete", scope: "household", by: g.session.actorId }); // last entry in the household's own log
         deleteIdentitiesForHousehold(hh);
         deleteSessionsForHousehold(hh);
-        // Durable tombstone in the system registry (the household's own audit goes down with it).
-        const gone = sysDoc("deleted_households.json", []);
-        gone.push({ householdId: hh, at: new Date().toISOString(), by: g.session.actorId, email: idn.email });
-        putSysDoc("deleted_households.json", gone);
         tenantEngine().deleteTenant(hh);
         // The snapshots go with it. Dropping the tenant DB while leaving 30 days of
         // complete household backups on disk would make "delete my account" untrue —
         // and Apple 5.1.1(v) asks for deletion, not for the live copy only.
-        deleteBackupsFor(hh);
+        const purged = deleteBackupsFor(hh);
+        /* Durable tombstone in the system registry (the household's own audit goes down with
+         * it) — written LAST, and carrying the backup count, so that nothing writes into the
+         * deleted household's own tenant after it is gone. deleteBackupsFor used to audit its
+         * own result, which ran as the deleted tenant and recreated tenants/<hh>/audit.jsonl
+         * seconds after removing it: a directory and an id left on disk for a family that had
+         * just asked to not exist here. */
+        const gone = sysDoc("deleted_households.json", []);
+        gone.push({ householdId: hh, at: new Date().toISOString(), by: g.session.actorId, email: idn.email, backupsPurged: purged });
+        putSysDoc("deleted_households.json", gone);
         return json(res, 200, { ok: true, deleted: "household" }, req, { "set-cookie": clearSessionCookie() });
       }
       putMember({ actorId: g.session.actorId, archived: true, householdId: g.session.householdId });

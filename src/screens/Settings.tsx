@@ -385,10 +385,20 @@ function TakeYourDataCard() {
   const [busy, setBusy] = useState(false);
   const [settings, setSettings] = useState<BackendSettings | null>(null);
   const [budget, setBudget] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => { void (async () => { const s = await backend.getSettings(); setSettings(s); setBudget(s.aiDailyCallBudget ? String(s.aiDailyCallBudget) : ""); })(); }, []);
 
-  if (session?.role !== "Owner") return null;
+  /* Export is the Owner's, because it spans every member's personal space. DELETION IS NOT:
+   * whether you can erase yourself must never depend on your rank, and mobile already lets any
+   * member do it. Gating the whole card on Owner — which is what this did first — would have
+   * left an Adult Member on the web with no way out at all. The server decides the blast radius
+   * from the role either way, so the copy below has to say which one is about to happen. */
+  if (!session) return null;
+  const isOwner = session.role === "Owner";
 
   const download = async () => {
     setBusy(true);
@@ -396,6 +406,26 @@ function TakeYourDataCard() {
     setBusy(false);
     if (!r.ok) { toast({ kind: "error", title: "Couldn't build the export", message: r.message ?? r.error }); return; }
     toast({ kind: "success", title: "Export downloaded", message: "Everything your family owns, minus credentials — which are listed but never included." });
+  };
+
+  const confirmDelete = async () => {
+    if (!deletePassword) return;
+    setDeleting(true); setDeleteErr(null);
+    const r = await backend.deleteMyAccount(deletePassword);
+    setDeleting(false);
+    setDeletePassword("");
+    if (!r.ok) {
+      setDeleteErr(
+        r.error === "password_incorrect" ? "That password didn't match. Nothing was deleted."
+        : r.error === "not_identity_account" ? (r.message ?? "This profile signs in without an email account, so there's no account to delete.")
+        : r.error === "backend_unreachable" ? "Couldn't reach the server, so nothing was deleted."
+        : (r.message ?? "Couldn't delete the account."),
+      );
+      return;
+    }
+    // The server has already cleared the session and the cookie. A full reload is the honest
+    // next state: everything this page is showing has just stopped existing.
+    window.location.href = "/";
   };
 
   const saveBudget = async () => {
@@ -415,15 +445,64 @@ function TakeYourDataCard() {
   return (
     <Card className="card-pad">
       <SectionTitle icon="PackageOpen">Your family's data</SectionTitle>
-      <p className="text-sm text-ink-500">Everything FamiliOS holds for your household, as a readable file you can keep, move, or hand to anyone you like.</p>
-      <div className="mt-3 flex flex-wrap gap-2">
-        <Button variant="secondary" disabled={busy} onClick={download}>
-          <Icon name={busy ? "Loader2" : "Download"} size={15} className={busy ? "animate-spin" : ""} /> {busy ? "Building it…" : "Download my family's data"}
-        </Button>
+      {isOwner && (
+        <>
+          <p className="text-sm text-ink-500">Everything FamiliOS holds for your household, as a readable file you can keep, move, or hand to anyone you like.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button variant="secondary" disabled={busy} onClick={download}>
+              <Icon name={busy ? "Loader2" : "Download"} size={15} className={busy ? "animate-spin" : ""} /> {busy ? "Building it…" : "Download my family's data"}
+            </Button>
+          </div>
+          <p className="mt-2 text-xs text-ink-400">
+            Includes your calendar, tasks, meals, lists, helpers, memories, contacts and the full activity log. Credentials — connector keys and sign-in tokens — are named but never included; they are no use outside this server and shipping them would be a risk to you.
+          </p>
+        </>
+      )}
+
+      {/* Erasure sits with export because they are the same right, and a family that has just
+          been shown how to take their data with them is exactly who should find this next. */}
+      {/* Omitted, not disabled, for a PIN-model profile: there is no account to delete and the
+          server would only ever refuse. Those profiles are removed by an Owner in Household. */}
+      {settings?.hasIdentity && (
+      <div className={`${isOwner ? "mt-4 border-t border-ink-900/[0.06] pt-3" : ""}`}>
+        <p className="text-sm font-semibold text-ink-800">Delete my account</p>
+        <p className="mt-0.5 text-xs text-ink-500">
+          {isOwner
+            ? <>You&apos;re the Owner, so this deletes <strong>the whole household</strong> — every member&apos;s calendar, tasks, files, helpers and history, the backups, and everyone&apos;s sign-in. It cannot be undone. Download your data first if you want to keep it.</>
+            : <>This deletes <strong>your own account</strong> and signs you out. The rest of your household is untouched. It cannot be undone.</>}
+        </p>
+        <div className="mt-2">
+          <Button variant="danger" onClick={() => { setDeleteOpen(true); setDeletePassword(""); setDeleteErr(null); }}>
+            <Icon name="Trash2" size={15} /> Delete my account
+          </Button>
+        </div>
       </div>
-      <p className="mt-2 text-xs text-ink-400">
-        Includes your calendar, tasks, meals, lists, helpers, memories, contacts and the full activity log. Credentials — connector keys and sign-in tokens — are named but never included; they are no use outside this server and shipping them would be a risk to you.
-      </p>
+      )}
+
+      <Modal
+        open={deleteOpen}
+        onClose={() => { setDeleteOpen(false); setDeletePassword(""); setDeleteErr(null); }}
+        title={isOwner ? "Delete the whole household?" : "Delete your account?"}
+        icon="AlertTriangle"
+        size="sm"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => { setDeleteOpen(false); setDeletePassword(""); setDeleteErr(null); }}>Keep my account</Button>
+            <Button variant="danger" disabled={!deletePassword || deleting} onClick={confirmDelete}>{deleting ? "Deleting…" : isOwner ? "Delete everything" : "Delete my account"}</Button>
+          </>
+        }
+      >
+        <p className="text-sm text-ink-600">
+          {isOwner
+            ? <>This removes every member&apos;s data, this household&apos;s backups, and everyone&apos;s ability to sign in. <strong>It cannot be undone.</strong></>
+            : <>This removes your account and signs you out. Your household carries on without you. <strong>It cannot be undone.</strong></>}
+        </p>
+        <p className="mt-1.5 text-sm text-ink-500">Enter your account password to confirm.</p>
+        <form className="mt-3" onSubmit={(e) => { e.preventDefault(); void confirmDelete(); }}>
+          <TextInput type="password" value={deletePassword} autoFocus placeholder="Your password" aria-label="Your account password" onChange={(e) => { setDeletePassword(e.target.value); setDeleteErr(null); }} />
+        </form>
+        {deleteErr && <p className="mt-2 text-sm text-coral-600">{deleteErr}</p>}
+      </Modal>
 
       {/* The dial that was enforced and could not be turned. */}
       <div className="mt-4 border-t border-ink-900/[0.06] pt-3">
