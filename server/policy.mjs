@@ -31,6 +31,35 @@ export function isHighStakes(cap) {
 }
 
 /**
+ * Does this capability actually leave the household? Only the kill switch asks.
+ *
+ * The test used to be the same over-broad list `isHighStakes` uses, which swept in every
+ * purely-LOCAL write — `homeops.create_task`, `create_list_item`, `write_memory`. That was
+ * harmless only because nothing enforced a BLOCKED verdict; the moment the engine started
+ * refusing them (as it now does), turning the kill switch ON would have stopped a family
+ * adding a task to their own list. A switch labelled "pause anything that leaves this
+ * house" has to mean that literally.
+ *
+ * Three signals, most reliable first:
+ *   • `delivers` — the single source of truth for "this reaches a person", declared on the
+ *     capability's own definition. Same flag, same reason as the WP-002 note in
+ *     assistant-runs.mjs: never infer reach from a tool's id, name, or approval gate.
+ *   • `external` — supplied by the caller, which knows the capability's KIND. Every
+ *     provider and connector tool talks to a third party whatever its action reads, so
+ *     `calendar.create` and `http.post` reach outside even though neither delivers.
+ *   • Send / Download / Pay — a message going out, money moving, or bytes from outside.
+ *
+ * A local Write with none of these stays local, and the kill switch leaves it alone.
+ * `isHighStakes` deliberately keeps the wider net: it governs who may RELAX a gate, where
+ * over-inclusion fails safe. This governs a hard refusal, where it does not.
+ */
+export function reachesOutside(cap) {
+  if (cap?.delivers === true) return true;
+  if (cap?.external === true) return true;
+  return ["send", "download", "pay"].includes(String(cap?.action ?? "").toLowerCase());
+}
+
+/**
  * Resolve the effective policy for one capability (tool or function).
  *
  * Pure: every input is passed in, nothing is read from the store, so this is trivially
@@ -57,9 +86,11 @@ export function resolveEffectivePolicy({ cap, agent = null, settings = {}, overr
 
   // 1. Household kill switch. A hard stop on anything that leaves the household — no
   //    agent-level rule can reach past it. Mirrors the gate in connectors.mjs.
-  const external = ["send", "write", "download"].includes(String(cap?.action ?? "").toLowerCase());
-  if (external && settings?.externalActionsEnabled === false) {
-    return decide(BLOCKED, "household.kill_switch", "External actions are turned off for this household.");
+  if (reachesOutside(cap) && settings?.externalActionsEnabled === false) {
+    // Same sentence notify.mjs and engine.mjs execResolved use. One concept, one wording:
+    // this reason is surfaced to a family in run details, so the three layers that can
+    // refuse for this reason must not each invent their own phrasing for it.
+    return decide(BLOCKED, "household.kill_switch", "External actions are paused by the household kill switch.");
   }
 
   // 2-3. The agent's permission surface. Denies beat allows; an explicit allow-list means

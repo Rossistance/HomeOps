@@ -51,10 +51,14 @@ export function buildSeedData(): AppData {
   ];
 
   const contactMethods: ContactMethod[] = [
-    { id: "ct-alex-email", memberId: "m-alex", label: "Primary email", type: "Email", value: "alex@harper.example", verified: true, optInStatus: "Opted In", allowedAgentIds: [] },
-    { id: "ct-alex-text", memberId: "m-alex", label: "Mobile (text)", type: "Phone/Text", value: "(555) 010-2244", verified: true, optInStatus: "Opted In", allowedAgentIds: [] },
-    { id: "ct-morgan-email", memberId: "m-morgan", label: "Primary email", type: "Email", value: "morgan@harper.example", verified: true, optInStatus: "Opted In", allowedAgentIds: [] },
-    { id: "ct-elaine-text", memberId: "m-elaine", label: "Mobile (prefers text)", type: "Phone/Text", value: "(555) 018-7700", verified: true, optInStatus: "Opted In", allowedAgentIds: [] },
+    // CONSENT IS NEVER SEEDED — same rule, same reason as server/seed.mjs (2026-07-30).
+    // These are also the records migrateContactMethodsToServer() pushes up on first sync,
+    // so shipping them pre-consented here would have re-opened the hole the server fix
+    // closed: a demo address that satisfies every fail-closed gate in notify.mjs.
+    { id: "ct-alex-email", memberId: "m-alex", label: "Primary email", type: "Email", value: "alex@harper.example", verified: false, optInStatus: "Pending", allowedAgentIds: [] },
+    { id: "ct-alex-text", memberId: "m-alex", label: "Mobile (text)", type: "Phone/Text", value: "(555) 010-2244", verified: false, optInStatus: "Pending", allowedAgentIds: [] },
+    { id: "ct-morgan-email", memberId: "m-morgan", label: "Primary email", type: "Email", value: "morgan@harper.example", verified: false, optInStatus: "Pending", allowedAgentIds: [] },
+    { id: "ct-elaine-text", memberId: "m-elaine", label: "Mobile (prefers text)", type: "Phone/Text", value: "(555) 018-7700", verified: false, optInStatus: "Pending", allowedAgentIds: [] },
     { id: "ct-sam-text", memberId: "m-sam", label: "Mobile", type: "Phone/Text", value: "(555) 044-3311", verified: false, optInStatus: "Pending", allowedAgentIds: [] },
   ];
 

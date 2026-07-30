@@ -277,7 +277,7 @@ export interface MemberRec { actorId: string; displayName: string; role: string;
 export type ContactMethodType = "Email" | "Phone/Text" | "In-App" | "Family Dashboard";
 export interface ContactMethodRec {
   id: string; memberId: string; label: string; type: ContactMethodType; value: string;
-  verified: boolean; optInStatus: "Opted In" | "Pending" | "Not Set";
+  verified: boolean; optInStatus: "Opted In" | "Pending" | "Not Set" | "Opted Out";
   allowedAgentIds: string[]; createdAt?: string; updatedAt?: string;
 }
 // AI providers (server truth — readiness is verified, never assumed).

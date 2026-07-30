@@ -6,7 +6,7 @@
 // to hand itself the ability to send, pay, or reach outside the household.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveEffectivePolicy, ALLOWED, BLOCKED, NEEDS_APPROVAL } from "../policy.mjs";
+import { resolveEffectivePolicy, reachesOutside, ALLOWED, BLOCKED, NEEDS_APPROVAL } from "../policy.mjs";
 
 const lowRead = { id: "weather.current", name: "Current conditions", requiresApproval: false, risk: "Low", action: "Read" };
 const gatedLow = { id: "notes.write", name: "Write a note", requiresApproval: true, risk: "Low", action: "Read" };
@@ -136,6 +136,56 @@ test("a non-empty allow-list makes anything absent from it out of scope", () => 
 test("an EMPTY allow-list means 'all', not 'none'", () => {
   const r = resolveEffectivePolicy({ cap: lowRead, agent: agentWith({ allowedToolIds: [] }) });
   assert.equal(r.decision, ALLOWED);
+});
+
+/* ---- the kill switch means "leaves the household", literally ----
+ * Two bugs met here. `decide()` reports requiresApproval:false for every verdict that isn't
+ * NEEDS_APPROVAL, and engine.mjs read only that field — so a BLOCKED capability became an
+ * UNGATED one, and turning the kill switch ON removed the approval gate from the two gated
+ * internal tools. Enforcing BLOCKED then exposed the second bug: the switch's reach test
+ * counted every `Write` as external, which would have refused a family adding a task to
+ * their own list. reachesOutside() is the narrowed test; the engine passes `external` for
+ * provider and connector kinds because only it knows the capability's kind. */
+
+test("reachesOutside: delivering, sending, paying and third-party capabilities do", () => {
+  assert.equal(reachesOutside({ action: "Send" }), true, "a message going out");
+  assert.equal(reachesOutside({ action: "Download" }), true, "bytes arriving from outside");
+  assert.equal(reachesOutside({ action: "Pay" }), true, "money moving");
+  assert.equal(reachesOutside({ action: "Read", delivers: true }), true, "declared reach beats a mild action");
+  assert.equal(reachesOutside({ action: "Write", external: true }), true, "provider/connector kinds, per the engine");
+});
+
+test("reachesOutside: a purely LOCAL write does not", () => {
+  // homeops.create_task, create_list_item, write_memory, create_artifact: Write, internal,
+  // no delivery. Pausing external actions must not stop a family using their own app.
+  assert.equal(reachesOutside({ action: "Write" }), false);
+  assert.equal(reachesOutside({ action: "Read" }), false);
+  assert.equal(reachesOutside({}), false);
+});
+
+test("the kill switch does NOT block a local write", () => {
+  const localWrite = { id: "homeops.create_task", name: "Add a task", requiresApproval: false, risk: "Low", action: "Write" };
+  const r = resolveEffectivePolicy({ cap: localWrite, settings: { externalActionsEnabled: false } });
+  assert.equal(r.decision, ALLOWED, "adding a task to your own list is not an external action");
+});
+
+test("the kill switch DOES block a third-party write the engine marked external", () => {
+  const providerWrite = { id: "calendar.create", name: "Create event", requiresApproval: false, risk: "Medium", action: "Write", external: true };
+  const r = resolveEffectivePolicy({ cap: providerWrite, settings: { externalActionsEnabled: false } });
+  assert.equal(r.decision, BLOCKED);
+  assert.equal(r.rule, "household.kill_switch");
+});
+
+test("a BLOCKED verdict never reports itself as 'no approval needed'", () => {
+  // The shape of the bypass: a caller that reads requiresApproval alone must not be able to
+  // mistake a refusal for a clearance. requiresApproval is false on BLOCKED by design, so
+  // `decision` is the field that carries the refusal — assert both, so the contract is
+  // pinned for every future consumer.
+  const r = resolveEffectivePolicy({ cap: highSend, settings: { externalActionsEnabled: false } });
+  assert.equal(r.decision, BLOCKED);
+  assert.equal(r.requiresApproval, false, "the historical shape, kept");
+  assert.notEqual(r.decision, ALLOWED, "and it is NOT an allowance");
+  assert.ok(r.reason.length > 0, "a refusal explains itself");
 });
 
 /* ---- risk re-classing ---- */

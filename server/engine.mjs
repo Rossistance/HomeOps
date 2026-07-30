@@ -23,7 +23,7 @@ import { getInternalFunction } from "./internal-functions.mjs";
 import { resolveRegisteredFunction, runFunctionHandler, computeFunctionState } from "./functions.mjs";
 import { getAgent, getSkill } from "./store.mjs";
 import { isToolStepAllowed, partialUpdateAgent } from "./agents.mjs";
-import { resolveEffectivePolicy } from "./policy.mjs";
+import { resolveEffectivePolicy, reachesOutside, BLOCKED } from "./policy.mjs";
 import { partialUpdateSkill } from "./skills.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
 import { proposeEvolution, judgeEvolutionConfidence, INTERNAL_INPUTS, claimsExternalEffect } from "./planner.mjs";
@@ -298,6 +298,18 @@ function resolveTool(toolId, householdId, actorId = null) {
 // has been consumed. Returns { ok, result } | { ok:false, error, message, waiting? }.
 async function execResolved(resolved, input, ctx, approvalId) {
   if (resolved.kind === "internal") {
+    // Defence in depth for the kill switch. The policy layer refuses an outside-reaching
+    // capability while external actions are paused, but that layer only runs for a run
+    // that names an agent (`run.sourceRef.agentId`) — and one caller creates runs without
+    // one: the self-repair path in assistant-runs.mjs. `kind:"internal"` was then the ONE
+    // execution path with no kill-switch check of its own (provider has the check below,
+    // connector tools re-check inside executeTool), so homeops.notify_contact could text a
+    // family whose switch was off. Local internal writes are unaffected — see
+    // reachesOutside() for why `delivers` and not `action` decides that.
+    if (!externalActionsEnabled(ctx.householdId)
+        && reachesOutside({ action: resolved.action, delivers: resolved.def?.delivers ?? false })) {
+      return { ok: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch." };
+    }
     // WP-005: the acting AGENT travels with the call. homeops.notify_contact enforces
     // the recipient's per-agent allowlist, and it cannot do that without knowing who
     // is acting — an unattributed send would silently skip that gate.
@@ -657,11 +669,28 @@ async function _drive(runId) {
             risk: resolved.risk,
             action: resolved.action,
             delivers: resolved.tool?.delivers ?? resolved.def?.delivers ?? false,
+            // KIND is reach: every provider and connector tool talks to a third party,
+            // whatever its action reads. policy.mjs is pure and can't know that, so the
+            // engine — which just resolved the tool — tells it. Internal homeops.* tools
+            // are local unless they declare `delivers` (only notify_contact does).
+            external: resolved.kind === "provider" || resolved.kind === "connector",
           },
           agent,
           settings: getSettings(run.householdId),
           override: getRiskOverride(run.householdId, step.toolId, run.actorId ?? null),
         });
+        // A BLOCKED verdict is a REFUSAL, and until now nothing read it. `decide()` reports
+        // requiresApproval:false for every verdict that isn't NEEDS_APPROVAL, so consuming
+        // only that field turned the household kill switch into an approval BYPASS: with
+        // external actions paused, a gated capability resolved to BLOCKED, then to
+        // requiresApproval:false, and executed with no approval at all. Turning safety ON
+        // removed a gate. The two agent-permission BLOCKED paths were already caught above
+        // by isToolStepAllowed; the kill-switch path was not.
+        if (decision.decision === BLOCKED) {
+          patchRunStep(runId, i, { status: "failed", detail: decision.reason, finishedAt: Date.now() });
+          appendAudit({ type: "run.policy_block", runId, toolId: step.toolId, agentId: agent.id, rule: decision.rule, reason: decision.reason, householdId: run.householdId });
+          return finishFailed(runId, `policy_${decision.rule}`);
+        }
         // Clearing a gate is admin-sanctioned but NEVER silent — the household override
         // path is audited a few lines above, and an agent-level clear is audited here.
         if (decision.rule === "agent.auto_allow" && baseApproval && !step.agentPolicyAudited) {

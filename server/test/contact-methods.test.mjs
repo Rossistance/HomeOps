@@ -28,7 +28,12 @@ test("listing requires a session; the seeded registry is present", async () => {
   const seeded = r.data.contactMethods.find((c) => c.id === "ct-alex-email");
   assert.ok(seeded, "seeded demo methods exist server-side");
   assert.equal(seeded.memberId, "m-alex");
-  assert.equal(seeded.verified, true);
+  // CONSENT IS NEVER SEEDED (2026-07-30). These shipped `verified: true, optInStatus:
+  // "Opted In"`, which satisfied every fail-closed gate in notify.mjs and resolveSmsSender —
+  // so a seeded install with Google connected would attempt a REAL send to a reserved-TLD
+  // address nobody owns, and a seeded phone counted as a consenting A2P recipient.
+  assert.equal(seeded.verified, false, "demo data populates a roster; it does not manufacture permission");
+  assert.notEqual(seeded.optInStatus, "Opted In");
 });
 
 test("an adult may create a method for another member; it starts unverified", async () => {
@@ -142,7 +147,12 @@ test("notify refuses a verified-but-not-opted-in method", async () => {
 test("a verified email method resolves its address from the registry and honestly reports needs-setup", async () => {
   // No Google account is connected in this environment, so the send can't succeed —
   // but reaching needs_setup:google proves the registry resolved type+address.
-  const send = await owner.req("/api/notify", { method: "POST", body: JSON.stringify({ methodId: "ct-alex-email", title: "Hi", body: "test" }) });
+  // Created here rather than taken from the seed: seeded methods are deliberately
+  // unverified (see the listing test), and this assertion is about ADDRESS RESOLUTION,
+  // not about consent — it must not depend on demo data being pre-consented.
+  const made = await owner.req("/api/contact-methods", { method: "POST", body: JSON.stringify({ memberId: "m-alex", label: "Resolvable", type: "Email", value: "resolve@example.com", verified: true, optInStatus: "Opted In" }) });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  const send = await owner.req("/api/notify", { method: "POST", body: JSON.stringify({ methodId: made.data.contactMethod.id, title: "Hi", body: "test" }) });
   assert.equal(send.data.ok, false);
   assert.equal(send.data.channel, "email");
   assert.equal(send.data.needsSetup, "google");

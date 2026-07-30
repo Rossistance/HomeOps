@@ -34,13 +34,18 @@ test("backup round-trip: snapshot captures collections and restore brings them b
   assert.equal(m.role, "Owner");
 });
 
+// Snapshots live under backups/<householdId>/ as of 2026-07-30 — one bundle per household
+// rather than one shared bundle containing every tenant. See the header note in backup.mjs
+// for why (any signed-up stranger is an Owner, and Owner was the whole gate).
+const tenantBackupDir = (t = "local") => join(DIR, "backups", t);
+
 test("restore refuses a tampered bundle (never partial-writes)", async () => {
   store.putMember({ actorId: "m-owner", displayName: "Ross", role: "Owner", householdId: "local" });
   const name = backup.createBackup();
-  const p = join(DIR, "backups", name);
+  const p = join(tenantBackupDir(), name);
   const { gunzipSync, gzipSync } = await import("node:zlib");
   const bundle = JSON.parse(gunzipSync(fs.readFileSync(p)).toString("utf8"));
-  bundle.tenants.local.files = "definitely not a files object";
+  bundle.files = "definitely not a files object"; // format 3 is single-tenant
   fs.writeFileSync(p, gzipSync(JSON.stringify(bundle)));
   const out = backup.restoreBackup(name);
   assert.equal(out.ok, false);
@@ -55,10 +60,31 @@ test("legacy format-1 bundles (JSON-file era) still restore", async () => {
     files: { "events.json": JSON.stringify({ ev1: { id: "ev1", title: "From the old world" } }) },
   };
   const name = "familios-backup-2026-01-01.json.gz";
-  fs.writeFileSync(join(DIR, "backups", name), gzipSync(JSON.stringify(legacy)));
+  fs.mkdirSync(tenantBackupDir(), { recursive: true });
+  fs.writeFileSync(join(tenantBackupDir(), name), gzipSync(JSON.stringify(legacy)));
   const out = backup.restoreBackup(name);
   assert.equal(out.ok, true, JSON.stringify(out));
   assert.equal(store.getEvent("ev1").title, "From the old world");
+});
+
+test("a format-2 all-tenant bundle imports only the caller's own slice", async () => {
+  // The pre-2026-07-30 shape, restored by a household: its own slice lands, a neighbour's
+  // does not. Proven at the HTTP layer too in backup-tenant-isolation.test.mjs; this pins
+  // the module contract directly.
+  const { gzipSync } = await import("node:zlib");
+  const name = "familios-backup-2026-01-02.json.gz";
+  fs.mkdirSync(tenantBackupDir(), { recursive: true });
+  fs.writeFileSync(join(tenantBackupDir(), name), gzipSync(JSON.stringify({
+    meta: { format: 2, app: "familios", tenants: ["local", "hh_neighbour"] },
+    tenants: {
+      local: { files: { "events.json": { ev2: { id: "ev2", title: "Mine" } } }, audit: "" },
+      hh_neighbour: { files: { "events.json": { ev3: { id: "ev3", title: "Theirs" } } }, audit: "" },
+    },
+  })));
+  const out = backup.restoreBackup(name);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(store.getEvent("ev2")?.title, "Mine");
+  assert.ok(!store.getEvent("ev3"), "the neighbour's slice was not imported");
 });
 
 test("corruption quarantine: reads fall back, writes REFUSE until acknowledged", () => {

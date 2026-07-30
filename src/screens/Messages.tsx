@@ -412,7 +412,11 @@ function Contacts() {
                           {sendingId === c.id ? <Icon name="Loader2" size={13} className="animate-spin" /> : <Icon name="ShieldCheck" size={13} />} Verify
                         </Button>
                       )}
-                      <StatusDot color={c.optInStatus === "Opted In" ? "sage" : "amber"} label={c.optInStatus} />
+                      {/* "Opted Out" is not a paler "Pending": one is a person waiting to be
+                          asked, the other is a person who replied STOP. Amber for the first,
+                          coral for the second — a withdrawal should read as a stop, not as an
+                          errand still outstanding. */}
+                      <StatusDot color={c.optInStatus === "Opted In" ? "sage" : c.optInStatus === "Opted Out" ? "coral" : "amber"} label={c.optInStatus} />
                     </div>
                   </div>
                   {codeEntryId === c.id && !c.verified && (

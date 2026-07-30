@@ -40,7 +40,7 @@ import {
 } from "./store.mjs";
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases, applyEvolutionToTarget } from "./engine.mjs";
 import { revertEvolution, resolveEvolutionBefore, canRevertEvolution, listEvolutionArchive } from "./evolution-revert.mjs";
-import { createBackup, listBackups, readBackup, restoreBackup, backupTick } from "./backup.mjs";
+import { createBackup, listBackups, readBackup, restoreBackup, backupTick, deleteBackupsFor, listLegacyBackups, readLegacyBackup, restoreLegacyBundle } from "./backup.mjs";
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { closeBrowser } from "./browser.mjs";
 import { orchestrate, ensureOpenDefaultAgent } from "./orchestrator.mjs";
@@ -961,7 +961,12 @@ const handleRequest = async (req, res) => {
     // Family Dashboard aren't external addresses — their value is a fixed channel tag.
     const CONTACT_METHOD_TYPES = ["Email", "Phone/Text", "In-App", "Family Dashboard"];
     const CONTACT_FIXED_VALUES = { "In-App": "in-app", "Family Dashboard": "dashboard" };
-    const OPT_IN_STATES = ["Opted In", "Pending", "Not Set"];
+    // "Opted Out" is a real, terminal-until-reversed state, not the absence of consent.
+    // A recipient who texts STOP must be distinguishable from one who simply hasn't
+    // answered yet ("Pending"): the first is a withdrawal we are legally obliged to honour
+    // and to be able to evidence, the second is an invitation still open. Carriers block
+    // the transport either way; this is FamiliOS's own record telling the truth about it.
+    const OPT_IN_STATES = ["Opted In", "Pending", "Not Set", "Opted Out"];
     const validContactValue = (type, value) =>
       type === "Email" ? /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
       : type === "Phone/Text" ? String(value).replace(/\D/g, "").length >= 7
@@ -1479,6 +1484,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
         gone.push({ householdId: hh, at: new Date().toISOString(), by: g.session.actorId, email: idn.email });
         putSysDoc("deleted_households.json", gone);
         tenantEngine().deleteTenant(hh);
+        // The snapshots go with it. Dropping the tenant DB while leaving 30 days of
+        // complete household backups on disk would make "delete my account" untrue —
+        // and Apple 5.1.1(v) asks for deletion, not for the live copy only.
+        deleteBackupsFor(hh);
         return json(res, 200, { ok: true, deleted: "household" }, req, { "set-cookie": clearSessionCookie() });
       }
       putMember({ actorId: g.session.actorId, archived: true, householdId: g.session.householdId });
@@ -1488,7 +1497,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
       return json(res, 200, { ok: true, deleted: "account" }, req, { "set-cookie": clearSessionCookie() });
     }
 
-    /* ---- Backups & store health (Owner-only; the family's safety net) ---- */
+    /* ---- Backups & store health (Owner-only; the family's safety net) ----
+     * SCOPE: every call below reads and writes ONLY the caller's own household, because
+     * backup.mjs resolves the tenant from the request context (currentTenant()) and never
+     * from a body. Before 2026-07-30 one bundle held every tenant and these same
+     * Owner-gated routes handed it to any signed-up stranger — see the header note in
+     * backup.mjs. The pre-existing all-tenant bundles are reachable only via the
+     * operator routes further down. */
     if (path === "/api/backups" && method === "GET") {
       const g = gate(req, { requireSession: true, minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       return json(res, 200, { backups: listBackups(), quarantined: quarantinedCollections() }, req);
@@ -1510,6 +1525,35 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body?.name) return json(res, 400, { error: "name_required" }, req);
       const out = restoreBackup(String(body.name));
+      return json(res, out.ok ? 200 : 422, out, req);
+    }
+    /* Operator-only access to the pre-2026-07-30 all-tenant bundles. These predate
+     * per-household backups and contain every family's data, so household Owner is not a
+     * sufficient credential for them — operator authority lives in a deployment env var
+     * (HOMEOPS_OPERATOR_EMAILS) that no household can grant itself, and the routes 404
+     * when it is unset. Kept because they are a genuine disaster-recovery net. */
+    if (path === "/api/admin/legacy-backups" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!isOperator(g.session)) return json(res, 404, { error: "not_found" }, req);
+      audit({ type: "admin.legacy_backups.list", ok: true }, req, g.session);
+      return json(res, 200, { backups: listLegacyBackups() }, req);
+    }
+    const legacyOne = path.match(/^\/api\/admin\/legacy-backups\/([^/]+)$/);
+    if (legacyOne && legacyOne[1] !== "restore" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!isOperator(g.session)) return json(res, 404, { error: "not_found" }, req);
+      const raw = readLegacyBackup(legacyOne[1]);
+      if (!raw) return json(res, 404, { error: "not_found" }, req);
+      audit({ type: "admin.legacy_backups.download", name: legacyOne[1], ok: true }, req, g.session);
+      res.writeHead(200, { "content-type": "application/gzip", "content-disposition": `attachment; filename="${legacyOne[1]}"`, ...corsHeaders(req) });
+      return res.end(raw);
+    }
+    if (path === "/api/admin/legacy-backups/restore" && method === "POST") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!isOperator(g.session)) return json(res, 404, { error: "not_found" }, req);
+      const body = await readBody(req); if (!body?.name) return json(res, 400, { error: "name_required" }, req);
+      const out = restoreLegacyBundle(String(body.name));
+      audit({ type: "admin.legacy_backups.restore", name: String(body.name), ok: out.ok, error: out.ok ? undefined : out.error }, req, g.session);
       return json(res, out.ok ? 200 : 422, out, req);
     }
     /* Declutter / fresh start (Owner-only, backup-first). Bulk-clears the assistant's
@@ -5407,8 +5451,17 @@ server.listen(PORT, () => {
   // /api/health browserRuntime flag — reflect reality from the start.
   healthCheck("browser").catch(() => {});
   // Nightly household backup (+ weekly Owner notice), piggybacked on a light timer.
-  setInterval(() => { void backupTick(); }, 30 * 60_000);
-  void backupTick();
+  // Once per household, in that household's own tenant context — the snapshot, the 24h
+  // cadence stamp, and the weekly Owner notice are all per-family now. Previously this ran
+  // bare, so it took ONE all-tenant snapshot and only ever told the resident Owner.
+  setInterval(() => { void forEachTenant((t) => backupTick(t)); }, 30 * 60_000);
+  // Deliberately NOT at boot. A first tick exports every tenant's whole database, and doing
+  // that while the process is still coming up competes for the same SQLite files the server
+  // is opening — on Windows that surfaces as a transient `disk I/O error`, and it made a
+  // concurrent test suite flaky. A minute's delay keeps the "a server that restarts often
+  // still gets its nightly snapshot" guarantee and removes the startup contention. Unref'd
+  // so it never holds the process open.
+  setTimeout(() => { void forEachTenant((t) => backupTick(t)); }, 60_000).unref?.();
   // eslint-disable-next-line no-console
   // Report the ACTUAL bound port (PORT=0 asks the OS for a free one — the test
   // harness relies on this line to learn where the server landed).

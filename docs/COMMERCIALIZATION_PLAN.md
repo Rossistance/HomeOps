@@ -266,3 +266,76 @@ Provability ladder (cheap → expensive): egress ledger UI → published claims 
 **Capabilities used:** deep-research workflow; claude-api skill (pricing, [A]); all-in-one-skill lifecycle as the planning frame; direct file reads. **Skipped:** Explore agent (rate-limited), docx/pptx export (markdown chosen for repo versionability — say the word and I'll produce a formatted deck or PDF for the team), Notion/Linear/Figma MCPs (not authenticated in this session).
 
 **Retrospective — worth fixing before the next research run:** (1) The deep-research workflow fans out 75 verification agents with no rate-limit backoff or partial-credit path; when the budget dies, *all* verification is lost even though extraction succeeded. It should stagger panels, degrade to 1 verifier per claim under pressure, and persist per-claim verdicts as they land. (2) A cheaper default would verify only the ~8 claims that actually move a decision (trial length, paywall type, price point, base rates, Apple's commission and deletion rules) rather than all 25. Both are worth encoding into the skill.
+
+---
+
+# ADDENDUM — 2026-07-10: status correction, blocker triage, and the "magic gap"
+
+*Written after re-auditing the repo at its new location (`D:\FamiliOS\FamiliOS`) and after two real-world blockers surfaced: a 4×-rejected Twilio A2P 10DLC registration, and a decision to defer linking bank details to Apple. Everything above stands except the Phase 1 sizing, which was written against a stale snapshot.*
+
+> **SUPERSEDED IN PART — see [CODEBASE_STATUS_2026-07-30.md](CODEBASE_STATUS_2026-07-30.md).** A five-agent full-code exploration on 2026-07-30 corrected three things in this document: (1) **§0.3's Turso/libSQL recommendation is obsolete** — a measured spike chose Node's built-in `node:sqlite` instead, because an async driver would force an async refactor of every store call site; per-tenant physically-separate SQLite is already shipped and tested. (2) **§7's egress-ledger privacy claim is unsupportable as written** — nine production call sites bypass `safeFetch`, including `oauth.mjs:11 rawFetch` which carries all provider traffic, and no ledger is written anywhere. Do not market an egress guarantee until that is fixed. (3) **Billing is not greenfield** — a 21-day trial, `getPlan`, a RevenueCat webhook, and `planGate` on six AI routes are all shipped server-side; only the client half is missing. The status document also identifies a cross-tenant backup exposure that must close before any stranger signs up.
+
+## A1. The codebase has moved past this plan — Phase 1 is largely built
+
+The roadmap in §5 assumed multi-tenancy was unstarted. It isn't. Modules that did not exist in the audited snapshot:
+
+| Module | What it does | Plan item it closes |
+|---|---|---|
+| [tenant-context.mjs](../server/tenant-context.mjs) | `AsyncLocalStorage` carries `householdId` through the synchronous store accessors — request context filled by `gate()`, `runWithTenant()` for engine runs / trigger fires / boot loops, `RESIDENT_TENANT` fallback | **1.1**, the single hardest item (est. 1.5–3 wks) |
+| [tenant-db.mjs](../server/tenant-db.mjs) + `server/spike/tenant-store-spike.mjs` | Per-tenant storage layer + the DB spike §0.3 called for | **0.3**, **1.1** |
+| [policy.mjs](../server/policy.mjs) | One effective approval policy resolved in one pure function: household → agent → capability, tightening always honoured, relaxing bounded by `isHighStakes()`; every result names the rule that produced it | (not in the plan — see A3) |
+| [identity.mjs](../server/identity.mjs), [pin.mjs](../server/pin.mjs) | Identity/auth surface beyond the original session layer | part of **1.4** |
+| `recordAiUsage` / `aiBudgetExhausted` in [store.mjs](../server/store.mjs) | Per-household AI spend metering | the §3 COGS guardrail + **1.3** hook |
+| `getSettings(householdId)` | Settings are now household-scoped | **1.2** — the "sneaky one" is already fixed |
+| [assistant-runs.mjs](../server/assistant-runs.mjs) | Conversation-born runs report back into the thread; failed runs self-heal once, then offer to save the repaired plan as a reusable helper; `delivers` flag (not a name regex) decides what counts as delivered | (not in the plan — this is ahead of it) |
+| [backup.mjs](../server/backup.mjs), [nests.mjs](../server/nests.mjs), [reminders.mjs](../server/reminders.mjs), [places.mjs](../server/places.mjs), [memory-capture.mjs](../server/memory-capture.mjs), [automation-preflight.mjs](../server/automation-preflight.mjs), [file-understanding.mjs](../server/file-understanding.mjs) | Product surface built since | — |
+
+**Revised Phase 1: ~1–3 weeks, not 3–6.** What plausibly remains is self-serve household *creation* for strangers, the Apple-required account-deletion flow, billing/entitlements (1.5), and the cross-tenant isolation test suite. **Verify before planning against this** — run `npm test` and grep for `runWithTenant` coverage; I read module headers, not every call site.
+
+## A2. Neither blocker is on the critical path
+
+**Apple — you do not need a bank account yet.** The $99 Developer Program membership (paid by card) is all TestFlight needs. The **Paid Applications Agreement** — which requires bank and tax details — is required only to *sell*. So the whole validation sequence runs first: build → TestFlight → 20–50 real families → measure week-4 retention → *then* link banking and flip the paywall. That is months of unblocked runway, and it puts the money step after the evidence that the product retains, which is the right order anyway.
+
+**Twilio — pivot to toll-free, and fix the one field that is probably killing you.** Per Twilio's own compliance docs: toll-free verification takes **3–5 business days** vs 10–15 for an A2P campaign, needs a simpler submission, and a rejected toll-free application **resubmitted within 7 days gets priority review**. For household-volume traffic the A2P throughput advantage is irrelevant. Then:
+
+- **The prime suspect is the consent-as-condition trap.** Twilio's rule: *"If customers must opt in to messaging to complete a purchase or create an account, the registration **will be rejected**."* If the campaign describes opt-in as happening during member setup — where a phone number is required — that is an automatic reject, and it would be rejected identically on every resubmission. Which matches 4 denials with no useful support explanation.
+- **The second suspect is the message-flow field** — Twilio names it the #1 campaign rejection cause. It needs four things: opt-in method description with no pre-checked boxes, message frequency ("up to N msgs/month"), the literal string "Message and data rates may apply," and a **publicly accessible** link to a screenshot of the opt-in UI (Drive/OneDrive set to anyone-with-link is explicitly fine). Also required: a privacy policy that states mobile data is **not** shared with third parties, and T&Cs with HELP/STOP in bold. No public URL shorteners.
+- **Good news you may not realize you have:** [sms.mjs](../server/sms.mjs) `resolveSmsSender()` already requires a contact method that is `verified === true` **and** `optInStatus === "Opted In"`, backed by `contact_verifications.json`. That is a genuine, auditable double opt-in — exactly the evidence the campaign wants. The problem is almost certainly *describing* it, not *having* it. Screenshot that verification flow, host it publicly, and quote the exact consent copy in the message-flow field.
+- If a brand (not campaign) rejection is in the mix: brand rejection means business name/EIN do not match tax records **exactly**. With the LLC formed, register a Standard brand on the EIN rather than Sole Proprietor.
+- **WhatsApp does bypass A2P 10DLC** — but needs Meta Business Verification (weeks) plus pre-approved templates for anything outside the 24-hour service window. Not a shortcut.
+
+## A3. The "magic gap": why competitors feel like *just text it and it does anything*
+
+This is the important finding, and it is not an architecture problem.
+
+**1. The channel is built, not missing.** [sms.mjs](../server/sms.mjs) implements `handleInboundSms({from, body})`; [index.mjs](../server/index.mjs) exposes a Twilio-signature-validated `POST /api/webhooks/sms`; inbound texts resolve to a verified member and land in the *same* durable conversation model the web and mobile chat use (`channel: "sms"`); there is a passing `server/test/sms-gateway.test.mjs`. **Two-way "text your assistant" is finished code waiting on a phone number.** That is a procurement blocker wearing the costume of a product gap.
+
+**2. The defaults gate every useful action — and there is no preset to loosen them.** `sms.send` and `gmail.send` are `risk: "High"`, `delivers: true`, `requiresApproval: true`. `isHighStakes()` in [policy.mjs](../server/policy.mjs) means **no agent-level `autoAllow` can ever clear those gates** — by design, and correctly so. The only thing that can is a household-level `risk_override` with `skipApproval: true`. That mechanism exists, is audited, and works: the audit log shows it being toggled by hand on `gmail.modifyLabels`, `calendar.create`, `sms.send` on 2026-07-03/04, and the spike report counts **9** risk overrides in the store.
+
+So the honest diagnosis: *the autonomy dial exists, it is per-tool, and it must be set nine-plus times by hand.* Nobody — including you — will do that per household. Competitors feel magical because their default is "act," with no gate at all. Yours is "ask," on everything that matters.
+
+**The highest-leverage work package in this entire document is therefore not in the roadmap above:**
+
+> **WP-A: Household Autonomy Presets.** One household-level setting with three named levels that writes the appropriate set of `risk_override` records in a single action:
+> - **Cautious** — today's behavior; approve everything that sends, writes, or pays.
+> - **Balanced (recommended default)** — auto-run reads, calendar adds, list/task/reminder writes, and in-household notifications. Still approve: outbound email/SMS to non-members, purchases, downloads, anything touching money or an outside party.
+> - **Trusted** — auto-run everything except money and messages to people outside the household; report afterward instead of asking first.
+>
+> Ship **Balanced as the default for new households.** Keep the kill switch and `isHighStakes` boundary exactly as they are — this changes defaults and adds a preset writer, it does not weaken the policy engine. Surface it in onboarding as one question ("How much should Famili do on its own?") and echo the effective policy in plain words, which `policy.mjs` already returns via its `rule`/`reason` fields.
+>
+> **Estimated effort: 2–4 days.** It is the difference between "sophisticated but asks permission constantly" and "it just handles it."
+
+**3. Perceived latency.** Plan → steps → tool calls is slower than a one-line reply. Fix with acknowledge-instantly, execute-async, report-in-thread — which `assistant-runs.mjs` already does for run results. Make the *acknowledgment* immediate and specific ("On it — adding that to Tuesday and texting Sarah") rather than silence until the run finishes.
+
+**What the competitors don't have:** durable restart-recoverable runs, at-most-once side effects, an auditable approval policy with named rules, honest delivery reporting (`delivers` flag rather than a name-sniffing regex — the false-success class you already eliminated), per-household isolation, and a credible local-LLM privacy path. Those are the parts that are hard to build and hard to copy. "Feels magical" is a defaults-and-copy problem, and it is days of work, not months. Do not rebuild toward the competitors' architecture; change your defaults and keep the substrate.
+
+## A4. Revised near-term sequence (nothing here needs Twilio or Apple)
+
+1. **This week — WP-A autonomy presets** (2–4 days). Biggest felt improvement per hour spent, and it makes every demo better.
+2. **This week — instant-acknowledgment copy** in the assistant loop (hours).
+3. **Days 3–5 — toll-free verification submitted**, with the opt-in screenshot hosted publicly and the message-flow field written to the four-element spec. Keep the A2P campaign open in parallel; if it clears later, migrate.
+4. **Weeks 2–3 — close the real Phase 1 remainder**: self-serve household creation, account deletion, cross-tenant isolation tests. Confirm what is actually left rather than trusting either estimate.
+5. **Weeks 3–4 — TestFlight with real families** on the $99 membership. No banking, no paywall, no SMS dependency (push + in-app chat carry it).
+6. **Then, and only then** — RevenueCat + Paid Applications Agreement + paywall, once week-4 retention says the product holds.
+
+**On "losing ground daily":** the assistant-app land rush is real, but the apps shipping easy text interfaces are mostly thin wrappers with no durable execution, no family multi-user model, no approval semantics, and no privacy story — and every one of them sending US SMS hits the same A2P wall you are hitting. Ground is lost by shipping nothing for months, not by being four days behind on a toll-free number. Items 1 and 2 above are the ones that close the felt gap, and they are this week's work.

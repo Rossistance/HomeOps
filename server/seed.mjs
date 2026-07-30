@@ -74,13 +74,21 @@ export function seedDefaults() {
   // frontend demo seed (src/data/seed.ts), so the web client's one-time migration
   // is a no-op for these and mobile sees the same registry. Idempotent by id;
   // household edits (verify, allowlists, deletes of OTHER methods) are never clobbered.
+  // CONSENT IS NEVER SEEDED. These demo methods used to ship `verified: true,
+  // optInStatus: "Opted In"`, which satisfied every fail-closed gate in notify.mjs
+  // (verified → opted-in → per-agent allowlist) and in resolveSmsSender. On a seeded
+  // install with Google connected, notify_contact to ct-alex-email would attempt a REAL
+  // Gmail send to a reserved-TLD address nobody owns — and a seeded phone number counted
+  // as a consenting SMS recipient for A2P purposes. Demo data may populate a roster; it
+  // may not manufacture permission to contact anyone. Verification is a real round-trip
+  // (a code to the address, entered back) and it stays that way for seeds too.
   const haveContacts = new Set(listContactMethods().map((c) => c.id));
   const activeMembers = new Set(listMembers().filter((m) => !m.archived).map((m) => m.actorId));
   for (const c of [
-    { id: "ct-alex-email", memberId: "m-alex", label: "Primary email", type: "Email", value: "alex@harper.example", verified: true, optInStatus: "Opted In" },
-    { id: "ct-alex-text", memberId: "m-alex", label: "Mobile (text)", type: "Phone/Text", value: "(555) 010-2244", verified: true, optInStatus: "Opted In" },
-    { id: "ct-morgan-email", memberId: "m-morgan", label: "Primary email", type: "Email", value: "morgan@harper.example", verified: true, optInStatus: "Opted In" },
-    { id: "ct-elaine-text", memberId: "m-elaine", label: "Mobile (prefers text)", type: "Phone/Text", value: "(555) 018-7700", verified: true, optInStatus: "Opted In" },
+    { id: "ct-alex-email", memberId: "m-alex", label: "Primary email", type: "Email", value: "alex@harper.example", verified: false, optInStatus: "Pending" },
+    { id: "ct-alex-text", memberId: "m-alex", label: "Mobile (text)", type: "Phone/Text", value: "(555) 010-2244", verified: false, optInStatus: "Pending" },
+    { id: "ct-morgan-email", memberId: "m-morgan", label: "Primary email", type: "Email", value: "morgan@harper.example", verified: false, optInStatus: "Pending" },
+    { id: "ct-elaine-text", memberId: "m-elaine", label: "Mobile (prefers text)", type: "Phone/Text", value: "(555) 018-7700", verified: false, optInStatus: "Pending" },
     { id: "ct-sam-text", memberId: "m-sam", label: "Mobile", type: "Phone/Text", value: "(555) 044-3311", verified: false, optInStatus: "Pending" },
   ]) {
     if (!haveContacts.has(c.id) && activeMembers.has(c.memberId)) {

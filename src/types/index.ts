@@ -225,7 +225,7 @@ export interface ContactMethod {
   type: "Email" | "Phone/Text" | "In-App" | "Family Dashboard";
   value: string;
   verified: boolean;
-  optInStatus: "Opted In" | "Pending" | "Not Set";
+  optInStatus: "Opted In" | "Pending" | "Not Set" | "Opted Out";
   allowedAgentIds: string[];
 }
 

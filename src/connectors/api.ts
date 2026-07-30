@@ -549,7 +549,7 @@ export interface ServerNotification { id: string; householdId: string; actorId: 
 export interface ServerContactMethod {
   id: string; householdId: string; memberId: string; label: string;
   type: "Email" | "Phone/Text" | "In-App" | "Family Dashboard"; value: string;
-  verified: boolean; optInStatus: "Opted In" | "Pending" | "Not Set";
+  verified: boolean; optInStatus: "Opted In" | "Pending" | "Not Set" | "Opted Out";
   allowedAgentIds: string[]; createdBy?: string; createdAt?: string; updatedAt?: string;
 }
 
