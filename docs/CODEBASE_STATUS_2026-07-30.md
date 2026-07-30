@@ -8,6 +8,25 @@
 
 ---
 
+> ## ✅ WEEK 1 SHIPPED — commit `18640b3`, pushed to `main` 2026-07-30
+>
+> All four Week-1 items are implemented, tested, and deployed. **1014 server tests, 0 failures (24 new).** Web + mobile typecheck clean; `npm run build` clean; live webhook path and A2P raw-HTML verified against a running server.
+>
+> | Item | Status | Where |
+> |---|---|---|
+> | 1.1 Cross-tenant backup exposure | **fixed** — per-tenant `backups/<householdId>/`, slice-only legacy restore, operator-gated legacy surface, snapshots purged on household deletion | `server/backup.mjs`, `server/index.mjs`, `server/test/backup-tenant-isolation.test.mjs` (10 tests) |
+> | 1.2 Kill switch → approval bypass | **fixed** — `BLOCKED` is now a hard step failure + audit; `reachesOutside()` narrows the reach test so local writes still work; `execResolved` gained the internal-tool check | `server/policy.mjs`, `server/engine.mjs`, `server/test/policy-resolution.test.mjs` (+5 tests) |
+> | 1.5 Seeded consent | **fixed** — both seeds (server *and* the web copy that feeds `migrateContactMethodsToServer`) ship unverified / Pending | `server/seed.mjs`, `src/data/seed.ts`, `server/test/contact-methods.test.mjs` |
+> | 3.1 STOP/HELP | **fixed** — keywords handled before any model, whole-message matched, audited, working for opted-out/unverified senders; START only *restores* a verified consent; `"Opted Out"` is a real state and renders coral | `server/sms.mjs`, `server/test/sms-keywords.test.mjs` (11 tests) |
+>
+> **Two extras found and fixed while in there:** the web's client-side seed also shipped pre-consented contacts (and migration would have pushed them back to the server, re-opening 1.5); and the boot-time backup tick now runs 60 s later, unref'd, because exporting every tenant while the process was still opening those same SQLite files made the concurrent suite flaky on Windows.
+>
+> **One vocabulary change worth knowing:** all three layers that can refuse for the kill switch now say the same sentence — *"External actions are paused by the household kill switch."* The `policy.mjs` reason was reworded to match `notify.mjs` and `execResolved` rather than weakening the existing `notify-contact-delivery` assertion.
+>
+> **Twilio consequence:** the campaign's claim *"users opt out by replying STOP… HELP returns help text"* is now true of the code. That removes an independent rejection cause; the entity classification (§3.2 — EIN + Low-Volume Standard, plus toll-free in parallel) is still the primary blocker and is not a code change.
+
+---
+
 ## SEVERITY 1 — Fix before any stranger has an account
 
 ### 1.1 Cross-tenant backup exposure *(the most serious finding here)*
