@@ -226,6 +226,9 @@ export function Settings() {
           <p className="mt-2 text-xs text-ink-500">"Start my own" erases the sample household from this browser and takes you to first-run setup to create your own.</p>
         </Card>
 
+        {/* Take your data with you */}
+        <TakeYourDataCard />
+
         {/* Disclaimers */}
         <Card className="card-pad">
           <SectionTitle icon="ShieldAlert">Safety & disclaimers</SectionTitle>
@@ -360,6 +363,82 @@ function AutonomyCard() {
         </form>
         {pinErr && <p className="mt-2 text-sm text-coral-600">{pinErr}</p>}
       </Modal>
+    </Card>
+  );
+}
+
+/* "Give me everything you hold about my family."
+ *
+ * The backup buttons above are a RESTORE artifact: a gzip shaped for the importer, containing
+ * the household's encrypted credentials because a restore needs them. Useful, and not an answer
+ * to "what do you have on us" — you cannot read it, and handing someone their own OAuth tokens
+ * is a liability nobody asked for. This is the other artifact, and it is the one Apple and GDPR
+ * are actually asking about.
+ *
+ * Owner-only, enforced server-side: the export spans every member's personal space, so it is
+ * not one person's to take. The button is simply absent for anyone else rather than present and
+ * refusing — a control you can press that always fails is the thing this whole work package has
+ * been removing. */
+function TakeYourDataCard() {
+  const toast = useStore((s) => s.toast);
+  const session = useStore((s) => s.session);
+  const [busy, setBusy] = useState(false);
+  const [settings, setSettings] = useState<BackendSettings | null>(null);
+  const [budget, setBudget] = useState("");
+
+  useEffect(() => { void (async () => { const s = await backend.getSettings(); setSettings(s); setBudget(s.aiDailyCallBudget ? String(s.aiDailyCallBudget) : ""); })(); }, []);
+
+  if (session?.role !== "Owner") return null;
+
+  const download = async () => {
+    setBusy(true);
+    const r = await backend.exportHousehold();
+    setBusy(false);
+    if (!r.ok) { toast({ kind: "error", title: "Couldn't build the export", message: r.message ?? r.error }); return; }
+    toast({ kind: "success", title: "Export downloaded", message: "Everything your family owns, minus credentials — which are listed but never included." });
+  };
+
+  const saveBudget = async () => {
+    const n = budget.trim() === "" ? 0 : Number(budget);
+    const r = await backend.setSettings({ aiDailyCallBudget: Number.isFinite(n) ? n : -1 });
+    const fresh = await backend.getSettings();
+    setSettings(fresh);
+    setBudget(fresh.aiDailyCallBudget ? String(fresh.aiDailyCallBudget) : "");
+    if (fresh.aiDailyCallBudget === (Number.isFinite(n) && n > 0 ? Math.floor(n) : null)) {
+      toast({ kind: "success", title: fresh.aiDailyCallBudget ? `Capped at ${fresh.aiDailyCallBudget} calls a day` : "Daily cap removed" });
+    } else {
+      toast({ kind: "error", title: "Couldn't save that", message: "A daily cap is a whole number of calls, or blank for no limit." });
+    }
+    void r;
+  };
+
+  return (
+    <Card className="card-pad">
+      <SectionTitle icon="PackageOpen">Your family's data</SectionTitle>
+      <p className="text-sm text-ink-500">Everything FamiliOS holds for your household, as a readable file you can keep, move, or hand to anyone you like.</p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button variant="secondary" disabled={busy} onClick={download}>
+          <Icon name={busy ? "Loader2" : "Download"} size={15} className={busy ? "animate-spin" : ""} /> {busy ? "Building it…" : "Download my family's data"}
+        </Button>
+      </div>
+      <p className="mt-2 text-xs text-ink-400">
+        Includes your calendar, tasks, meals, lists, helpers, memories, contacts and the full activity log. Credentials — connector keys and sign-in tokens — are named but never included; they are no use outside this server and shipping them would be a risk to you.
+      </p>
+
+      {/* The dial that was enforced and could not be turned. */}
+      <div className="mt-4 border-t border-ink-900/[0.06] pt-3">
+        <Field label="Daily AI call limit" hint="A safety net against a runaway loop or a surprise bill. Leave blank for no limit.">
+          <div className="flex items-center gap-2">
+            <TextInput type="number" inputMode="numeric" min={0} value={budget} placeholder="No limit" onChange={(e) => setBudget(e.target.value)} className="!w-40" />
+            <Button variant="secondary" onClick={saveBudget}>Save</Button>
+            {settings && (
+              <span className="text-xs text-ink-400">
+                {settings.aiCallsToday ?? 0} used today{settings.aiDailyCallBudget ? ` of ${settings.aiDailyCallBudget}` : ""}
+              </span>
+            )}
+          </div>
+        </Field>
+      </div>
     </Card>
   );
 }

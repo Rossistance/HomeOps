@@ -14,7 +14,7 @@ import {
   appendAudit, readAudit, getWebhookEvents, addWebhookEvent, getSettings, setSettings, getDataRev,
   getDataRevForTenant, revEmitter,
   quarantinedCollections, acknowledgeQuarantine, CURRENT_TENANT, forEachTenant, runWithTenant, currentTenant,
-  migrateVaultToTenantKeys,
+  migrateVaultToTenantKeys, getAiUsage,
   tenantEngine, sysDoc, putSysDoc, deleteSessionsForHousehold, getPlan, setPlanFromEntitlement,
   createSession, deleteSession, deleteSessionsForActor, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
@@ -42,6 +42,7 @@ import {
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases, applyEvolutionToTarget } from "./engine.mjs";
 import { revertEvolution, resolveEvolutionBefore, canRevertEvolution, listEvolutionArchive } from "./evolution-revert.mjs";
 import { createBackup, listBackups, readBackup, restoreBackup, backupTick, deleteBackupsFor, listLegacyBackups, readLegacyBackup, restoreLegacyBundle } from "./backup.mjs";
+import { exportHouseholdWithAudit } from "./export.mjs";
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { platformMailReady, sendPlatformEmail, platformMailStatus } from "./mailer.mjs";
 import { closeBrowser } from "./browser.mjs";
@@ -253,6 +254,11 @@ function settingsView(s, session) {
     autonomyDefaulted: !s.autonomySetAt,
     autonomySetByRole: s.autonomySetByRole ?? null,
     autonomySetAt: s.autonomySetAt ?? null,
+    /* The daily AI cap, and today's count against it. A budget you can set but can't watch is
+     * only half a control — the number that matters is how close you are to it. Null is
+     * unmetered, which is the default. */
+    aiDailyCallBudget: Number.isFinite(Number(s.aiDailyCallBudget)) && Number(s.aiDailyCallBudget) > 0 ? Math.floor(Number(s.aiDailyCallBudget)) : null,
+    aiCallsToday: getAiUsage(session.householdId)?.total ?? 0,
   };
 }
 
@@ -731,6 +737,26 @@ const handleRequest = async (req, res) => {
       if (s0 && rateLimited("assistant", s0.actorId, 30, 60_000)) {
         audit({ type: "rate.limited", route: path, actorId: s0.actorId }, req);
         return json(res, 429, { error: "rate_limited", message: "That's a lot of messages at once — give it a minute." }, req);
+      }
+      /* …AND A LIMIT ON THE HOUSEHOLD, not just the person.
+       *
+       * The per-actor cap bounds one member. It does not bound a FAMILY: six members is six
+       * times the ceiling, and on a shared deployment every one of those calls spends the same
+       * pooled AI capacity everyone else's household is waiting on. There was no limit at that
+       * level at all, so one busy household could degrade the product for every other one —
+       * with nothing in the logs naming a cause, because nobody had exceeded anything.
+       *
+       * Deliberately generous relative to the per-actor cap: this is a backstop against a
+       * runaway client or an unusual day, not a quota on a large family talking to their own
+       * assistant. Tunable so an operator can raise it without editing code. */
+      const hh = s0?.householdId;
+      // Floor of 10, not 30: a floor exists so a typo can't lock a family out of their own
+      // assistant, but set it at the DEFAULT and the knob stops being a knob — an operator who
+      // needs to throttle hard could only ever loosen. Below 10 is a mistake; 10 is a choice.
+      const hhLimit = Math.max(10, parseInt(process.env.HOMEOPS_HOUSEHOLD_RATE_LIMIT ?? "90", 10) || 90);
+      if (hh && rateLimited("assistant_household", hh, hhLimit, 60_000)) {
+        audit({ type: "rate.limited", route: path, scope: "household", actorId: s0.actorId }, req);
+        return json(res, 429, { error: "rate_limited", message: "Your household has sent a lot of messages in the last minute. Give it a moment and try again." }, req);
       }
     }
 
@@ -1731,6 +1757,39 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (path === "/api/backups" && method === "GET") {
       const g = gate(req, { requireSession: true, minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       return json(res, 200, { backups: listBackups(), quarantined: quarantinedCollections() }, req);
+    }
+
+    /* ---- "Give me everything you hold about my family" ----
+     *
+     * A backup is a RESTORE artifact: gzipped, shaped for tenant-db's importer, and containing
+     * the household's encrypted credentials because a restore needs them. Handing a family that
+     * file and calling it their data is technically true and practically useless — and shipping
+     * someone their own OAuth refresh tokens, even encrypted, is a liability nobody asked for.
+     *
+     * This is the other artifact: readable JSON, everything the household owns, credentials
+     * removed and said to be removed. Owner-only, because it spans every member's personal
+     * space — a household export is not one person's to take.
+     *
+     * Deliberately a plain synchronous body rather than a streamed download: a family's whole
+     * store is measured in megabytes, and the honest failure of loading it at once is a slow
+     * request rather than a half-written file that looks complete. */
+    if (path === "/api/export" && method === "GET") {
+      const g = gate(req, { requireSession: true, minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const bundle = exportHouseholdWithAudit(g.session.householdId, (hh) => {
+        const p = tenantEngine().tenantPath(hh, "audit.jsonl");
+        if (!fs.existsSync(p)) return [];
+        return fs.readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return { unparseable: l }; } });
+      });
+      if (!bundle) return json(res, 503, { error: "storage_unreadable", message: "Your data can't be read cleanly right now, so an export would be incomplete. Restore from a backup first." }, req);
+      audit({ type: "household.export_downloaded", collections: bundle.meta.collections }, req, g.session);
+      const body = Buffer.from(JSON.stringify(bundle, null, 2), "utf8");
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "content-disposition": `attachment; filename="familios-export-${g.session.householdId}-${new Date().toISOString().slice(0, 10)}.json"`,
+        "content-length": body.length,
+        ...corsHeaders(req),
+      });
+      return res.end(body);
     }
     if (path === "/api/backups/run" && method === "POST") {
       const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -4872,6 +4931,26 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // WP-010 pre-auth privacy (ISS-015): when ON, this household's roster is hidden from
       // the pre-auth profile picker to anyone without a session for it (see /api/profiles).
       if (typeof body.hideProfilesPreAuth === "boolean") patch.hideProfilesPreAuth = body.hideProfilesPreAuth;
+      /* A DIAL THAT WAS ENFORCED AND COULD NOT BE TURNED.
+       *
+       * store.mjs has metered every AI call per household since C1.3, and aiBudgetExhausted()
+       * is checked on the real paths — but NOTHING ever wrote `aiDailyCallBudget`. The cap was
+       * live, functional, and permanently unset: a family that wanted to bound their own spend
+       * had no way to say so, and an operator's only recourse was editing the store by hand.
+       *
+       * 0 or null means unmetered, which is the documented default and the way to switch it
+       * back off. Not PIN-gated: unlike the autonomy switches this cannot cause an action to
+       * leave the house — the worst it does is make the assistant stop early, which is the
+       * careful direction. */
+      if (body.aiDailyCallBudget !== undefined) {
+        if (body.aiDailyCallBudget === null || body.aiDailyCallBudget === 0 || body.aiDailyCallBudget === "") {
+          patch.aiDailyCallBudget = null;
+        } else {
+          const n = Number(body.aiDailyCallBudget);
+          if (!Number.isFinite(n) || n < 0 || n > 100000) return json(res, 400, { error: "invalid_budget", message: "A daily call budget is a whole number of calls, or 0 for no limit." }, req);
+          patch.aiDailyCallBudget = Math.floor(n);
+        }
+      }
       /* The household's own sign-in PIN. Refuse a too-short one HERE rather than in the
        * form: this is the gate on every Owner and Adult Admin sign-in, and a client that
        * skips its own validation must not be able to set a one-digit PIN on it. */

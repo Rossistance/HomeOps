@@ -101,7 +101,7 @@
 >
 > **Deliberately unchanged:** the shared connector endpoint `/api/webhooks/webhook` keeps its resident behaviour. connectors.mjs publishes it as a fixed path with no household in the URL, so there is nothing to route on; giving it a tenant would mean inventing one. Non-resident households reach the feature through a webhook **trigger**, which carries its own URL and secret.
 >
-> **Still open in Severity 2:** 2.3 billing client (blocked — no Apple bank account yet), 2.8 per-household export + rate limits, 2.9 Sign in with Apple.
+> **Still open in Severity 2:** 2.3 billing client (blocked — no Apple bank account yet), 2.9 Sign in with Apple.
 
 ---
 
@@ -116,6 +116,22 @@
 > **The migration was the risk**, since getting it wrong means every family losing every credential at once. Format is read off the value, never assumed: `iv.tag.ct` stays on the master key, `v2.iv.tag.ct` uses the derived one. A boot pass rewrites v1 blobs per household, deferred and unref'd (same SQLite-contention reason as the backup tick), idempotent, and **a blob that won't decrypt is left exactly as found** rather than dropped or overwritten.
 >
 > **Verified on real data, not just fixtures:** the local dev household's genuine pre-existing OpenAI key decrypted and made a live authenticated call (125 models) *before* migration; the boot pass then rekeyed 8 real secrets; the same call succeeded again afterwards, with all 5 live connectors unchanged.
+
+---
+
+> ## ✅ 2.8 SHIPPED — export + per-household capacity, 2026-07-30
+>
+> **1164 server tests, 0 failures (18 new).** Web typecheck + build clean; both halves exercised in the running app against real data.
+>
+> **"Give me everything you hold about my family."** A backup already existed and is the wrong artifact for this: gzipped, shaped for tenant-db's importer, and containing the household's encrypted credentials because a restore needs them. Handing a family that file is technically true and practically useless — and shipping someone their own OAuth refresh tokens, even encrypted, is a liability nobody asked for. `GET /api/export` (Owner-only) returns readable JSON of everything the household owns, with the activity log included, credentials redacted, and a manifest naming what was left out and why. Built by exporting the whole tenant *and then redacting*, not by listing collections worth including — an include-list silently omits whatever gets added next year.
+>
+> **One household could exhaust everyone's capacity.** Rate limiting was per-IP (auth) and per-**actor** (assistant). Neither bounds a family: six members is six times the ceiling, and every one of those calls spends the same pooled AI capacity every other household is waiting on. A household bucket now sits alongside the per-actor one — deliberately generous, tunable via `HOMEOPS_HOUSEHOLD_RATE_LIMIT`, and its 429 says *household* so it isn't mistaken for a personal limit.
+>
+> **A dial that was enforced and could not be turned.** `aiDailyCallBudget` has been metered and enforced since C1.3 (`recordAiUsage` / `aiBudgetExhausted`) and **nothing anywhere ever wrote it** — a live, functional cap, permanently unset. Now settable, with today's count surfaced beside it, because a budget you can set but can't watch is half a control. Not PIN-gated: unlike the autonomy switches it cannot cause an action to leave the house, and gating it would teach people to type the PIN without reading.
+>
+> **Verified on the real dev household:** a 2.8 MB export of 36 collections and 4,107 audit lines, containing 42 real events — with the genuine OpenAI API key and every stored OAuth token redacted (field names kept, values gone), no vault ciphertext, and no PIN hash. The budget saved, displayed "0 used today of 150", and was returned to unmetered.
+>
+> **Not done:** no mobile surface for either control — web is the Owner-administration surface, and the export is a desktop-shaped action. Said plainly rather than left to be discovered.
 
 ---
 

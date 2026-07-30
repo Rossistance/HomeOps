@@ -374,6 +374,10 @@ export interface BackendSettings {
   autonomyDefaulted?: boolean;
   autonomySetByRole?: string | null;
   autonomySetAt?: string | null;
+  /** Daily AI call cap — metered and enforced server-side since C1.3, settable since 2.8.
+   *  null means unmetered, which is the default. `aiCallsToday` is the count it measures. */
+  aiDailyCallBudget?: number | null;
+  aiCallsToday?: number;
 }
 
 export interface AgentContext {
@@ -751,6 +755,26 @@ export const backend = {
   },
   async audit(limit = 50): Promise<AuditEvent[]> {
     try { return (await req<{ events: AuditEvent[] }>(`/audit?limit=${limit}`)).events ?? []; } catch { return []; }
+  },
+  /* Fetched rather than linked, so a failure is a message instead of a browser tab showing raw
+   * JSON or an error page. The blob is handed to a synthetic <a download> because that is the
+   * only way to name a file the browser will save. */
+  async exportHousehold(): Promise<{ ok: boolean; error?: string; message?: string }> {
+    try {
+      const res = await fetch("/api/export", { credentials: "same-origin" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        return { ok: false, error: body.error ?? `http_${res.status}`, message: body.message };
+      }
+      const blob = await res.blob();
+      const name = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? "familios-export.json";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      return { ok: true };
+    } catch { return { ok: false, error: "backend_unreachable" }; }
   },
   async getSettings(): Promise<BackendSettings> {
     try { return (await req<{ settings: BackendSettings }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
