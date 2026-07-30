@@ -192,6 +192,12 @@ function maybeSeedSandbox(s) {
  * starting today and is written explicitly at signup — but flipping the meaning of "unset"
  * would loosen approvals for every household already running, retroactively, without anyone
  * choosing it. A default may only apply to households that didn't have a behaviour yet. */
+/** Inbound-SMS replay guard (see the /api/webhooks/sms route). Lives in the _system tenant:
+ *  a text is deduplicated before we know whose it is, and a keyword now fans out across
+ *  households, so the record cannot belong to any single one. */
+const SMS_SEEN_FILE = "sms-inbound-seen.json";
+const SMS_SEEN_TTL_MS = 24 * 60 * 60 * 1000;
+
 const STANCES_LIST = ["Cautious", "Balanced", "Trusted"];
 const DEFAULT_STANCE_FOR_NEW_HOUSEHOLDS = "Balanced";
 const STANCE_OR_DEFAULT = (s) => STANCES_LIST.includes(String(s?.autonomy)) ? String(s.autonomy) : "Cautious";
@@ -835,7 +841,40 @@ const handleRequest = async (req, res) => {
       const from = String(params.From ?? "");
       const smsBody = String(params.Body ?? "").trim();
       if (!from || !smsBody) { audit({ type: "sms.inbound", ok: false, error: "empty" }, req); return xml(twiml(null)); }
+
+      /* IDEMPOTENCY, because Twilio retries.
+       *
+       * Twilio re-delivers a webhook it doesn't get a timely 200 from — and this handler runs
+       * the assistant, an LLM call, BEFORE it can answer. A slow model is therefore enough to
+       * produce a retry, and a retry ran the whole message again: a second conversation turn, a
+       * second plan, a second approval sitting in the family's queue for something they asked
+       * for once. Every mutating path in this product is idempotent except the one an external
+       * service is explicitly documented to repeat.
+       *
+       * Keyed on MessageSid, which is Twilio's own per-message id, and stored in the _system
+       * tenant because a text is deduplicated before we know whose it is — and because a
+       * keyword now fans out across households, so the record cannot live in any one of them.
+       * The cached reply is replayed verbatim: the retry exists because Twilio didn't hear the
+       * answer, so the answer is what it should get. */
+      const sid = String(params.MessageSid ?? params.SmsMessageSid ?? "").trim();
+      if (sid) {
+        const seen = sysDoc(SMS_SEEN_FILE, {});
+        const prior = seen[sid];
+        if (prior) {
+          audit({ type: "sms.inbound", ok: true, replayed: true, messageSid: sid }, req);
+          return xml(twiml(prior.replyText ?? null));
+        }
+      }
       const r = await handleInboundSms({ from, body: smsBody });
+      if (sid) {
+        // Prune on write: a busy deployment must not accumulate every message id forever, and
+        // a retry that arrives a day later is a different conversation, not a duplicate.
+        const seen = sysDoc(SMS_SEEN_FILE, {});
+        const cutoff = Date.now() - SMS_SEEN_TTL_MS;
+        for (const [k, v] of Object.entries(seen)) if (!v?.at || v.at < cutoff) delete seen[k];
+        seen[sid] = { at: Date.now(), replyText: r.replyText ?? null };
+        putSysDoc(SMS_SEEN_FILE, seen);
+      }
       if (r.unknownSender) {
         audit({ type: "sms.inbound", ok: false, error: "unknown_or_unverified_sender" }, req);
         return xml(twiml(null));
