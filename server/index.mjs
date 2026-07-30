@@ -186,6 +186,54 @@ function maybeSeedSandbox(s) {
  * Returns null when satisfied, or a ready-to-send refusal. A household with no PIN set
  * cannot be gated by one, so it falls back to role — refusing everyone until someone sets
  * a PIN would lock a family out of their own settings. */
+/* The three autonomy stances, and what an unset one means.
+ *
+ * ABSENT READS AS CAUTIOUS, not as the new default. Balanced is the right stance for a family
+ * starting today and is written explicitly at signup — but flipping the meaning of "unset"
+ * would loosen approvals for every household already running, retroactively, without anyone
+ * choosing it. A default may only apply to households that didn't have a behaviour yet. */
+const STANCES_LIST = ["Cautious", "Balanced", "Trusted"];
+const DEFAULT_STANCE_FOR_NEW_HOUSEHOLDS = "Balanced";
+const STANCE_OR_DEFAULT = (s) => STANCES_LIST.includes(String(s?.autonomy)) ? String(s.autonomy) : "Cautious";
+
+/* ONE projection for both the GET and the POST response.
+ *
+ * These were two hand-maintained copies of the same object literal, and they drifted the
+ * moment a field was added: the write returned a settings object with no `autonomy` in it, so
+ * a client that trusted the response — as clients should — rendered the OLD stance straight
+ * after successfully changing it. The value was saved and the screen said otherwise, which is
+ * this codebase's recurring defect in miniature. Now there is one shape and one place. */
+function settingsView(s, session) {
+  return {
+    externalActionsEnabled: s.externalActionsEnabled !== false,
+    ownerPinSet: !!s.ownerPinHash,
+    /* breakGlassActive — say out loud that a PIN set in the deployment's environment is ALSO
+     * being accepted right now. It's a single shared secret that opens every Owner and Adult
+     * Admin account in the resident household, and while it's set there is no way to tell from
+     * inside the app that your sign-in went through it. A household shouldn't have to take my
+     * word for who can get in. */
+    breakGlassActive: !!hasBootstrapPin() && session.householdId === CURRENT_TENANT,
+    /* Which places provider is actually answering. There was no way to tell from inside the
+     * app whether a Places key had taken — you set one, and found out later by noticing a
+     * restaurant had no rating. Here rather than on /api/health because an unauthenticated
+     * endpoint should not enumerate which third-party keys a deployment holds. */
+    placesProvider: placesProvider(),
+    aiActiveProvider: s.aiActiveProvider ?? null,
+    calendarAutoSync: s.calendarAutoSync === true,
+    autoApproveImprovements: s.autoApproveImprovements !== false,
+    autoApproveImprovementsDefaulted: typeof s.autoApproveImprovements !== "boolean",
+    timezone: s.timezone ?? null,
+    hideProfilesPreAuth: s.hideProfilesPreAuth === true,
+    /* The household's autonomy stance (policy.mjs rule 7). Absent reads as Cautious, and
+     * `autonomyDefaulted` says whether anyone has actually chosen — so the UI can invite a
+     * decision instead of showing a setting that looks deliberate and isn't. */
+    autonomy: STANCE_OR_DEFAULT(s),
+    autonomyDefaulted: !s.autonomySetAt,
+    autonomySetByRole: s.autonomySetByRole ?? null,
+    autonomySetAt: s.autonomySetAt ?? null,
+  };
+}
+
 async function requireHouseholdPin(session, pin) {
   const s = getSettings(session.householdId);
   if (!s.ownerPinHash) return null;                 // nothing to check against
@@ -1164,7 +1212,12 @@ const handleRequest = async (req, res) => {
       if (invite) consumeInvite(invite.token);
       await runWithTenant(householdId, () => {
         putMember({ actorId, displayName: ownerName, role, relationship, householdId });
-        if (!invite) setSettings({ householdName: String(body.householdName).trim().slice(0, 60), householdCreatedAt: Date.now() }, householdId);
+        /* A brand-new household gets the stance a family starting today should have: low-risk
+         * work just happens, anything that sends or spends still asks. Written HERE, at
+         * creation, rather than as the meaning of an unset field — that distinction is the
+         * whole point (see STANCE_OR_DEFAULT). No attribution is stamped: nobody chose this
+         * yet, so `autonomyDefaulted` stays true and onboarding can still ask. */
+        if (!invite) setSettings({ householdName: String(body.householdName).trim().slice(0, 60), householdCreatedAt: Date.now(), autonomy: DEFAULT_STANCE_FOR_NEW_HOUSEHOLDS }, householdId);
         // The deployment's AI keys, for this household, now — not at the next restart. A
         // family that signs up and finds the assistant unable to think has no reason to
         // come back, and "wait for a deploy" is not an onboarding step.
@@ -4680,18 +4733,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (path === "/api/settings" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const s = getSettings(g.session.householdId);
-      /* breakGlassActive — say out loud that a PIN set in the deployment's environment is
-       * ALSO being accepted right now. It's a single shared secret that opens every Owner
-       * and Adult Admin account in the resident household, and while it's set there is no
-       * way to tell from inside the app that your sign-in went through it. A household
-       * shouldn't have to take my word for who can get in. */
-      return json(res, 200, { settings: { externalActionsEnabled: s.externalActionsEnabled !== false, ownerPinSet: !!s.ownerPinHash, breakGlassActive: !!hasBootstrapPin() && g.session.householdId === CURRENT_TENANT,
-        /* Which places provider is actually answering. There was no way to tell from inside
-         * the app whether a Places key had taken — you set one, and then found out later by
-         * noticing that a restaurant had no rating. It's here rather than on /api/health
-         * because an unauthenticated endpoint should not enumerate which third-party keys a
-         * deployment holds. */
-        placesProvider: placesProvider(), aiActiveProvider: s.aiActiveProvider ?? null, calendarAutoSync: s.calendarAutoSync === true, autoApproveImprovements: s.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof s.autoApproveImprovements !== "boolean", timezone: s.timezone ?? null, hideProfilesPreAuth: s.hideProfilesPreAuth === true } }, req);
+      return json(res, 200, { settings: settingsView(s, g.session) }, req);
     }
     if (path === "/api/settings" && method === "POST") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -4702,9 +4744,27 @@ function mayWriteAgent(session, agent, nextVisibility) {
        * the risk overrides: a deliberate pause, proved by the PIN, at the moment of the act.
        * Setting the PIN itself is exempt — you can't be asked for what you're establishing. */
       const DANGEROUS = ["externalActionsEnabled", "calendarAutoSync", "autoApproveImprovements"];
-      if (DANGEROUS.some((k) => body[k] !== undefined && body[k] !== prev[k])) {
+      /* The autonomy preset joins them, but only on the way UP to Trusted — the tier that
+       * clears send/spend gates household-wide. Balanced can never reach a delivering
+       * capability (policy.mjs rule 7 is bounded by isHighStakes), and dropping back to
+       * Cautious is the careful direction, so neither is gated: a PIN prompt for becoming
+       * safer is how you teach someone to stop reading them. */
+      const raisingToTrusted = body.autonomy === "Trusted" && prev.autonomy !== "Trusted";
+      if (raisingToTrusted || DANGEROUS.some((k) => body[k] !== undefined && body[k] !== prev[k])) {
         const gated = await requireHouseholdPin(g.session, body.pin);
         if (gated) return json(res, 403, gated, req);
+      }
+      /* G4/G5, at household scale. Attribution is stamped from the SESSION and never accepted
+       * from the body — identical reasoning to agents.mjs sanitizeApprovalPolicy, because it is
+       * the identical claim: rule 7 honours Trusted only when autonomySetByRole names someone
+       * with the standing to have chosen it, so a request body must not be able to say so. */
+      if (body.autonomy !== undefined) {
+        if (!STANCES_LIST.includes(body.autonomy)) return json(res, 400, { error: "invalid_autonomy" }, req);
+        patch.autonomy = body.autonomy;
+        const mayTrust = ["Owner", "Adult Admin"].includes(String(g.session.role));
+        patch.autonomySetBy = g.session.actorId;
+        patch.autonomySetByRole = body.autonomy === "Trusted" && mayTrust ? g.session.role : null;
+        patch.autonomySetAt = new Date().toISOString();
       }
       if (typeof body.externalActionsEnabled === "boolean") patch.externalActionsEnabled = body.externalActionsEnabled;
       // Calendar auto-sync: Adult Admin opt-in that pre-authorizes Google Calendar
@@ -4737,7 +4797,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       }
       const next = setSettings(patch, g.session.householdId);
       audit({ type: "settings.update", ok: true, changed: Object.keys(patch), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
-      return json(res, 200, { settings: { externalActionsEnabled: next.externalActionsEnabled !== false, ownerPinSet: !!next.ownerPinHash, breakGlassActive: !!hasBootstrapPin() && g.session.householdId === CURRENT_TENANT, aiActiveProvider: next.aiActiveProvider ?? null, calendarAutoSync: next.calendarAutoSync === true, autoApproveImprovements: next.autoApproveImprovements !== false, autoApproveImprovementsDefaulted: typeof next.autoApproveImprovements !== "boolean", timezone: next.timezone ?? null, hideProfilesPreAuth: next.hideProfilesPreAuth === true } }, req);
+      return json(res, 200, { settings: settingsView(next, g.session) }, req);
     }
 
     /* ---- AI providers ---- */

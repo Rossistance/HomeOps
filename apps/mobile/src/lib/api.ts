@@ -326,7 +326,16 @@ export interface AppSettingsRec {
   placesProvider?: "google" | "nominatim";
   aiActiveProvider: string | null; calendarAutoSync: boolean;
   autoApproveImprovements: boolean;
+  /** The household's autonomy stance — one answer instead of a capability matrix. Enforced in
+   *  server/policy.mjs rule 7, which is the only place that decides what it means. */
+  autonomy?: Autonomy;
+  /** True until a person actually chooses, so the UI can invite a decision rather than present
+   *  an unanswered default as though someone had made it. */
+  autonomyDefaulted?: boolean;
+  autonomySetByRole?: string | null;
+  autonomySetAt?: string | null;
 }
+export type Autonomy = "Cautious" | "Balanced" | "Trusted";
 /** Result of POST /api/calendar/sync-all — one button syncs every subscription
  * and pulls Google-side edits in the same pass. */
 export interface SyncAllResult {
@@ -1190,9 +1199,13 @@ export const api = {
     const r = await req<{ settings: AppSettingsRec }>("/settings");
     return r.data?.settings ?? null;
   },
-  async updateSettings(patch: Partial<Pick<AppSettingsRec, "externalActionsEnabled" | "calendarAutoSync" | "autoApproveImprovements">> & { ownerPin?: string; pin?: string }): Promise<{ settings?: AppSettingsRec; error?: string; message?: string }> {
+  async updateSettings(patch: Partial<Pick<AppSettingsRec, "externalActionsEnabled" | "calendarAutoSync" | "autoApproveImprovements" | "autonomy">> & { ownerPin?: string; pin?: string }): Promise<{ settings?: AppSettingsRec; error?: string; message?: string }> {
     const r = await req<{ settings?: AppSettingsRec; error?: string; message?: string }>("/settings", { method: "POST", body: JSON.stringify(patch) });
-    if (r.status === 403) return { error: "insufficient_role" };
+    // A 403 here is THREE different things — you're not allowed, you need the PIN, or the PIN
+    // was wrong — and this collapsed all of them into "insufficient_role". Two of the three are
+    // questions the person can answer, so flattening them makes a fixable refusal look like a
+    // permanent one. The server's own error code travels; only a bodyless 403 falls back.
+    if (r.status === 403) return r.data?.error ? r.data : { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
 };

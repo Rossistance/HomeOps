@@ -3,11 +3,11 @@
 // everything shown is exactly what the server enforces.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { TextInput, View } from "react-native";
-import { api, type AppSettingsRec, type EventRec, type FileRec, type Meal, type MemberRec, type TaskRec } from "@/lib/api";
+import { api, type AppSettingsRec, type Autonomy, type EventRec, type FileRec, type Meal, type MemberRec, type TaskRec } from "@/lib/api";
 import { fade, memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic, type HearthColors } from "@/theme";
-import { Badge, Button, Card, EmptyState, ErrorState, HScreen, Notice, Rise, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
+import { Badge, Button, Card, EmptyState, ErrorState, HScreen, Notice, PinPrompt, PressableCard, Rise, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
 
 function roleTone(c: HearthColors, role: string): { fg: string; bg: string } {
   switch (role) {
@@ -23,6 +23,106 @@ const spaceLabel = (id: string) => {
   const raw = id.replace(/^sp-/, "").replace(/[-_]/g, " ");
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 };
+
+/* THE ONE QUESTION.
+ *
+ * Every other autonomy control is per-helper or per-tool, and both are advanced. A family that
+ * just wants the thing to work had two options: answer an approval for every reminder, or go
+ * learn a capability matrix on the web app. So they got the nagging — which was never a
+ * decision anyone made, just the absence of one. This is the decision, on the surface the
+ * family actually uses.
+ *
+ * It writes ONE value. The stances are enforced in server/policy.mjs rule 7 and nowhere else —
+ * no bulk-writing of per-helper flags, which would fight with settings someone made
+ * deliberately and rewrite records every time the preset changed. */
+const STANCES: { key: Autonomy; title: string; blurb: string; note: string; icon: string }[] = [
+  { key: "Cautious", icon: "checkmark.shield.fill", title: "Cautious", blurb: "Ask me about everything that isn't just reading.", note: "The most approvals. Good for a while, if you want to watch each step." },
+  { key: "Balanced", icon: "scalemass.fill", title: "Balanced", blurb: "Handle everyday things here at home; ask before anything goes out.", note: "Tasks, notes, lists and calendar entries just happen. Email, texts, purchases and anything reaching another service still ask." },
+  { key: "Trusted", icon: "bolt.fill", title: "Trusted", blurb: "Also send and spend without asking me first.", note: "Needs your household PIN. The pause switch still stops everything, and any step marked “always ask” still waits." },
+];
+
+function AutonomyPicker({ settings, colors, onSaved }: { settings: AppSettingsRec; colors: HearthColors; onSaved: (s: AppSettingsRec) => void }) {
+  const { spacing } = useTheme();
+  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<Autonomy | null>(null);
+  const [pinErr, setPinErr] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  const current: Autonomy = settings.autonomy ?? "Cautious";
+  const unanswered = settings.autonomyDefaulted !== false;
+
+  const apply = async (stance: Autonomy, pin?: string) => {
+    setBusy(true);
+    const r = await api.updateSettings({ autonomy: stance, ...(pin ? { pin } : {}) });
+    setBusy(false);
+    if (!r.settings) {
+      // pin_required and pin_incorrect are QUESTIONS, not failures — ask, don't report.
+      if (r.error === "pin_required" || r.error === "pin_incorrect") {
+        setPending(stance);
+        setPinErr(r.error === "pin_incorrect" ? (r.message ?? "That PIN didn't match. Nothing was changed.") : null);
+        return;
+      }
+      setNote(r.message ?? (r.error === "insufficient_role" ? "Only an Owner or Adult Admin can change this." : "Couldn't change that."));
+      return;
+    }
+    tapHaptic("success");
+    setPending(null); setPinErr(null); setNote(null);
+    onSaved(r.settings);
+  };
+
+  return (
+    <>
+      <SectionHeader title="How much should FamiliOS do on its own?" />
+      <Card style={{ gap: spacing.sm }}>
+        <T kind="sub">One answer for the whole family. You can still change it for any single helper or tool — those choices win over this one.</T>
+        {unanswered && <Notice ok={false} tone={{ fg: colors.amber, bg: colors.amberBg }} text="Nobody has answered this yet, so FamiliOS is asking about everything. Balanced is what most families want." />}
+        {STANCES.map((s) => {
+          const on = current === s.key;
+          return (
+            <PressableCard
+              key={s.key}
+              disabled={busy}
+              onPress={() => { tapHaptic(); void apply(s.key); }}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: on, disabled: busy }}
+              accessibilityLabel={`${s.title}. ${s.blurb}`}
+              style={{
+                borderColor: on ? colors.sage : colors.border,
+                backgroundColor: on ? colors.sageBg : colors.surfaceSunken,
+              }}
+            >
+              <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                <Sym name={s.icon} size={16} color={on ? colors.sage : colors.textFaint} />
+                <View style={{ flex: 1, gap: 2 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                    <T kind="rowTitle">{s.title}</T>
+                    {on && <Badge label="current" fg={colors.sage} bg={colors.sageBg} />}
+                  </View>
+                  <T kind="sub">{s.blurb}</T>
+                  <T kind="caption" color={colors.textFaint}>{s.note}</T>
+                </View>
+              </View>
+            </PressableCard>
+          );
+        })}
+        {current === "Trusted" && settings.autonomySetByRole ? (
+          <T kind="caption" color={colors.textFaint}>Allowed by an {settings.autonomySetByRole}.</T>
+        ) : null}
+        {note ? <Notice ok={false} text={note} /> : null}
+      </Card>
+
+      <PinPrompt
+        visible={!!pending}
+        title="Confirm with your household PIN"
+        warning="You're allowing your family's helpers to send messages and spend money without asking first. The pause switch still stops everything, and any step you've marked “always ask” still waits. You can come back to Balanced at any time without the PIN."
+        busy={busy}
+        error={pinErr}
+        onCancel={() => { setPending(null); setPinErr(null); }}
+        onConfirm={(pin) => void apply(pending!, pin)}
+      />
+    </>
+  );
+}
 
 type SpaceItem = { kind: "event" | "task" | "meal" | "file"; title: string };
 
@@ -110,6 +210,15 @@ export default function HouseholdScreen() {
 
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
+      {/* The household's stance, first — it's the one autonomy question most families will
+          ever answer, and every other control in the product is per-helper or per-tool. */}
+      {isAdmin && settings && (
+        <AutonomyPicker
+          settings={settings}
+          colors={colors}
+          onSaved={(s) => setSettings(s)}
+        />
+      )}
       <SectionHeader title="Members" />
       {members.length === 0 ? (
         <ErrorState message="Can't load the roster — is the backend reachable?" onRetry={() => void load()} />

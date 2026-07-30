@@ -52,9 +52,17 @@ spawnWeb();
 let browserRt = null;
 const rtDir = join(root, "server", "browser-runtime");
 if (fs.existsSync(join(rtDir, "node_modules", "playwright"))) {
+  /* Pin the runtime's port for the same reason the backend's is pinned above — and it bit
+   * harder here. index.mjs reads `BROWSER_RUNTIME_PORT || PORT || 9223`, and this spawn passed
+   * the whole environment through, so any PORT meant for the WEB server was inherited by the
+   * runtime. Launch it under PORT=5173 and the runtime and Vite race for that port: whichever
+   * binds first wins, and when the runtime won, http://localhost:5173 served its JSON health
+   * body instead of the app. Same symptom either way — "the app didn't load" — with a
+   * different cause each run, which is the worst kind of dev bug to chase. */
+  const rtPort = process.env.BROWSER_RUNTIME_PORT || "9223";
   browserRt = spawn(process.execPath, [join(rtDir, "index.mjs")], {
     cwd: rtDir, stdio: "inherit",
-    env: { ...process.env, ...(extraCa ? { NODE_EXTRA_CA_CERTS: extraCa } : {}) },
+    env: { ...process.env, PORT: rtPort, BROWSER_RUNTIME_PORT: rtPort, ...(extraCa ? { NODE_EXTRA_CA_CERTS: extraCa } : {}) },
   });
   browserRt.on("exit", (code) => console.log(`[browser-runtime] exited with ${code}`));
 }

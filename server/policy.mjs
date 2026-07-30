@@ -174,7 +174,66 @@ export function resolveEffectivePolicy({ cap, agent = null, settings = {}, overr
       `${cap.name ?? cap.id} sends or spends, so running unattended doesn't cover it — an Owner has to allow that separately.`);
   }
 
-  // 7-8. Nothing overrode the capability's own default.
+  /* 7. THE HOUSEHOLD'S STANCE — the autonomy preset.
+   *
+   * Everything above is per-helper or per-tool: real controls, and both of them advanced. A
+   * family that just wants the thing to work has to either answer an approval for every
+   * summary and reminder, or go learn a capability matrix. That gap is why this product feels
+   * like it nags next to "just text your assistant" — the nagging isn't a policy decision
+   * anyone made, it's the absence of one.
+   *
+   *   Cautious  — no blanket relaxation. Exactly the behaviour of a household that has
+   *               configured nothing, which is why it is what an ABSENT setting means: turning
+   *               this on for existing families by default would quietly loosen approvals they
+   *               never agreed to loosen.
+   *   Balanced  — low-risk steps stop asking. Bounded by isHighStakes, the same bound rule 6
+   *               holds autoAllow to, so it can never reach send, spend, pay, download or
+   *               anything external no matter what a family picks. That bound is what makes it
+   *               safe to offer without a PIN.
+   *   Trusted   — sends and spends stop asking too. Same authority requirement as rule 6b's
+   *               high tier: honoured only when a real Owner/Adult Admin chose it, recorded in
+   *               autonomySetByRole, and the settings route asks for the household PIN.
+   *
+   * Deliberately the WEAKEST relaxation, below every per-helper and per-tool rule. A preset is
+   * a default stance, not a ceiling: if someone deliberately turned one helper loose with the
+   * PIN, that decision is more specific and better attributed than a household-wide default
+   * and has to win — otherwise the per-helper control becomes decorative, which is the exact
+   * defect this whole work package exists to remove. The hard ceiling is rule 1, the kill
+   * switch, and rule 4 ("always ask me for this one") still fences off individual steps. */
+  const stance = String(settings?.autonomy ?? "Cautious");
+  if (base.baseRequiresApproval && (stance === "Balanced" || stance === "Trusted")) {
+    /* The bound is reachesOutside, NOT isHighStakes.
+     *
+     * isHighStakes is the AGENT-level bound and says so — it sweeps in every Write action,
+     * including purely local ones, because an agent must not be able to grant itself writes by
+     * listing its own capability. Reused here it would mean Balanced could not clear
+     * homeops.create_task, create_list_item, write_memory or create_event_draft: precisely the
+     * "just do it" work the preset exists to stop interrupting. A family would turn it on and
+     * still be asked about adding a task to their own list.
+     *
+     * reachesOutside is the household-level line — the same one the kill switch draws, written
+     * for exactly this reason: a local write does not leave the house. Anything that does, plus
+     * anything explicitly classed High (including by this household's own re-classing), stays
+     * on the Trusted side of the fence. */
+    const beyondBalanced = reachesOutside(effectiveCap) || String(base.risk).toLowerCase() === "high";
+    if (!beyondBalanced) {
+      return decide(ALLOWED, "household.autonomy_low_risk",
+        `Your family set FamiliOS to handle low-risk steps like this one without asking.`);
+    }
+    if (stance === "Trusted") {
+      const by = String(settings?.autonomySetByRole ?? "");
+      if (["Owner", "Adult Admin"].includes(by)) {
+        return decide(ALLOWED, "household.autonomy_trusted",
+          `An ${by} set your family's helpers to send and spend without asking first.`);
+      }
+      // Same shape as rule 6b's refusal: the tier is reported as refused rather than silently
+      // downgraded, so a screen can say why the switch didn't do what the label promised.
+      return decide(NEEDS_APPROVAL, "household.autonomy_trusted_unauthorized",
+        `${cap?.name ?? cap?.id ?? "This step"} sends or spends, and an Owner has to be the one to allow that.`);
+    }
+  }
+
+  // 8. Nothing overrode the capability's own default.
   if (base.baseRequiresApproval) {
     return decide(NEEDS_APPROVAL, "capability.requires_approval", `${cap?.name ?? cap?.id ?? "This step"} needs your approval by default.`);
   }

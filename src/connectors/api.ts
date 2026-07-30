@@ -355,6 +355,27 @@ export interface EffectivePolicy {
   canAutoAllow?: boolean;
 }
 
+/** The household's autonomy stance — one question instead of a capability matrix.
+ *  Enforced in server/policy.mjs rule 7, which is the only place that decides what it means. */
+export type Autonomy = "Cautious" | "Balanced" | "Trusted";
+
+export interface BackendSettings {
+  externalActionsEnabled: boolean;
+  ownerPinSet?: boolean;
+  aiActiveProvider?: string | null;
+  calendarAutoSync?: boolean;
+  autoApproveImprovements?: boolean;
+  autoApproveImprovementsDefaulted?: boolean;
+  timezone?: string | null;
+  hideProfilesPreAuth?: boolean;
+  autonomy?: Autonomy;
+  /** True until a person actually chooses — so the UI can invite a decision rather than
+   *  present an unanswered default as though someone had made it. */
+  autonomyDefaulted?: boolean;
+  autonomySetByRole?: string | null;
+  autonomySetAt?: string | null;
+}
+
 export interface AgentContext {
   agentId: string;
   openAllowList: boolean;
@@ -731,8 +752,19 @@ export const backend = {
   async audit(limit = 50): Promise<AuditEvent[]> {
     try { return (await req<{ events: AuditEvent[] }>(`/audit?limit=${limit}`)).events ?? []; } catch { return []; }
   },
-  async getSettings(): Promise<{ externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; autoApproveImprovementsDefaulted?: boolean; timezone?: string | null; hideProfilesPreAuth?: boolean }> {
-    try { return (await req<{ settings: { externalActionsEnabled: boolean; ownerPinSet?: boolean; aiActiveProvider?: string | null; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; autoApproveImprovementsDefaulted?: boolean; timezone?: string | null; hideProfilesPreAuth?: boolean } }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
+  async getSettings(): Promise<BackendSettings> {
+    try { return (await req<{ settings: BackendSettings }>("/settings")).settings; } catch { return { externalActionsEnabled: true }; }
+  },
+  /* The autonomy stance gets its own writer because it is the one settings change that can be
+   * REFUSED for a reason the person can fix. setSettings swallows everything into a default
+   * object, so a `pin_required` on the way up to Trusted would have surfaced as a silent
+   * no-op — the same shape of failure as the risk-override card that couldn't save. */
+  async setAutonomy(autonomy: Autonomy, pin?: string): Promise<{ ok: boolean; settings?: BackendSettings; error?: string; message?: string }> {
+    try {
+      const r = await req<{ settings?: BackendSettings; error?: string; message?: string }>("/settings", { method: "POST", body: JSON.stringify({ autonomy, ...(pin ? { pin } : {}) }), mutation: true });
+      if (r.settings) return { ok: true, settings: r.settings };
+      return { ok: false, error: r.error ?? "unknown", message: r.message };
+    } catch { return { ok: false, error: "backend_unreachable" }; }
   },
   async setSettings(patch: Record<string, unknown>): Promise<{ externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; autoApproveImprovementsDefaulted?: boolean; timezone?: string | null; hideProfilesPreAuth?: boolean }> {
     try { return (await req<{ settings: { externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; autoApproveImprovementsDefaulted?: boolean; timezone?: string | null; hideProfilesPreAuth?: boolean } }>("/settings", { method: "POST", body: JSON.stringify(patch), mutation: true })).settings; } catch { return { externalActionsEnabled: true }; }

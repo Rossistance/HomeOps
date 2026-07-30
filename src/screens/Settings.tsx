@@ -5,7 +5,7 @@ import { exportBackup, importBackup } from "@/storage/backup";
 import { PageHeader, Card, SectionTitle, Button, Toggle, Select, Badge, Modal, HealthDot, Field, TextInput, Avatar } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { AIProvidersPanel } from "@/screens/AIProviders";
-import { backend, type CatalogTool, type RiskOverride } from "@/connectors/api";
+import { backend, type CatalogTool, type RiskOverride, type Autonomy, type BackendSettings } from "@/connectors/api";
 import { useCalmMode, useAdvancedMode, useUnifiedNav } from "@/lib/prefs";
 
 export function Settings() {
@@ -205,6 +205,10 @@ export function Settings() {
           </Row>
         </Card>
 
+        {/* The household's stance — above the per-tool matrix, because it's the question a
+            family should meet first and the only one most will ever answer. */}
+        <AutonomyCard />
+
         {/* Risk & approvals (item 9) */}
         <RiskOverridesCard />
 
@@ -260,6 +264,106 @@ function Row({ label, desc, children }: { label: string; desc?: string; children
  * resolveTool applies them); this card only edits the household's override records.
  * The whole Settings screen is already Adult Admin-gated. */
 const RISK_CLASSES = ["Low", "Medium", "High", "Sensitive"];
+/* THE ONE QUESTION.
+ *
+ * Every other autonomy control in this product is per-helper or per-tool, and both are
+ * advanced. A family that just wants it to work had two options: answer an approval for every
+ * summary and reminder, or go learn a capability matrix. So they got the nagging — which was
+ * never a decision anyone made, just the absence of one.
+ *
+ * The stances are enforced in server/policy.mjs rule 7 and nowhere else. This card does not
+ * bulk-write per-helper flags: doing that would fight with settings a family had deliberately
+ * made, and a preset would silently rewrite records every time it changed. It sets one value. */
+const STANCES: { key: Autonomy; title: string; blurb: string; note: string; icon: string }[] = [
+  { key: "Cautious", icon: "ShieldCheck", title: "Cautious", blurb: "Ask me about everything that isn't just reading.", note: "Most approvals. Choose this if you want to see each step for a while." },
+  { key: "Balanced", icon: "Scale", title: "Balanced", blurb: "Handle everyday things here at home; ask before anything goes out.", note: "Adding tasks, drafting notes, updating lists and calendars just happen. Email, texts, purchases and anything reaching another service still ask." },
+  { key: "Trusted", icon: "Zap", title: "Trusted", blurb: "Also send and spend without asking me first.", note: "Needs your household PIN. The pause switch still stops everything, and any step you mark “always ask” still waits." },
+];
+
+function AutonomyCard() {
+  const toast = useStore((s) => s.toast);
+  const [settings, setSettings] = useState<BackendSettings | null>(null);
+  const [pendingStance, setPendingStance] = useState<Autonomy | null>(null);
+  const [pin, setPin] = useState("");
+  const [pinErr, setPinErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => setSettings(await backend.getSettings());
+  useEffect(() => { void load(); }, []);
+
+  const current: Autonomy = settings?.autonomy ?? "Cautious";
+  const unanswered = settings?.autonomyDefaulted !== false;
+
+  const apply = async (stance: Autonomy, withPin?: string) => {
+    setBusy(true);
+    const r = await backend.setAutonomy(stance, withPin);
+    setBusy(false);
+    if (!r.ok) {
+      if (r.error === "pin_required" || r.error === "pin_incorrect") {
+        setPendingStance(stance);
+        setPinErr(r.error === "pin_incorrect" ? (r.message ?? "That PIN didn't match. Nothing was changed.") : null);
+        return;
+      }
+      toast({ kind: "error", title: "Couldn't change this", message: r.message ?? r.error });
+      return;
+    }
+    setPendingStance(null); setPin(""); setPinErr(null);
+    setSettings(r.settings ?? null);
+    toast({ kind: "success", title: `Set to ${stance}`, message: STANCES.find((s) => s.key === stance)?.blurb ?? "" });
+  };
+
+  return (
+    <Card className="card-pad">
+      <SectionTitle icon="SlidersHorizontal">How much should FamiliOS do on its own?</SectionTitle>
+      <p className="text-sm text-ink-500">
+        One answer for the whole household. You can still override it for any single helper or tool — those choices win over this one.
+      </p>
+      {unanswered && <p className="mt-2 rounded-xl bg-amber-500/10 px-3 py-2 text-sm text-ink-700">Nobody has answered this yet, so FamiliOS is asking you about everything. Picking <strong>Balanced</strong> is what most families want.</p>}
+      <div className="mt-3 space-y-2">
+        {STANCES.map((s) => {
+          const on = current === s.key;
+          return (
+            <button key={s.key} disabled={busy} onClick={() => apply(s.key)}
+              aria-pressed={on}
+              className={`flex w-full items-start gap-3 rounded-2xl border p-3 text-left transition-colors ${on ? "border-sage-500 bg-sage-500/[0.08]" : "border-ink-900/[0.06] bg-surface-rim hover:bg-ink-900/[0.03]"}`}>
+              <Icon name={s.icon} size={16} className={`mt-0.5 shrink-0 ${on ? "text-sage-600" : "text-ink-400"}`} />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2 text-sm font-semibold text-ink-800">{s.title}{on && <Badge color="sage">current</Badge>}</span>
+                <span className="mt-0.5 block text-sm text-ink-600">{s.blurb}</span>
+                <span className="mt-0.5 block text-xs text-ink-400">{s.note}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {current === "Trusted" && settings?.autonomySetByRole && (
+        <p className="mt-2 text-xs text-ink-400">Allowed by an {settings.autonomySetByRole}{settings.autonomySetAt ? ` on ${new Date(settings.autonomySetAt).toLocaleDateString()}` : ""}.</p>
+      )}
+
+      <Modal
+        open={!!pendingStance}
+        onClose={() => { setPendingStance(null); setPin(""); setPinErr(null); }}
+        title="Confirm with your household PIN"
+        icon="Zap"
+        size="sm"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => { setPendingStance(null); setPin(""); setPinErr(null); }}>Cancel</Button>
+            <Button variant="primary" disabled={!pin || busy} onClick={() => apply(pendingStance!, pin)}>{busy ? "Saving…" : "Allow this"}</Button>
+          </>
+        }
+      >
+        <p className="text-sm text-ink-600">You&apos;re allowing your family&apos;s helpers to <strong>send messages and spend money without asking first</strong>.</p>
+        <p className="mt-1.5 text-sm text-ink-500">The pause switch still stops everything, and any step you&apos;ve marked &ldquo;always ask&rdquo; still waits for you. You can come back to Balanced at any time without the PIN.</p>
+        <form className="mt-3" onSubmit={(e) => { e.preventDefault(); void apply(pendingStance!, pin); }}>
+          <TextInput type="password" value={pin} autoFocus placeholder="Household PIN" aria-label="Household PIN" onChange={(e) => { setPin(e.target.value); setPinErr(null); }} />
+        </form>
+        {pinErr && <p className="mt-2 text-sm text-coral-600">{pinErr}</p>}
+      </Modal>
+    </Card>
+  );
+}
+
 function RiskOverridesCard() {
   const toast = useStore((s) => s.toast);
   const [catalog, setCatalog] = useState<CatalogTool[]>([]);
