@@ -87,6 +87,24 @@
 
 ---
 
+> ## ✅ SEVERITY 2 MULTI-TENANCY SHIPPED — `eb88b6b`, `d5b9151`, `2221d72`, `f0b1c4d`, 2026-07-30
+>
+> **1118 server tests, 0 failures (30 new).** Four bugs with one shape: work that ran correctly for the resident household and silently not at all for anyone who signed up. None of them errored, none logged, and each looked right at the call site.
+>
+> | # | Was | Now |
+> |---|---|---|
+> | 2.5 | `forEachTenant(() => sweepAccountHealth({ householdId: CURRENT_TENANT }))` — the loop visited every household and swept the same one N times, so for every signed-up family an account's status went on describing the last thing that touched it. That is the `needs_reconnect` that outlives its cause, i.e. the exact bug this sweep exists to prevent. | Takes the household the loop hands it. |
+> | 2.6 | `runJob` read `CURRENT_TENANT` for its kill-switch check *and* its tool call, and the scheduler ran it once per interval with no tenant. `rss-poll`, `weather-morning` and every downstream `connector_event` fired only for the resident household. Worse: **"Run now" consulted somebody else's kill switch** — a family could hit the master stop, watch it turn off, and have jobs keep running outward. | Per-tenant via `forEachTenant`; the route passes the pressing session's household. Verified against the old constant: the job sailed past a switch that was off. |
+> | 2.4a | Inbound SMS resolved **every** text against the resident household, so a signed-up family's member got silence and their STOP was recorded against a household they aren't in. | Resolved by **sender**, not by `To` (one Twilio number serves every household). Keywords fan out to every household that knows the number — someone texting STOP isn't asking to be left alone by *one* of the two families that have it. A conversation from a number in two households is **not guessed at**: guessing means answering with another family's calendar. |
+> | 2.4b | No `MessageSid` idempotency. Twilio retries anything it doesn't get a timely 200 from, and this handler runs an LLM before it can answer — so a slow model was enough to replay the whole message. Measured: a retry took the conversation from 2 turns to 4, i.e. a second plan and a second approval for something asked once. | Deduped on `MessageSid` in the `_system` tenant, cached reply replayed verbatim, pruned at 24h. Not a gate: no sid still means service, a different sid is still a new message, unknown senders still get silence. |
+> | 2.4c | The webhook receiver had the same resident-only resolution: a trigger registered by any other family was invisible, its signing secret never found, and in production the delivery was rejected `signing_secret_required` for want of a secret that existed one household over. The only evidence was a 401 in somebody else's system. | A trigger id is unique deployment-wide, so it identifies its household on its own — there was no ambiguity, just a lookup nobody was doing. |
+>
+> **Deliberately unchanged:** the shared connector endpoint `/api/webhooks/webhook` keeps its resident behaviour. connectors.mjs publishes it as a fixed path with no household in the URL, so there is nothing to route on; giving it a tenant would mean inventing one. Non-resident households reach the feature through a webhook **trigger**, which carries its own URL and secret.
+>
+> **Still open in Severity 2:** 2.3 billing client (blocked — no Apple bank account yet), 2.7 shared vault key / memory `"default"` bucket, 2.8 per-household export + rate limits, 2.9 Sign in with Apple.
+
+---
+
 ## SEVERITY 1 — Fix before any stranger has an account
 
 ### 1.1 Cross-tenant backup exposure *(the most serious finding here)*

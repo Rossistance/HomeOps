@@ -192,6 +192,21 @@ function maybeSeedSandbox(s) {
  * starting today and is written explicitly at signup — but flipping the meaning of "unset"
  * would loosen approvals for every household already running, retroactively, without anyone
  * choosing it. A default may only apply to households that didn't have a behaviour yet. */
+/** Which household registered this webhook trigger id, if any?
+ *
+ * A trigger id is `trg_` + 20 hex, unique across the deployment, so — unlike an inbound text —
+ * it identifies its household on its own. There is no ambiguity to resolve here, just a lookup
+ * nobody was doing. Returns null for anything that isn't a registered trigger, which is how the
+ * shared `/api/webhooks/webhook` connector path keeps its existing resident behaviour.
+ *
+ * One doc read per household per delivery; the search stops at the first hit. */
+async function householdForTriggerId(id) {
+  if (!/^trg_[a-f0-9]+$/i.test(String(id))) return null;   // cheap reject: not a trigger id shape
+  let found = null;
+  await forEachTenant((t) => { if (!found && getTrigger(id)) found = t; });
+  return found;
+}
+
 /** Inbound-SMS replay guard (see the /api/webhooks/sms route). Lives in the _system tenant:
  *  a text is deduplicated before we know whose it is, and a keyword now fans out across
  *  households, so the record cannot belong to any single one. */
@@ -916,11 +931,35 @@ const handleRequest = async (req, res) => {
       return json(res, 200, { ok: true, applied: applied?.tier ?? "no_change" }, req);
     }
 
-    /* ---- Webhook receiver (external inbound; signature-gated, not session) ---- */
+    /* ---- Webhook receiver (external inbound; signature-gated, not session) ----
+     *
+     * WHOSE WEBHOOK IS THIS? Every store call below — getTrigger, getTriggerSecret, getSecret,
+     * addWebhookEvent, seenWebhookNonce, audit, fireWebhookTrigger — follows the ambient tenant
+     * context, and an inbound webhook has none. So all of them read the RESIDENT household: a
+     * trigger registered by any signed-up family was invisible here, its signing secret was
+     * never found, and in production the delivery was rejected with `signing_secret_required`
+     * for want of a secret that existed the whole time, one household over. The family's own
+     * webhook trigger simply never fired, and the only evidence was a 401 at the far end.
+     *
+     * A trigger id (`trg_` + 20 hex) is unique across the deployment, so unlike an inbound text
+     * it identifies its household on its own — no ambiguity to resolve, just a lookup nobody
+     * was doing. One doc read per household per delivery, which is the right trade at this
+     * scale and the reason the search stops at the first hit.
+     *
+     * The generic connector endpoint is a different matter and is deliberately left alone:
+     * connectors.mjs publishes it as the fixed path `/api/webhooks/webhook`, with no household
+     * anywhere in the URL, so there is nothing to route on. Non-resident households reach this
+     * feature through a webhook TRIGGER, which has its own per-trigger URL and secret. Giving
+     * the shared connector path a tenant would mean inventing one. */
     const whMatch = path.match(/^\/api\/webhooks\/([^/]+)$/);
     if (whMatch && method === "POST") {
       const id = whMatch[1];
       const raw = await readRaw(req);
+      const owner = await householdForTriggerId(id);
+      // Everything below reads and writes through the ambient tenant. Enter the owning
+      // household's context once, here, rather than threading an id through six call sites —
+      // several of which (seenWebhookNonce, addWebhookEvent, audit) take no household at all.
+      return await runWithTenant(owner ?? CURRENT_TENANT, async () => {
       let payload;
       try { payload = raw ? JSON.parse(raw) : {}; } catch { audit({ type: "webhook.received", connectorId: id, ok: false, error: "malformed_json" }, req); return json(res, 400, { ok: false, error: "malformed_json" }, req); }
       // A webhook TRIGGER (Slice 6) registered at this id uses its own signing secret;
@@ -954,6 +993,7 @@ const handleRequest = async (req, res) => {
         firedRunId = fired?.runId ?? null;
       }
       return json(res, 200, { ok: true, event: evt, verified, runId: firedRunId }, req);
+      });
     }
 
     /* ---- Session (login / current / logout) ---- */
