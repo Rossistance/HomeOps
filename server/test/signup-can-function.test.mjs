@@ -172,6 +172,28 @@ test("the verification link is a GET that renders a page, and a bad token says s
 
 /* ---- guard against the Week 1 work regressing while Week 2 lands ---- */
 
+/* ---- a new household is not an empty one ---- */
+
+test("a fresh household inherits the deployment's built-in skills", async () => {
+  // seedDefaults() only seeds the household it runs in, and it runs at boot with no tenant
+  // context — so every signed-up family had ZERO skills and the pre-built use cases the
+  // agent templates reference simply did not exist for them.
+  const r = await fresh.req("/api/skills");
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const skills = r.data.skills ?? [];
+  assert.ok(skills.length > 0, "the built-in catalogue is present for a brand-new household");
+  assert.ok(skills.every((s) => s.householdId === fresh.householdId),
+    "and every copy is stamped with THIS household, not the template's");
+});
+
+test("NEGATIVE: only system skills are copied — a family's own work never travels", async () => {
+  // The template is the resident household, so the filter matters: a household's authored
+  // skills must never be copied into a stranger's database.
+  const r = await fresh.req("/api/skills");
+  assert.ok((r.data.skills ?? []).every((s) => s.system === true),
+    "nothing but system skills crossed the tenant boundary");
+});
+
 test("Week 1 invariants still hold: keywords classify, backups are scoped", async () => {
   assert.equal(classifySmsKeyword("STOP"), "opt_out");
   assert.equal(classifySmsKeyword("help me plan dinner"), null);

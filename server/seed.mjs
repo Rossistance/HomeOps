@@ -3,7 +3,7 @@
 // to select and execute out of the box. The seeded skill uses only internal
 // functions (+ a gated sign-off step), so it runs end-to-end with no external
 // account — demonstrating the full approval→resume→execute→audit→memory loop.
-import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction, listMembers, putMember, listPlaybooks, putPlaybook, listContactMethods, putContactMethod, getSettings, setSettings, currentTenant } from "./store.mjs";
+import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction, listMembers, putMember, listPlaybooks, putPlaybook, listContactMethods, putContactMethod, getSettings, setSettings, currentTenant, runWithTenant, CURRENT_TENANT } from "./store.mjs";
 
 /** The household these seed records belong to — the one whose database they are being
  *  written INTO, which is what `currentTenant()` resolves to for every put* call below.
@@ -16,6 +16,43 @@ import { listAgents, putAgent, listSkills, putSkill, listFunctions, putFunction,
  *  treat as everyone's. Stamping what we're actually writing to removes the trap without
  *  changing today's behaviour. */
 const SEED_TENANT = () => currentTenant();
+
+/**
+ * Give a NEW household the deployment's built-in skills.
+ *
+ * seedDefaults() only ever seeds the household it runs in, and it runs once at boot with no
+ * tenant context — so every family that signed up got zero skills. Not fatal (the assistant
+ * plans from the live tool catalog, and the default agent self-heals in orchestrator.mjs),
+ * but the pre-built use cases — meal planning with sign-off, the morning status text, the
+ * recipe extractor — simply did not exist for anyone but the resident family. A paid product
+ * whose advertised recipes are missing on day one is a worse first run than an empty one,
+ * because the templates reference them.
+ *
+ * The resident household is the TEMPLATE rather than re-running the 150 lines of inline
+ * definitions in a second code path: one source of truth, and a new household provably gets
+ * what this deployment actually ships rather than what a parallel copy of the list says it
+ * ships. Restricted to `system: true` records so a family's own authored skills are never
+ * copied into a stranger's database, and idempotent by id so it is safe on every signup.
+ *
+ * Trade-off, stated: if the resident household's system skills are edited, new households
+ * inherit the edit. That is the intended behaviour for a self-hosted deployment tuning its
+ * own catalogue, and the alternative (a second hard-coded list) drifts silently instead.
+ */
+export function ensureSystemSkills(householdId) {
+  if (!householdId || householdId === CURRENT_TENANT) return [];
+  const template = runWithTenant(CURRENT_TENANT, () => listSkills((s) => s.system === true && String(s.id ?? "").startsWith("skl_")));
+  if (!Array.isArray(template) || template.length === 0) return [];
+  return runWithTenant(householdId, () => {
+    const have = new Set(listSkills().map((s) => s.id));
+    const added = [];
+    for (const s of template) {
+      if (have.has(s.id)) continue;
+      putSkill({ ...s, householdId, createdAt: Date.now(), updatedAt: new Date().toISOString() });
+      added.push(s.id);
+    }
+    return added;
+  });
+}
 
 /* ============================================================== *
  * WP-004 (ISS-008, FEAT-019/005) — default "Family Chore Board" mini app for NEW

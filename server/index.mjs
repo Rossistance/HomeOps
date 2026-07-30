@@ -46,7 +46,7 @@ import { platformMailReady, sendPlatformEmail, platformMailStatus } from "./mail
 import { closeBrowser } from "./browser.mjs";
 import { orchestrate, ensureOpenDefaultAgent } from "./orchestrator.mjs";
 import { sandboxEnabled, seedSandboxAccounts, listSandboxEffects } from "./sandbox-connectors.mjs";
-import { seedDefaults } from "./seed.mjs";
+import { seedDefaults, ensureSystemSkills } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
 import { twilioAuthToken, twilioSignatureValid, handleInboundSms, twiml } from "./sms.mjs";
 import {
@@ -1154,6 +1154,16 @@ const handleRequest = async (req, res) => {
         try { bootstrapAIFromEnv(householdId); } catch { /* non-fatal: Settings can still add one */ }
         appendAudit({ type: invite ? "household.join" : "household.signup", email, actorId, role });
       });
+      // The deployment's built-in skills, for a household that would otherwise have none —
+      // the pre-built use cases the agent templates reference. Outside the block above
+      // because it enters the resident tenant to read the template set. Non-fatal: an empty
+      // catalogue is a poorer first run, not a broken one.
+      if (!invite) {
+        try {
+          const skills = ensureSystemSkills(householdId);
+          if (skills.length) await runWithTenant(householdId, () => appendAudit({ type: "household.skills_seeded", count: skills.length }));
+        } catch { /* the assistant still plans from the live tool catalog */ }
+      }
       const s = createSession({ actorId, actorName: ownerName, role, householdId });
       maybeSeedSandbox(s);
       const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };

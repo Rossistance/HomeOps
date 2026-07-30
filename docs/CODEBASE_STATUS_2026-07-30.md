@@ -25,6 +25,22 @@
 >
 > **Twilio consequence:** the campaign's claim *"users opt out by replying STOP… HELP returns help text"* is now true of the code. That removes an independent rejection cause; the entity classification (§3.2 — EIN + Low-Volume Standard, plus toll-free in parallel) is still the primary blocker and is not a code change.
 
+> ## ✅ WEEK 2 SHIPPED — commit `f22277d`, pushed to `main` 2026-07-30
+>
+> The three items that made a signed-up household non-functional. **1025 server tests, 0 failures (11 new).** Typechecks clean.
+>
+> | Item | Status | Note |
+> |---|---|---|
+> | 1.3 OAuth tenant context | **fixed** — state moved to the `_system` tenant (same reason sessions live there: at callback time the household is unknown); account + vault tokens written inside `runWithTenant(st.householdId)`; failed-callback audits filed with the household that started the flow | `store.mjs`, `index.mjs` |
+> | 1.4 Transactional email | **fixed** — new `server/mailer.mjs`, dependency-free HTTPS through `safeFetch` (so it's *inside* the egress choke point). Recovery mail is platform-first and deliberately **not** behind the household kill switch. Signup sends a real confirmation over a GET link that renders a page. Household email falls back to the platform sender instead of refusing, audited as a distinct transport. `/api/health` reports `mail.readiness` | `mailer.mjs`, `notify.mjs`, `index.mjs` |
+> | 2.1 Platform AI key | **fixed** — `bootstrapAIFromEnv(householdId)` now runs once per household at boot *and* at signup, so a family created between restarts isn't waiting for a deploy. Idempotent: a household that chose its own key or a local Ollama keeps it | `ai.mjs`, `index.mjs` |
+>
+> **Also:** seed records stamp the tenant they're written into rather than the literal `"local"` — harmless today, but several readers still carry a legacy `|| householdId === "local"` clause that treats such a record as shared. And `render.yaml` gained `RESEND_API_KEY`, `FAMILIOS_MAIL_FROM`, and `HOMEOPS_OPERATOR_EMAILS` — the last was set on the service by hand but missing from the blueprint, so a rebuild would have dropped the operator console and, since Week 1, the only route to the legacy backup bundles.
+>
+> **⚠️ One deployment action required:** set `RESEND_API_KEY` and `FAMILIOS_MAIL_FROM` (a verified domain) in the Render dashboard. Until then `/api/health` reports `mail.readiness: "not_configured"` and account recovery still has no wire — the code is ready, the credential isn't.
+>
+> **2.2 per-tenant seeding — also done**, in a follow-up within the same push. `ensureSystemSkills(householdId)` uses the **resident household as the template** rather than duplicating 150 lines of inline definitions into a second code path: one source of truth, and a new household provably gets what this deployment actually ships. Filtered to `system: true` + `skl_` ids so a family's own authored skills never cross a tenant boundary, idempotent by id, and non-fatal. Stated trade-off: editing the resident household's system skills changes what new households inherit — intended for a self-hosted deployment tuning its own catalogue, and better than a second hard-coded list that drifts silently.
+
 ---
 
 ## SEVERITY 1 — Fix before any stranger has an account
