@@ -87,7 +87,7 @@
 
 ---
 
-> ## ✅ SEVERITY 2 MULTI-TENANCY SHIPPED — `eb88b6b`, `d5b9151`, `2221d72`, `f0b1c4d`, 2026-07-30
+> ## ✅ SEVERITY 2 MULTI-TENANCY SHIPPED — `eb88b6b`, `d5b9151`, `2221d72`, `9b93b5a`, 2026-07-30
 >
 > **1118 server tests, 0 failures (30 new).** Four bugs with one shape: work that ran correctly for the resident household and silently not at all for anyone who signed up. None of them errored, none logged, and each looked right at the call site.
 >
