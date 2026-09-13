@@ -296,25 +296,29 @@ export default function CalendarScreen() {
   // Upcoming = anything undated, or anything whose EFFECTIVE end is within the last 12h
   // onward — an all-day event runs to the end of its last day (the server stores endAt:null
   // for a single-day one, which is how today's all-day event used to vanish at noon).
+  // Upcoming = anything undated, or anything whose EFFECTIVE end is today or later. The old
+  // "12 hours of grace" kept yesterday evening's event on the list until this morning — an
+  // event on the 12th was still showing on the 13th. Today's midnight is the line.
   const upcoming = useMemo(() => {
-    const grace = Date.now() - 12 * 3600e3;
+    const t = new Date(); const startOfToday = +new Date(t.getFullYear(), t.getMonth(), t.getDate());
     return [...lensedEvents]
-      .filter((e) => { const end = effectiveEndMs(e); return end === null || end >= grace; })
-      .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
+      .filter((e) => { const end = effectiveEndMs(e); return end === null || end >= startOfToday; })
+      .sort((a, b) => +new Date(a.startAt ?? 0) - +new Date(b.startAt ?? 0));
   }, [lensedEvents]);
   // ISS-121: events whose source account can no longer refresh (server-derived flag).
   const staleEvents = useMemo(() => events.filter((e) => e.staleSource), [events]);
+  const todayKey = dayKey(new Date());
   const byDay = useMemo(() => {
     const map: Record<string, EventRec[]> = {};
     for (const e of upcoming) {
       const keys = spanKeys(e);
       if (keys.length === 0) { (map["undated"] ??= []).push(e); continue; }
-      for (const k of keys) (map[k] ??= []).push(e);
+      // A multi-day span that began before today shows under today, not under a past day.
+      for (const k of [...new Set(keys.map((x) => (x < todayKey ? todayKey : x)))]) (map[k] ??= []).push(e);
     }
     return map;
-  }, [upcoming]);
+  }, [upcoming, todayKey]);
   const dayKeys = useMemo(() => Object.keys(byDay).filter((k) => k !== "undated").sort(), [byDay]);
-  const todayKey = dayKey(new Date());
   const strip = useMemo(() => Array.from({ length: STRIP_DAYS }, (_, i) => {
     const d = new Date(); d.setDate(d.getDate() + i); return d;
   }), []);
@@ -452,9 +456,13 @@ export default function CalendarScreen() {
                 <T key={i} kind="caption" color={colors.textFaint} style={{ flex: 1, textAlign: "center" }}>{d}</T>
               ))}
             </View>
-            <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
-              {monthCells.map((d, i) => {
-                if (!d) return <View key={i} style={{ width: `${100 / 7}%`, height: 44 }} />;
+            {/* Explicit rows of seven, each cell flex:1. Percentage widths (100/7) rounded up
+                past 100% and pushed the seventh cell onto the next line, so a whole weekday
+                column went missing and every date sat under the wrong weekday. */}
+            {Array.from({ length: monthCells.length / 7 }, (_, r) => monthCells.slice(r * 7, r * 7 + 7)).map((row, r) => (
+            <View key={r} style={{ flexDirection: "row" }}>
+              {row.map((d, i) => {
+                if (!d) return <View key={i} style={{ flex: 1, height: 44 }} />;
                 const k = dayKey(d);
                 const dayEvents = byDayAll[k] ?? [];
                 const isToday = k === todayKey;
@@ -467,7 +475,7 @@ export default function CalendarScreen() {
                     accessibilityRole="button"
                     accessibilityState={{ selected: isSelected }}
                     accessibilityLabel={`${dayTitle(k, todayKey)}${dayEvents.length ? `, ${dayEvents.length} events` : ""}`}
-                    style={{ width: `${100 / 7}%`, height: 44, alignItems: "center", justifyContent: "center", gap: 2 }}
+                    style={{ flex: 1, height: 44, alignItems: "center", justifyContent: "center", gap: 2 }}
                   >
                     <View style={{
                       width: 28, height: 28, borderRadius: 14, alignItems: "center", justifyContent: "center",
@@ -484,6 +492,7 @@ export default function CalendarScreen() {
                 );
               })}
             </View>
+            ))}
           </Card>
         </Rise>
       ) : null}
