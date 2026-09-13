@@ -8,6 +8,7 @@
  * an OpenAI/Anthropic/Gemini adapter can be slotted in later; until then every
  * task resolves locally.
  */
+import { isTodayEvent } from "@/lib/dates";
 import type {
   Agent,
   RiskLevel,
@@ -342,15 +343,22 @@ export interface BriefingSection {
   accent: string;
 }
 
+/** The approvals a surface actually shows. Server approvals are the truth (the local
+ *  `data.approvals` mirror is write-only and never learns a decision), so callers pass
+ *  them in; the local list is only the fallback for a session with no server. */
+export type PendingApprovalLike = { title: string };
+function pendingOf(data: AppData, approvals?: PendingApprovalLike[]): PendingApprovalLike[] {
+  return approvals ?? data.approvals.filter((a) => a.status === "Pending").map((a) => ({ title: a.title }));
+}
+
 /** Build today's family briefing from live local data. */
-export function generateBriefing(data: AppData): BriefingSection[] {
+export function generateBriefing(data: AppData, approvals?: PendingApprovalLike[]): BriefingSection[] {
   const now = Date.now();
   const dayMs = 86400000;
+  // "Today" is the same local-day window every other surface uses (isTodayEvent) — this
+  // used to be ±1 day, so yesterday's dinner was still "today's schedule" the next morning.
   const todayEvents = data.events
-    .filter((e) => {
-      const t = new Date(e.startAt).getTime();
-      return t >= now - dayMs && t <= now + dayMs * 1.2;
-    })
+    .filter((e) => isTodayEvent(e, now))
     .sort((a, b) => +new Date(a.startAt) - +new Date(b.startAt));
 
   const overdue = data.tasks.filter((t) => t.status !== "done" && t.dueAt && new Date(t.dueAt).getTime() < now);
@@ -358,7 +366,7 @@ export function generateBriefing(data: AppData): BriefingSection[] {
     (t) => t.status !== "done" && t.dueAt && new Date(t.dueAt).getTime() >= now && new Date(t.dueAt).getTime() < now + dayMs * 3,
   );
   const bills = data.tasks.filter((t) => t.type === "bill" && t.status !== "done");
-  const pendingApprovals = data.approvals.filter((a) => a.status === "Pending");
+  const pendingApprovals = pendingOf(data, approvals);
 
   return [
     {
@@ -395,9 +403,9 @@ export function generateBriefing(data: AppData): BriefingSection[] {
 
 export type SuggestedAction = { title: string; detail: string; route: { screen: string; params?: Record<string, string> }; icon: string };
 
-export function suggestNextActions(data: AppData): SuggestedAction[] {
+export function suggestNextActions(data: AppData, approvals?: PendingApprovalLike[]): SuggestedAction[] {
   const out: SuggestedAction[] = [];
-  const pending = data.approvals.filter((a) => a.status === "Pending");
+  const pending = pendingOf(data, approvals);
   if (pending.length) {
     out.push({
       title: `Review ${pending.length} approval${pending.length > 1 ? "s" : ""}`,
@@ -449,18 +457,18 @@ export function suggestNextActions(data: AppData): SuggestedAction[] {
  *  short set of genuinely useful starter prompts rather than showing nothing. */
 export interface AskSuggestion { icon: string; text: string }
 const ADULT_ROLES = new Set(["Owner", "Adult Admin", "Adult Member"]);
-export function suggestAskPrompts(data: AppData, member?: Member): AskSuggestion[] {
+export function suggestAskPrompts(data: AppData, member?: Member, approvals?: PendingApprovalLike[]): AskSuggestion[] {
   const isAdult = ADULT_ROLES.has(member?.role ?? "");
   const firstName = (name?: string) => (name ?? "").split(" ")[0];
   const out: AskSuggestion[] = [];
 
-  const pending = data.approvals.filter((a) => a.status === "Pending");
+  const pending = pendingOf(data, approvals);
   if (isAdult && pending.length) {
     out.push({ icon: "ShieldCheck", text: pending.length === 1 ? `Tell me about the "${pending[0].title}" approval waiting on me` : `What are the ${pending.length} things waiting on my approval?` });
   }
 
   const now = Date.now();
-  const todayEvents = data.events.filter((e) => e.startAt && new Date(e.startAt).getTime() >= now - 3600_000 && new Date(e.startAt).toDateString() === new Date().toDateString());
+  const todayEvents = data.events.filter((e) => isTodayEvent(e, now));
   if (todayEvents.length) {
     out.push({ icon: "CalendarDays", text: "What's on the family calendar today, and who's driving?" });
   }

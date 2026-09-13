@@ -2,9 +2,10 @@
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
-import { addMemory, addArtifact, putEvent, getEvent, patchEvent, putTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods, listAgents, getAgent, getMember } from "./store.mjs";
+import { addMemory, addArtifact, putEvent, getEvent, patchEvent, deleteEventRec, putTask, listTasks, patchTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods, listAgents, getAgent, getMember } from "./store.mjs";
 import { partialUpdateAgent } from "./agents.mjs";
-import { mealEventNotes, pushEventToGoogle } from "./calendar.mjs";
+import { mealEventNotes, pushEventToGoogle, deleteGoogleCopy } from "./calendar.mjs";
+import { householdTimeZone, localMidnightISO, wallClockISO } from "./household-time.mjs";
 import { searchPlaces } from "./places.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { extractStructured } from "./file-extract.mjs";
@@ -14,6 +15,12 @@ import crypto from "node:crypto";
 
 const eid = (p) => p + "_" + crypto.randomBytes(8).toString("hex");
 const nowISO = () => new Date().toISOString();
+// The HTTP create routes refuse an unparseable stamp (ISS-105) so an event can never be
+// stored on no day; these tools took the model's string verbatim, which is how "tomorrow"
+// became a row that rendered nowhere and a run that still reported ok:true.
+const badStamp = (v) => v != null && v !== "" && Number.isNaN(+new Date(v));
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MEMORY_SCOPES = ["household", "personal", "nest"];
 
 export const INTERNAL_FUNCTIONS = {
   /* ---- Helper (agent) inspection + iteration --------------------------------------
@@ -254,7 +261,11 @@ export const INTERNAL_FUNCTIONS = {
     async run(ctx, input) {
       const text = String(input?.text ?? "").trim();
       if (!text) return { ok: false, error: "empty_text", message: "Nothing to remember." };
-      const scope = input?.scope ?? "family";
+      // "family" was a fourth scope no reader recognised (it fell through as household-
+      // visible), and the default. Household is the honest default for a durable fact;
+      // anything else the caller names is validated against the three real rooms.
+      const requested = String(input?.scope ?? "").trim().toLowerCase();
+      const scope = requested === "family" ? "household" : MEMORY_SCOPES.includes(requested) ? requested : "household";
       const type = input?.type ?? "Fact";
       const rec = addMemory({
         householdId: ctx.householdId,
@@ -343,9 +354,20 @@ export const INTERNAL_FUNCTIONS = {
     async run(ctx, input) {
       const title = String(input?.title ?? "").trim();
       if (!title) return { ok: false, error: "empty_title", message: "An event needs a title." };
+      if (badStamp(input?.startAt)) return { ok: false, error: "invalid_startAt", message: "startAt isn't a valid date/time — use ISO 8601 (e.g. 2026-09-14T17:00:00-04:00) or YYYY-MM-DD for an all-day event." };
+      if (badStamp(input?.endAt)) return { ok: false, error: "invalid_endAt", message: "endAt isn't a valid date/time." };
+      const tz = householdTimeZone(ctx.householdId);
+      // A date-only start means "that whole day" — an all-day event anchored to the
+      // household's midnight, never the server's (which is how a US family's all-day
+      // events began the evening before).
+      const dateOnly = DATE_ONLY_RE.test(String(input?.startAt ?? ""));
+      const allDay = input?.allDay === true || dateOnly;
+      const startAt = dateOnly ? localMidnightISO(input.startAt, tz) : (input?.startAt ?? null);
+      const endAt = input?.endAt ? (DATE_ONLY_RE.test(String(input.endAt)) ? localMidnightISO(input.endAt, tz) : input.endAt) : null;
       const rec = putEvent({
         id: eid("ev"), householdId: ctx.householdId, title,
-        startAt: input?.startAt ?? null, endAt: input?.endAt ?? null,
+        startAt, endAt: endAt && startAt && Date.parse(endAt) > Date.parse(startAt) ? endAt : null, allDay,
+        notes: typeof input?.notes === "string" ? input.notes : "",
         location: input?.location ?? "", spaceId: input?.spaceId ?? "sp-family",
         participantIds: Array.isArray(input?.participantIds) ? input.participantIds : [],
         driverId: input?.driverId ?? null, ownerId: input?.ownerId ?? ctx.actorId, backupOwnerId: null,
@@ -357,7 +379,7 @@ export const INTERNAL_FUNCTIONS = {
         source: "FamiliOS Assistant", provenance: { via: "agent", runId: ctx.runId, actorId: ctx.actorId },
         createdBy: ctx.actorId, createdAt: Date.now(), updatedAt: nowISO(),
       });
-      return { ok: true, result: { id: rec.id, title: rec.title, status: rec.status } };
+      return { ok: true, result: { id: rec.id, title: rec.title, status: rec.status, startAt: rec.startAt, endAt: rec.endAt, allDay: rec.allDay === true } };
     },
   },
 
@@ -428,6 +450,7 @@ export const INTERNAL_FUNCTIONS = {
     async run(ctx, input) {
       const title = String(input?.title ?? "").trim();
       if (!title) return { ok: false, error: "empty_title", message: "A task needs a title." };
+      if (badStamp(input?.dueAt)) return { ok: false, error: "invalid_dueAt", message: "dueAt isn't a valid date/time — use ISO 8601 or YYYY-MM-DD." };
       const rec = putTask({
         id: eid("tk"), householdId: ctx.householdId, title,
         type: input?.type ?? "task", status: "todo", dueAt: input?.dueAt ?? null,
@@ -509,26 +532,44 @@ export const INTERNAL_FUNCTIONS = {
         if (input?.replace === true) {
           const old = occupant(date);
           patchMeal(old.id, { archived: true, updatedAt: nowISO() });
+          // Archiving the meal alone left its calendar event and grocery items behind —
+          // two dinners on the calendar and both ingredient lists on the shopping list.
+          for (const e of listEvents((x) => x.householdId === ctx.householdId && x.mealId === old.id)) {
+            if (e.provenance?.googleEventId && getSettings(ctx.householdId).externalActionsEnabled !== false) {
+              await deleteGoogleCopy({ ev: e, householdId: ctx.householdId, actorId: ctx.actorId }).catch(() => null);
+            }
+            deleteEventRec(e.id);
+          }
+          for (const t of listTasks((x) => x.householdId === ctx.householdId && x.mealId === old.id && x.status !== "done")) {
+            patchTask(t.id, { mealId: null, notes: t.notes === `For ${old.title}` ? "" : t.notes });
+          }
           scheduleNote = `Replaced ${old.title} on ${date}.`;
         } else {
           const requested = date;
           for (let d = 1; d <= 7 && occupant(date); d++) {
             date = new Date(Date.parse(requested) + d * 86400000).toISOString().slice(0, 10);
           }
-          scheduleNote = occupant(date)
-            ? "" // week is full — keep the requested date rather than land nowhere
-            : `${requested} ${slot} already had ${occupant(requested)?.title ?? "a meal"} — moved to ${date}. Ask me to "replace" if you'd rather swap.`;
-          if (!scheduleNote) date = requested;
+          if (occupant(date)) {
+            // Week is full — keep the requested date, but SAY it is now a double booking.
+            date = requested;
+            scheduleNote = `${requested} ${slot} already had ${occupant(requested)?.title ?? "a meal"} and the week is full, so both are on that slot now. Ask me to "replace" if you'd rather swap.`;
+          } else {
+            scheduleNote = `${requested} ${slot} already had ${occupant(requested)?.title ?? "a meal"} — moved to ${date}. Ask me to "replace" if you'd rather swap.`;
+          }
         }
       }
       let meal;
       if (dupe) {
         // Same dish already on the plan — move/refresh it instead of duplicating.
+        // Only move it when a date was actually given — re-planning "tacos" with no date used
+        // to write date:null over the real one, dropping the meal off the planner while its
+        // calendar event stayed on the old day.
         meal = patchMeal(dupe.id, {
-          date, slot, updatedAt: now,
+          ...(date ? { date, slot } : {}), updatedAt: now,
           ...(ingredients.length && !(dupe.ingredients ?? []).length ? { ingredients } : {}),
           ...(instructions.length && !(dupe.instructions ?? []).length ? { instructions } : {}),
         }) ?? dupe;
+        date = meal.date ?? date;
         scheduleNote = scheduleNote || `${meal.title} was already planned — updated it instead of adding a duplicate.`;
       } else {
         meal = putMeal({
@@ -543,7 +584,6 @@ export const INTERNAL_FUNCTIONS = {
       if (enrichmentNote) scheduleNote = [scheduleNote, enrichmentNote].filter(Boolean).join(" ");
       // 2) Groceries — every not-yet-have ingredient, linked by mealId. Items
       // already on the open list (any meal) aren't added twice.
-      const { listTasks } = await import("./store.mjs");
       const openGrocery = new Set(listTasks((t) => t.householdId === ctx.householdId && t.type === "list" && t.listName === "Groceries" && t.status !== "done").map((t) => norm(t.title)));
       const groceryIds = [];
       for (const ing of ingredients.filter((i) => !i.have && !openGrocery.has(norm(i.item)))) {
@@ -562,7 +602,10 @@ export const INTERNAL_FUNCTIONS = {
         const time = meal.time ?? SLOT_TIMES[slot] ?? "18:00";
         const slotLabel = slot.charAt(0).toUpperCase() + slot.slice(1);
         const evTitle = `${slotLabel}: ${meal.title}`;
-        const startAt = `${date}T${time}:00`;
+        // A real instant on the household's clock. The zoneless "2026-07-23T18:00:00" this
+        // used to write meant one time on the server and another on every phone, and went
+        // to Google with no zone beside a UTC end.
+        const startAt = wallClockISO(date, time, householdTimeZone(ctx.householdId)) ?? `${date}T${time}:00`;
         const notes = mealEventNotes(meal);
         const existing = listEvents((e) => e.householdId === ctx.householdId && e.mealId === meal.id)[0];
         event = existing

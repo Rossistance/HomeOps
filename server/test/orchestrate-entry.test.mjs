@@ -1,3 +1,7 @@
+// LEGACY ENGINE: this suite pins the previous single-shot assistant brain (JSON envelope
+// answer|lookup|plan|build). The default Ask Famili engine is now the AI SDK agent loop
+// (server/assistant-agent.mjs, server/test/assistant-agent.test.mjs); every server here is
+// spawned with HOMEOPS_ASSISTANT_ENGINE=legacy so the rollback path stays proven.
 // FamiliOS — WP-006 slice 1: the single orchestrate() entry.
 //
 // orchestrate() (server/orchestrator.mjs) is THE choke point every run source funnels
@@ -99,7 +103,7 @@ async function countRuns(owner) {
 describe("orchestrate() single entry (HOMEOPS_ORCHESTRATE_ENTRY default ON)", () => {
   let ctx, owner, fake;
   before(async () => {
-    ctx = await startServer();
+    ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy" } });
     owner = await makeSession(ctx, "m-alex");
     fake = await wireFakeProvider(ctx, owner);
   });
@@ -207,7 +211,7 @@ describe("orchestrate() single entry (HOMEOPS_ORCHESTRATE_ENTRY default ON)", ()
 describe("orchestrate() rollback (HOMEOPS_ORCHESTRATE_ENTRY=off)", () => {
   let ctx, owner, fake;
   before(async () => {
-    ctx = await startServer({ env: { HOMEOPS_ORCHESTRATE_ENTRY: "off" } });
+    ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy",  HOMEOPS_ORCHESTRATE_ENTRY: "off" } });
     owner = await makeSession(ctx, "m-alex");
     fake = await wireFakeProvider(ctx, owner);
   });

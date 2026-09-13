@@ -1,3 +1,7 @@
+// LEGACY ENGINE: this suite pins the previous single-shot assistant brain (JSON envelope
+// answer|lookup|plan|build). The default Ask Famili engine is now the AI SDK agent loop
+// (server/assistant-agent.mjs, server/test/assistant-agent.test.mjs); every server here is
+// spawned with HOMEOPS_ASSISTANT_ENGINE=legacy so the rollback path stays proven.
 // FamiliOS — PERMANENT PERSONA REGRESSION SUITE.
 //
 // Promoted from the Top Gun audit's persona-passes.mjs, which observed role-variant
@@ -60,7 +64,7 @@ let ctx, fake, morgan, lily, sam;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 before(async () => {
-  ctx = await startServer();
+  ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy" } });
   fake = http.createServer((req, res) => {
     let body = ""; req.on("data", (c) => (body += c));
     req.on("end", () => {

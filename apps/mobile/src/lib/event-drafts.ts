@@ -29,6 +29,8 @@ export interface EventDraft {
   driverId: string | null;
   bring: { item: string; memberId: string | null }[];
   bringInput: string;
+  /** Minutes-before nudges. Optional: drafts written before events had reminders lack it. */
+  remindOffsets?: number[];
   savedAt: string;
 }
 

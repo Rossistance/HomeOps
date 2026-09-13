@@ -4,7 +4,7 @@ import { useStore } from "@/store/useStore";
 import { Button, Card, Badge, Avatar, Checkbox, EmptyState, TextInput, Select, ACCENT_SOLID } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { fmtDate, relativeTime } from "@/lib/dates";
-import { isBoardTask } from "@/lib/taskSurfaces";
+import { isBoardTask, listItems, openListItems, GROCERY_LIST_NAME } from "@/lib/taskSurfaces";
 import { cn } from "@/lib/cn";
 
 export function MiniAppRenderer({ app }: { app: MiniApp }) {
@@ -17,9 +17,51 @@ export function MiniAppRenderer({ app }: { app: MiniApp }) {
       return <BudgetSnapshot app={app} />;
     case "Subscription Tracker":
       return <SubscriptionReview app={app} />;
+    case "Grocery List":
+      return <GroceryList app={app} />;
     default:
       return <GenericApp app={app} />;
   }
+}
+
+/* ------------------------------ Grocery List ---------------------------- */
+// The starter template promises "synced to the Groceries task list", and until now the
+// renderer fell through to the static seed ("To buy — nothing here yet") while the real
+// items lived only on the Meals screen. Same rows, same helpers, same check-off.
+function GroceryList({ app }: { app: MiniApp }) {
+  const tasks = useStore((s) => s.data.tasks);
+  const setTaskStatus = useStore((s) => s.setTaskStatus);
+  const createTask = useStore((s) => s.createTask);
+  const [adding, setAdding] = useState("");
+  const items = listItems(tasks).slice().sort((a, b) => (a.status === "done" ? 1 : 0) - (b.status === "done" ? 1 : 0));
+  const open = openListItems(tasks);
+  const add = () => {
+    if (!adding.trim()) return;
+    createTask({ title: adding.trim(), type: "list", listName: GROCERY_LIST_NAME, status: "todo", spaceId: app.spaceId, source: "user", priority: "low" });
+    setAdding("");
+  };
+  return (
+    <div>
+      <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <TextInput placeholder="Add an item…" value={adding} onChange={(e) => setAdding(e.target.value)} className="sm:max-w-xs" onKeyDown={(e) => e.key === "Enter" && add()} />
+        <Button variant="primary" size="sm" disabled={!adding.trim()} onClick={add}><Icon name="Plus" size={15} /> Add</Button>
+        <span className="text-xs text-ink-400 sm:ml-auto">{open.length} to buy · synced with the Groceries list on Meals.</span>
+      </div>
+      {items.length === 0 ? <EmptyState icon="ShoppingCart" title="Nothing to buy" message="Add an item, or send a meal's ingredients here from Meals." /> : (
+        <ul className="space-y-1">
+          {items.map((t) => (
+            <li key={t.id}>
+              <button onClick={() => setTaskStatus(t.id, t.status === "done" ? "todo" : "done")} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-surface-sunken/60" aria-label={`Toggle ${t.title}`}>
+                <Icon name={t.status === "done" ? "CheckCircle2" : "Circle"} size={16} className={t.status === "done" ? "shrink-0 text-sage-500" : "shrink-0 text-ink-300"} />
+                <span className={t.status === "done" ? "text-ink-400 line-through" : "text-ink-800"}>{t.title}</span>
+                {t.notes && <span className="ml-auto truncate text-xs text-ink-400">{t.notes}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 /* ------------------------------ Chore Board ----------------------------- */

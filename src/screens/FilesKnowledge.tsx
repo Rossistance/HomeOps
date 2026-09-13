@@ -16,6 +16,7 @@ export function FilesKnowledge() {
   useEffect(() => { if (params?.tab) setTab(params.tab); if (params?.item) setTab("knowledge"); if (params?.file || params?.new) setTab("files"); }, [params?.tab, params?.item, params?.file, params?.new]);
   const files = useStore((s) => s.data.files);
   const knowledge = useStore((s) => s.data.knowledge);
+  const memoryCount = useStore((s) => (s.data.memories ?? []).length);
   // WP-004 (ISS-008, FEAT-019/005): lifted here (not inside the Knowledge tab body) so
   // the Knowledge Library tab's count badge reflects real generated artifacts, not just
   // the local `data.knowledge` array — see ArtifactsLibrary below. One fetch, shared.
@@ -23,7 +24,7 @@ export function FilesKnowledge() {
   return (
     <div className="animate-fade-in">
       <PageHeader title="Files & Knowledge" subtitle="Documents your helpers process, plus everything they know about your household." icon="FolderOpen" />
-      <Tabs tabs={[{ id: "files", label: "Files", icon: "FileText", count: files.length }, { id: "knowledge", label: "Knowledge Library", icon: "BookOpen", count: knowledge.length + artifactsState.artifacts.length }]} active={tab} onChange={setTab} />
+      <Tabs tabs={[{ id: "files", label: "Files", icon: "FileText", count: files.length }, { id: "knowledge", label: "Knowledge Library", icon: "BookOpen", count: knowledge.length + artifactsState.artifacts.length + memoryCount }]} active={tab} onChange={setTab} />
       <div className="pt-5">{tab === "files" ? <Files /> : <Knowledge artifactsState={artifactsState} />}</div>
     </div>
   );

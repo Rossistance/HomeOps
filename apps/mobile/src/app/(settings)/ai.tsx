@@ -12,7 +12,9 @@ import {
   Rise, Row, SectionHeader, SkeletonCards, Sym, SymTile, T, Well,
 } from "@/components/ui";
 
-const WEB_URL = "https://homeops-ai.onrender.com";
+// The web client is served from the same origin as the API, so a staging or self-hosted
+// deployment links to ITS web app — a hardcoded production host sent them to the wrong site.
+const WEB_URL = API_URL;
 
 // Truthful readiness labels — mirror the server vocabulary in server/ai.mjs.
 // "configured" is NOT "working": only a real probe upgrades it to Reachable.

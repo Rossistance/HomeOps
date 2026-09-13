@@ -12,8 +12,9 @@
 // Fired exactly once per task: `reminderSentAt` is stamped BEFORE the send, so a slow push or
 // a restart mid-sweep can't produce the same nudge twice. A reminder that failed to send is a
 // smaller harm than one that arrives four times.
-import { listTasks, patchTask, getMember } from "./store.mjs";
+import { listTasks, patchTask, getMember, listEvents, patchEvent } from "./store.mjs";
 import { pushToMember } from "./notify.mjs";
+import { householdTimeZone, formatInZone, stampToMs } from "./household-time.mjs";
 
 /** The minute-offsets a family can choose. "None" is null, not 0 — 0 means "at the time". */
 export const REMINDER_CHOICES = [
@@ -61,14 +62,15 @@ export function reminderAt(task) {
 
 function reminderTextFor(task, mins) {
   const anchor = task.startAt || task.dueAt;
-  const when = anchor ? new Date(anchor) : null;
   const lead = mins === 0 ? "now"
     : mins === 24 * 60 ? "tomorrow"
     : mins >= 60 ? `in ${Math.round(mins / 60)} hour${mins >= 120 ? "s" : ""}`
     : `in ${mins} minutes`;
-  const at = when && !Number.isNaN(+when)
-    ? when.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
-    : null;
+  // The time a person reads is on THEIR clock, not the server's ("10:00 PM" for a 6 PM
+  // pickup was the server formatting in UTC).
+  const tz = householdTimeZone(task.householdId);
+  const ms = anchor ? stampToMs(anchor, tz) : NaN;
+  const at = Number.isNaN(ms) ? null : formatInZone(new Date(ms).toISOString(), tz, { hour: "numeric", minute: "2-digit" });
   return `${lead}${at ? ` — ${at}` : ""}`;
 }
 
@@ -134,6 +136,62 @@ export function sweepTaskArchive(now = Date.now()) {
     const completedAt = Date.parse(t.completedAt ?? t.updatedAt ?? "");
     if (Number.isNaN(completedAt) || now - completedAt < ARCHIVE_AFTER_MS) continue;
     try { patchTask(t.id, { status: "archived" }); out.archived++; } catch { /* next task */ }
+  }
+  return out;
+}
+
+/* ---- Calendar EVENT reminders (Cluster N, the half that was never built) ----
+ * Tasks could nudge a phone; the calendar — the surface a family actually plans on — could
+ * not. Same shape as tasks: `remindOffsets` (minutes before the start), fired once per
+ * offset per event, stamped BEFORE the push, retired quietly when more than a day late.
+ * Recipients are the people on the event: its participants, else its owner (else whoever
+ * created it). Archived members never get one (pushToMember refuses). */
+export function eventReminderPlan(ev) {
+  const offsets = isValidReminderList(ev?.remindOffsets) && ev.remindOffsets.length > 0 ? [...new Set(ev.remindOffsets)] : [];
+  const sent = new Set(Array.isArray(ev?.remindersSent) ? ev.remindersSent : []);
+  return { offsets, sent };
+}
+export async function sweepEventReminders(now = Date.now()) {
+  const out = { checked: 0, sent: 0, skipped: 0 };
+  let candidates;
+  try {
+    candidates = listEvents((e) => e.startAt && e.status !== "cancelled" && Array.isArray(e.remindOffsets) && e.remindOffsets.length > 0);
+  } catch { return out; }
+  for (const ev of candidates) {
+    const { offsets, sent } = eventReminderPlan(ev);
+    const tz = householdTimeZone(ev.householdId);
+    const anchorMs = stampToMs(ev.startAt, tz);
+    if (Number.isNaN(anchorMs)) continue;
+    for (const mins of offsets) {
+      if (sent.has(mins)) continue;
+      const at = anchorMs - mins * 60_000;
+      if (at > now) continue;
+      out.checked++;
+      const stale = now - at > 24 * 60 * 60 * 1000;
+      try {
+        sent.add(mins);
+        patchEvent(ev.id, { remindersSent: [...sent] });
+        if (stale) { out.skipped++; continue; }
+        const people = new Set([...(ev.participantIds ?? []), ...(ev.attendees ?? []).map((a) => a?.memberId).filter(Boolean)]);
+        if (people.size === 0 && (ev.ownerId || ev.createdBy)) people.add(ev.ownerId || ev.createdBy);
+        const when = ev.allDay
+          ? formatInZone(new Date(anchorMs).toISOString(), tz, { weekday: "short", month: "short", day: "numeric" })
+          : formatInZone(new Date(anchorMs).toISOString(), tz, { hour: "numeric", minute: "2-digit" });
+        const lead = mins === 0 ? "Starting now" : mins === 24 * 60 ? "Tomorrow" : mins >= 60 ? `In ${Math.round(mins / 60)} hour${mins >= 120 ? "s" : ""}` : `In ${mins} minutes`;
+        let delivered = 0;
+        for (const actorId of people) {
+          const r = await pushToMember({
+            householdId: ev.householdId, actorId,
+            title: ev.title,
+            body: `${lead} — ${when}${ev.location ? ` · ${ev.location}` : ""}`,
+            data: { type: "event", id: ev.id },
+            timeSensitive: true,
+          });
+          if (r?.ok) delivered++;
+        }
+        if (delivered) out.sent++; else out.skipped++;
+      } catch { out.skipped++; }
+    }
   }
   return out;
 }

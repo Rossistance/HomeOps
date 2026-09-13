@@ -13,23 +13,28 @@ import { agentVisibleTo } from "./agents.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
 import { searchWeb, readPage } from "./web.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
+import { listPublicFunctions } from "./functions.mjs";
+import { householdTimeZone, localDayBounds, localDateKey, stampToMs } from "./household-time.mjs";
 
 // Input hints for the internal family-data tools, so the planner knows how to fill
 // them (and the engine knows which fields require threading — see toolInputSchema).
 export const INTERNAL_INPUTS = {
-  "homeops.create_event_draft": [{ key: "title", required: true }, { key: "startAt" }, { key: "location" }, { key: "participantIds" }, { key: "driverId" }, { key: "visibility" }],
+  "homeops.create_event_draft": [{ key: "title", required: true }, { key: "startAt" }, { key: "endAt" }, { key: "allDay" }, { key: "location" }, { key: "notes" }, { key: "participantIds" }, { key: "driverId" }, { key: "visibility" }],
   "homeops.update_event_checklist": [{ key: "eventId", required: true }, { key: "items", required: true }],
   "homeops.assign_driver": [{ key: "eventId", required: true }, { key: "driverId", required: true }],
   "homeops.assign_what_to_bring": [{ key: "eventId", required: true }, { key: "items", required: true }],
-  "homeops.create_task": [{ key: "title", required: true }, { key: "dueAt" }, { key: "assignedMemberId" }, { key: "priority" }],
+  "homeops.create_task": [{ key: "title", required: true }, { key: "dueAt" }, { key: "assignedMemberId" }, { key: "priority" }, { key: "notes" }],
   "homeops.create_list_item": [{ key: "text", required: true }, { key: "listName" }],
-  "homeops.plan_meal": [{ key: "title", required: true }, { key: "date" }, { key: "slot" }, { key: "ingredients" }],
+  // The prompt contract and this schema used to disagree: recipeUrl/instructions/servings/
+  // replace were read by the handler and named in the prompt, but never declared here — so
+  // the engine's input fill dropped them (Severity-5 item 7) and a meal lost its recipe.
+  "homeops.plan_meal": [{ key: "title", required: true }, { key: "date" }, { key: "slot" }, { key: "time" }, { key: "ingredients" }, { key: "instructions" }, { key: "recipeUrl" }, { key: "servings" }, { key: "replace" }, { key: "notes" }],
   "homeops.attach_note_or_file_reference": [{ key: "eventId", required: true }, { key: "note" }, { key: "fileRef" }],
   "homeops.send_notification_draft": [{ key: "to" }, { key: "body", required: true }, { key: "subject" }, { key: "channel" }],
   // WP-005: the registry delivery tool — the one path that can actually deliver on a
   // schedule without a per-run approval race.
   "homeops.notify_contact": [{ key: "to" }, { key: "methodId" }, { key: "subject" }, { key: "body", required: true }],
-  "homeops.write_memory": [{ key: "text", required: true }, { key: "scope" }],
+  "homeops.write_memory": [{ key: "text", required: true }, { key: "scope", label: "household | personal" }],
   "homeops.create_artifact": [{ key: "title", required: true }, { key: "body" }, { key: "kind" }],
   "homeops.create_approval": [{ key: "subject", required: true }, { key: "detail" }],
   // Reading an attachment, and pulling structure out of it.
@@ -48,9 +53,9 @@ export const INTERNAL_INPUTS = {
   ],
 };
 
-const ICONS = ["Bot", "Sun", "Mail", "Inbox", "Calendar", "Receipt", "CreditCard", "UtensilsCrossed", "Plane", "Stethoscope", "Wrench", "HeartHandshake", "FolderOpen", "PawPrint", "Gift", "Search", "ShoppingCart", "Bell", "ShieldCheck", "FileText", "Globe", "MessageSquare", "ListChecks"];
-const TRIGGERS = ["Schedule", "Webhook", "RSS Feed", "Email Received", "Email Label Applied", "Text Message Received", "Email Reply Received", "Calendar Event Created", "File Changed", "Manual", "Agent-to-Agent"];
-const SPACE_TYPES = ["Personal", "Family", "School", "Bills", "Medical", "Travel", "Home Maintenance", "Caregiving", "Pets", "Custom"];
+export const ICONS = ["Bot", "Sun", "Mail", "Inbox", "Calendar", "Receipt", "CreditCard", "UtensilsCrossed", "Plane", "Stethoscope", "Wrench", "HeartHandshake", "FolderOpen", "PawPrint", "Gift", "Search", "ShoppingCart", "Bell", "ShieldCheck", "FileText", "Globe", "MessageSquare", "ListChecks"];
+export const TRIGGERS = ["Schedule", "Webhook", "RSS Feed", "Email Received", "Email Label Applied", "Text Message Received", "Email Reply Received", "Calendar Event Created", "File Changed", "Manual", "Agent-to-Agent"];
+export const SPACE_TYPES = ["Personal", "Family", "School", "Bills", "Medical", "Travel", "Home Maintenance", "Caregiving", "Pets", "Custom"];
 const MINIAPP_TYPES = ["Chore Board", "Trip Planner", "Budget Snapshot", "Grocery List", "Medical Tracker", "Subscription Tracker", "Research Comparison", "Custom"];
 const RISKS = ["Low", "Medium", "High", "Sensitive"];
 const EXECUTABLE = ["connected", "authorized_write", "authorized_readonly", "local_only"];
@@ -141,6 +146,18 @@ export function toolCatalog(session) {
   // reaching for unconnected external apps.
   for (const f of listInternalFunctions()) {
     out.push({ toolId: f.id, name: f.name, action: f.action, risk: f.risk, requiresApproval: !!f.requiresApproval, connectorId: f.connectorId, connectorName: f.connectorName, source: "internal", connected: true, inputs: mapInputs(INTERNAL_INPUTS[f.id] ?? []) });
+  }
+  // Registered (household-authored) functions — Severity-5 item 2. The engine could EXECUTE
+  // them (resolveRegisteredFunction) but the planner, the assistant, the repair pass, the
+  // risk-override route and the function-builder picker all fed from this catalog, which
+  // never listed them: a family could author, test and allow-list a function and no chat
+  // could ever reach it. "connected" is the function's live availability (passed a real
+  // test + deps satisfied), so an unready one shows up honestly rather than not at all.
+  if (session) {
+    for (const f of listPublicFunctions(session)) {
+      if (!f || f.state === "deprecated") continue;
+      out.push({ toolId: f.id, name: f.name ?? f.id, action: f.effectiveAction ?? "Other", risk: f.effectiveRisk ?? "Low", requiresApproval: !!f.requiresApproval, connectorId: f.connectorId ?? "functions", connectorName: f.connectorName ?? "Functions", source: "function", connected: f.executable === true, readiness: f.state, description: f.description ?? "", inputs: mapInputs(f.input_schema ?? []) });
+    }
   }
   // Household risk overrides (item 9): the catalog reports EFFECTIVE values so the
   // planner and every UI reflect the same reality the engine enforces. Defaults are
@@ -279,7 +296,7 @@ function repairJSONControlChars(s) {
 
 /** Tolerant JSON extraction — handles code fences, surrounding prose, and repairs the
  *  common "raw newline inside a string" malformation before giving up. */
-function extractJSON(text) {
+export function extractJSON(text) {
   if (!text) return null;
   let t = String(text).trim();
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -503,8 +520,16 @@ For a plan or build, "answer" is one friendly sentence summarizing what you'll s
  * authoritative, and a child's assistant never sees adults-only items. The client
  * context (if any) is kept only as a low-priority hint.
  */
-/** Start of the local day containing `nowISO`, as an ISO stamp. */
-export function startOfLocalDay(nowISO) {
+/** Start of the day containing `nowISO` — on the HOUSEHOLD's clock when `tz` is given, else
+ *  the server's (the previous behaviour, kept for callers with no household). `setHours(0)`
+ *  on a UTC-hosted server put "today" at 8 PM the previous evening for a US family, which is
+ *  how the assistant came to deny a 5 PM movie the whole family could see on the calendar. */
+export function startOfLocalDay(nowISO, tz) {
+  const ms = nowISO ? Date.parse(nowISO) : Date.now();
+  if (tz) {
+    const b = localDayBounds(Number.isNaN(ms) ? Date.now() : ms, tz);
+    if (b && Number.isFinite(b.start)) return new Date(b.start).toISOString();
+  }
   const d = nowISO ? new Date(nowISO) : new Date();
   d.setHours(0, 0, 0, 0);
   return d.toISOString();
@@ -516,16 +541,22 @@ export function startOfLocalDay(nowISO) {
  * Exported and pure so the boundary that caused the "I can't see your calendar" failure is
  * directly testable, rather than a filter buried in a 90-line context builder.
  */
-export function isUpcomingForContext(e, nowISO) {
+export function isUpcomingForContext(e, nowISO, tz) {
   if (!e?.startAt) return true;                       // undated items are always relevant
-  if (e.startAt >= startOfLocalDay(nowISO)) return true; // anything today or later
-  return !!(e.endAt && e.endAt >= nowISO);            // started earlier, still running
+  const dayStart = Date.parse(startOfLocalDay(nowISO, tz));
+  const startMs = tz ? stampToMs(e.startAt, tz) : Date.parse(e.startAt);
+  if (Number.isNaN(startMs)) return true;             // unparseable: better shown than hidden
+  if (startMs >= dayStart) return true;               // anything today or later
+  const endMs = e.endAt ? (tz ? stampToMs(e.endAt, tz) : Date.parse(e.endAt)) : NaN;
+  const nowMs = nowISO ? Date.parse(nowISO) : Date.now();
+  return !Number.isNaN(endMs) && endMs >= nowMs;      // started earlier, still running
 }
 
 export async function buildServerContext(session, clientContext, { goal } = {}) {
   if (!session) return clientContext ?? {};
   const hh = session.householdId;
   const now = new Date().toISOString();
+  const tz = householdTimeZone(hh);
   // "Upcoming" is measured from the START OF TODAY, not from this instant.
   //
   // This filter used to be `startAt >= now`, and it is why the assistant kept insisting it
@@ -543,7 +574,7 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
   // but haven't finished yet.
   const events = listEvents((e) => e.householdId === hh)
     .filter((e) => canSeeEntity(e, session))
-    .filter((e) => isUpcomingForContext(e, now))
+    .filter((e) => isUpcomingForContext(e, now, tz))
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
     .slice(0, 12)
     // endAt/allDay ride along so the assistant can say "All day" or "until 8pm" instead of
@@ -642,7 +673,7 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
     ? { latitude: loc.latitude, longitude: loc.longitude, city: loc.city ?? null, region: loc.region ?? null, country: loc.country ?? null }
     : undefined;
   return {
-    now, asActor: { id: session.actorId, role: session.role },
+    now, timezone: tz, today: localDateKey(Date.parse(now), tz), asActor: { id: session.actorId, role: session.role },
     householdSize, members, upcomingEvents: events, openTasks: tasks, upcomingMeals, recentMemory: memory,
     ...(memoryDisclosure ? { memoryDisclosure } : {}),
     existingAgents, existingSkills, existingAutomations,
@@ -678,7 +709,7 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
  * "what the household looks like" and "what this photo says" legible to the model instead of
  * being two different things inside one JSON object.
  */
-function attachmentSection(clientContext) {
+export function attachmentSection(clientContext) {
   const text = clientContext?.attachedFileText;
   if (!text || typeof text !== "string" || !text.trim()) return "";
   const name = clientContext.attachedFileName ?? "the attached file";
@@ -718,20 +749,20 @@ async function performLookup({ id, session, message, parsed }) {
   if (!queries.length && !readUrls.length) {
     return { ok: true, kind: "answer", answer: String(parsed.answer ?? "I couldn't work out what to look up — can you rephrase?") };
   }
-  const searches = [];
-  for (const q of queries) {
+  // In parallel: the searches and page reads are independent, and they were the slowest
+  // serial stretch of the whole turn (Severity-5 item 5).
+  const searches = await Promise.all(queries.map(async (q) => {
     const r = await searchWeb(q, { maxResults: 6 }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
-    searches.push({
+    return {
       query: q, ok: !!r?.ok,
       results: (r?.results ?? []).slice(0, 6).map((x) => ({ title: x.title, url: x.url, snippet: String(x.snippet ?? "").slice(0, 240) })),
       ...(r?.ok ? {} : { error: r?.error ?? "search_failed" }),
-    });
-  }
-  const pages = [];
-  for (const u of readUrls) {
+    };
+  }));
+  const pages = await Promise.all(readUrls.map(async (u) => {
     const p = await readPage(u, { maxChars: 2600 }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
-    pages.push({ url: u, ok: !!p?.ok, title: p?.title ?? "", text: String(p?.text ?? "").slice(0, 2600), ...(p?.ok ? {} : { error: p?.error ?? "read_failed" }) });
-  }
+    return { url: u, ok: !!p?.ok, title: p?.title ?? "", text: String(p?.text ?? "").slice(0, 2600), ...(p?.ok ? {} : { error: p?.error ?? "read_failed" }) };
+  }));
   const anyMaterial = searches.some((s) => s.results.length) || pages.some((p) => p.ok);
   if (!anyMaterial) {
     const why = searches[0]?.error ?? pages[0]?.error ?? "no results";
@@ -790,7 +821,7 @@ export async function assistantRespond({ message, context, session, providerId, 
 
 /** Clamp a model-proposed build spec to safe, expected shapes before it reaches the
  *  materialize endpoint (which re-validates + role-gates). Defensive, not trusting. */
-function normalizeBuild(b) {
+export function normalizeBuild(b) {
   const out = { summary: String(b.summary ?? "").slice(0, 280) };
   if (b.skill && typeof b.skill === "object") {
     out.skill = {

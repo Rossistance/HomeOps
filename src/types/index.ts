@@ -5,7 +5,8 @@
  * local-first shape. Collections are stored as arrays inside `AppData` and
  * persisted to IndexedDB. UI/session state lives in the store, not here.
  */
-import type { AgentPlan, ChatBuild } from "@/connectors/api";
+import type { AgentPlan, ChatBuild, AssistantToolCall } from "@/connectors/api";
+export type { AssistantToolCall };
 
 /* ----------------------------------------------------------------------- */
 /* Enums / unions                                                          */
@@ -679,6 +680,8 @@ export interface CalendarEvent {
   title: string;
   startAt: string;
   endAt?: string;
+  /** All-day: no clock time; startAt/endAt are date-only local days. */
+  allDay?: boolean;
   location?: string;
   spaceId: string;
   memberIds: string[];
@@ -927,6 +930,8 @@ export interface AssistantMessage {
   buildProgress?: string[];
   /** Set once the plan has been dispatched — links to an AutomationRun in `runs`. */
   runId?: string;
+  /** What the assistant did this turn (new engine) — rendered as a compact strip under the answer. */
+  toolCalls?: AssistantToolCall[];
   status?: AssistantMessageStatus;
   error?: string;
   model?: string;

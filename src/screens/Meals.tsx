@@ -3,9 +3,11 @@ import { useStore } from "@/store/useStore";
 import { PageHeader, Card, Button, Badge, Field, TextInput, Select, Modal } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { backend, type Meal, type ServerTask } from "@/connectors/api";
+import { dayKey } from "@/lib/dates";
 
 const SLOTS = ["breakfast", "lunch", "dinner", "snack"] as const;
-const dayKey = (d: Date) => d.toISOString().slice(0, 10);
+// meal.date is a literal LOCAL day string; keying the week by the UTC date (as this used
+// to) shifted every meal a day after ~7 PM in US zones and pre-filled tomorrow in the composer.
 
 /** Family meal plan: a rolling week of meals, one-click "send to groceries", and the
  *  shared grocery list (reusing list-tasks). Meals are household-visible; writing needs
@@ -75,7 +77,12 @@ export function Meals() {
     if (r.meal) { setEditing(null); await load(); toast({ kind: "success", title: "Meal updated", message: "Any linked grocery items and calendar event are kept." }); }
     else toast({ kind: "error", title: "Couldn't update meal", message: r.error === "insufficient_role" ? "Adults only." : r.error });
   };
-  const toggleGrocery = async (t: ServerTask) => { const next = t.status === "done" ? "todo" : "done"; setGroceries((g) => g.map((x) => x.id === t.id ? { ...x, status: next } : x)); await backend.updateTaskRemote(t.id, { status: next }); };
+  const toggleGrocery = async (t: ServerTask) => {
+    const next = t.status === "done" ? "todo" : "done";
+    setGroceries((g) => g.map((x) => x.id === t.id ? { ...x, status: next } : x)); // optimistic
+    const r = await backend.updateTaskRemote(t.id, { status: next });
+    if (r.error) { await load(); toast({ kind: "error", title: "Couldn't update", message: r.error === "insufficient_role" ? "Ask an adult to change this item." : r.error }); }
+  };
   const renameGrocery = async (t: ServerTask, title: string) => {
     const name = title.trim(); if (!name || name === t.title) return;
     setGroceries((g) => g.map((x) => x.id === t.id ? { ...x, title: name } : x)); // optimistic

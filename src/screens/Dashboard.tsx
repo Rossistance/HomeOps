@@ -3,7 +3,7 @@ import { useStore } from "@/store/useStore";
 import { Card, Button, Badge, StatusDot, EmptyState, Modal, Field, TextInput, ReadinessBadge, ACCENT_BG, MemberDots } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { generateBriefing, suggestNextActions } from "@/lib/ai";
-import { fmtDateFull, fmtTime, dayName, relativeTime, isOverdue } from "@/lib/dates";
+import { fmtDateFull, dayName, relativeTime, isOverdue, isLive, isTodayEvent, eventTimeLabel } from "@/lib/dates";
 import { backend, type ServerEvolution, type HelpRequest } from "@/connectors/api";
 import type { Member, CalendarEvent, Task } from "@/types";
 import { capabilitiesFor } from "@/lib/roles";
@@ -76,14 +76,23 @@ export function Dashboard() {
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   const firstName = (me?.displayName ?? "there").split(" ")[0];
 
-  const briefing = useMemo(() => generateBriefing(data), [data]);
-  const suggestions = useMemo(() => suggestNextActions(data), [data]);
-  // All upcoming events (from ~now), sorted — the base for the Today card's two columns.
-  const upcoming = useMemo(() => inSpace([...data.events]).filter((e) => new Date(e.startAt).getTime() >= Date.now() - 3600_000).sort((a, b) => +new Date(a.startAt) - +new Date(b.startAt)), [data.events, spaceFilter]);
+  // Everything still LIVE (not yet ended — an all-day event lasts all day, a timed one until
+  // its end), sorted — the base for the Today card's two columns. The old now−1h window
+  // dropped an all-day event from Home at 1 AM and a 9 AM event by 10:30.
+  const upcoming = useMemo(() => inSpace([...data.events]).filter((e) => isLive(e)).sort((a, b) => +new Date(a.startAt) - +new Date(b.startAt)), [data.events, spaceFilter]);
   // WP-001: server truth, not the local `data.approvals` mirror — see Shell's useBadges
   // for the same fix. Server approvals have no spaceId (approvals aren't a space concept
   // server-side), so this list intentionally isn't run through inSpace().
   const pendingApprovals = serverApprovals.filter((a) => a.status === "pending");
+  // The briefing and the suggestions read the SAME approvals as the hero line and the badge
+  // — they used to count the write-only local mirror, so "Nothing is waiting on you" and
+  // "Review 1 approval" sat on one screen together.
+  const approvalsForCopy = useMemo(() => pendingApprovals.map((a) => ({ title: a.preview || a.toolId })), [pendingApprovals]);
+  const briefing = useMemo(() => generateBriefing(data, approvalsForCopy), [data, approvalsForCopy]);
+  const suggestions = useMemo(() => suggestNextActions(data, approvalsForCopy), [data, approvalsForCopy]);
+  const canAccess = useStore((s) => s.canAccess);
+  // The briefing thread is a seed id in the sample household; a real family may not have one.
+  const briefingThread = useMemo(() => data.threads.find((t) => t.id === "th-briefing" || /briefing/i.test(t.title)) ?? null, [data.threads]);
   const overdue = inSpace(data.tasks.filter((t) => t.status !== "done" && isOverdue(t.dueAt)));
   // WP-004 (ISS-008, FEAT-019/005): "Open tasks" — the household's undated open tasks
   // plus upcoming (not-yet-due) dated ones, on the SAME board-eligible types the Chore
@@ -127,9 +136,8 @@ export function Dashboard() {
 
   // Calendar-under-Ask (WS1): split today's events into "today" vs "coming up" so the
   // key card mirrors the mobile Today screen — the nearest things first, then a peek ahead.
-  const startOfTomorrow = useMemo(() => { const d = new Date(); d.setHours(24, 0, 0, 0); return d.getTime(); }, []);
-  const eventsToday = useMemo(() => upcoming.filter((e) => +new Date(e.startAt) < startOfTomorrow).slice(0, 8), [upcoming, startOfTomorrow]);
-  const comingUp = useMemo(() => upcoming.filter((e) => +new Date(e.startAt) >= startOfTomorrow).slice(0, 3), [upcoming, startOfTomorrow]);
+  const eventsToday = useMemo(() => upcoming.filter((e) => isTodayEvent(e)).slice(0, 8), [upcoming]);
+  const comingUp = useMemo(() => upcoming.filter((e) => !isTodayEvent(e)).slice(0, 3), [upcoming]);
   const memberById = useMemo(() => new Map(data.members.map((m) => [m.id, m])), [data.members]);
 
   // "What I did & learned" (WS3): one honest, glanceable ledger of what the household's
@@ -179,7 +187,9 @@ export function Dashboard() {
   const quick: { label: string; icon: string; accent: keyof typeof ACCENT_BG; run: () => void; show: boolean }[] = [
     { label: "New agent", icon: "Bot", accent: "ink", run: () => navigate("agents", { new: "1" }), show: caps.canCreateAgents },
     { label: "New automation", icon: "Workflow", accent: "sage", run: () => navigate("automations", { tab: "builder" }), show: caps.canCreateAgents },
-    { label: "Connect", icon: "Plug", accent: "lavender", run: () => navigate("connections"), show: caps.canConnect },
+    // Same predicate the route guard uses — an Adult Member used to be offered the tile and
+    // bounced straight back with "Not available for your profile".
+    { label: "Connect", icon: "Plug", accent: "lavender", run: () => navigate("connections"), show: canAccess("connections") },
     { label: "Upload", icon: "Upload", accent: "amber", run: () => navigate("files", { new: "1" }), show: caps.canUpload },
     { label: "Reminder", icon: "BellPlus", accent: "coral", run: () => setReminderOpen(true), show: true },
     { label: "Template", icon: "Sparkles", accent: "sky", run: () => navigate("automations", { tab: "templates" }), show: caps.canCreateAgents },
@@ -232,7 +242,9 @@ export function Dashboard() {
             <p className="mb-2.5 text-xs font-medium uppercase tracking-[0.18em] text-white/45">Your family today</p>
             <div className="flex gap-2.5">
               {data.members.slice(0, 6).map((m) => {
-                const count = data.events.filter((e) => e.memberIds.includes(m.id)).length + data.tasks.filter((t) => t.assignedMemberId === m.id && t.status !== "done").length;
+                // "Your family TODAY": today's events for this member plus their open tasks —
+                // not every event they were ever on.
+                const count = data.events.filter((e) => e.memberIds.includes(m.id) && isTodayEvent(e)).length + data.tasks.filter((t) => t.assignedMemberId === m.id && t.status !== "done").length;
                 return (
                   <button key={m.id} onClick={() => navigate("spaces", { tab: "members", member: m.id })} className="group flex flex-col items-center gap-1.5">
                     <span className="relative transition-transform group-hover:-translate-y-0.5">
@@ -362,7 +374,7 @@ export function Dashboard() {
       <div className="stagger grid grid-cols-1 gap-4 lg:grid-cols-6">
         {/* Briefing (wide) */}
         <Card className="card-pad lg:col-span-4">
-          <Header icon="Sun" title="Today's family briefing" action={<Button size="sm" variant="secondary" onClick={() => navigate("messages", { thread: "th-briefing" })}><Icon name="MessageSquare" size={14} /> Open thread</Button>} />
+          <Header icon="Sun" title="Today's family briefing" action={briefingThread ? <Button size="sm" variant="secondary" onClick={() => navigate("messages", { thread: briefingThread.id })}><Icon name="MessageSquare" size={14} /> Open thread</Button> : undefined} />
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {briefing.map((s) => (
               <div key={s.label} className="well p-3.5">
@@ -631,7 +643,7 @@ function EventLine({ event, memberById, showDay, onOpen }: { event: CalendarEven
     <li onClick={onOpen} className="group flex cursor-pointer items-center gap-3 rounded-2xl border border-transparent px-2 py-1.5 transition-colors hover:border-ink-900/[0.06] hover:bg-surface-overlay">
       <div className="flex w-12 shrink-0 flex-col items-center leading-tight">
         {showDay && <span className="text-[10px] font-semibold uppercase text-ink-400">{dayName(event.startAt).slice(0, 3)}</span>}
-        <span className="text-xs font-semibold text-ink-700">{fmtTime(event.startAt)}</span>
+        <span className="text-xs font-semibold text-ink-700">{eventTimeLabel(event)}</span>
       </div>
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-ink-800">{event.title}</p>

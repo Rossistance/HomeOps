@@ -5,7 +5,7 @@
   "type": "module",
   "description": "FamiliOS — Personal agent teams for family life and household admin.",
   "engines": {
-    "node": ">=22.13 <25"
+    "node": ">=22.13"
   },
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -14,7 +14,7 @@
     "start": "node server/index.mjs",
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "test": "node --test \"server/test/*.test.mjs\"",
+    "test": "node --test \"server/test/*.test.mjs\" \"src/**/*.test.mjs\"",
     "typecheck": "tsc -p tsconfig.json",
     "generate-icons": "node mobile-version/setup-icons.mjs",
     "install-browser": "playwright install chromium",
@@ -30,6 +30,11 @@
     "topgun:report": "playwright show-report tests/topgun/.artifacts/web/report"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.53",
+    "@ai-sdk/google": "^4.0.69",
+    "@ai-sdk/openai": "^4.0.66",
+    "@ai-sdk/openai-compatible": "^3.0.48",
+    "ai": "^7.0.99",
     "idb": "^8.0.0",
     "lucide-react": "^0.456.0",
     "playwright": "^1.49.0",

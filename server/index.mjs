@@ -62,7 +62,9 @@ import { suggestAddresses, placesProvider } from "./places.mjs";
 import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
 import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel, listNests } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
-import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive } from "./reminders.mjs";
+import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive, sweepEventReminders } from "./reminders.mjs";
+import { householdTimeZone, formatForHousehold, wallClockISO } from "./household-time.mjs";
+import { addEventTombstone } from "./store.mjs";
 import { getAgent, getViewerNote, putViewerNote } from "./store.mjs";
 import { captureMemoryFromExchange } from "./memory-capture.mjs";
 import {
@@ -78,6 +80,7 @@ import { getFunction, listFunctionVersions } from "./store.mjs";
 import {
   createTrigger, updateTrigger, deleteTrigger, fireTrigger, fireWebhookTrigger, fireConnectorEvent,
   publicTrigger, listPublicTriggers, getTriggerSecret, tick, TRIGGER_TYPES, registerTriggerRunHooks, scheduleTextFor,
+  reanchorTriggersForHousehold,
 } from "./triggers.mjs";
 import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, sendRecoveryCode, pushToMember } from "./notify.mjs";
@@ -93,6 +96,37 @@ import { listProviders as listConnectorProviders, providerById as connectorProvi
 import { buildAuthUrl, exchangeCode, apiForAccount } from "./oauth.mjs";
 import { listAccountsFor, getOwnedAccount, upsertAccount, revokeAccount, checkAccountHealth, sweepAccountHealth, publicAccount, accountStatusById } from "./accounts.mjs";
 import { planFromGoal, generateMiniApp, generatePlaybook, assistantRespond, assistantStream, proposeEvolution, toolCatalog } from "./planner.mjs";
+import { runAssistantAgent } from "./assistant-agent.mjs";
+// Ask Famili engine selector. Default "agent" — the AI SDK ToolLoopAgent in
+// assistant-agent.mjs (tools called in a loop, results observed, approvals via durable
+// runs). HOMEOPS_ASSISTANT_ENGINE=legacy restores the previous single-shot planner
+// (assistantRespond/assistantStream) byte-for-byte. Read live so a spawned test server
+// can pick per instance, like every other rollback flag in this codebase.
+function assistantEngine() {
+  return String(process.env.HOMEOPS_ASSISTANT_ENGINE ?? "agent").trim().toLowerCase() === "legacy" ? "legacy" : "agent";
+}
+// The assistant message the durable thread keeps for one turn — shared by both routes so
+// the streaming and non-streaming paths can never persist different shapes.
+function assistantTurnMessage(out, at) {
+  if (!out.ok) {
+    return { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at };
+  }
+  return {
+    role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null,
+    runId: out.run?.id ?? out.runId ?? null, model: out.model ?? null, at,
+    ...(Array.isArray(out.toolCalls) && out.toolCalls.length ? { toolCalls: out.toolCalls } : {}),
+    ...(Array.isArray(out.runIds) && out.runIds.length ? { runIds: out.runIds } : {}),
+    ...(out.degraded ? { degraded: true, fellBackFrom: out.fellBackFrom ?? null } : {}),
+  };
+}
+// An agent turn that queued an approval-gated step reports the durable run the way a
+// legacy plan did, so both clients attach to it and watch it to a terminal state.
+function attachAgentRun(out) {
+  if (out?.ok && !out.run && out.runId) {
+    const r = getRun(out.runId);
+    if (r) out.run = publicRun(r);
+  }
+}
 import { preflightAutomation } from "./automation-preflight.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
@@ -449,6 +483,14 @@ function nextSubscriptionColor(householdId) {
 // Chat spaces: a conversation lives in its creator's PERSONAL space (private to
 // them — the long-standing behavior and the default) or in the FAMILY space
 // (visibility "household"), where any household member can read and continue it.
+/* Personal memory belongs to its author ALONE; nest memory to the nest; household memory to
+ * everyone. One predicate for GET and DELETE, so the two can never disagree again. */
+function canSeeMemory(m, session) {
+  if (!m) return false;
+  if (m.scope === "personal") return m.source?.actorId === session.actorId;
+  if (m.scope === "nest") return canSeeNest(m.nestId, session.householdId, session.actorId);
+  return true;
+}
 function canSeeConversation(c, session) {
   if (!c || c.householdId !== session.householdId) return false;
   if (c.actorId === session.actorId) return true;
@@ -2122,7 +2164,16 @@ function mayWriteAgent(session, agent, nextVisibility) {
       putMember({ actorId: m.actorId, archived: true });
       // A removed member's devices lose access NOW, not at token expiry.
       const killed = deleteSessionsForActor(m.actorId);
-      audit({ type: "member.archive", memberId: m.actorId, sessionsKilled: killed, ok: true }, req, g.session);
+      // …and stop being REACHABLE. Their push tokens and contact methods stayed live, so a
+      // scheduled briefing kept emailing them and task reminders kept ringing their phone.
+      let tokensRemoved = 0;
+      for (const t of getPushTokens()) if (t.actorId === m.actorId) { removePushToken(t.token); tokensRemoved++; }
+      let methodsClosed = 0;
+      for (const cm of listContactMethods((c) => c.householdId === g.session.householdId && c.memberId === m.actorId)) {
+        patchContactMethod(cm.id, { optInStatus: "Opted Out", allowedAgentIds: [] });
+        methodsClosed++;
+      }
+      audit({ type: "member.archive", memberId: m.actorId, sessionsKilled: killed, tokensRemoved, methodsClosed, ok: true }, req, g.session);
       return json(res, 200, { ok: true }, req);
     }
     const acctHealth = path.match(/^\/api\/accounts\/([^/]+)\/health$/);
@@ -2459,6 +2510,14 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // form already keeps the editor open and surfaces the server message on a non-2xx.
       if (badTimestamp(body.startAt)) return json(res, 400, { error: "invalid_startAt", message: "That start date/time isn't a valid timestamp." }, req);
       if (badTimestamp(body.endAt)) return json(res, 400, { error: "invalid_endAt", message: "That end date/time isn't a valid timestamp." }, req);
+      // Events reach nests the same way tasks and knowledge do. A raw visibility:"nest" with
+      // no nestId used to make the event invisible to everyone but its owner.
+      const evVis = resolveVisibility(body.visibility, body.nestId, g.session);
+      if (!evVis) return json(res, 403, { error: "not_in_nest", message: "You can only put this in a nest you're part of." }, req);
+      // Calendar reminders (Cluster N): the same offsets tasks offer, validated the same way.
+      if (body.remindOffsets !== undefined && !isValidReminderList(body.remindOffsets)) {
+        return json(res, 400, { error: "bad_reminder", message: "Pick reminder times from the offered list." }, req);
+      }
       const ev = putEvent({
         id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         title: String(body.title).trim(), startAt: body.startAt ?? null, endAt: body.endAt ?? null,
@@ -2469,7 +2528,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
         driverId: body.driverId ?? null, ownerId: body.ownerId ?? g.session.actorId, backupOwnerId: body.backupOwnerId ?? null,
         whatToBring: body.whatToBring ?? [], checklist: body.checklist ?? [], travel: body.travel ?? null,
         reminders: body.reminders ?? [], attachments: [], comments: [], mealImpact: body.mealImpact ?? null,
-        visibility: body.visibility ?? "household", category: body.category ?? "Family",
+        remindOffsets: Array.isArray(body.remindOffsets) ? [...new Set(body.remindOffsets)] : undefined, remindersSent: [],
+        ...evVis, category: body.category ?? "Family",
         layer: body.layer ?? "canonical", status: body.status ?? "confirmed",
         source: body.source ?? "FamiliOS", provenance: { via: "user", actorId: g.session.actorId },
         createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
@@ -2526,9 +2586,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // E6 — newly added people are actually told. Their own device (push) plus a durable
       // in-app notification, so it survives a phone that was off. Never re-notified on an
       // unrelated edit: only `added`.
-      const when = updated.startAt
-        ? new Date(updated.startAt).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
-        : "no date set yet";
+      const when = updated.startAt ? formatForHousehold(updated.startAt, g.session.householdId) : "no date set yet";
       for (const memberId of added) {
         addNotification({
           householdId: g.session.householdId, actorId: memberId, channel: "in_app",
@@ -2580,9 +2638,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (ev.ownerId && ev.ownerId !== memberId) {
         const who = getMember(memberId)?.displayName ?? "Someone";
         const verb = status === "accepted" ? "is coming" : status === "declined" ? "can't make it" : "hasn't answered";
-        const when = updated.startAt
-          ? new Date(updated.startAt).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
-          : "no date set";
+        const when = updated.startAt ? formatForHousehold(updated.startAt, g.session.householdId) : "no date set";
         /* Cluster I — "Melissa should have received a notification during that period. She
          * did not." The in-app record existed; the PUSH didn't, so a phone in a pocket
          * heard nothing. And the record itself said "Ross is coming" with no event, no
@@ -2637,14 +2693,14 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const requests = { attend: [], drive: [], bring: [], ...(ev.requests ?? {}) };
       // One standing ask per person per kind — a second tap is impatience, not a new request.
       const dup = requests[kind].some((r) => r.actorId === g.session.actorId && (kind !== "bring" || r.item === item));
-      if (!dup) {
-        requests[kind] = [...requests[kind], { actorId: g.session.actorId, ...(item ? { item } : {}), at: new Date().toISOString() }];
-        patchEvent(ev.id, { requests });
+      if (dup) {
+        // The ask is already standing; a second tap used to re-notify the owner every time.
+        return json(res, 200, { ok: true, pending: true, duplicate: true, requests }, req);
       }
+      requests[kind] = [...requests[kind], { actorId: g.session.actorId, ...(item ? { item } : {}), at: new Date().toISOString() }];
+      patchEvent(ev.id, { requests });
       const who = getMember(g.session.actorId)?.displayName ?? "Someone";
-      const when = ev.startAt
-        ? new Date(ev.startAt).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
-        : "no date set";
+      const when = ev.startAt ? formatForHousehold(ev.startAt, g.session.householdId) : "no date set";
       const title = kind === "attend" ? `${who} would like to join "${ev.title}"`
         : kind === "drive" ? `${who} offered to drive for "${ev.title}"`
         : `${who} suggests bringing ${item} to "${ev.title}"`;
@@ -2732,6 +2788,18 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (ifUpdatedAt && ev.updatedAt && ifUpdatedAt !== ev.updatedAt) {
         return json(res, 409, { error: "stale_write", message: "This event changed on another device — refresh and try again.", current: ev }, req);
       }
+      if ("remindOffsets" in patch && patch.remindOffsets !== undefined && !isValidReminderList(patch.remindOffsets)) {
+        return json(res, 400, { error: "bad_reminder", message: "Pick reminder times from the offered list." }, req);
+      }
+      // Moving the start, or changing the reminder set, re-arms the reminders (same rule as tasks).
+      if (("startAt" in patch && patch.startAt !== ev.startAt) || ("remindOffsets" in patch && JSON.stringify(patch.remindOffsets) !== JSON.stringify(ev.remindOffsets ?? undefined))) {
+        patch.remindersSent = [];
+      }
+      if ("nestId" in patch || patch.visibility === "nest") {
+        const vis = resolveVisibility(patch.visibility, patch.nestId, g.session, ev);
+        if (!vis) return json(res, 403, { error: "not_in_nest", message: "You can only move this into a nest you're part of." }, req);
+        patch.visibility = vis.visibility; patch.nestId = vis.nestId;
+      } else if ("visibility" in patch && patch.visibility !== "nest") patch.nestId = null;
       /* Cluster D — the fork. "This is his item and I should not be able to edit any of the
        * information under schedule or the title of the event… The only part that I should be
        * able to add is this section — just for me."
@@ -2862,6 +2930,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
           const r = await deleteGoogleCopy({ ev, householdId: g.session.householdId, actorId: g.session.actorId });
           googleOutcome = r?.ok ? "deleted" : "failed";
         }
+        // The copy is still on Google. Without this, the next subscription sync re-imported
+        // it as a fresh linked event — the "deleted events come back" loop, still open on
+        // every non-happy path. The tombstone makes the sync skip it for 90 days.
+        if (googleOutcome !== "deleted") addEventTombstone({ googleEventId: gCopyId, title: ev.title, reason: googleOutcome });
       }
       deleteEventRec(ev.id);
       audit({ type: "event.delete", eventId: ev.id, ok: true, ...(googleOutcome ? { google: googleOutcome } : {}) }, req, g.session);
@@ -3019,6 +3091,20 @@ function mayWriteAgent(session, agent, nextVisibility) {
       }
       if ("visibility" in patch && patch.visibility !== "nest") patch.nestId = null; // leaving a nest scope clears the pointer
       const updated = patchTask(tk.id, patch);
+      // A task pushed to the calendar (to-calendar) is a real two-way link; renaming or moving
+      // the task used to leave its event at the old title and time.
+      const mirrorKeys = ["title", "startAt", "endAt", "dueAt", "notes"].filter((k) => k in patch);
+      if (mirrorKeys.length) {
+        const linked = listEvents((e) => e.householdId === g.session.householdId && (e.taskId === tk.id || (tk.eventId && e.id === tk.eventId)))[0];
+        const startAt = updated.startAt || updated.dueAt;
+        if (linked && startAt) {
+          const ev2 = patchEvent(linked.id, { title: updated.title, startAt, endAt: updated.endAt ?? null, notes: updated.notes ?? "" });
+          if (getSettings(g.session.householdId).calendarAutoSync === true && ev2.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
+            void pushEventToGoogle({ ev: ev2, householdId: g.session.householdId, actorId: updated.assignedMemberId || g.session.actorId })
+              .then((r) => appendAudit({ type: "calendar.autopush", eventId: ev2.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) })).catch(() => {});
+          }
+        }
+      }
       audit({ type: "task.update", taskId: tk.id, ok: true }, req, g.session);
       return json(res, 200, { task: updated }, req);
     }
@@ -3028,8 +3114,19 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (!tk || tk.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       if (!isAdultRole(g.session.role) && tk.createdBy !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
       deleteTaskRec(tk.id);
-      audit({ type: "task.delete", taskId: tk.id, ok: true }, req, g.session);
-      return json(res, 200, { ok: true }, req);
+      // The task's calendar mirror goes with it — including the pushed Google copy, best
+      // effort — exactly as a meal's does. Deleting only the task left a phantom event.
+      const linkedEvents = listEvents((e) => e.householdId === g.session.householdId && (e.taskId === tk.id || (tk.eventId && e.id === tk.eventId)));
+      for (const e of linkedEvents) {
+        if (e.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
+          void deleteGoogleCopy({ ev: e, householdId: g.session.householdId, actorId: g.session.actorId })
+            .then((r) => { appendAudit({ type: "calendar.googledelete", eventId: e.id, ok: r.ok }); if (!r.ok) addEventTombstone({ googleEventId: e.provenance.googleEventId, title: e.title, reason: "task_delete_google_failed" }); })
+            .catch(() => {});
+        }
+        deleteEventRec(e.id);
+      }
+      audit({ type: "task.delete", taskId: tk.id, removedEvents: linkedEvents.length, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, removedEvents: linkedEvents.length }, req);
     }
 
     // H7 [23:18] — "when a task has a date it should append to the calendar, and push to
@@ -3186,7 +3283,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
      * Grocery items reuse tasks (type:"list", listName:"Groceries"). ---- */
     if (path === "/api/meals" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const visible = listMeals((m) => m.householdId === g.session.householdId).filter((m) => canSeeEntity(m, g.session));
+      // plan_meal's replace:true archives the meal it replaced; the planner must not show both.
+      const visible = listMeals((m) => m.householdId === g.session.householdId && !m.archived).filter((m) => canSeeEntity(m, g.session));
       return json(res, 200, { meals: visible }, req);
     }
     /* P2 [09:20] — "are these ingredients automatically added to the grocery list? If not,
@@ -3264,9 +3362,33 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (ifUpdatedAt && m.updatedAt && ifUpdatedAt !== m.updatedAt) {
         return json(res, 409, { error: "stale_write", message: "This was changed on another device — refresh and try again.", current: m }, req);
       }
+      if (Array.isArray(patch.ingredients)) {
+        patch.ingredients = patch.ingredients.map((i) => (typeof i === "string" ? { item: i, have: false } : { item: String(i?.item ?? ""), have: !!i?.have })).filter((i) => i.item);
+      }
       const updated = patchMeal(m.id, patch);
-      audit({ type: "meal.update", mealId: m.id, ok: true }, req, g.session);
-      return json(res, 200, { meal: updated }, req);
+      // The edit path was a bare patchMeal: move a meal to Saturday and its calendar event
+      // stayed on Thursday with the old title; add an ingredient and the grocery list never
+      // heard. Same cascade the create and to-calendar routes already do.
+      const groceriesAdded = "ingredients" in patch ? syncMealGroceries(updated, g.session) : 0;
+      let eventSynced = false;
+      const affectsEvent = ["date", "slot", "time", "title", "notes", "ingredients", "instructions", "servings", "recipeUrl"].some((k) => k in patch);
+      if (affectsEvent) {
+        const linked = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id)[0];
+        if (linked && updated.date) {
+          const SLOT_TIMES = { breakfast: "08:00", lunch: "12:00", dinner: "18:00", snack: "15:00" };
+          const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(updated.time ?? "") ? updated.time : (SLOT_TIMES[updated.slot] ?? "18:00");
+          const slotLabel = updated.slot ? updated.slot.charAt(0).toUpperCase() + updated.slot.slice(1) : "Dinner";
+          const fields = { title: `${slotLabel}: ${updated.title}`, startAt: wallClockISO(updated.date, time, householdTimeZone(g.session.householdId)) ?? `${updated.date}T${time}:00`, notes: mealEventNotes(updated) };
+          const ev2 = patchEvent(linked.id, fields);
+          eventSynced = true;
+          if (getSettings(g.session.householdId).calendarAutoSync === true && ev2.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
+            void pushEventToGoogle({ ev: ev2, householdId: g.session.householdId, actorId: g.session.actorId })
+              .then((r) => appendAudit({ type: "calendar.autopush", eventId: ev2.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) })).catch(() => {});
+          }
+        }
+      }
+      audit({ type: "meal.update", mealId: m.id, groceriesAdded, eventSynced, ok: true }, req, g.session);
+      return json(res, 200, { meal: updated, groceriesAdded, eventSynced }, req);
     }
     if (mealOne && method === "DELETE") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -3329,7 +3451,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (!m.date) return json(res, 400, { error: "date_required", message: "Give the meal a date before adding it to the calendar." }, req);
       const SLOT_TIMES = { breakfast: "08:00", lunch: "12:00", dinner: "18:00", snack: "15:00" };
       const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(m.time ?? "") ? m.time : (SLOT_TIMES[m.slot] ?? "18:00");
-      const startAt = `${m.date}T${time}:00`;
+      // A real instant on the household's clock — a zoneless stamp meant one time on the
+      // server and another on every phone, and reached Google with no zone at all.
+      const startAt = wallClockISO(m.date, time, householdTimeZone(g.session.householdId)) ?? `${m.date}T${time}:00`;
       const slotLabel = m.slot ? m.slot.charAt(0).toUpperCase() + m.slot.slice(1) : "Dinner";
       const title = `${slotLabel}: ${m.title}`;
       // The event body mirrors the full meal context (recipe link, ingredients,
@@ -3771,10 +3895,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
        * memories reach the nest, household memories reach everyone — the same three rooms
        * as everything else since the visibility work. */
       const all = listMemory({ householdId: g.session.householdId, limit: 200 });
-      const visible = all.filter((m) =>
-        m.scope === "personal" ? m.source?.actorId === g.session.actorId
-        : m.scope === "nest" ? canSeeNest(m.nestId, g.session.householdId, g.session.actorId)
-        : true);
+      const visible = all.filter((m) => canSeeMemory(m, g.session));
       return json(res, 200, { memory: visible }, req);
     }
     // Archive/delete a memory entry the actor can see (mirrors the GET visibility rule).
@@ -3785,8 +3906,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const m = getMemoryEntry(memOne[1]);
       if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
-      const canSee = m.scope !== "personal" || m.source?.actorId === g.session.actorId || isAdultRole(g.session.role);
-      if (!canSee) return json(res, 404, { error: "not_found" }, req); // don't leak existence
+      // EXACTLY the GET rule. This used to carry an `|| isAdultRole(...)` bypass the GET had
+      // deliberately removed — an adult could delete a personal memory they could not read,
+      // and anyone could delete a nest memory outside their nest.
+      if (!canSeeMemory(m, g.session)) return json(res, 404, { error: "not_found" }, req); // don't leak existence
       deleteMemoryEntry(m.id);
       audit({ type: "memory.delete", memoryId: m.id, ok: true }, req, g.session);
       return json(res, 200, { ok: true }, req);
@@ -3978,6 +4101,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const cm = getContactMethod(contactOne[1]);
       if (!cm || cm.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       if (!contactReach(g.session)(cm.memberId)) return json(res, 403, { error: "outside_your_nest", message: "You can manage your own contact methods and your nest's. The Owner manages everyone's." }, req);
+      // Same gate POST has: reach grants a nest-mate's methods, but rewriting or deleting
+      // ANOTHER member's address is an adult act.
+      if (!isAdultRole(g.session.role) && cm.memberId !== g.session.actorId) return json(res, 403, { error: "insufficient_role", message: "Only an adult can change another member's contact methods." }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const patch = {};
       if (body.label != null) { const l = String(body.label).trim(); if (!l) return json(res, 400, { error: "label_required" }, req); patch.label = l; }
@@ -4040,6 +4166,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const cm = getContactMethod(contactOne[1]);
       if (!cm || cm.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       if (!contactReach(g.session)(cm.memberId)) return json(res, 403, { error: "outside_your_nest", message: "You can manage your own contact methods and your nest's. The Owner manages everyone's." }, req);
+      // Same gate POST has: reach grants a nest-mate's methods, but rewriting or deleting
+      // ANOTHER member's address is an adult act.
+      if (!isAdultRole(g.session.role) && cm.memberId !== g.session.actorId) return json(res, 403, { error: "insufficient_role", message: "Only an adult can change another member's contact methods." }, req);
       deleteContactMethodRec(cm.id);
       deleteContactVerification(cm.id); // a pending code for a deleted method is dead
       audit({ type: "contact_method.delete", contactMethodId: cm.id, ok: true }, req, g.session);
@@ -4981,7 +5110,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
         patch.timezone = body.timezone;
       }
       const next = setSettings(patch, g.session.householdId);
-      audit({ type: "settings.update", ok: true, changed: Object.keys(patch), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
+      // "Every day at 7 AM" was resolved on the OLD clock; the next fire would land at the
+      // wrong hour (and a one-shot schedule at the wrong hour forever).
+      let reanchored = 0;
+      if ("timezone" in patch && patch.timezone !== prev.timezone) reanchored = reanchorTriggersForHousehold(g.session.householdId);
+      audit({ type: "settings.update", ok: true, changed: Object.keys(patch), ...(reanchored ? { reanchoredTriggers: reanchored } : {}), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
       return json(res, 200, { settings: settingsView(next, g.session) }, req);
     }
 
@@ -5074,8 +5207,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // never shrunk — only a household's explicit DENY reaches the model's menu, and a
       // local provider additionally gets the relevance-ranked, budget-capped catalog.
       const actingAgent = ensureOpenDefaultAgent("agt_household");
-      const out = await assistantRespond({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent });
+      const out = assistantEngine() === "agent"
+        ? await runAssistantAgent({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) })
+        : await assistantRespond({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent });
       demoteBuildForRole(out, g.session);
+      attachAgentRun(out);
       // Do-requests EXECUTE immediately (C-intel): a plan from chat auto-starts as a
       // durable server run — no "Run plan" click. Approval-gated steps still pause
       // for human sign-off inside the run, and results append back to this thread.
@@ -5105,9 +5241,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
           appendConversationMessage(conv.id, { role: "user", text: String(body.message), at });
           // `build` persisted too — otherwise a build-proposal card vanished on refresh
           // and the user had no durable evidence the assistant ever offered to build.
-          appendConversationMessage(conv.id, out.ok
-            ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, runId: out.run?.id ?? null, model: out.model ?? null, at }
-            : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at });
+          appendConversationMessage(conv.id, assistantTurnMessage(out, at));
           // I1 — name the thread from the first exchange (see maybeNameConversation).
           if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? out.plan?.summary ?? out.build?.summary ?? "", session: g.session });
           // BUG-06 — the writer memory never had. Scoped to the room it was said in.
@@ -5131,20 +5265,34 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // attachment that only worked on the non-streaming path would still look broken.
       await attachFileContext(body, g.session);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", ...corsHeaders(req) });
+      // The first honest word BEFORE the first model round-trip — the client had nothing
+      // truthful to show for the slowest seconds of the turn (Severity-5 item 6).
+      try { res.write(`data: ${JSON.stringify({ type: "phase", phase: "thinking" })}\n\n`); } catch { /* client hung up */ }
       let tokenCount = 0;
       try {
         const histConv = body.conversationId ? getConversation(body.conversationId) : null;
         const history = histConv && canSeeConversation(histConv, g.session) ? histConv.messages : [];
         // WP-006 slice 2 — same acting-agent catalog pruning as POST /api/assistant.
         const actingAgent = ensureOpenDefaultAgent("agt_household");
-        const out = await assistantStream(
-          { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent },
-          (_tok) => { tokenCount++; if (tokenCount % 4 === 0) res.write(`data: ${JSON.stringify({ type: "progress", tokens: tokenCount })}\n\n`); },
-          // What it's actually doing, as opposed to what the token counter implies. A web
-          // lookup used to spend its whole (long) life claiming to be writing.
-          (phase) => { try { res.write(`data: ${JSON.stringify({ type: "phase", phase })}\n\n`); } catch { /* client hung up */ } },
-        );
+        const sse = (ev) => { try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch { /* client hung up */ } };
+        const onToken = (tok) => {
+          tokenCount++;
+          if (tokenCount % 4 === 0) sse({ type: "progress", tokens: tokenCount });
+          // The answer text itself, for clients that render it live (the legacy engine's
+          // JSON tokens were meaningless mid-stream; the agent's are the real reply).
+          if (assistantEngine() === "agent" && typeof tok === "string" && tok) sse({ type: "delta", text: tok });
+        };
+        // What it's actually doing, as opposed to what the token counter implies. A web
+        // lookup used to spend its whole (long) life claiming to be writing.
+        const onPhase = (phase) => sse({ type: "phase", phase });
+        const out = assistantEngine() === "agent"
+          ? await runAssistantAgent(
+              { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) },
+              { onToken, onPhase, onEvent: (ev) => sse(ev) },
+            )
+          : await assistantStream({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent }, onToken, onPhase);
         demoteBuildForRole(out, g.session); // ISS-011 — the streaming path gates identically
+        attachAgentRun(out);
 
         // WP-003 slice 4 (thread order, ISS-005/009/011/016) — persist the user's OWN
         // turn BEFORE the run below is ever started. startRun (engine.mjs) does not
@@ -5190,9 +5338,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         // never survived a refresh because it was never written past the client's memory.
         // Failed turns persist as well (see POST /api/assistant).
         if (conv) {
-          appendConversationMessage(conv.id, out.ok
-            ? { role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null, runId: out.run?.id ?? null, model: out.model ?? null, at: new Date().toISOString() }
-            : { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at: new Date().toISOString() });
+          appendConversationMessage(conv.id, assistantTurnMessage(out, new Date().toISOString()));
           // I1 — the streaming path is the one the real chat UI uses, so naming has to happen
           // here too or it would never fire in practice.
           if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? out.plan?.summary ?? out.build?.summary ?? "", session: g.session });
@@ -5755,6 +5901,7 @@ server.listen(PORT, () => {
   // than scheduled on whichever device happened to create the task. Every 30s so a
   // "15 minutes before" lands within half a minute of the mark.
   setInterval(() => { void forEachTenant(() => sweepTaskReminders()); }, 30_000);
+  setInterval(() => { void forEachTenant(() => sweepEventReminders()); }, 30_000);
   // Archive is cheap and slow-moving; hourly is generous. First pass shortly after boot so
   // a long-stopped server catches up without waiting an hour.
   setInterval(() => { void forEachTenant(() => sweepTaskArchive()); }, 60 * 60_000);

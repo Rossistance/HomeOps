@@ -5,6 +5,7 @@ import { Icon } from "@/components/Icon";
 import { cn } from "@/lib/cn";
 import { fmtDateTime, relativeTime } from "@/lib/dates";
 import { RunTimeline, RunStatusBadge } from "./RunTimeline";
+import { TERMINAL_RUN } from "@/store/useStore";
 
 /* Execution Monitor — the live view of the durable SERVER runtime. Lists runs from
    every entry point (chat, skill, agent, schedule, webhook, manual) and streams the
@@ -16,7 +17,8 @@ const SOURCE_LABEL: Record<string, string> = {
   assistant: "Chat", skill: "Skill", agent: "Agent", schedule: "Schedule",
   webhook: "Webhook", rss: "RSS", manual: "Manual", automation: "Automation",
 };
-const TERMINAL = ["completed", "failed", "cancelled", "expired"];
+// The exported list, so a partially_failed run (terminal) stops polling and loses its Cancel button.
+const TERMINAL: readonly string[] = TERMINAL_RUN;
 
 export function ExecutionMonitor() {
   const [runs, setRuns] = useState<ServerRun[]>([]);

@@ -1,3 +1,7 @@
+// LEGACY ENGINE: this suite pins the previous single-shot assistant brain (JSON envelope
+// answer|lookup|plan|build). The default Ask Famili engine is now the AI SDK agent loop
+// (server/assistant-agent.mjs, server/test/assistant-agent.test.mjs); every server here is
+// spawned with HOMEOPS_ASSISTANT_ENGINE=legacy so the rollback path stays proven.
 // Saying what it's actually doing.
 //
 // The working bubble had two states and inferred both from token flow: tokens arriving meant
@@ -22,7 +26,7 @@ let ctx, adult, provider;
 let nextReply = "";
 
 before(async () => {
-  ctx = await startServer();
+  ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy" } });
   adult = await makeSession(ctx, "m-morgan");
   provider = http.createServer((req, res) => {
     let b = ""; req.on("data", (c) => (b += c));
@@ -88,7 +92,10 @@ test("a plain answer announces no phase at all — it is just written", async ()
   // phase event would be a claim about work that isn't happening.
   nextReply = JSON.stringify({ kind: "answer", answer: "Soccer is at 4:15 on Tuesday." });
   const events = await streamFrames("when is soccer?");
-  assert.equal(events.filter((e) => e.type === "phase").length, 0);
+  // The one exception is the honest pre-model "thinking" frame, emitted before the first
+  // round-trip so the client has something truthful for the slowest seconds of the turn.
+  const phases = events.filter((e) => e.type === "phase").map((e) => e.phase);
+  assert.deepEqual(phases.filter((p) => p !== "thinking"), []);
   assert.ok(events.some((e) => e.type === "done"), "…but it still completes normally");
 });
 

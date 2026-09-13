@@ -39,6 +39,14 @@ function keyOf(p) {
   return getSecret(cfgId(p.id), "apiKey");
 }
 
+/** The resolved connection details for a provider — base URL, vault key, chosen model —
+ *  for the AI SDK model factory (ai-model.mjs). The key never leaves the backend. */
+export function providerConnection(id) {
+  const p = aiProviderById(id);
+  if (!p) return null;
+  return { provider: p, baseUrl: baseUrlOf(p), apiKey: keyOf(p) || "", model: modelOf(p) };
+}
+
 // Truthful readiness vocabulary (P1.3). A default localhost URL is NOT proof a local
 // runtime is up, and an API key is not proof a cloud endpoint is reachable — so we
 // distinguish static configuration from verified health:

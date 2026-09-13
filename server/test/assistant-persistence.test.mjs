@@ -22,8 +22,26 @@ before(async () => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
+      const answer = "Here's your household summary: all quiet today.";
+      // The default Ask Famili engine (server/assistant-agent.mjs) talks to Ollama through its
+      // OpenAI-compatible /v1 surface; the legacy engine used /api/chat. Answer both so this
+      // suite pins PERSISTENCE, not a particular engine.
+      if (req.url.includes("/v1/")) {
+        let stream = false;
+        try { stream = !!JSON.parse(body).stream; } catch { /* ignore */ }
+        if (stream) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write("data: " + JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 0, model: "test-model", choices: [{ index: 0, delta: { role: "assistant", content: answer }, finish_reason: null }] }) + "\n\n");
+          res.write("data: " + JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 0, model: "test-model", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }) + "\n\n");
+          res.end("data: [DONE]\n\n");
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "c1", object: "chat.completion", created: 0, model: "test-model", choices: [{ index: 0, message: { role: "assistant", content: answer }, finish_reason: "stop" }] }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/x-ndjson" });
-      res.end(JSON.stringify({ message: { content: "Here's your household summary: all quiet today." } }) + "\n");
+      res.end(JSON.stringify({ message: { content: answer } }) + "\n");
     });
   });
   await new Promise((resolve) => fakeProvider.listen(0, resolve));

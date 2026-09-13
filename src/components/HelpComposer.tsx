@@ -3,7 +3,7 @@ import { useStore } from "@/store/useStore";
 import { Button, Field, Select, TextArea, ACCENT_SOLID } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { backend, type CalendarSubscription } from "@/connectors/api";
-import { fmtTime, dayName } from "@/lib/dates";
+import { fmtTime, dayName, relativeTime } from "@/lib/dates";
 import type { Member, CalendarEvent, Task } from "@/types";
 
 /** Shared ask ↔ offer help composer, used by the adult Dashboard HelpCard and the
@@ -69,7 +69,7 @@ export function HelpComposer({
     if (!value) return "";
     const label = labelForValue(value);
     if (kind === "offer") return `I can help with ${label}.`;
-    return kidFriendly ? `Can you help me with ${label}?` : `Can you pick up the girls from ${label}?`;
+    return `Can you help me with ${label}?`;
   };
 
   const pickItem = (value: string) => {
@@ -135,7 +135,7 @@ export function HelpComposer({
   };
 
   const eventOptionLabel = (e: CalendarEvent) => `${dayName(e.startAt).slice(0, 3)} ${fmtTime(e.startAt)} — ${e.title}`;
-  const taskOptionLabel = (t: Task) => `${t.title}${t.dueAt ? ` (due ${fmtTime(t.dueAt)})` : ""}`;
+  const taskOptionLabel = (t: Task) => `${t.title}${t.dueAt ? ` (due ${relativeTime(t.dueAt)})` : ""}`;
   const hasItems = itemEvents.length > 0 || itemTasks.length > 0;
 
   const copy = kidFriendly

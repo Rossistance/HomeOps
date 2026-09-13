@@ -22,6 +22,8 @@ import type {
   TriggerType,
   CalendarEvent,
   AssistantConversation,
+  AssistantMessage,
+  AssistantToolCall,
   MessageThread,
   AppSettings,
   WorkflowPlan,
@@ -48,7 +50,8 @@ import { pushActivity, executeAgentRun, subagentDefsFor, processFile } from "@/l
 import { parseAgentPrompt, buildWorkflowPlan, routeToAgent, detectApprovalGates } from "@/lib/ai";
 import { buildSearchIndex, search } from "@/lib/search";
 import { getAdvancedMode, setAdvancedMode } from "@/lib/prefs";
-import { backend, templateIdempotencyKey, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerConversationMessage, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge, type BackendApproval, type ServerNotification, type AutomationValidationError, type AutomationLifecycleState } from "@/connectors/api";
+import { isLive } from "@/lib/dates";
+import { backend, templateIdempotencyKey, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerConversationMessage, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge, type ServerTrigger, type BackendApproval, type ServerNotification, type AutomationValidationError, type AutomationLifecycleState } from "@/connectors/api";
 
 /** A plan shape the live runner can execute (AgentPlan satisfies this). */
 export interface RunnableStep { toolId: string | null; title: string; detail: string; input: Record<string, unknown>; requiresApproval: boolean }
@@ -139,8 +142,9 @@ function mapStepStatus(s: string): RunStep["status"] {
   return "pending";
 }
 // WP-101 (sibling slice): partially_failed is terminal — omitting it here means the
-// poller never breaks on a run that's actually done, and it polls forever.
-const TERMINAL_RUN = ["completed", "failed", "cancelled", "expired", "partially_failed"];
+// poller never breaks on a run that's actually done, and it polls forever. Exported so
+// every poller (ExecutionMonitor, the chat run-watcher) stops on the SAME set.
+export const TERMINAL_RUN = ["completed", "failed", "cancelled", "expired", "partially_failed"];
 const PARKED_RUN = ["waiting_for_approval", "waiting_for_connector", "waiting_for_provider"];
 // Renders a tool's resolved input into a human-readable preview instead of the generic
 // "Draft prepared by your helper agent…" boilerplate — this is the actual, real content
@@ -552,12 +556,17 @@ export interface Store extends UIState {
   runPlan: (plan: RunnablePlan, opts?: { agentId?: string; automationId?: string; label?: string }) => Promise<string>;
   /** Poll a durable SERVER run to terminal/parked and mirror it into local state. */
   syncServerRun: (runId: string) => Promise<void>;
-  // Assistant — the conversational NL → plan → approval → execution → history loop.
+  // Assistant — the conversational NL → answer/build (+ approval-gated runs) → history loop.
   startConversation: (text: string, opts?: { visibility?: "household" | "personal" }) => Promise<string>;
   sendToAssistant: (conversationId: string, text: string, extraContext?: Record<string, unknown>) => Promise<void>;
   runConversationPlan: (conversationId: string, messageId: string) => Promise<void>;
   buildFromChat: (conversationId: string, messageId: string) => Promise<void>;
   deleteConversation: (id: string) => void;
+  /** Server-side triggers (chat-built automations live here, not in `data.automations`).
+   *  Refreshed after a chat build and by the Triggers tab, so a just-built automation is
+   *  reachable from "Open automation" instead of resolving to nothing. */
+  serverTriggers: ServerTrigger[];
+  refreshTriggers: () => Promise<ServerTrigger[]>;
   // Evolution — evidence-backed improvement proposals from real run traces.
   maybeProposeEvolution: (runId: string) => Promise<void>;
   reviewEvolution: (id: string, accept: boolean) => Promise<void>;
@@ -636,22 +645,14 @@ export interface Store extends UIState {
   approveRequest: (id: string, newPreview?: string) => Promise<void>;
   denyRequest: (id: string) => Promise<void>;
   askAgentForChanges: (id: string, note: string) => Promise<void>;
-  requestApproval: (input: {
-    title: string;
-    proposedAction: string;
-    riskLevel?: ApprovalRequest["riskLevel"];
-    category?: ApprovalRequest["category"];
-    agentId?: string;
-    spaceId?: string;
-    dataUsedSummary?: string;
-    recipientSummary?: string;
-    previewContent?: string;
-    description?: string;
-    toolId?: string;
-    toolInput?: Record<string, unknown>;
-    connectorId?: string;
-    backendApprovalId?: string;
-  }) => string;
+  /** Local projection of an approval that ALREADY exists server-side (runTool /
+   *  syncServerRun pass its backendApprovalId). Never call this for a brand-new ask —
+   *  the Approvals console reads server truth, so a local-only record is invisible to
+   *  everyone who could decide it. Use requestServerApproval for that. */
+  requestApproval: (input: ApprovalRequestInput) => string;
+  /** Create the approval on the server first, mirror it locally only on success; a
+   *  refusal is toasted with the reason and nothing is minted. Resolves the local id. */
+  requestServerApproval: (input: ApprovalRequestInput & { toolId: string }) => Promise<string | null>;
 
   /* files + knowledge */
   uploadFiles: (files: File[], spaceId?: string) => Promise<string[]>;
@@ -708,7 +709,46 @@ export interface Store extends UIState {
   /* settings */
   updateSettings: (patch: Partial<AppSettings>) => void;
   setActiveProvider: (id: AppSettings["ai"]["activeProvider"]) => void;
-  toggleSoloMode: () => void;
+}
+
+export interface ApprovalRequestInput {
+  title: string;
+  proposedAction: string;
+  riskLevel?: ApprovalRequest["riskLevel"];
+  category?: ApprovalRequest["category"];
+  agentId?: string;
+  spaceId?: string;
+  dataUsedSummary?: string;
+  recipientSummary?: string;
+  previewContent?: string;
+  description?: string;
+  toolId?: string;
+  toolInput?: Record<string, unknown>;
+  connectorId?: string;
+  backendApprovalId?: string;
+}
+
+/** One honest sentence for a refused/unreachable server write, shared by every
+ *  optimistic mutation that rolls back (tasks, events, agents, approvals). */
+function refusalMessage(error: string | undefined, fallback = "The server refused it — nothing was saved."): string {
+  if (error === "insufficient_role") return "Your role can't make this change.";
+  if (error === "authentication_required") return "Sign in to make this change.";
+  if (error === "backend_unreachable") return "Couldn't reach the server — nothing was saved.";
+  return fallback;
+}
+
+/** The subset of an Agent patch the server registry stores. Presentation-only keys
+ *  (space, playbooks, files, connectionIds) stay local and never warrant a round-trip. */
+function serverAgentPatch(patch: Partial<Agent>): Partial<ServerAgent> {
+  const p: Partial<ServerAgent> = {};
+  if (patch.name !== undefined) p.name = patch.name;
+  if (patch.icon !== undefined) p.icon = patch.icon;
+  if (patch.purpose !== undefined) p.purpose = patch.purpose;
+  if (patch.instructions !== undefined) p.instructions = patch.instructions;
+  if (patch.status !== undefined) p.status = patch.status;
+  if (patch.allowedToolIds !== undefined) p.allowedToolIds = patch.allowedToolIds;
+  if (patch.approvalPolicy !== undefined) p.approvalPolicy = patch.approvalPolicy;
+  return p;
 }
 
 /* --------------------------- persistence plumbing --------------------------- */
@@ -1225,12 +1265,26 @@ export const useStore = create<Store>((set, get) => {
         safetyLimits: parsed.approvalGates.length ? parsed.approvalGates : ["Asks before acting outside the household."],
       });
     },
-    updateAgent: (id, patch) =>
+    // Server-registry agents are re-overlaid on every hydrate (mergeServerAgents), so a
+    // local-only edit/pause/delete used to be reverted within seconds of the next poll.
+    // Each write below persists through the backend when the agent has a serverId, and
+    // rolls the optimistic change back — with the reason — when the server refuses.
+    updateAgent: (id, patch) => {
+      const before = get().data.agents.find((x) => x.id === id);
       commit((d) => {
         const a = d.agents.find((x) => x.id === id);
         if (a) Object.assign(a, patch, { updatedAt: nowISO() });
-      }),
+      });
+      const server = serverAgentPatch(patch);
+      if (!before?.serverId || !Object.keys(server).length) return;
+      void backend.patchAgent(before.serverId, server).then((r) => {
+        if (r.agent) return;
+        commit((d) => { const i = d.agents.findIndex((x) => x.id === id); if (i >= 0) d.agents[i] = before; });
+        toast({ kind: "error", title: "Couldn't save agent", message: refusalMessage(r.error, "The server refused the change — it was undone.") });
+      });
+    },
     setAgentStatus: (id, status) => {
+      const before = get().data.agents.find((x) => x.id === id);
       commit((d) => {
         const a = d.agents.find((x) => x.id === id);
         if (a) {
@@ -1250,18 +1304,43 @@ export const useStore = create<Store>((set, get) => {
         }
       });
       toast({ kind: "info", title: `Agent ${status.toLowerCase()}` });
+      if (!before?.serverId) return;
+      void backend.patchAgent(before.serverId, { status }).then((r) => {
+        if (r.agent) return;
+        commit((d) => { const a = d.agents.find((x) => x.id === id); if (a) { a.status = before.status; a.updatedAt = nowISO(); } });
+        toast({ kind: "error", title: `Couldn't ${status === "Paused" ? "pause" : "update"} agent`, message: refusalMessage(r.error, "The server refused the change — it was undone.") });
+      });
     },
     duplicateAgent: (id) => {
       const newId = uid("agent");
+      const source = get().data.agents.find((x) => x.id === id);
       commit((d) => {
         const a = d.agents.find((x) => x.id === id);
         if (a) {
           const copy: Agent = { ...structuredClone(a), id: newId, name: `${a.name} (Copy)`, status: "Draft", createdAt: nowISO(), updatedAt: nowISO() };
+          // The clone must NOT inherit the original's serverId: mergeServerAgents matches
+          // local agents by serverId, so the copy would be overwritten by the original on
+          // the very next hydrate — name, purpose and status all snapping back.
+          delete copy.serverId;
           d.agents.unshift(copy);
           pushActivity(d, { actorType: "user", actorId: "user", actorName: "You", actionType: "agent.created", description: `Duplicated “${a.name}”`, entityType: "agent", entityId: newId, status: "success" });
         }
       });
       toast({ kind: "success", title: "Agent duplicated" });
+      // A server-backed original gets a server-backed copy too, so the duplicate survives
+      // a refresh and other devices. If a hydrate already pulled the server copy in under
+      // its own id before this resolves, the local draft is the redundant one.
+      if (source?.serverId) {
+        void backend.duplicateAgentServer(source.serverId).then((r) => {
+          if (!r.agent) return;
+          const sid = r.agent.id;
+          commit((d) => {
+            if (d.agents.some((x) => x.id === sid || x.serverId === sid)) { d.agents = d.agents.filter((x) => x.id !== newId); return; }
+            const c = d.agents.find((x) => x.id === newId);
+            if (c) c.serverId = sid;
+          });
+        });
+      }
       return newId;
     },
     runAgent: (id) => {
@@ -1319,6 +1398,8 @@ export const useStore = create<Store>((set, get) => {
       });
     },
     deleteAgent: (id) => {
+      const before = get().data.agents.find((x) => x.id === id);
+      const index = get().data.agents.findIndex((x) => x.id === id);
       commit((d) => {
         const a = d.agents.find((x) => x.id === id);
         d.agents = d.agents.filter((x) => x.id !== id);
@@ -1326,6 +1407,12 @@ export const useStore = create<Store>((set, get) => {
         if (a) pushActivity(d, { actorType: "user", actorId: get().session?.actorId ?? "user", actorName: get().session?.actorName ?? "You", actionType: "agent.deleted", description: `Deleted agent “${a.name}”`, entityType: "agent", entityId: id, spaceId: a.spaceId, status: "warning" });
       });
       toast({ kind: "info", title: "Agent deleted" });
+      if (!before?.serverId) return;
+      void backend.deleteAgent(before.serverId).then((r) => {
+        if (r.ok) return;
+        commit((d) => { d.agents.splice(Math.min(index, d.agents.length), 0, before); });
+        toast({ kind: "error", title: "Couldn't delete agent", message: refusalMessage(r.error, "The server refused — the agent was restored.") });
+      });
     },
     runAgentLive: async (id) => {
       const d0 = get().data;
@@ -1518,11 +1605,11 @@ export const useStore = create<Store>((set, get) => {
         now: new Date().toISOString(),
         members: d0.members.map((m) => m.displayName),
         upcomingEvents: [...d0.events]
-          .filter((e) => { const ts = +new Date(e.startAt); return ts >= now - 36e5 && ts <= now + 7 * 864e5; })
+          .filter((e) => isLive(e, now) && +new Date(e.startAt) <= now + 7 * 864e5)
           .sort((a, b) => +new Date(a.startAt) - +new Date(b.startAt)).slice(0, 8)
-          .map((e) => ({ title: e.title, when: e.startAt, location: e.location ?? "" })),
+          .map((e) => ({ title: e.title, when: e.startAt, location: e.location ?? "", allDay: !!e.allDay })),
         openTasks: d0.tasks.filter((tk) => tk.status !== "done").slice(0, 10).map((tk) => ({ title: tk.title, due: tk.dueAt ?? "", type: tk.type })),
-        pendingApprovals: d0.approvals.filter((a) => a.status === "Pending").length,
+        pendingApprovals: s.serverApprovals.filter((a) => a.status === "pending").length,
         liveConnectors: s.connectors.filter((c) => c.live).map((c) => c.name),
         connectedAccounts: s.accounts.filter((a) => a.status === "connected").map((a) => `${a.provider} (${a.displayName})`),
         // Per-turn extras (e.g. { attachedFileId, attachedFileName } from the "+" attach button).
@@ -1539,22 +1626,35 @@ export const useStore = create<Store>((set, get) => {
       // — otherwise the label would flicker back to "Generating…" mid-search, which is the
       // same wrong-but-confident status the mobile client fixed with its phaseLockedRef.
       let phaseLocked = false;
+      const patchMsg = (fn: (m: AssistantMessage) => void) => commit((d) => {
+        const m = d.conversations?.find((x) => x.id === conversationId)?.messages.find((x) => x.id === aMsgId);
+        if (m) fn(m);
+      });
       const r = await backend.streamAssistant({ message: t, context: ctx, conversationId }, (tokens) => {
-        if (tokens === 4 && !phaseLocked) {
-          commit((d) => {
-            const c = d.conversations?.find((x) => x.id === conversationId); if (!c) return;
-            const m = c.messages.find((x) => x.id === aMsgId); if (!m) return;
-            m.status = "streaming";
-          });
-        }
+        if (tokens === 4 && !phaseLocked) patchMsg((m) => { m.status = "streaming"; });
       }, (phase) => {
         phaseLocked = true;
-        commit((d) => {
-          const c = d.conversations?.find((x) => x.id === conversationId); if (!c) return;
-          const m = c.messages.find((x) => x.id === aMsgId); if (!m) return;
-          m.status = phase === "searching" ? "searching" : phase === "creating" ? "creating" : "streaming";
+        patchMsg((m) => { m.status = phase === "searching" ? "searching" : phase === "creating" ? "creating" : "streaming"; });
+      }, (text) => {
+        // The reply as it streams — rendered live; the engine's final `answer` replaces it on done.
+        patchMsg((m) => { m.text += text; m.status = "streaming"; });
+      }, (ev) => {
+        // Live tool frames become provisional chips (running → done/failed as they settle);
+        // the engine's authoritative toolCalls list replaces them on done.
+        patchMsg((m) => {
+          const calls = m.toolCalls ?? (m.toolCalls = []);
+          const status: AssistantToolCall["status"] = ev.status === "error" ? "failed" : ev.status === "called" ? "done" : "running";
+          const entry: AssistantToolCall = { tool: ev.tool, label: ev.label ?? ev.tool, status, ok: ev.status === "called" ? true : ev.status === "error" ? false : undefined, summary: ev.message };
+          const i = calls.findIndex((c) => c.tool === ev.tool && c.status === "running");
+          if (i >= 0) calls[i] = entry; else calls.push(entry);
         });
       });
+      // A durable run can now arrive with ANY kind — an approval-gated step parks a run
+      // even on a plain "answer" — so the attach + watcher below key off the run, not kind.
+      const runId = r.ok ? (r.run?.id ?? r.runId ?? r.runIds?.[0] ?? undefined) : undefined;
+      const okText = r.kind === "plan" && r.plan ? (r.answer || r.plan.summary || (runId ? "On it — doing it now." : "Here's my plan."))
+        : r.kind === "build" && r.build ? (r.answer || r.build.summary || "Here's what I'll set up.")
+        : (r.answer || "I'm not sure how to help with that yet.");
       commit((d) => {
         const c = d.conversations?.find((x) => x.id === conversationId); if (!c) return;
         const m = c.messages.find((x) => x.id === aMsgId); if (!m) return;
@@ -1581,26 +1681,23 @@ export const useStore = create<Store>((set, get) => {
         } else if (r.kind === "plan" && r.plan) {
           // Auto-run (C-intel): the server already started executing this plan —
           // attach the run so the card shows live status instead of a Run button.
-          if (r.run?.id) { m.status = "done"; m.runId = r.run.id; m.text = r.answer || r.plan.summary || "On it — doing it now."; }
-          else { m.status = "planned"; m.text = r.answer || r.plan.summary || "Here's my plan."; }
-          m.plan = r.plan; m.model = r.model;
+          m.status = runId ? "done" : "planned"; m.plan = r.plan;
         } else if (r.kind === "build" && r.build) {
-          m.status = "planned"; m.text = r.answer || r.build.summary || "Here's what I'll set up."; m.build = r.build; m.model = r.model;
+          m.status = "planned"; m.build = r.build;
         } else {
-          m.status = "answered"; m.text = r.answer || "I'm not sure how to help with that yet."; m.model = r.model;
+          m.status = "answered";
         }
+        if (r.ok) { m.text = okText; m.model = r.model; m.toolCalls = r.toolCalls; if (runId) m.runId = runId; }
         c.updatedAt = nowISO();
       });
-      // Watch a server-auto-started run to a terminal state, hydrating so its
-      // live status, run_result message, and any self-repair follow-ups (status
-      // lines, the repaired run, the save-as-helper offer) land in this thread.
-      if (r.ok && r.kind === "plan" && r.run?.id) {
-        const runId = r.run.id;
+      // Watch a server-started run to a terminal state, hydrating so its live status,
+      // run_result message, and any self-repair follow-ups (status lines, the repaired
+      // run, the save-as-helper offer) land in this thread.
+      if (r.ok && runId) {
         // The exact text this turn's message was optimistically set to above — used
         // below to detect whether anything has already replaced it before we do.
-        const optimisticText = r.answer || r.plan?.summary || "On it — doing it now.";
+        const optimisticText = okText;
         void (async () => {
-          const TERMINAL_RAW = ["completed", "failed", "cancelled", "expired"];
           let last: ServerRun | null = null;
           for (let i = 0; i < 60; i++) {
             await new Promise((res) => setTimeout(res, 2500));
@@ -1615,7 +1712,7 @@ export const useStore = create<Store>((set, get) => {
             // single run's status (one cheap request) for terminal detection
             // and the honesty fallback below.
             last = await backend.getRun(runId);
-            if (last && TERMINAL_RAW.includes(last.status)) break;
+            if (last && TERMINAL_RUN.includes(last.status)) break;
           }
           // One unconditional sync now that the run is terminal/exhausted — cheap
           // (fires once, not on a timer) and a safety net in case a rev push was
@@ -1686,7 +1783,16 @@ export const useStore = create<Store>((set, get) => {
         const serverAgents = await backend.agents();
         commit((d) => mergeServerAgents(d, serverAgents, { connectors: get().connectors, providers: get().providers, actorId: get().session?.actorId }));
       } catch { /* next hydrate catches up */ }
+      // A chat-built automation is a SERVER trigger — refetch so "Open automation" lands
+      // on it instead of an Automations screen that only knows client-local rows.
+      if (cr.automation) void get().refreshTriggers();
       toast({ kind: "success", title: "Built", message: parts.join(", ") || "Created." });
+    },
+    serverTriggers: [],
+    refreshTriggers: async () => {
+      const serverTriggers = await backend.triggers();
+      set({ serverTriggers });
+      return serverTriggers;
     },
     runConversationPlan: async (conversationId, messageId) => {
       const c = get().data.conversations?.find((x) => x.id === conversationId);
@@ -1782,8 +1888,22 @@ export const useStore = create<Store>((set, get) => {
       toast({ kind: "info", title: "New improvement suggestion", message: "FamiliOS learned from a failed run — review it in Activity → Improvements." });
     },
     reviewEvolution: async (id, accept) => {
+      const local = get().data.evolutions?.find((x) => x.id === id);
       // Optimistically mark reviewed locally (instant UI feedback)
-      commit((d) => { const e = d.evolutions?.find((x) => x.id === id); if (e) e.status = accept ? "accepted" : "rejected"; });
+      commit((d) => { const e = d.evolutions?.find((x) => x.id === id); if (e) { e.status = accept ? "accepted" : "rejected"; e.reviewedAt = Date.now(); e.reviewedBy = get().session?.actorName; } });
+      // A proposal THIS client minted (maybeProposeEvolution) has no server row, so posting
+      // its id could only ever produce an error toast and a permanently-pending card.
+      // Resolve it here: accepting applies the suggested instructions to the agent it names.
+      if (local) {
+        const applied = accept && local.kind === "agent" && !!local.agentId && !!local.after;
+        if (applied) get().updateAgent(local.agentId!, { instructions: local.after! });
+        toast({
+          kind: accept ? "success" : "info",
+          title: accept ? "Improvement accepted" : "Suggestion dismissed",
+          message: accept ? (applied ? `${local.agentName ?? "The agent"}'s instructions were updated.` : "Accepted — apply the change manually in the builder.") : undefined,
+        });
+        return;
+      }
       // Server-side apply: versions the target entity (agent, skill) durably
       try {
         const r = await backend.reviewEvolution(id, accept);
@@ -1955,7 +2075,7 @@ export const useStore = create<Store>((set, get) => {
         createdAt: k.createdAt, updatedAt: k.updatedAt,
       });
       const mapEvent = (e: ServerEvent): CalendarEvent => ({
-        id: e.id, serverId: e.id, title: e.title, startAt: e.startAt ?? "", endAt: e.endAt ?? undefined,
+        id: e.id, serverId: e.id, title: e.title, startAt: e.startAt ?? "", endAt: e.endAt ?? undefined, allDay: e.allDay || undefined,
         location: e.location || undefined, spaceId: e.spaceId, memberIds: e.participantIds ?? [],
         category: e.category ?? "General", movable: e.layer === "canonical", source: e.source ?? "FamiliOS",
         layer: e.layer, visibility: e.visibility, ownerId: e.ownerId, driverId: e.driverId, editable: e.editable,
@@ -1972,8 +2092,10 @@ export const useStore = create<Store>((set, get) => {
         visibility: t.visibility, listName: t.listName, createdAt: t.createdAt, updatedAt: t.updatedAt,
       });
       const MEMORY_TYPES: MemoryType[] = ["Fact", "Preference", "Routine", "Rule", "Contact", "Insight"];
+      // Attribution is the server's to give (a run's agent); "" means it gave none, and
+      // the Memory surfaces hide their agent filter/tab rather than offer one that can't match.
       const mapMemory = (m: ServerMemory): MemoryEntry => ({
-        id: m.id, serverId: m.id, agentId: "", spaceId: "sp-family",
+        id: m.id, serverId: m.id, agentId: m.agentId ?? m.source?.agentId ?? "", spaceId: "sp-family",
         type: (MEMORY_TYPES as string[]).includes(m.type) ? (m.type as MemoryType) : "Insight",
         title: m.type ? `${m.type[0].toUpperCase()}${m.type.slice(1)}` : "Memory",
         content: m.text, tags: [], source: "Learned from a run",
@@ -1991,7 +2113,7 @@ export const useStore = create<Store>((set, get) => {
       // fields via a local cast instead of editing that (additive-only, out-of-scope)
       // file — the runtime object has always carried them; only the type didn't.
       type RawConvMsg = ServerConversationMessage & {
-        runId?: string | null; error?: string | null; kind?: string;
+        error?: string | null; kind?: string;
         artifactId?: string | null; link?: string | null; taskId?: string | null; approvalId?: string | null;
         links?: { kind: "task" | "artifact"; id: string; label: string }[];
       };
@@ -2002,7 +2124,7 @@ export const useStore = create<Store>((set, get) => {
           return {
             id: `${c.id}-m${i}`, role: m.role, text: m.text, createdAt: m.at,
             plan: m.plan ?? undefined, build: m.build ?? undefined, builtIds: m.builtIds ?? undefined, model: m.model ?? undefined,
-            runId: m.runId ?? undefined, kind: m.kind, error: m.error ?? undefined,
+            runId: m.runId ?? m.runIds?.[0] ?? undefined, toolCalls: m.toolCalls ?? undefined, kind: m.kind, error: m.error ?? undefined,
             artifactId: m.artifactId ?? undefined, artifactLink: m.link ?? undefined,
             taskId: m.taskId ?? undefined, approvalId: m.approvalId ?? undefined,
             links: m.links ?? undefined,
@@ -2091,7 +2213,17 @@ export const useStore = create<Store>((set, get) => {
         // memories cleared on the server (reset / fresh start) must NOT survive as local ghosts —
         // only user-added local memories (no serverId, never pushed) are kept. This was the
         // "33 memories persist after a server wipe" bug: the old merge kept stale serverId rows.
-        d.memories = mergeServerAuthoritative(memory.map(mapMemory), d.memories);
+        // There is no memory PATCH endpoint, so an edit made here can never reach the
+        // server row — and the old merge re-mapped that row on every poll, silently
+        // reverting the edit. A locally-edited copy (updatedAt later than the server's
+        // stamp) carries its edits forward instead; deletions still propagate.
+        const priorMemories = new Map(d.memories.filter((m) => m.serverId).map((m) => [m.serverId!, m]));
+        d.memories = mergeServerAuthoritative(memory.map(mapMemory), d.memories).map((m) => {
+          const prev = m.serverId ? priorMemories.get(m.serverId) : undefined;
+          return prev && prev.updatedAt > m.updatedAt
+            ? { ...m, title: prev.title, content: prev.content, type: prev.type, tags: prev.tags, sensitive: prev.sensitive, userApproved: prev.userApproved, spaceId: prev.spaceId, agentId: prev.agentId || m.agentId, updatedAt: prev.updatedAt }
+            : m;
+        });
         // Durable files (server blobs). Web reads the same /api/files the iOS app writes to,
         // so uploads survive refresh/device-switch and show up in the shared Library.
         // Server-authoritative: a file deleted on the server is dropped here; only offline /
@@ -2101,9 +2233,17 @@ export const useStore = create<Store>((set, get) => {
         // user had just processed flipped back to "Not indexed" seconds after the "File
         // processed" toast, which is the contradiction that was reported. Carry this
         // browser's own answer forward rather than overwriting it with a guess.
+        // Same class of wipe for name / tags / sensitive: all three are editable here, but
+        // there is no file PATCH endpoint (src/connectors/api.ts has upload/content/delete
+        // only), so the server copy can never learn them — the previous local record is
+        // the only place they exist. Carried forward by serverId; deletions still propagate.
         const priorIndexed = new Set(d.files.filter((f) => f.searchIndexed).map((f) => f.serverId ?? f.id));
-        d.files = mergeServerAuthoritative(files.map(mapFile), d.files)
-          .map((f) => (priorIndexed.has(f.serverId ?? f.id) ? { ...f, searchIndexed: true } : f));
+        const priorFiles = new Map(d.files.filter((f) => f.serverId).map((f) => [f.serverId!, f]));
+        d.files = mergeServerAuthoritative(files.map(mapFile), d.files).map((f) => {
+          const prev = f.serverId ? priorFiles.get(f.serverId) : undefined;
+          const carried = prev ? { ...f, name: prev.name, tags: prev.tags, sensitive: prev.sensitive } : f;
+          return priorIndexed.has(f.serverId ?? f.id) ? { ...carried, searchIndexed: true } : carried;
+        });
         // Server-owned Knowledge (user-authored, editable, durable). Server-authoritative:
         // knowledge deleted on the server is dropped here; only never-synced local drafts survive.
         d.knowledge = mergeServerAuthoritative(knowledge.map(mapKnowledge), d.knowledge);
@@ -2919,6 +3059,17 @@ export const useStore = create<Store>((set, get) => {
       toast({ kind: "warn", title: "Approval requested", message: input.title });
       return id;
     },
+    requestServerApproval: async (input) => {
+      // Same route runTool takes for a gated tool: the server record is what the Approvals
+      // console (and every other device) can see and decide; the local row only mirrors it.
+      const created = await backend.createApproval({ toolId: input.toolId, connectorId: input.connectorId, input: input.toolInput ?? {}, category: input.category, preview: input.previewContent ?? input.proposedAction });
+      if (!created.approval) {
+        toast({ kind: "error", title: "Couldn't request approval", message: refusalMessage(created.error, created.error ? `The server refused it (${created.error}).` : "The server refused it.") });
+        return null;
+      }
+      void get().refreshApprovalsAndNotifications();
+      return get().requestApproval({ ...input, backendApprovalId: created.approval.id });
+    },
 
     /* --------------------------- files + knowledge ------------------------ */
     uploadFiles: async (files, spaceId) => {
@@ -3267,7 +3418,8 @@ export const useStore = create<Store>((set, get) => {
     toggleMemorySensitive: (id) =>
       commit((d) => {
         const m = d.memories.find((x) => x.id === id);
-        if (m) m.sensitive = !m.sensitive;
+        // updatedAt is what the hydrate merge reads to keep a local edit — stamp it.
+        if (m) { m.sensitive = !m.sensitive; m.updatedAt = nowISO(); }
       }),
 
     /* ------------------------------ mini apps ----------------------------- */
@@ -3358,48 +3510,77 @@ export const useStore = create<Store>((set, get) => {
         });
       });
       toast({ kind: "success", title: "Reminder added" });
-      // Persist to the server when online; on success tag the optimistic item with its
-      // serverId so later updates target the durable record (and the next hydrate
-      // reconciles to the canonical server task).
-      if (get().backendOnline) {
+      // Persist to the server; on success tag the optimistic item with its serverId so
+      // later updates target the durable record. A local-only session (T-03) has no
+      // server household to write to, so it stays a device-local task on purpose.
+      if (!get().isLocalSession) {
         void backend.createTaskRemote({ title: input.title, type: input.type, status: input.status, dueAt: input.dueAt ?? null, assignedMemberId: input.assignedMemberId ?? null, spaceId: input.spaceId, priority: input.priority, amount: input.amount ?? null, notes: input.notes ?? "", visibility: input.visibility ?? "household" })
-          .then((r) => { if (r.task) commit((d) => { const t = d.tasks.find((x) => x.id === id); if (t) t.serverId = r.task!.id; }); });
+          .then((r) => {
+            if (r.task) { commit((d) => { const t = d.tasks.find((x) => x.id === id); if (t) t.serverId = r.task!.id; }); return; }
+            // Same shape as createEvent (ISS-105): a create the server refused must not
+            // linger as a phantom that survives every hydrate. Roll it back and say so.
+            commit((d) => { d.tasks = d.tasks.filter((x) => x.id !== id); });
+            toast({ kind: "error", title: "Couldn't save that task", message: refusalMessage(r.error) });
+          });
       }
       return id;
     },
+    // Server-backed tasks/events ALWAYS go to the server (never skipped on a stale
+    // `backendOnline`), and a refused or unreachable write is rolled back with a toast —
+    // a fire-and-forget PATCH left this device believing a change nobody else could see.
     updateTask: (id, patch) => {
-      let serverId: string | undefined;
+      const before = get().data.tasks.find((x) => x.id === id);
       commit((d) => {
         const t = d.tasks.find((x) => x.id === id);
-        if (t) { Object.assign(t, patch, { updatedAt: nowISO() }); serverId = t.serverId; }
+        if (t) Object.assign(t, patch, { updatedAt: nowISO() });
       });
-      if (serverId && get().backendOnline) void backend.updateTaskRemote(serverId, patch as Record<string, unknown>);
+      if (!before?.serverId) return;
+      void backend.updateTaskRemote(before.serverId, patch as Partial<ServerTask>).then((r) => {
+        if (r.task) return;
+        commit((d) => { const i = d.tasks.findIndex((x) => x.id === id); if (i >= 0) d.tasks[i] = before; });
+        toast({ kind: "error", title: "Couldn't save that change", message: refusalMessage(r.error, "The server refused the change — it was undone.") });
+      });
     },
     setTaskStatus: (id, status) => {
-      let serverId: string | undefined;
+      const before = get().data.tasks.find((x) => x.id === id);
       commit((d) => {
         const t = d.tasks.find((x) => x.id === id);
-        if (t) { t.status = status; t.updatedAt = nowISO(); serverId = t.serverId; }
+        if (t) { t.status = status; t.updatedAt = nowISO(); }
       });
-      if (serverId && get().backendOnline) void backend.updateTaskRemote(serverId, { status });
+      if (!before?.serverId) return;
+      void backend.updateTaskRemote(before.serverId, { status }).then((r) => {
+        if (r.task) return;
+        commit((d) => { const t = d.tasks.find((x) => x.id === id); if (t) { t.status = before.status; t.updatedAt = nowISO(); } });
+        toast({ kind: "error", title: "Couldn't update that task", message: refusalMessage(r.error, "The server refused the change — it was undone.") });
+      });
     },
     deleteTask: (id) => {
-      const serverId = get().data.tasks.find((x) => x.id === id)?.serverId;
+      const before = get().data.tasks.find((x) => x.id === id);
+      const index = get().data.tasks.findIndex((x) => x.id === id);
       commit((d) => { d.tasks = d.tasks.filter((x) => x.id !== id); });
-      if (serverId && get().backendOnline) void backend.deleteTaskRemote(serverId);
+      if (!before?.serverId) return;
+      void backend.deleteTaskRemote(before.serverId).then((r) => {
+        if (r.ok) return;
+        commit((d) => { d.tasks.splice(Math.min(index, d.tasks.length), 0, before); });
+        toast({ kind: "error", title: "Couldn't delete that task", message: refusalMessage(r.error, "The server refused — the task was restored.") });
+      });
     },
     moveEvent: (id, newStartISO) => {
-      let serverId: string | undefined;
+      const before = get().data.events.find((x) => x.id === id);
       commit((d) => {
         const e = d.events.find((x) => x.id === id);
         if (e) {
           e.startAt = newStartISO;
-          serverId = e.serverId;
           pushActivity(d, { actorType: "user", actorId: "user", actorName: "You", actionType: "calendar.changed", description: `Moved “${e.title}”`, entityType: "event", entityId: id, spaceId: e.spaceId, status: "info" });
         }
       });
-      if (serverId && get().backendOnline) void backend.updateEvent(serverId, { startAt: newStartISO });
       toast({ kind: "success", title: "Event moved" });
+      if (!before?.serverId) return;
+      void backend.updateEvent(before.serverId, { startAt: newStartISO }).then((r) => {
+        if (r.event) return;
+        commit((d) => { const e = d.events.find((x) => x.id === id); if (e) e.startAt = before.startAt; });
+        toast({ kind: "error", title: "Couldn't move that event", message: refusalMessage(r.error, "The server refused the move — it was undone.") });
+      });
     },
     createEvent: (input) => {
       const id = uid("event");
@@ -3409,6 +3590,7 @@ export const useStore = create<Store>((set, get) => {
           title: input.title,
           startAt: input.startAt,
           endAt: input.endAt,
+          allDay: input.allDay,
           location: input.location,
           spaceId: input.spaceId ?? d.spaces[0].id,
           memberIds: input.memberIds ?? [],
@@ -3420,7 +3602,7 @@ export const useStore = create<Store>((set, get) => {
         });
       });
       if (get().backendOnline) {
-        void backend.createEvent({ title: input.title, startAt: input.startAt ?? null, endAt: input.endAt ?? null, location: input.location ?? "", spaceId: input.spaceId, participantIds: input.memberIds ?? [], category: input.category, visibility: input.visibility ?? "household" })
+        void backend.createEvent({ title: input.title, startAt: input.startAt ?? null, endAt: input.endAt ?? null, allDay: input.allDay, location: input.location ?? "", spaceId: input.spaceId, participantIds: input.memberIds ?? [], category: input.category, visibility: input.visibility ?? "household" })
           .then((r) => {
             if (r.event) { commit((d) => { const e = d.events.find((x) => x.id === id); if (e) e.serverId = r.event!.id; }); return; }
             // ISS-105: a create the server REFUSED must not linger as a phantom. With no
@@ -3535,12 +3717,6 @@ export const useStore = create<Store>((set, get) => {
         d.settings.ai.activeProvider = id;
       });
       toast({ kind: "info", title: "AI provider updated", message: id === "local" ? "Using the local rules engine." : "Manage real providers in Settings → AI Providers." });
-    },
-    toggleSoloMode: () => {
-      commit((d) => {
-        d.settings.soloProfessionalMode = !d.settings.soloProfessionalMode;
-      });
-      toast({ kind: "info", title: "Solo Professional Mode toggled" });
     },
   };
 });

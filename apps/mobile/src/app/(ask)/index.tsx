@@ -18,9 +18,10 @@ import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { api, type AgentPlan, type AssistantResult, type ChatBuild, type ConversationRec, type MemberRec, type NestRec, type ResultGroupRec, type RunRec } from "@/lib/api";
+import { api, type AgentPlan, type AssistantResult, type AssistantToolCall, type ChatBuild, type ConversationRec, type MemberRec, type NestRec, type ResultGroupRec, type RunRec } from "@/lib/api";
 import { ResultCards } from "@/components/ResultCards";
 import { streamAssistant, type AssistantPhase } from "@/lib/assistant-stream";
+import { coversDay } from "@/lib/event-days";
 import { getLocationContext } from "@/lib/location";
 import { canManageHousehold, canManageOwn, capabilitiesFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
@@ -56,6 +57,8 @@ interface Msg {
   // K2 — what the run actually fetched, as cards, in line. "still not returned in line, in
   // chat, results as cards."
   resultGroups?: ResultGroupRec[];
+  /** The tools this turn called — a quiet receipt under the reply, never the reply itself. */
+  toolCalls?: AssistantToolCall[];
   /** What rode along with this message, so the bubble can show it rather than name it. */
   attachments?: { key: string; name: string; uri?: string; mime?: string }[];
 }
@@ -131,6 +134,9 @@ export default function AskScreen() {
    * to "Writing…" a beat after appearing. */
   const [phase, setPhase] = useState<AssistantPhase>("thinking");
   const phaseLockedRef = useRef(false);
+  /* The tool the server is calling right now, by its human label — "Working: Calendar" under
+   * the dots. Cleared when the call finishes; the receipt row under the reply is the record. */
+  const [working, setWorking] = useState<string | null>(null);
   const [buildingId, setBuildingId] = useState<string | null>(null);
   // Server-durable thread: created on the first send so both turns persist and
   // the same conversation shows up on the web. Opening a recent chat resumes it.
@@ -217,10 +223,16 @@ export default function AskScreen() {
   const followRef = useRef(false);
   const revealRef = useRef<{ timer: ReturnType<typeof setInterval>; msgId: string; full: string } | null>(null);
 
-  /* ---------- progressive reveal (client-side; the server streams progress
-     pings, not text — see src/lib/assistant-stream.ts) ---------- */
+  /* ---------- progressive reveal (client-side, for the paths that arrive all at once:
+     the non-streaming fallback, or a server that sent no "delta" frames). When the reply
+     streams as text, the deltas ARE the reveal — see send()) ---------- */
   const setMsgText = useCallback((id: string, t: string) => {
     setMsgs((m) => m.map((x) => (x.id === id ? { ...x, text: t } : x)));
+  }, []);
+  /** Replace the message with this id, or append it if it isn't there yet — a streamed reply
+   *  creates its bubble on the first delta, so "done" must not create a second one. */
+  const upsertMsg = useCallback((msg: Msg) => {
+    setMsgs((m) => (m.some((x) => x.id === msg.id) ? m.map((x) => (x.id === msg.id ? { ...x, ...msg } : x)) : [...m, msg]));
   }, []);
 
   const flushReveal = useCallback(() => {
@@ -261,8 +273,10 @@ export default function AskScreen() {
     const out: Suggestion[] = [];
     const pending = approvals.filter((a) => a.status === "pending").length;
     if (pending > 0 && canBuild) out.push({ text: pending === 1 ? "What's waiting on my approval?" : `Summarize the ${pending} approvals waiting on me`, icon: "checkmark.shield" });
-    const today = new Date().toISOString().slice(0, 10);
-    const todays = events.filter((e) => (e.startAt ?? "").startsWith(today)).length;
+    // Local calendar day, spans included — a UTC string prefix put the evening's plans on
+    // tomorrow and missed a multi-day event that started yesterday.
+    const now = new Date();
+    const todays = events.filter((e) => coversDay(e, now)).length;
     if (todays > 0) out.push({ text: "What does the family's day look like?", icon: "calendar" });
     const nowIso = new Date().toISOString();
     const overdue = tasks.filter((t) => t.status !== "done" && t.dueAt && t.dueAt < nowIso).length;
@@ -310,6 +324,7 @@ export default function AskScreen() {
         error: m.kind === "error" || (m.kind === "run_result" && m.status === "failed"),
         runId: m.runId ?? undefined,
         resultGroups: groups,
+        toolCalls: m.toolCalls?.length ? m.toolCalls : undefined,
       };
     }), []);
 
@@ -614,20 +629,33 @@ export default function AskScreen() {
       if (ready.length > 1) ctx.attachedAlsoNames = ready.slice(1).map((a) => a.name);
     }
     const context = Object.keys(ctx).length ? ctx : undefined;
+    const aid = uid + "a";
+    /* Reply text as it streams. The bubble appears on the first delta and grows with each
+     * one — the real thing, so the client-side reveal below is only for replies that arrive
+     * whole. Kept in a local so a fallback mid-stream can't leave a half-bubble behind. */
+    let streamed = "";
     let r: AssistantResult;
     try {
       r = await streamAssistant(t, {
         conversationId: convId ?? undefined,
         context,
         onProgress: () => { if (!phaseLockedRef.current) setPhase("writing"); },
+        onDelta: (piece) => {
+          streamed += piece;
+          if (!phaseLockedRef.current) setPhase("writing");
+          upsertMsg({ id: aid, role: "assistant", text: streamed });
+        },
+        onTool: (ev) => setWorking(ev.status === "running" ? (ev.label ?? ev.tool) : null),
         onPhase: (p) => { phaseLockedRef.current = true; setPhase(p); },
       });
     } catch {
       // Any stream failure (transport, auth, parse) → non-streaming call, so
       // behavior never regresses. The server persists the turn either way.
+      if (streamed) { streamed = ""; setMsgs((m) => m.filter((x) => x.id !== aid)); }
       r = await api.assistant(t, { conversationId: convId ?? undefined, context });
     }
     setBusy(false);
+    setWorking(null);
     /* M4 [05:32] — "it doesn't really rename like it should intelligently."
      *
      * It DOES: the server names a thread from its first exchange (I1). But the client seeded
@@ -637,31 +665,37 @@ export default function AskScreen() {
     if (isFirstExchange) {
       void api.conversations().then((cs) => setRecent(cs.slice(0, 8))).catch(() => null);
     }
-    const aid = uid + "a";
     if (r.ok) {
+      // "plan" no longer comes out of the replaced engine, but the branch stays: an old
+      // thread's persisted plan message still renders through the same shape.
       const full =
         r.kind === "plan" && r.plan ? (r.answer || r.plan.summary || "On it.")
         : r.kind === "build" && r.build ? (r.answer || r.build.summary || "Here's what I'll set up.")
-        : (r.answer || "I'm not sure how to help with that yet.");
-      setMsgs((m) => [...m, {
-        id: aid, role: "assistant", text: "",
+        : (r.answer || streamed || "I'm not sure how to help with that yet.");
+      // Every run this turn started — `run` rides along with ANY kind now (an "answer"
+      // whose step was queued for approval still has one), so never gate this on kind.
+      const runIds = [...new Set([r.run?.id, r.runId, ...(r.runIds ?? [])].filter((x): x is string => !!x))];
+      upsertMsg({
+        id: aid, role: "assistant", text: streamed ? full : "",
         plan: r.kind === "plan" ? r.plan ?? undefined : undefined,
         build: r.kind === "build" ? r.build ?? undefined : undefined,
-        runId: r.run?.id,
-      }]);
-      revealInto(aid, full);
-      // Do-requests already started executing server-side — watch the run live;
-      // its results (and any self-repair) come back into this thread.
-      if (r.run?.id && convId) watchServerRun(r.run.id, convId);
+        runId: runIds[0],
+        toolCalls: r.toolCalls?.length ? r.toolCalls : undefined,
+      });
+      // Streamed text is already on screen; only a whole-at-once reply gets the reveal.
+      if (!streamed) revealInto(aid, full);
+      // Runs already executing server-side — watch each live; their results (and any
+      // self-repair) come back into this thread.
+      if (convId) for (const id of runIds) watchServerRun(id, convId);
     } else {
-      setMsgs((m) => [...m, {
+      upsertMsg({
         id: aid, role: "assistant", error: true,
         text: r.error === "no_provider"
           ? "I need an AI provider connected (Settings → AI Providers), then ask me again."
           : (r.message || "I couldn't reach the AI provider just now."),
-      }]);
+      });
     }
-  }, [attached, busy, conversationId, flushReveal, revealInto, space, text, watchServerRun]);
+  }, [attached, busy, conversationId, flushReveal, revealInto, space, text, upsertMsg, watchServerRun]);
 
   /* ---------- attachments ----------
    * The bubble appears the moment you pick, carrying its own spinner, and resolves on its own.
@@ -1166,6 +1200,9 @@ export default function AskScreen() {
                   ) : null}
                   {/* K2 — the rows the run fetched, as real cards, right here in the thread. */}
                   {m.resultGroups ? <ResultCards groups={m.resultGroups} /> : null}
+                  {/* What the engine actually did this turn — small, muted, and honest about
+                      the step that's still waiting on someone. */}
+                  {m.toolCalls?.length ? <ToolCallsRow calls={m.toolCalls} /> : null}
                   {plan ? <PlanCard plan={plan} autoRun={!!m.runId} onRun={() => void runPlan(plan)} /> : null}
                   {build ? (
                     isGuest && !m.built ? (
@@ -1254,7 +1291,7 @@ export default function AskScreen() {
             </Card>
           ) : null}
 
-          {busy ? <TypingBubble phase={phase} /> : null}
+          {busy ? <TypingBubble phase={phase} working={working} /> : null}
         </ScrollView>
 
         {/* Composer */}
@@ -1421,8 +1458,9 @@ const PHASE_LABEL: Record<AssistantPhase, string> = {
   creating: "Setting that up…",
 };
 
-/** Three softly pulsing dots — the "assistant is working" bubble. */
-function TypingBubble({ phase }: { phase: AssistantPhase }) {
+/** Three softly pulsing dots — the "assistant is working" bubble. `working` names the tool
+ *  the server is calling right now, when it has said so. */
+function TypingBubble({ phase, working }: { phase: AssistantPhase; working?: string | null }) {
   const { spacing } = useTheme();
   return (
     <Animated.View entering={FadeInDown.duration(200).reduceMotion(ReduceMotion.System)} style={{ alignItems: "flex-start" }}>
@@ -1432,9 +1470,44 @@ function TypingBubble({ phase }: { phase: AssistantPhase }) {
           <TypingDot delay={140} />
           <TypingDot delay={280} />
         </View>
-        <T kind="caption">{PHASE_LABEL[phase]}</T>
+        <T kind="caption">{working ? `Working: ${working}` : PHASE_LABEL[phase]}</T>
       </Card>
     </Animated.View>
+  );
+}
+
+/** The turn's tool calls, as a receipt: a tick for what got done, a warning for what
+ *  didn't, and the one that's waiting on a person tappable through to the Inbox. */
+function ToolCallsRow({ calls }: { calls: AssistantToolCall[] }) {
+  const { colors, spacing } = useTheme();
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, paddingHorizontal: 4 }} accessibilityRole="list">
+      {calls.map((c, i) => {
+        const label = c.label || c.tool;
+        if (c.status === "awaiting_approval") {
+          return (
+            <PressableScale
+              key={i}
+              onPress={() => router.push("/inbox")}
+              haptic="select" hitSlop={6}
+              accessibilityRole="button"
+              accessibilityLabel={`${label} is waiting for approval. Open Inbox`}
+              style={{ flexDirection: "row", alignItems: "center", gap: 4 }}
+            >
+              <Sym name="clock" size={10} color={colors.amber} />
+              <T kind="caption" color={colors.amber}>Waiting for approval · {label}</T>
+            </PressableScale>
+          );
+        }
+        const failed = c.status === "failed" || c.status === "blocked" || c.ok === false;
+        return (
+          <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 4 }} accessibilityLabel={`${label}: ${failed ? c.status : "done"}`}>
+            <Sym name={failed ? "exclamationmark.triangle" : "checkmark"} size={10} color={failed ? colors.coral : colors.textFaint} />
+            <T kind="caption" color={failed ? colors.coral : colors.textFaint}>{label}</T>
+          </View>
+        );
+      })}
+    </View>
   );
 }
 

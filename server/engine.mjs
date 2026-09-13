@@ -55,6 +55,11 @@ function fireRunFinished(runId) {
   for (const cb of _runFinishedHooks) {
     try { void Promise.resolve(cb(run)).catch(() => {}); } catch { /* observer-only */ }
   }
+  // The per-run EventEmitter was never released — one live emitter per run for the life of
+  // the process. A finished run's SSE subscribers get their terminal event first (emitted
+  // just before this hook fires); a minute later the entry goes.
+  const t = setTimeout(() => emitters.delete(runId), 60_000);
+  if (typeof t.unref === "function") t.unref();
 }
 
 /* ---- WP-004: PARKED-RUN hooks (ISS-004) ----
@@ -345,6 +350,72 @@ async function execResolved(resolved, input, ctx, approvalId) {
   // connector tool — executeTool re-checks readiness + kill switch; we pass the
   // consumed-approval flag so gated connector tools (http.post/sms.send) run.
   return await executeTool(resolved.tool.id, input, { actorId: ctx.actorId, householdId: ctx.householdId, requestId: ctx.runId, approvalConsumed: !!approvalId, approvalId });
+}
+
+/* ================= CHAT TOOL EXECUTION (assistant-agent.mjs) =================
+ * The Ask Famili agent loop calls tools one at a time, observes the result, and decides
+ * what to do next. A read, or a write the policy allows outright, executes HERE — through
+ * the SAME resolveTool → agent policy → effective-policy → execResolved chain a run step
+ * goes through, so a chat turn can never do something a run could not. Anything that
+ * resolves to NEEDS_APPROVAL is NOT executed here: the caller starts a durable one-step
+ * run for it (orchestrate → startRun), which creates the approval, parks, and later
+ * consumes the approval exactly as every scheduled run does. This function only ever
+ * reports that verdict (`needsApproval: true`).
+ *
+ * Returns one of:
+ *   { ok: true,  result, resolved }                      executed
+ *   { ok: false, needsApproval: true, resolved }         caller must queue a run
+ *   { ok: false, error, message, policyBlocked?: true }  refused or failed (model sees why)
+ */
+export async function executeToolForChat({ toolId, input = {}, session, agent = null, conversationId = null } = {}) {
+  const householdId = session?.householdId;
+  const actorId = session?.actorId ?? null;
+  if (!householdId) return { ok: false, error: "no_session", message: "No household session." };
+  const resolved = resolveTool(toolId, householdId, actorId);
+  if (!resolved) return { ok: false, error: "unknown_tool", message: `There is no tool called "${toolId}".` };
+  const meta = () => ({ toolId, action: resolved.action, risk: resolved.risk, connectorId: resolved.connectorId ?? null, connectorName: resolved.connectorName ?? null, requiresApproval: !!resolved.requiresApproval });
+  if (agent) {
+    const verdict = isToolStepAllowed(agent, toolId, { householdId, actorId });
+    if (!verdict.ok) {
+      appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent.id, reason: verdict.reason, householdId, actorId, conversationId });
+      return { ok: false, error: `not_permitted_${verdict.reason}`, message: verdict.message ?? "Not permitted for this helper.", policyBlocked: true, resolved: meta() };
+    }
+    const baseApproval = resolved.baseRequiresApproval ?? resolved.requiresApproval;
+    const decision = resolveEffectivePolicy({
+      cap: {
+        id: toolId,
+        name: resolved.tool?.name ?? resolved.def?.name ?? toolId,
+        requiresApproval: baseApproval,
+        risk: resolved.risk,
+        action: resolved.action,
+        delivers: resolved.tool?.delivers ?? resolved.def?.delivers ?? false,
+        external: resolved.kind === "provider" || resolved.kind === "connector",
+      },
+      agent,
+      settings: getSettings(householdId),
+      override: getRiskOverride(householdId, toolId, actorId),
+    });
+    if (decision.decision === BLOCKED) {
+      appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent.id, rule: decision.rule, reason: decision.reason, householdId, actorId, conversationId });
+      return { ok: false, error: `policy_${decision.rule}`, message: decision.reason, policyBlocked: true, resolved: meta() };
+    }
+    resolved.requiresApproval = decision.requiresApproval;
+    resolved.policy = decision;
+  }
+  if (resolved.requiresApproval) return { ok: false, needsApproval: true, resolved: meta() };
+  // Kill switch for an UNATTRIBUTED chat turn — execResolved covers internal + provider
+  // tools and executeTool covers connectors, so this mirrors the run path exactly.
+  let out;
+  const t0 = Date.now();
+  try {
+    out = await withTimeout(execResolved(resolved, input, { householdId, actorId, runId: null, accountId: null, agentId: agent?.id ?? null }, undefined), RUN_STEP_TIMEOUT_MS);
+  } catch (e) {
+    out = { ok: false, error: "timeout", message: String(e?.message ?? e) };
+  }
+  appendAudit({ type: "assistant.tool", toolId, connectorId: resolved.connectorId ?? null, ok: !!out?.ok, error: out?.ok ? undefined : out?.error, action: resolved.action, durationMs: Date.now() - t0, householdId, actorId, conversationId });
+  if (!out) return { ok: false, error: "no_result", message: "The tool returned nothing.", resolved: meta() };
+  if (out.ok) return { ok: true, result: out.result ?? null, resolved: meta() };
+  return { ok: false, error: out.error ?? "tool_failed", message: out.message ?? out.error ?? "The tool failed.", waiting: out.waiting, needsSetup: out.needsSetup, resolved: meta() };
 }
 
 const WAITING_CONNECTOR_RE = /not_configured|not_connected|not_authorized|connector_|runtime_unavailable/;
@@ -1046,7 +1117,9 @@ export function cancelRun(runId) {
 
 // Find the run currently parked on a given approval (for the decide→resume hook).
 export function findRunByApprovalId(approvalId) {
-  return listRuns({ limit: 500 }).find((r) => r.steps?.some((s) => s.approvalId === approvalId && s.status === "waiting_for_approval")) ?? null;
+  // By STATUS, not the newest 500 runs: a run parked while 500 newer ones were created fell
+  // outside the page, so tapping Approve marked the approval approved and resumed nothing.
+  return listRuns({ status: "waiting_for_approval", limit: 10_000 }).find((r) => r.steps?.some((s) => s.approvalId === approvalId && s.status === "waiting_for_approval")) ?? null;
 }
 
 // Server-owned stale-run expiry: a run parked on an approval whose 30-min TTL has

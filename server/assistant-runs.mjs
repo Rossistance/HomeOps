@@ -17,7 +17,8 @@ import {
   getConversation, appendConversationMessage, getMember, appendAudit,
   recordAiUsage, aiBudgetExhausted, getSettings, runWithTenant,
 } from "./store.mjs";
-import { onRunFinished, onRunParked, startRun } from "./engine.mjs";
+import { onRunFinished, onRunParked } from "./engine.mjs";
+import { orchestrate } from "./orchestrator.mjs";
 import { toolCatalog, normalizePlan } from "./planner.mjs";
 import { providerChatWithFallback } from "./ai.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
@@ -444,18 +445,21 @@ async function repairFailedRun(run) {
   // Inheriting rather than re-deriving is deliberate: a repair is the SAME request, retried.
   // It must not be able to acquire authority the original run did not have, and copying the
   // original's agentId gives it exactly that and no more.
-  const repaired = await startRun({
-    source: "assistant",
-    sourceRef: {
-      conversationId, isRepair: true, repairedFrom: run.id, originalTitle: run.title,
-      agentId: run.sourceRef?.agentId ?? null,
-      skillId: run.sourceRef?.skillId ?? null,
-      via: run.sourceRef?.via ?? "chat",
-    },
-    plan, session, title: plan.title,
-    goal: run.goal ?? null,
-    visibility: run.visibility,
+  // Through the single orchestrate() entry, like every other run source. Calling startRun
+  // here skipped the visible-skip clamp (orchestrator.runAssistantPlan): a repaired plan
+  // with one step the helper isn't allowed hard-failed the WHOLE run (engine re-validation
+  // = finishFailed) instead of skipping that step — and recorded no routing decision.
+  const orchestrated = await orchestrate({
+    source: "assistant", via: "chat", plan, session, conversationId,
+    agentId: run.sourceRef?.agentId ?? undefined,
+    goal: run.goal ?? null, visibility: run.visibility,
+    sourceRef: { isRepair: true, repairedFrom: run.id, originalTitle: run.title, skillId: run.sourceRef?.skillId ?? null },
   });
+  if (!orchestrated?.ok) {
+    appendToConversation(run, { kind: "status", text: `I couldn't start the corrected plan (${orchestrated?.message ?? orchestrated?.error ?? "unknown error"}). The failure details are in Activity.` });
+    return;
+  }
+  const repaired = orchestrated.run;
   appendToConversation(run, {
     kind: "status",
     text: `Diagnosis: ${String(parsed.diagnosis ?? "adjusted the failing step").slice(0, 280)} — running the corrected plan now.`,

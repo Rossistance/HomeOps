@@ -1,3 +1,7 @@
+// LEGACY ENGINE: this suite pins the previous single-shot assistant brain (JSON envelope
+// answer|lookup|plan|build). The default Ask Famili engine is now the AI SDK agent loop
+// (server/assistant-agent.mjs, server/test/assistant-agent.test.mjs); every server here is
+// spawned with HOMEOPS_ASSISTANT_ENGINE=legacy so the rollback path stays proven.
 // The two ways a private room leaked, and the writer that never wrote.
 //
 // BUG-05 — "There is no privacy with these artifacts… you can see artifacts that were
@@ -23,7 +27,7 @@ import { startServer, stopServer, makeSession, writeStoreRecord, writeStoreDoc, 
 let ctx, owner, adult, provider, hh;
 
 before(async () => {
-  ctx = await startServer();
+  ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy" } });
   owner = await makeSession(ctx, "m-alex");
   adult = await makeSession(ctx, "m-morgan");
   hh = owner.raw?.session?.householdId; // the seeded household's real id — never guess it

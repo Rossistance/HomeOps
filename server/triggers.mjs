@@ -16,6 +16,7 @@ import {
 import { orchestrate } from "./orchestrator.mjs";
 import { onRunFinished, onRunParked } from "./engine.mjs";
 import { runWithTenant } from "./tenant-context.mjs";
+import { tzOffsetAt, wallClockToUtc, localParts, formatForHousehold } from "./household-time.mjs";
 
 export const TRIGGER_TYPES = ["schedule", "recurring", "webhook", "connector_event", "manual"];
 const TICKABLE = ["schedule", "recurring"];
@@ -66,36 +67,8 @@ export function parseAnchor(v) {
   return { hour: h, minute: min, text: `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}` };
 }
 
-// Offset (ms) that must be SUBTRACTED from a UTC-interpreted wall clock to get the
-// real instant in `tz` — derived from the platform tz database, so DST is handled
-// by the runtime rather than guessed here.
-function tzOffsetAt(utcMs, tz) {
-  try {
-    const dtf = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    const p = Object.fromEntries(dtf.formatToParts(new Date(utcMs)).filter((x) => x.type !== "literal").map((x) => [x.type, Number(x.value)]));
-    // `hour` can format as 24 for midnight under hour12:false on some ICU builds.
-    const asUTC = Date.UTC(p.year, p.month - 1, p.day, p.hour % 24, p.minute, p.second);
-    return asUTC - utcMs;
-  } catch { return null; } // unknown tz — caller falls back to server-local time
-}
-
-// Wall-clock {y,m,d,hour,minute} in `tz` → the real UTC instant. Resolved twice so a
-// candidate that lands on a DST shift settles on the correct side of the boundary.
-function wallClockToUtc({ year, month, day, hour, minute }, tz) {
-  const naive = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
-  let off = tzOffsetAt(naive, tz);
-  if (off == null) return null;
-  let ms = naive - off;
-  const off2 = tzOffsetAt(ms, tz);
-  if (off2 != null && off2 !== off) ms = naive - off2;
-  return ms;
-}
-
-function localParts(utcMs, tz) {
-  const dtf = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour12: false, year: "numeric", month: "2-digit", day: "2-digit" });
-  const p = Object.fromEntries(dtf.formatToParts(new Date(utcMs)).filter((x) => x.type !== "literal").map((x) => [x.type, Number(x.value)]));
-  return { year: p.year, month: p.month, day: p.day };
-}
+// tzOffsetAt / wallClockToUtc / localParts live in household-time.mjs now — one
+// implementation for scheduling, day boundaries and everything a person reads.
 
 /**
  * The next instant at which the household's wall clock reads `anchor`, strictly
@@ -143,9 +116,24 @@ export function scheduleTextFor(trigger) {
     const m = Math.round(trigger.intervalMs / 60_000);
     return `Every ${m} minute${m === 1 ? "" : "s"}`;
   }
-  if (trigger?.type === "schedule" && trigger.nextRunAt) return `Once · ${new Date(trigger.nextRunAt).toLocaleString()}`;
+  if (trigger?.type === "schedule" && trigger.nextRunAt) return `Once · ${formatForHousehold(new Date(trigger.nextRunAt).toISOString(), trigger.householdId)}`;
   const labels = { webhook: "On webhook", connector_event: "On new data", manual: "Manual only" };
   return labels[trigger?.type] ?? "Manual only";
+}
+
+/** The household changed its timezone: every anchored trigger's next fire was resolved on
+ *  the OLD clock (or the server's). Re-resolve them now, rather than letting a 7 AM
+ *  briefing fire at the wrong hour once and a one-shot schedule at the wrong hour forever. */
+export function reanchorTriggersForHousehold(householdId, now = Date.now()) {
+  let changed = 0;
+  const tz = householdTimezone(householdId);
+  for (const t of listTriggers((x) => x.householdId === householdId && x.enabled && TICKABLE.includes(x.type) && x.anchor)) {
+    const occ = nextAnchorOccurrence(t.anchor, tz, now);
+    if (!occ) continue;
+    patchTrigger(t.id, { nextRunAt: occ.at, tzSource: occ.tzSource });
+    changed++;
+  }
+  return changed;
 }
 
 /* --------------------------------- CRUD --------------------------------- */

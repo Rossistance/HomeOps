@@ -97,13 +97,13 @@ export function functionRequiresApproval(fn) {
       return false;
   }
 }
-function functionAction(fn) {
+export function functionAction(fn) {
   if (fn?.type === "custom_http") return isWriteMethod(fn.config?.method) ? "Write" : "Read";
   const wrapped = fn?.type === "connector_api" || fn?.type === "browser" ? fn.config?.toolId : fn?.type === "internal" ? fn.config?.functionId : null;
   const u = wrapped ? underlyingTool(wrapped) : null;
   return u?.action ?? fn?.action ?? "Other";
 }
-function functionRisk(fn) {
+export function functionRisk(fn) {
   const wrapped = fn?.type === "connector_api" || fn?.type === "browser" ? fn.config?.toolId : fn?.type === "internal" ? fn.config?.functionId : null;
   const u = wrapped ? underlyingTool(wrapped) : null;
   return u?.risk ?? fn?.risk ?? "Low";

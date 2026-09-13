@@ -6,6 +6,8 @@
 // BYMONTHDAY / nth-weekday BYDAY, EXDATE); anything more exotic falls back to the first
 // occurrence rather than guessing.
 
+import { wallClockToUtc } from "./time-math.mjs";
+
 // Unfold RFC 5545 folded lines: a CRLF followed by a space/tab continues the previous line.
 function unfold(text) {
   return String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n[ \t]/g, "");
@@ -19,7 +21,10 @@ function unescapeText(v) {
 //   20260115T090000Z      → 2026-01-15T09:00:00.000Z (UTC)
 //   20260115T090000       → 2026-01-15T09:00:00      (floating/local — no offset)
 //   20260115 (VALUE=DATE) → 2026-01-15               (all-day)
-function toISO(raw, isDateOnly) {
+//   20260115T090000 + TZID=America/New_York → 2026-01-15T14:00:00.000Z (a real instant)
+// A TZID used to be discarded, so a school feed's 9:00 AM became 9:00 in whatever zone
+// happened to read it — the server's for reminders and sorting, the phone's on screen.
+function toISO(raw, isDateOnly, tzid) {
   const v = String(raw).trim();
   const dOnly = /^(\d{4})(\d{2})(\d{2})$/.exec(v);
   if (isDateOnly || dOnly) {
@@ -30,7 +35,28 @@ function toISO(raw, isDateOnly) {
   const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z)?$/.exec(v);
   if (!m) return { iso: null, allDay: false };
   const base = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`;
-  return { iso: m[7] ? `${base}.000Z` : base, allDay: false };
+  if (m[7]) return { iso: `${base}.000Z`, allDay: false };
+  if (tzid) {
+    const ms = wallClockToUtc({ year: +m[1], month: +m[2], day: +m[3], hour: +m[4], minute: +m[5], second: +m[6] }, tzid);
+    if (ms != null) return { iso: new Date(ms).toISOString(), allDay: false };
+  }
+  return { iso: base, allDay: false };
+}
+
+// RFC 5545 DURATION ("P1D", "PT1H30M", "P2DT3H") → milliseconds, or null.
+function parseDuration(raw) {
+  const m = /^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(String(raw).trim());
+  if (!m) return null;
+  const ms = ((+(m[2] ?? 0)) * 7 * 864e5) + ((+(m[3] ?? 0)) * 864e5) + ((+(m[4] ?? 0)) * 3600e3) + ((+(m[5] ?? 0)) * 60e3) + ((+(m[6] ?? 0)) * 1e3);
+  return m[1] === "-" ? -ms : ms;
+}
+// An ISO in any of our three forms plus a duration → the end in the SAME form.
+function addDuration(iso, ms) {
+  const c = parseNaive(iso);
+  if (!c) return null;
+  if (c.form === "utc" || c.form === "floating") return fromNaiveMs(naiveMs(c) + ms, c.form);
+  // Date-only start: a whole-day duration keeps the date form (inclusive end handled downstream).
+  return fromNaiveMs(naiveMs(c) + ms - 864e5, "date");
 }
 
 // Split "NAME;PARAM=x;PARAM2=y:VALUE" into { name, params, value }.
@@ -61,6 +87,7 @@ export function parseICS(text) {
     if (line === "BEGIN:VEVENT") { cur = {}; continue; }
     if (line === "END:VEVENT") {
       if (cur && (cur.startAt || cur.title)) {
+        if (!cur.endAt && cur.startAt && cur.durationMs != null) cur.endAt = addDuration(cur.startAt, cur.durationMs);
         events.push({
           uid: cur.uid ?? null,
           title: cur.title ?? "(untitled)",
@@ -82,8 +109,9 @@ export function parseICS(text) {
       case "SUMMARY": cur.title = unescapeText(p.value); break;
       case "LOCATION": cur.location = unescapeText(p.value); break;
       case "UID": cur.uid = p.value.trim(); break;
-      case "DTSTART": { const r = toISO(p.value, (p.params.VALUE ?? "").toUpperCase() === "DATE"); cur.startAt = r.iso; cur.allDay = r.allDay; break; }
-      case "DTEND": { const r = toISO(p.value, (p.params.VALUE ?? "").toUpperCase() === "DATE"); cur.endAt = r.iso; break; }
+      case "DTSTART": { const r = toISO(p.value, (p.params.VALUE ?? "").toUpperCase() === "DATE", p.params.TZID); cur.startAt = r.iso; cur.allDay = r.allDay; break; }
+      case "DTEND": { const r = toISO(p.value, (p.params.VALUE ?? "").toUpperCase() === "DATE", p.params.TZID); cur.endAt = r.iso; break; }
+      case "DURATION": { const ms = parseDuration(p.value); if (ms != null && ms >= 0) cur.durationMs = ms; break; }
       case "RRULE": cur.rrule = p.value.trim(); break;
       case "EXDATE": {
         // EXDATE may carry a comma-separated list and appear multiple times.

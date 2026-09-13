@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useStore } from "@/store/useStore";
 import { Card, Button, Badge, TextInput, EmptyState } from "@/components/ui";
 import { Icon } from "@/components/Icon";
-import { fmtDateFull, fmtTime, dayName } from "@/lib/dates";
+import { fmtDateFull, fmtTime, dayName, isLive, isTodayEvent, eventTimeLabel } from "@/lib/dates";
 import { backend, type HelpRequest } from "@/connectors/api";
 import type { CalendarEvent } from "@/types";
 
@@ -24,16 +24,17 @@ export function ScheduleList({ events }: { events: CalendarEvent[] }) {
   const endOfToday = new Date(); endOfToday.setHours(24, 0, 0, 0);
   const endOfWeek = startOfToday.getTime() + 7 * 864e5;
   const upcoming = useMemo(() => [...events]
-    .filter((e) => { const t = +new Date(e.startAt); return !isNaN(t) && t >= Math.min(startOfToday.getTime(), now - 36e5) && t < endOfWeek; })
+    .filter((e) => { const t = +new Date(e.startAt); return !isNaN(t) && isLive(e, now) && t < endOfWeek; })
     .sort((a, b) => +new Date(a.startAt) - +new Date(b.startAt)), [events]); // eslint-disable-line react-hooks/exhaustive-deps
-  const today = upcoming.filter((e) => +new Date(e.startAt) < +endOfToday);
-  const week = upcoming.filter((e) => +new Date(e.startAt) >= +endOfToday);
+  const today = upcoming.filter((e) => isTodayEvent(e, now));
+  const week = upcoming.filter((e) => !isTodayEvent(e, now));
+  void startOfToday; void endOfToday;
 
   const Row = ({ e, showDay }: { e: CalendarEvent; showDay?: boolean }) => (
     <li className="flex items-center gap-4 rounded-2xl border border-ink-900/[0.05] bg-surface-rim px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
       <div className="flex w-16 shrink-0 flex-col items-center leading-tight">
         {showDay && <span className="text-xs font-semibold uppercase text-ink-400">{dayName(e.startAt).slice(0, 3)}</span>}
-        <span className="text-base font-semibold text-ink-800">{fmtTime(e.startAt)}</span>
+        <span className="text-base font-semibold text-ink-800">{eventTimeLabel(e)}</span>
       </div>
       <div className="min-w-0 flex-1">
         <p className="truncate text-lg font-medium text-ink-900">{e.title}</p>

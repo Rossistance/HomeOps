@@ -30,6 +30,16 @@ import { T } from "@/components/ui/text";
 const MANAGE_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member"];
 // Remembered "also update Google on save" consent (WP-004/ISS-008, DEC-06).
 const ALSO_GOOGLE_KEY = "familios_save_also_google";
+/** The offsets the server accepts — the same list the task sheet offers (server/reminders.mjs
+ * REMINDER_CHOICES). Events had no reminders while tasks did; now they share the menu. */
+const REMINDERS: { minutes: number | null; label: string }[] = [
+  { minutes: null, label: "None" },
+  { minutes: 0, label: "At the time" },
+  { minutes: 15, label: "15 min before" },
+  { minutes: 30, label: "30 min before" },
+  { minutes: 60, label: "1 hour before" },
+  { minutes: 1440, label: "1 day before" },
+];
 
 /** Merge a calendar day and a clock time into one local Date. */
 function stamp(day: Date, time: Date): Date {
@@ -146,6 +156,8 @@ export default function EventFormScreen() {
   const [endDay, setEndDay] = useState<Date>(() => new Date());
   // WP-003/ISS-005: all-day events — real model concept, not a faked time.
   const [allDay, setAllDay] = useState(false);
+  // Minutes-before nudges, multi-select like a task's ("the day before AND one hour before").
+  const [remindSet, setRemindSet] = useState<Set<number>>(new Set());
   const [driverId, setDriverId] = useState<string | null>(null);
   /* E5 [12:26] — "replace or augment the note-for-driver with WHO'S ATTENDING: let me pick
    * GPop, Beannie, Melissa." Attendees are saved through their own endpoint rather than the
@@ -209,6 +221,7 @@ export default function EventFormScreen() {
           // the OWNER wrote on a mirror, myNotes is what I wrote for me.
           setLocalNotes(e.myNotes?.note ?? (e.ownerId === session?.actorId ? (e.localNotes ?? "") : ""));
           setMyBring(e.myNotes?.bring ?? []);
+          setRemindSet(new Set(e.remindOffsets ?? []));
           setDriverId(e.driverId);
           // An event from before this feature has participantIds but no answers. Reading that
           // as "everyone accepted" would show a card claiming three people said yes when
@@ -252,7 +265,7 @@ export default function EventFormScreen() {
   const buildDraft = (): EventDraft => ({
     title, location, notes, scheduled, allDay, hasEnd,
     day: day.toISOString(), start: start.toISOString(), end: end.toISOString(), endDay: endDay.toISOString(),
-    driverId, bring, bringInput, savedAt: new Date().toISOString(),
+    driverId, bring, bringInput, remindOffsets: [...remindSet].sort((a, b) => a - b), savedAt: new Date().toISOString(),
   });
   // Content signature — the timestamp is deliberately excluded so an untouched form
   // never looks "changed" just because time passed.
@@ -275,6 +288,7 @@ export default function EventFormScreen() {
       setEnd(revive(d.end, nextFullHour()));
       setEndDay(revive(d.endDay, new Date()));
       setDriverId(d.driverId); setBring(d.bring ?? []); setBringInput(d.bringInput ?? "");
+      setRemindSet(new Set(d.remindOffsets ?? []));
       setDraftRestored(true);
     })();
   }, [loading, householdId, draftId]);
@@ -291,7 +305,7 @@ export default function EventFormScreen() {
     const t = setTimeout(() => { void saveDraft(householdId, draftId, draft); }, 400);
     return () => clearTimeout(t);
   }, [loading, readOnly, householdId, draftId, title, location, notes, scheduled, allDay,
-      hasEnd, day, start, end, endDay, driverId, bring, bringInput]);
+      hasEnd, day, start, end, endDay, driverId, bring, bringInput, remindSet]);
 
   const discardDraft = useCallback(() => {
     if (householdId) void clearDraft(householdId, draftId);
@@ -356,7 +370,9 @@ export default function EventFormScreen() {
     // Include anything still typed into the bring field so it isn't silently lost.
     const pendingBring = bringInput.split(",").map((s) => s.trim()).filter(Boolean).map((item) => ({ item, memberId: null as string | null }));
     const whatToBring = [...bring, ...pendingBring];
-    const body = { title: title.trim(), startAt, endAt, allDay: scheduled && allDay, notes: notes.trim(), location: location.trim(), localNotes: localNotes.trim(), driverId, whatToBring };
+    // Reminders only mean something relative to a start; an unscheduled event sends none.
+    const remindOffsets = scheduled ? [...remindSet].sort((a, b) => a - b) : [];
+    const body = { title: title.trim(), startAt, endAt, allDay: scheduled && allDay, notes: notes.trim(), location: location.trim(), localNotes: localNotes.trim(), driverId, whatToBring, remindOffsets };
     /* Q2 — on a mirrored event, send only the half that's ours. Sending the title and times
      * back unchanged would be refused by the server (correctly — it can't tell "unchanged"
      * from "changed back"), and the append would go down with them. Attendees aren't here:
@@ -397,11 +413,16 @@ export default function EventFormScreen() {
 
   const confirmDelete = () => {
     if (!isEdit) return;
+    const name = `“${title.trim() || "This event"}”`;
     Alert.alert(
       "Delete event?",
       linkedGoogle
-        ? `“${title.trim() || "This event"}” will be deleted from Google Calendar and the household calendar.`
-        : `“${title.trim() || "This event"}” will be removed from the household calendar.`,
+        ? `${name} will be deleted from Google Calendar and the household calendar.`
+        // A canonical event that was pushed has a Google copy too; deleting here removes
+        // both, and the result below says so honestly if the Google half didn't go.
+        : googleEventId
+          ? `${name} will be removed from the household calendar and its copy in your Google Calendar.`
+          : `${name} will be removed from the household calendar.`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -410,8 +431,33 @@ export default function EventFormScreen() {
             setBusy("delete"); setNotice(null);
             const r = await api.deleteEvent(id);
             setBusy(null);
-            if (r.ok) { tapHaptic("success"); router.back(); }
-            else setNotice({ text: r.error === "insufficient_role" ? "Deleting events needs Limited Member or higher." : `Couldn't delete: ${r.error ?? "unknown error"}`, ok: false });
+            if (r.ok) {
+              tapHaptic("success");
+              // The FamiliOS event is gone either way; say plainly when the Google copy
+              // isn't, because the next sync will bring it back and that must not be a
+              // surprise. "kept_external_actions_disabled" = the household turned off
+              // external actions, so the server didn't touch Google at all.
+              if (r.google === "failed" || r.google === "kept_external_actions_disabled") {
+                Alert.alert(
+                  "Removed here, but not from Google",
+                  r.google === "failed"
+                    ? "The Google Calendar copy couldn't be removed, so it may come back on the next sync. Delete it in Google Calendar to be sure."
+                    : "External actions are off for this household, so the Google Calendar copy was left alone — it may come back on the next sync.",
+                  [{ text: "OK", onPress: () => router.back() }],
+                );
+                return;
+              }
+              router.back();
+            } else {
+              setNotice({
+                text: r.error === "insufficient_role" ? "Deleting events needs Limited Member or higher."
+                  // 422 google_delete_failed: the server refused rather than leave a copy
+                  // behind — its message says what to do.
+                  : r.error === "google_delete_failed" ? (r.message ?? "The Google Calendar copy couldn't be removed, so the event was kept. Try again, or delete it in Google Calendar first.")
+                  : `Couldn't delete: ${r.message ?? r.error ?? "unknown error"}`,
+                ok: false,
+              });
+            }
           })(),
         },
       ],
@@ -656,6 +702,31 @@ export default function EventFormScreen() {
         editable={!readOnly && canManage}
         inputStyle={inputStyle}
       />
+
+      {/* Remind — the same menu as a task's, because "15 minutes before, producing a real
+          notification" was never a tasks-only need. Only offered once there's a start to
+          remind relative to; the server schedules the nudges (reminders.mjs). */}
+      {scheduled ? (
+        <>
+          <SectionHeader title="Remind" />
+          <ChipRow>
+            {REMINDERS.map((r) => (
+              <Chip
+                key={String(r.minutes)}
+                label={r.label}
+                icon={r.minutes !== null && remindSet.has(r.minutes) ? "bell.fill" : undefined}
+                selected={r.minutes === null ? remindSet.size === 0 : remindSet.has(r.minutes)}
+                onPress={!readOnly && canManage ? () => setRemindSet((prev) => {
+                  if (r.minutes === null) return new Set();
+                  const next = new Set(prev);
+                  if (next.has(r.minutes)) next.delete(r.minutes); else next.add(r.minutes);
+                  return next;
+                }) : undefined}
+              />
+            ))}
+          </ChipRow>
+        </>
+      ) : null}
 
       {/* Notes (ISS-006 — carried into the Google description on push) */}
       <SectionHeader title="Notes" />

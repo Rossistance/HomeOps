@@ -31,7 +31,12 @@ async function runAgentOnServer(agent: Agent): Promise<{ run?: unknown; error?: 
     });
     r = await backend.runAgentServer(agent.id);
   }
-  if (r.error) console.warn(`[agents] server run failed: ${r.error}${r.message ? ` — ${r.message}` : ""}`);
+  // A primary action that fails must say so — this used to end in console.warn only, so the
+  // spinner stopped and nothing else happened.
+  if (r.error) {
+    const why = r.error === "backend_unreachable" ? "The backend runtime isn't reachable." : r.error === "insufficient_role" ? "Your profile can't run helpers." : (r.message ?? r.error);
+    useStore.getState().toast({ kind: "error", title: `Couldn't run ${agent.name}`, message: why });
+  }
   return r;
 }
 

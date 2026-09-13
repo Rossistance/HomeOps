@@ -126,6 +126,20 @@ services:
       # dropped it and taken the operator console with it.
       - key: HOMEOPS_OPERATOR_EMAILS
         sync: false
+      # Web search for the assistant (server/web.mjs). Without at least one of these the
+      # "searching" phase has nothing to search with. Any one is enough; set in the dashboard.
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      # AI provider keys picked up at boot for every household (server/ai.mjs
+      # bootstrapAIFromEnv). Optional — a family can also paste a key in Settings.
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
       # Optional OAuth providers. Fill these in the Render dashboard.
       - key: HOMEOPS_OAUTH_GOOGLE_CLIENT_ID
         sync: false

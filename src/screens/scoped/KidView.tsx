@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useStore } from "@/store/useStore";
 import { Card } from "@/components/ui";
 import { Icon } from "@/components/Icon";
-import { fmtDateFull, fmtTime } from "@/lib/dates";
+import { fmtDateFull, fmtTime, isTodayEvent } from "@/lib/dates";
 import { HelpComposer } from "@/components/HelpComposer";
 import { isChild } from "@/lib/roles";
 import { useMyHelpRequests } from "./GrandparentView";
@@ -36,7 +36,7 @@ export function KidView() {
   // Today's schedule (read-only) — my events first, else the whole family's day.
   const endOfToday = useMemo(() => { const d = new Date(); d.setHours(24, 0, 0, 0); return d.getTime(); }, []);
   const todays = useMemo(() => [...data.events]
-    .filter((e) => { const t = +new Date(e.startAt); return !isNaN(t) && t >= startOfToday && t < endOfToday; })
+    .filter((e) => isTodayEvent(e))
     .sort((a, b) => +new Date(a.startAt) - +new Date(b.startAt)), [data.events, startOfToday, endOfToday]);
   const mine = todays.filter((e) => me && e.memberIds.includes(me.id));
   const schedule = mine.length > 0 ? mine : todays;
@@ -59,7 +59,7 @@ export function KidView() {
               ? "No chores today — enjoy your day!"
               : doneCount === myChores.length
                 ? "All your chores are done. Amazing! 🎉"
-                : `You have ${myChores.length - doneCount} chore${myChores.length - doneCount === 1 ? "" : "s"} to do today.`}
+                : `You have ${myChores.length - doneCount} chore${myChores.length - doneCount === 1 ? "" : "s"} on your list.`}
           </p>
         </div>
       </div>

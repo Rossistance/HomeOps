@@ -7,17 +7,22 @@
 //     { requireSession: true }, so an unauthenticated call gets a JSON 401/403
 //     (NOT an event stream).
 //   ← 200 `text/event-stream`; each frame is a single `data: <json>` line
-//     terminated by a blank line. Three event shapes:
+//     terminated by a blank line. Five event shapes:
 //       { "type": "progress", "tokens": n }
-//         — liveness ping emitted every 4th provider token. The raw token TEXT
-//           is never streamed: the model responds with JSON that is meaningless
-//           mid-stream, so the server only signals that generation is alive.
+//         — liveness ping emitted every 4th provider token.
+//       { "type": "delta", "text": string }
+//         — a piece of the REPLY TEXT as it streams (the replaced engine writes prose
+//           first and tool calls as structure, so text is meaningful mid-stream now).
+//           Concatenate deltas in order; "done" still carries the authoritative text.
+//       { "type": "tool", "tool": string, "label"?: string, "status": "running" | "called" | "error" }
+//         — a tool the engine is calling right now, by name, with a human label when
+//           the server has one. "running" opens it, "called"/"error" closes it.
 //       { "type": "phase", "phase": "searching" | "creating" }
 //         — what the server has decided to DO, sent when it decides it. Distinct
 //           from the token ping on purpose: a lookup goes out to the live web and
 //           emits no tokens while it does, so inferring the phase from token flow
 //           reported "writing" throughout the slowest part of the request.
-//       { "type": "done", "result": { ok, kind, answer, plan?, build?, model } }
+//       { "type": "done", "result": { ok, kind, answer, build?, run?, toolCalls?, runId?, runIds?, model } }
 //         — the fully parsed AssistantResult, identical in shape to the
 //           non-streaming POST /api/assistant response ({ ok:false, error,
 //           message } on failure, e.g. "no_provider" / "stream_error").
@@ -46,19 +51,27 @@ export type ServerPhase = "searching" | "creating";
 /** The full vocabulary of the working bubble. */
 export type AssistantPhase = "thinking" | "writing" | ServerPhase;
 
-interface StreamEvent { type?: string; tokens?: number; phase?: string; result?: AssistantResult }
+/** A tool the server is calling mid-turn. `label` is the human name when it has one. */
+export interface StreamToolEvent { tool: string; label?: string; status: "running" | "called" | "error" }
+
+interface StreamEvent { type?: string; tokens?: number; text?: string; tool?: string; label?: string; status?: string; phase?: string; result?: AssistantResult }
 
 export interface StreamAssistantOpts {
   conversationId?: string;
   context?: Record<string, unknown>;
   /** Fires with the running token count each time the server pings progress. */
   onProgress?: (tokens: number) => void;
+  /** Fires with each piece of reply text as it streams, in order. */
+  onDelta?: (text: string) => void;
+  /** Fires when the server starts/finishes calling a tool. */
+  onTool?: (ev: StreamToolEvent) => void;
   /** Fires when the server says what it has decided to do. */
   onPhase?: (phase: ServerPhase) => void;
   signal?: AbortSignal;
 }
 
 const PHASES: readonly string[] = ["searching", "creating"];
+const TOOL_STATUSES: readonly string[] = ["running", "called", "error"];
 
 export async function streamAssistant(message: string, opts?: StreamAssistantOpts): Promise<AssistantResult> {
   const token = await bearerToken();
@@ -86,6 +99,10 @@ export async function streamAssistant(message: string, opts?: StreamAssistantOpt
       let ev: StreamEvent;
       try { ev = JSON.parse(line.slice(5).trim()) as StreamEvent; } catch { continue; }
       if (ev.type === "progress" && typeof ev.tokens === "number") opts?.onProgress?.(ev.tokens);
+      else if (ev.type === "delta" && typeof ev.text === "string" && ev.text) opts?.onDelta?.(ev.text);
+      else if (ev.type === "tool" && typeof ev.tool === "string" && ev.tool && ev.status && TOOL_STATUSES.includes(ev.status)) {
+        opts?.onTool?.({ tool: ev.tool, label: typeof ev.label === "string" && ev.label ? ev.label : undefined, status: ev.status as StreamToolEvent["status"] });
+      }
       // Unknown phase names are ignored rather than displayed: a future server adding one
       // shouldn't put a raw identifier in front of a person.
       else if (ev.type === "phase" && ev.phase && PHASES.includes(ev.phase)) opts?.onPhase?.(ev.phase as ServerPhase);

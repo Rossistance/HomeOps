@@ -5,7 +5,8 @@ import { Icon } from "@/components/Icon";
 import { InlineApprovals } from "@/components/InlineApprovals";
 import { MarkdownContent } from "@/lib/markdown";
 import { suggestAskPrompts, answerLocally } from "@/lib/ai";
-import type { AssistantConversation, AssistantMessage, AutomationRun, RunStatusView } from "@/types";
+import { surfaceForTask } from "@/lib/taskSurfaces";
+import type { AssistantConversation, AssistantMessage, AssistantToolCall, AutomationRun, RunStatusView } from "@/types";
 import { backend, type AgentPlan, type ChatBuild, type EmailReviewMessage, type EmailReviewLabel } from "@/connectors/api";
 
 /**
@@ -59,7 +60,7 @@ export function Assistant() {
   const start = (t: string) => void startConversation(t, { visibility: scope });
 
   if (!conv) return <AssistantHome conversations={conversations} scope={scope} onScope={setScope} onStart={start} onOpen={(id) => navigate("assistant", { id })} onDismiss={deleteConversation} />;
-  return <Conversation key={conv.id} conv={conv} conversations={conversations} scope={scope} onScope={setScope} onOpen={(id) => navigate("assistant", { id })} onSend={(t, extra) => sendToAssistant(conv.id, t, extra)} />;
+  return <Conversation key={conv.id} conv={conv} conversations={conversations} onOpen={(id) => navigate("assistant", { id })} onSend={(t, extra) => sendToAssistant(conv.id, t, extra)} />;
 }
 
 /** Personal / Family scope toggle for new chats. */
@@ -81,8 +82,9 @@ function AssistantHome({ conversations, scope, onScope, onStart, onOpen, onDismi
   const [text, setText] = useState("");
   const data = useStore((s) => s.data);
   const me = useStore((s) => s.currentMember());
+  const serverApprovals = useStore((s) => s.serverApprovals);
   const first = (me?.displayName ?? "there").split(" ")[0];
-  const suggestions = useMemo(() => suggestAskPrompts(data, me), [data, me]);
+  const suggestions = useMemo(() => suggestAskPrompts(data, me, pendingApprovalsOf(serverApprovals)), [data, me, serverApprovals]);
   const submit = () => { const t = text.trim(); if (t) { onStart(t); setText(""); } };
   // WP-003 slice 5 (recents hygiene) — collapse repeated error-only threads (no AI
   // provider, backend unreachable, …) down to the single most recent one instead of
@@ -165,7 +167,10 @@ function AssistantHome({ conversations, scope, onScope, onStart, onOpen, onDismi
 }
 
 /* ------------------------------ Conversation ---------------------------- */
-function Conversation({ conv, conversations, scope, onScope, onOpen, onSend }: { conv: AssistantConversation; conversations: AssistantConversation[]; scope: ChatScope; onScope: (s: ChatScope) => void; onOpen: (id: string) => void; onSend: (t: string, extra?: Record<string, unknown>) => void }) {
+// A thread's scope is fixed at creation (it's the conversation's server visibility), so
+// the Personal/Family toggle only belongs on the home/new-chat screen — inside a thread it
+// read as re-scoping something it could not change.
+function Conversation({ conv, conversations, onOpen, onSend }: { conv: AssistantConversation; conversations: AssistantConversation[]; onOpen: (id: string) => void; onSend: (t: string, extra?: Record<string, unknown>) => void }) {
   const navigate = useStore((s) => s.navigate);
   const deleteConversation = useStore((s) => s.deleteConversation);
   const toast = useStore((s) => s.toast);
@@ -181,10 +186,10 @@ function Conversation({ conv, conversations, scope, onScope, onOpen, onSend }: {
   // assistant reply ARRIVES, jump to the TOP of that reply so long answers read from
   // the start instead of the tail.
   const lastAssistant = [...conv.messages].reverse().find((m) => m.role === "assistant");
-  const arrivedKey = lastAssistant && lastAssistant.status !== "thinking" && lastAssistant.status !== "streaming" ? lastAssistant.id : null;
+  const arrivedKey = lastAssistant && !isGeneratingStatus(lastAssistant.status) ? lastAssistant.id : null;
   useEffect(() => {
     const last = conv.messages[conv.messages.length - 1];
-    if (!last || last.role === "user" || last.status === "thinking" || last.status === "streaming") {
+    if (!last || last.role === "user" || isGeneratingStatus(last.status)) {
       endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     }
   }, [conv.messages.length]);
@@ -228,7 +233,6 @@ function Conversation({ conv, conversations, scope, onScope, onOpen, onSend }: {
         <div className="flex items-center justify-between gap-2">
           <h1 className="font-display truncate text-xl font-semibold text-ink-900">{conv.title}</h1>
           <div className="flex items-center gap-1.5">
-            <ScopeToggle scope={scope} onScope={onScope} />
             <Button size="sm" variant="secondary" onClick={() => navigate("assistant")}><Icon name="Plus" size={14} /> New chat</Button>
             <Button size="sm" variant="ghost" onClick={() => deleteConversation(conv.id)} aria-label="Delete conversation"><Icon name="Trash2" size={15} /></Button>
           </div>
@@ -282,6 +286,16 @@ function Conversation({ conv, conversations, scope, onScope, onOpen, onSend }: {
   );
 }
 
+/** The Approvals console reads server truth; the suggestion engines take the same list so
+ *  their counts agree with it and a decided approval disappears everywhere at once. */
+function pendingApprovalsOf(serverApprovals: { id: string; status: string; preview: string; toolId: string }[]) {
+  return serverApprovals.filter((a) => a.status === "pending").map((a) => ({ id: a.id, title: a.preview || a.toolId }));
+}
+
+/** Every status under which the reply is still being produced — "searching"/"creating"
+ *  are server phases and used to fall through to the answered branch, hiding the strip. */
+const isGeneratingStatus = (status?: string) => status === "thinking" || status === "streaming" || status === "searching" || status === "creating";
+
 /** Phase strip shown while the AI is generating or a dispatched run is active. */
 function PhaseStrip({ status, runView }: { status?: string; runView?: RunStatusView }) {
   const phase =
@@ -314,15 +328,54 @@ function PhaseStrip({ status, runView }: { status?: string; runView?: RunStatusV
  * artifactId/artifactLink handling elsewhere in this file. */
 function RunResultLinks({ links }: { links: AssistantMessage["links"] }) {
   const navigate = useStore((s) => s.navigate);
+  const tasks = useStore((s) => s.data.tasks);
+  const choreBoard = useStore((s) => s.data.miniApps.find((m) => m.type === "Chore Board"));
   if (!links?.length) return null;
+  // A task id is not a mini-app id: `miniapps?id=<taskId>` opened nothing. Route each task
+  // to the surface that can actually show it (grocery items live on Meals, board tasks on
+  // the Chore Board) — the same per-item rule the Dashboard's overdue rows follow.
+  const openTask = (id: string) => {
+    const t = tasks.find((x) => (x.serverId ?? x.id) === id);
+    const to = t ? surfaceForTask(t) : null;
+    if (!to) return navigate("miniapps");
+    navigate(to.screen, to.screen === "miniapps" && choreBoard ? { ...to.params, id: choreBoard.id } : to.params);
+  };
   return (
     <div className="flex flex-wrap items-center gap-2">
       {links.map((l, i) => (
         <Button key={`${l.kind}-${l.id}-${i}`} size="sm" variant="secondary"
-          onClick={() => navigate(l.kind === "task" ? "miniapps" : "files", l.kind === "task" ? { id: l.id } : { file: l.id })}>
+          onClick={() => (l.kind === "task" ? openTask(l.id) : navigate("files", { file: l.id }))}>
           <Icon name={l.kind === "task" ? "ListChecks" : "FileText"} size={13} /> {l.label}
         </Button>
       ))}
+    </div>
+  );
+}
+
+/** What the assistant actually did this turn — one calm chip per tool call. */
+function ToolCallStrip({ calls }: { calls?: AssistantToolCall[] }) {
+  const navigate = useStore((s) => s.navigate);
+  if (!calls?.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" aria-label="What the assistant did">
+      {calls.map((c, i) => {
+        const key = `${c.tool}-${i}`;
+        if (c.status === "awaiting_approval") {
+          return (
+            <button key={key} onClick={() => navigate("messages", { tab: "approvals", ...(c.approvalId ? { approval: c.approvalId } : {}) })}
+              className="chip bg-amber-50 text-[11px] text-amber-700 transition-colors hover:bg-amber-100" title={c.label}>
+              ⏳ Waiting for approval · {c.label}
+            </button>
+          );
+        }
+        if (c.status === "failed" || c.status === "blocked") {
+          return <span key={key} className="chip bg-coral-50 text-[11px] text-coral-700" title={c.summary}>⚠ {c.label}{c.summary ? ` — ${c.summary}` : ""}</span>;
+        }
+        if (c.status === "running") {
+          return <span key={key} className="chip bg-surface-sunken text-[11px] text-ink-500"><Icon name="Loader2" size={10} className="animate-spin" /> {c.label}</span>;
+        }
+        return <span key={key} className="chip bg-surface-sunken text-[11px] text-ink-500" title={c.summary}>✓ {c.label}</span>;
+      })}
     </div>
   );
 }
@@ -337,7 +390,7 @@ function MessageRow({ conversationId, m, precedingUserText }: { conversationId: 
       </div>
     );
   }
-  const isGenerating = m.status === "thinking" || m.status === "streaming";
+  const isGenerating = isGeneratingStatus(m.status);
   // No AI provider connected: the backend honestly reports `error: "no_provider"`
   // rather than faking a response. Instead of leaving that as a dead end, hand the
   // original request to the local deterministic engine (src/lib/ai.ts) — the same
@@ -351,13 +404,19 @@ function MessageRow({ conversationId, m, precedingUserText }: { conversationId: 
       <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-ember-400 to-ember-600 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3)]"><Icon name="Sparkles" size={15} /></div>
       <div className="min-w-0 flex-1 space-y-2.5">
         {isGenerating
-          ? <PhaseStrip status={m.status} />
+          ? <>
+              {/* Streamed reply text renders as it arrives, above the phase strip. */}
+              {m.text && <MarkdownContent text={m.text} />}
+              <PhaseStrip status={m.status} />
+              <ToolCallStrip calls={m.toolCalls} />
+            </>
           : noProvider
             ? <LocalFallbackCard originalText={precedingUserText ?? ""} />
             : m.status === "error"
               ? <div className="text-sm text-coral-600">{m.text}{m.error && <p className="mt-0.5 text-xs text-ink-400">Details: {m.error}</p>}</div>
               : <>
                   <MarkdownContent text={m.text} />
+                  <ToolCallStrip calls={m.toolCalls} />
                   {m.model && <p className="flex items-center gap-1 text-[11px] text-ink-400"><Icon name="Sparkles" size={11} /> Answered by {m.model}.</p>}
                   {/* Bonus: a run_result's created-entity links as one-tap buttons. */}
                   {m.kind === "run_result" && <RunResultLinks links={m.links} />}
@@ -628,7 +687,9 @@ function BuildCard({ conversationId, messageId, build, status, progress, builtId
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <p className="flex items-center gap-1.5 text-sm text-sage-600"><Icon name="CheckCircle2" size={15} /> Done.</p>
           {builtIds?.agentId && <Button size="sm" variant="secondary" onClick={() => navigate("agents", { id: builtIds.agentId! })}><Icon name="Bot" size={13} /> Open helper</Button>}
-          {builtIds?.triggerId && <Button size="sm" variant="secondary" onClick={() => navigate("automations", { id: builtIds.triggerId! })}><Icon name="Workflow" size={13} /> Open automation</Button>}
+          {/* A chat-built automation is a SERVER trigger — send it to the Triggers tab,
+              not the client-local automations list where its id resolves to nothing. */}
+          {builtIds?.triggerId && <Button size="sm" variant="secondary" onClick={() => navigate("automations", { tab: "triggers", id: builtIds.triggerId! })}><Icon name="Workflow" size={13} /> Open automation</Button>}
         </div>
       ) : (
         <div className="mt-3 flex items-center gap-2">
@@ -753,7 +814,7 @@ function RunStatus({ run }: { run: AutomationRun }) {
         </Button>
       )}
       {view.terminal && (
-        <Button size="sm" variant="ghost" className="mt-2.5" onClick={() => navigate("activity")}><Icon name="History" size={13} /> View in history</Button>
+        <Button size="sm" variant="ghost" className="mt-2.5" onClick={() => navigate("automations", { tab: "history" })}><Icon name="History" size={13} /> View in history</Button>
       )}
     </div>
   );

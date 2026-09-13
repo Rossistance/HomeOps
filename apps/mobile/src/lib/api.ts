@@ -53,7 +53,20 @@ export interface BuildResult {
   updated?: { kind: string; id: string; name?: string; ok: boolean }[];
   notes?: string[]; error?: string; message?: string;
 }
-export interface AssistantResult { ok: boolean; kind?: "answer" | "plan" | "build"; answer?: string; plan?: AgentPlan; build?: ChatBuild; run?: RunRec; model?: string; error?: string; message?: string }
+/** One tool the Ask Famili engine called during a turn — shown as a quiet receipt under the
+ *  reply. `awaiting_approval` carries the approval to answer; `runId` the run it ran in. */
+export interface AssistantToolCall {
+  tool: string; label: string;
+  status: "done" | "failed" | "blocked" | "awaiting_approval";
+  ok?: boolean; summary?: string; runId?: string; approvalId?: string;
+}
+// kind: "answer" | "build" from the replaced engine — "plan" no longer occurs but old
+// persisted messages still carry it. A `run` may arrive WITH kind "answer" when a step was
+// queued for approval, so run-watching must never be gated on kind.
+export interface AssistantResult {
+  ok: boolean; kind?: "answer" | "plan" | "build"; answer?: string; plan?: AgentPlan; build?: ChatBuild; run?: RunRec; model?: string; error?: string; message?: string;
+  toolCalls?: AssistantToolCall[]; runId?: string; runIds?: string[];
+}
 // Server-durable assistant conversations — same records the web client uses, so a chat
 // started on the phone shows up on the web (and vice versa) and survives app restarts.
 // K2 — the rows a run actually fetched, as structure, so the chat can render real cards
@@ -95,6 +108,8 @@ export interface ConversationMessage {
   resultGroups?: ResultGroupRec[] | null;
   /** The same message with the row bullets removed — read this when rendering resultGroups. */
   textWithoutRows?: string | null;
+  /** The tools this turn called, persisted with the reply so a reopened chat shows them too. */
+  toolCalls?: AssistantToolCall[] | null;
 }
 export interface ConversationRec {
   id: string; title: string; messages: ConversationMessage[]; createdAt: string; updatedAt: string;
@@ -187,6 +202,9 @@ export interface EventRec {
   myNotes?: { note: string; bring: { item: string }[] } | null;
   /** H7 — set when this event was created from a task. */
   taskId?: string | null;
+  /** Minutes before the start to nudge — same choice list as tasks (reminders.mjs
+   *  REMINDER_CHOICES). Empty/absent = no reminder. */
+  remindOffsets?: number[];
 }
 export interface AttendeeRec { memberId: string; status: "invited" | "accepted" | "declined"; respondedAt: string | null }
 export interface TaskRec {
@@ -1078,8 +1096,11 @@ export const api = {
     });
     return r.data ?? { error: "network" };
   },
-  async deleteEvent(id: string): Promise<{ ok?: boolean; error?: string }> {
-    const r = await req<{ ok?: boolean; error?: string }>(`/events/${encodeURIComponent(id)}`, { method: "DELETE" });
+  // `google` reports what happened to a canonical event's Google copy: "deleted", or
+  // "failed" / "kept_external_actions_disabled" when it's still there and will resurface on
+  // the next sync. The server may instead refuse with 422 google_delete_failed.
+  async deleteEvent(id: string): Promise<{ ok?: boolean; google?: "deleted" | "failed" | "kept_external_actions_disabled"; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; google?: "deleted" | "failed" | "kept_external_actions_disabled"; error?: string; message?: string }>(`/events/${encodeURIComponent(id)}`, { method: "DELETE" });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },

@@ -8,7 +8,8 @@
 import crypto from "node:crypto";
 import { safeFetch } from "./net.mjs";
 import { parseICS, expandRecurring } from "./ics.mjs";
-import { listEvents, putEvent, patchEvent, deleteEventRec, getAccountRaw, getSubscription } from "./store.mjs";
+import { listEvents, putEvent, patchEvent, deleteEventRec, getAccountRaw, getSubscription, isEventTombstoned } from "./store.mjs";
+import { householdTimeZone, serverTimeZone, localMidnightISO, localDateKey, stampToMs, toInstantISO } from "./household-time.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 
@@ -43,15 +44,25 @@ export function mapGoogleEvents(items) {
 // construction: only date-only (`YYYY-MM-DD`) stamps are rewritten and the result is
 // always full ISO, so re-syncing can never shift the same span twice.
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
-const parseLocalDate = (s) => { const [y, m, d] = String(s).split("-").map(Number); return new Date(y, m - 1, d); };
-export function normalizeAllDaySpan(ev) {
+// YYYY-MM-DD ± n days, on the calendar (no zone involved).
+const shiftDate = (s, days) => {
+  const [y, m, d] = String(s).split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+};
+// "Local midnight" is the HOUSEHOLD's midnight. The previous `new Date(y, m-1, d)` was the
+// server process's — UTC on the hosted deployment, which is exactly the "begins a day early"
+// stamp the comment above says this function exists to avoid. Callers pass the household's
+// zone; the default is the server's so a caller with no household is no worse than before.
+export function normalizeAllDaySpan(ev, tz) {
   if (!ev?.allDay || !ev.startAt) return ev;
-  const startAt = DATE_ONLY_RE.test(String(ev.startAt)) ? parseLocalDate(ev.startAt).toISOString() : ev.startAt;
+  // `.map(normalizeAllDaySpan)` hands an INDEX as the second argument — only a real zone name counts.
+  if (typeof tz !== "string" || !tz) tz = serverTimeZone();
+  const startAt = DATE_ONLY_RE.test(String(ev.startAt)) ? (localMidnightISO(ev.startAt, tz) ?? ev.startAt) : ev.startAt;
   let endAt = ev.endAt ?? null;
   if (endAt && DATE_ONLY_RE.test(String(endAt))) {
-    const inc = parseLocalDate(endAt);
-    inc.setDate(inc.getDate() - 1);                                // exclusive → inclusive
-    endAt = +inc > +new Date(startAt) ? inc.toISOString() : null;  // single-day ⇒ no end at all
+    const inc = localMidnightISO(shiftDate(endAt, -1), tz);                                // exclusive → inclusive
+    endAt = inc && Date.parse(inc) > Date.parse(startAt) ? inc : null;                    // single-day ⇒ no end at all
   }
   return { ...ev, startAt, endAt };
 }
@@ -62,9 +73,10 @@ export function normalizeAllDaySpan(ev) {
  * and always writes full ISO. Scoped to one household; returns the number repaired. */
 export function backfillAllDaySpans(householdId) {
   let repaired = 0;
+  const tz = householdTimeZone(householdId);
   for (const ev of listEvents((e) => e.householdId === householdId && e.allDay === true && e.startAt)) {
     if (!DATE_ONLY_RE.test(String(ev.startAt ?? "")) && !DATE_ONLY_RE.test(String(ev.endAt ?? ""))) continue;
-    const fixed = normalizeAllDaySpan(ev);
+    const fixed = normalizeAllDaySpan(ev, tz);
     patchEvent(ev.id, { startAt: fixed.startAt, endAt: fixed.endAt });
     repaired++;
   }
@@ -102,6 +114,9 @@ function resolveGoogleAccount(sub, session) {
  */
 export async function syncSubscription({ sub, icsText, session }) {
   let parsed;
+  // The instant range this pull actually covered; a stored event OUTSIDE it is not evidence
+  // of anything and must not be removed as "gone from the feed".
+  let windowStart = Date.now() - 30 * 864e5, windowEnd = Date.now() + 90 * 864e5;
   let googleAccountId = null; // set for google-sourced subs so linked events can be edited two-way
   let ownerActorId = null;    // the member who connected the account — synced events belong to them (colors, free/busy)
   if (sub?.source === "google") {
@@ -111,11 +126,27 @@ export async function syncSubscription({ sub, icsText, session }) {
     googleAccountId = account.id;
     ownerActorId = account.connectedByActorId ?? null;
     const api = apiForAccount(account);
-    const timeMin = new Date().toISOString();
+    // 30 days back, like the .ics path. With timeMin = now, every synced event that had just
+    // ENDED vanished on the next sync (the removal loop below treats "not in this pull" as
+    // "left the feed"), taking the family's own notes on it along.
+    const timeMin = new Date(Date.now() - 30 * 864e5).toISOString();
     const timeMax = new Date(Date.now() + 90 * 864e5).toISOString();
-    const r = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=250&singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}`);
-    if (!r.ok) return { ok: false, error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status };
-    parsed = mapGoogleEvents(r.json?.items);
+    windowStart = Date.parse(timeMin); windowEnd = Date.parse(timeMax);
+    const items = [];
+    let pageToken = null;
+    // Follow nextPageToken: a calendar with more than 250 entries in the window used to
+    // import the first page only — and delete everything an earlier pull had brought in.
+    for (let page = 0; page < 20; page++) {
+      const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=250&singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`;
+      const r = await api(url);
+      if (!r.ok) return { ok: false, error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status };
+      items.push(...(r.json?.items ?? []));
+      pageToken = r.json?.nextPageToken ?? null;
+      if (!pageToken) break;
+    }
+    // A Google copy this household deleted here but could not delete THERE (Google error,
+    // external actions paused) is tombstoned — never re-imported as a fresh linked event.
+    parsed = mapGoogleEvents(items).filter((ev) => !isEventTombstoned(ev.uid));
   } else {
     // .ics: pasted feeds keep their raw text on the sub (re-parsed on re-sync); URL feeds
     // are re-fetched (SSRF-guarded). One source must be available.
@@ -135,9 +166,11 @@ export async function syncSubscription({ sub, icsText, session }) {
     parsed = expandRecurring(parseICS(text), { horizonStart: Date.now() - 30 * 864e5, horizonEnd: Date.now() + 90 * 864e5 });
   }
   // ISS-104: normalize all-day spans ONCE, right where the Google and .ics branches
-  // converge, so every downstream consumer sees the inclusive/local-midnight convention.
-  parsed = (parsed ?? []).map(normalizeAllDaySpan);
+  // converge, so every downstream consumer sees the inclusive/local-midnight convention —
+  // on the HOUSEHOLD's clock.
   const hh = session.householdId;
+  const tz = householdTimeZone(hh);
+  parsed = (parsed ?? []).map((ev) => normalizeAllDaySpan(ev, tz));
   // Repair anything stored by the pre-fix ingest before comparing against this pull —
   // otherwise a stale exclusive end reads as a "change" on every single sync.
   backfillAllDaySpans(hh);
@@ -239,6 +272,9 @@ export async function syncSubscription({ sub, icsText, session }) {
   // unless another subscription still shows it, in which case ownership transfers.
   let removed = 0;
   for (const stale of existing.values()) {
+    // Only an event INSIDE the pulled window can be said to have left the feed.
+    const staleMs = stale.startAt ? stampToMs(stale.startAt, tz) : NaN;
+    if (!Number.isNaN(staleMs) && (staleMs < windowStart || staleMs > windowEnd)) continue;
     const also = (stale.provenance?.alsoSubscriptionIds ?? []).filter((x) => x !== subId);
     if (also.length > 0) {
       patchEvent(stale.id, { provenance: { ...(stale.provenance ?? {}), subscriptionId: also[0], alsoSubscriptionIds: also.slice(1) } });
@@ -283,19 +319,20 @@ export async function syncSubscription({ sub, icsText, session }) {
 
 // Pure decision function — unit-testable with fixtures, no network.
 // ev: FamiliOS canonical event; gev: raw Google event resource (null if 404/cancelled).
-export function mergeGoogleEdit({ ev, gev }) {
+export function mergeGoogleEdit({ ev, gev, tz }) {
   const prov = ev.provenance ?? {};
   if (!gev || gev.status === "cancelled") return { action: "unlinked" };
   // All-day normalization (WP-003/ISS-005): Google's `date` form maps back to the
   // FamiliOS convention — allDay:true + local-midnight ISO stamps, end INCLUSIVE
   // (Google's end.date is exclusive; a single-day all-day event gets endAt:null).
+  // "Local" is the household's zone; a caller that has none gets the server's.
+  const zone = tz ?? (ev?.householdId ? householdTimeZone(ev.householdId) : serverTimeZone());
   const gAllDay = !!gev.start?.date && !gev.start?.dateTime;
-  const parseGDate = (s) => { const [y, m, d] = String(s).split("-").map(Number); return new Date(y, m - 1, d); };
-  const startAt = gev.start?.dateTime ?? (gev.start?.date ? parseGDate(gev.start.date).toISOString() : null);
+  const startAt = gev.start?.dateTime ?? (gev.start?.date ? localMidnightISO(gev.start.date, zone) : null);
   let endAt = gev.end?.dateTime ?? null;
   if (!endAt && gev.end?.date) {
-    const inc = parseGDate(gev.end.date); inc.setDate(inc.getDate() - 1);
-    endAt = startAt && +inc > +new Date(startAt) ? inc.toISOString() : null;
+    const inc = localMidnightISO(shiftDate(gev.end.date, -1), zone);
+    endAt = startAt && inc && Date.parse(inc) > Date.parse(startAt) ? inc : null;
   }
   const fields = {
     title: gev.summary ?? "(untitled)",
@@ -344,7 +381,7 @@ export async function pullGoogleEdits({ session }) {
     if (r.ok) gev = r.json;
     else if (r.status === 404 || r.status === 410) gev = null; // deleted on Google
     else { errors++; continue; } // auth/transient — skip, don't guess
-    const d = mergeGoogleEdit({ ev, gev });
+    const d = mergeGoogleEdit({ ev, gev, tz: householdTimeZone(session.householdId) });
     if (d.action === "merge") {
       patchEvent(ev.id, { ...d.fields, provenance: { ...(ev.provenance ?? {}), lastGoogleUpdated: d.googleUpdated, lastMergeAt: Date.now(), conflict: null } });
       merged++;
@@ -427,17 +464,22 @@ export function stripFamiliosBlock(description) {
  * All-day events (ev.allDay) push in Google's `date` form (end date EXCLUSIVE per
  * the Google Calendar contract); timed events keep `dateTime`. startAt/endAt stay
  * local-midnight ISO timestamps in the FamiliOS store. Pure + unit-testable. */
-const pad2 = (n) => String(n).padStart(2, "0");
-const localDateOf = (v) => { const d = v instanceof Date ? v : new Date(v); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+// Dates are read on the HOUSEHOLD's clock (tz); a zoneless timed stamp is resolved there
+// too. The previous version sent Google a naked "2026-07-23T18:00:00" start (no offset, no
+// timeZone — which the Calendar API rejects) beside an end round-tripped through
+// toISOString() as UTC: two time frames in one payload.
+const dateKeyOf = (v, tz) => (DATE_ONLY_RE.test(String(v)) ? String(v) : localDateKey(stampToMs(v, tz), tz));
 
-export function googleEventTimes(ev) {
+export function googleEventTimes(ev, tz) {
+  if (typeof tz !== "string" || !tz) tz = serverTimeZone();
   if (ev.allDay && ev.startAt) {
-    const endInc = new Date(ev.endAt ?? ev.startAt);
-    const endExc = new Date(endInc.getFullYear(), endInc.getMonth(), endInc.getDate() + 1);
-    return { start: { date: localDateOf(ev.startAt) }, end: { date: localDateOf(endExc) } };
+    const startKey = dateKeyOf(ev.startAt, tz);
+    const endIncKey = ev.endAt ? dateKeyOf(ev.endAt, tz) : startKey;
+    return { start: { date: startKey }, end: { date: shiftDate(endIncKey, 1) } };
   }
-  const end = ev.endAt ?? new Date(new Date(ev.startAt).getTime() + 3_600_000).toISOString();
-  return { start: { dateTime: ev.startAt }, end: { dateTime: end } };
+  const startISO = toInstantISO(ev.startAt, tz);
+  const end = ev.endAt ? toInstantISO(ev.endAt, tz) : new Date(Date.parse(startISO) + 3_600_000).toISOString();
+  return { start: { dateTime: startISO }, end: { dateTime: end } };
 }
 
 /* ---- Push half of two-way sync (shared executor) ----
@@ -463,7 +505,7 @@ export async function pushEventToGoogle({ ev, householdId, actorId }) {
   const r = await api(url, {
     method: gid ? "PATCH" : "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ summary: ev.title, description: composeGoogleDescription(ev), ...googleEventTimes(ev), location: ev.location ?? "" }),
+    body: JSON.stringify({ summary: ev.title, description: composeGoogleDescription(ev), ...googleEventTimes(ev, householdTimeZone(householdId)), location: ev.location ?? "" }),
   });
   if (!r.ok) return { ok: false, error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status, message: r.json?.error?.message ?? "Google rejected the write." };
   patchEvent(ev.id, { provenance: { ...(ev.provenance ?? {}), via: ev.provenance?.via ?? "user", googleEventId: r.json.id, googleAccountId: account.id, pushedAt: Date.now() } });
@@ -508,7 +550,7 @@ export async function editLinkedGoogleEvent({ ev, patch, householdId, actorId })
   const r = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(target.gid)}`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ summary: merged.title, description: composeGoogleDescription(merged), ...googleEventTimes(merged), location: merged.location ?? "" }),
+    body: JSON.stringify({ summary: merged.title, description: composeGoogleDescription(merged), ...googleEventTimes(merged, householdTimeZone(householdId)), location: merged.location ?? "" }),
   });
   if (!r.ok) return { ok: false, error: r.status === 401 ? "needs_reconnect" : "google_error", status: r.status, message: r.json?.error?.message ?? "Google rejected the edit." };
   const updated = patchEvent(ev.id, { ...patch, provenance: { ...(ev.provenance ?? {}), googleEventId: target.gid, googleAccountId: target.account.id } });

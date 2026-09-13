@@ -1,0 +1,726 @@
+// FamiliOS AI — "Ask Famili" agent engine, built on the Vercel AI SDK ToolLoopAgent.
+//
+// WHY THIS EXISTS. The previous brain (planner.mjs assistantRespond/assistantStream) made ONE
+// model call that classified a message as answer | lookup | plan | build, and a "plan" was a
+// static list of steps executed later with no way for the model to see a result and change
+// course. If step 2 needed something step 1 revealed, the engine guessed with a second
+// "input fill" call; if a step failed, a separate "repair" pass invented a new plan. That is
+// the classic brittle shape — the model never observed anything — and it is why the chat
+// could not reliably do real work.
+//
+// This engine is the standard agent loop instead: the model is given the household's REAL
+// tools, calls one, sees the actual result, and decides what to do next, until it has
+// enough to answer. Reads and policy-allowed writes execute immediately through the same
+// tool chain a run step uses (engine.mjs executeToolForChat). Anything the policy says needs
+// a human's approval is NOT executed in the turn: it becomes a durable one-step run through
+// orchestrate(), which creates the approval, parks, notifies, and later consumes the approval
+// exactly as every scheduled run does — nothing about approvals, audit, the kill switch or
+// per-agent permissions changed. The model is told the step is waiting, so it says so.
+//
+// Nothing here is simulated. Every tool result the model sees is the real result.
+import { ToolLoopAgent, tool, jsonSchema, isStepCount } from "ai";
+import { languageModelFor, fallbackProviderIds } from "./ai-model.mjs";
+import {
+  toolCatalog, pruneCatalogForPrompt, buildServerContext, activeProviderId, INTERNAL_INPUTS,
+  normalizeBuild, attachmentSection, TRIGGERS, SPACE_TYPES,
+} from "./planner.mjs";
+import { executeToolForChat } from "./engine.mjs";
+import { orchestrate } from "./orchestrator.mjs";
+import {
+  getRun, listEvents, getEvent, patchEvent, deleteEventRec, listTasks, getTask, patchTask, deleteTaskRec,
+  listMeals, listMembers, canSeeEntity, listApprovals, listMemory, getMember, isAdultRole,
+  recordAiUsage, aiBudgetExhausted, getSettings, appendAudit,
+} from "./store.mjs";
+import { roleAtLeast } from "./auth.mjs";
+import { memoryProvider } from "./memory-provider.mjs";
+import { isEditableLinkedGoogle, editLinkedGoogleEvent, pushEventToGoogle, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
+import { isValidReminder, isValidReminderList } from "./reminders.mjs";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const MAX_STEPS = Number(process.env.HOMEOPS_ASSISTANT_MAX_STEPS) > 0 ? Number(process.env.HOMEOPS_ASSISTANT_MAX_STEPS) : 12;
+const TURN_TIMEOUT_MS = 240_000;
+const STEP_TIMEOUT_MS = 120_000;
+const CONTEXT_CHARS = 7000;
+const TOOL_RESULT_CHARS = 6000;
+
+/* ------------------------------------------------------------------------------------ *
+ * Tool naming. Provider tool names must match ^[a-zA-Z0-9_-]+$ (OpenAI rejects a dot), so
+ * "homeops.create_task" is exposed as "homeops__create_task" and mapped back on execution.
+ * ------------------------------------------------------------------------------------ */
+export const toToolName = (id) => String(id).replace(/[^a-zA-Z0-9_-]/g, "__");
+
+/* ------------------------------------------------------------------------------------ *
+ * Input schemas. The catalog only knows input KEYS (and sometimes labels); a model needs
+ * types and meaning. These hints cover the app's own tools precisely and give every other
+ * key a sensible string default. Lists are declared as arrays; a model that sends a
+ * comma-separated string anyway is coerced (see coerceInput) rather than failed.
+ * ------------------------------------------------------------------------------------ */
+const KEY_HINTS = {
+  title: { type: "string", description: "Short human title." },
+  text: { type: "string", description: "The text." },
+  body: { type: "string", description: "Full message body, ready to send." },
+  subject: { type: "string", description: "Subject line." },
+  notes: { type: "string", description: "Free-form notes." },
+  detail: { type: "string" },
+  startAt: { type: "string", description: "Start date-time, ISO 8601 with the household's UTC offset, e.g. 2026-09-14T17:00:00-04:00. For an all-day item use the date only (YYYY-MM-DD)." },
+  endAt: { type: "string", description: "End date-time, same format as startAt. Omit if unknown." },
+  dueAt: { type: "string", description: "Due date-time, ISO 8601 with the household's UTC offset (or YYYY-MM-DD)." },
+  date: { type: "string", description: "Calendar date, YYYY-MM-DD." },
+  time: { type: "string", description: "Time of day, 24-hour HH:MM." },
+  slot: { type: "string", enum: ["breakfast", "lunch", "dinner", "snack"] },
+  location: { type: "string" },
+  eventId: { type: "string", description: "The event's id (starts with ev_). Look it up with famili__list_events first." },
+  taskId: { type: "string", description: "The task's id (starts with tk_ or li_). Look it up with famili__list_tasks first." },
+  agentId: { type: "string", description: "The helper's id (from famili context existingAgents or homeops__list_agents)." },
+  fileId: { type: "string", description: "The attached file's id (context.attachedFileId)." },
+  question: { type: "string" },
+  assignedMemberId: { type: "string", description: "A member id from the household roster (famili__list_members)." },
+  driverId: { type: "string", description: "A member id from the household roster." },
+  participantIds: { type: "array", items: { type: "string" }, description: "Member ids from the household roster." },
+  items: { type: "array", items: { type: "string" }, description: "One entry per item." },
+  ingredients: { type: "array", items: { type: "string" }, description: "Full ingredient list, one entry per ingredient with quantity." },
+  instructions: { type: "array", items: { type: "string" }, description: "Step-by-step cooking instructions, one step per entry." },
+  whatToBring: { type: "array", items: { type: "string" } },
+  recipeUrl: { type: "string", description: "Source recipe URL, if any." },
+  servings: { type: "number", description: "Number of servings — size to the household." },
+  replace: { type: "boolean", description: "true to replace whatever is already planned in that slot (only when the family said so)." },
+  visibility: { type: "string", enum: ["household", "personal", "adults", "private"], description: "Who can see it. Default household." },
+  priority: { type: "string", enum: ["low", "medium", "high"] },
+  type: { type: "string", description: "Kind of task: task, chore, bill, errand… Default task." },
+  listName: { type: "string", description: "Which list (Groceries, Shopping, Packing…)." },
+  scope: { type: "string", enum: ["household", "personal"], description: "household = everyone can use it later; personal = only the person who said it." },
+  kind: { type: "string" },
+  to: { type: "string", description: "Recipient address or phone number, exactly as the family gave it." },
+  methodId: { type: "string", description: "A verified contact-method id, when known." },
+  channel: { type: "string" },
+  query: { type: "string", description: "Plain-English search text." },
+  url: { type: "string", description: "A full http(s) URL." },
+  lat: { type: "number" },
+  lng: { type: "number" },
+  limit: { type: "number" },
+  name: { type: "string" },
+  purpose: { type: "string" },
+  status: { type: "string" },
+  runUnattended: { type: "boolean" },
+  includeSendAndSpend: { type: "boolean" },
+  note: { type: "string" },
+  fileRef: { type: "string" },
+  path: { type: "string" },
+};
+// Keys the app's own handlers read but the catalog hints leave out (Severity-5 item 7: the
+// plan_meal prompt contract and INTERNAL_INPUTS disagreed, so recipeUrl/instructions/
+// servings/replace could never be threaded). Declared here so the model can pass them.
+const EXTRA_INPUT_KEYS = {
+  "homeops.plan_meal": ["recipeUrl", "instructions", "servings", "replace", "time", "notes"],
+  "homeops.create_event_draft": ["endAt", "notes"],
+  "homeops.create_task": ["notes", "type", "visibility"],
+  "homeops.create_list_item": ["visibility"],
+  "homeops.write_memory": ["type"],
+};
+const LIST_KEYS = new Set(["items", "participantIds", "ingredients", "instructions", "whatToBring"]);
+
+function propFor(key, label) {
+  const hint = KEY_HINTS[key];
+  if (hint) return { ...hint, ...(label && !hint.description ? { description: label } : {}) };
+  return { type: "string", ...(label ? { description: label } : {}) };
+}
+function schemaForInputs(inputs, extraKeys = []) {
+  const properties = {};
+  const required = [];
+  for (const i of inputs ?? []) {
+    const key = typeof i === "string" ? i : i.key;
+    if (!key) continue;
+    properties[key] = propFor(key, typeof i === "object" ? i.label : undefined);
+    if (typeof i === "object" && i.required) required.push(key);
+  }
+  for (const key of extraKeys) if (!properties[key]) properties[key] = propFor(key);
+  return { type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: false };
+}
+// A model that sends "eggs, milk" for a list is corrected, not failed.
+function coerceInput(input) {
+  const out = { ...(input ?? {}) };
+  for (const k of Object.keys(out)) {
+    const v = out[k];
+    if (LIST_KEYS.has(k) && typeof v === "string") {
+      const t = v.trim();
+      if (t.startsWith("[")) { try { out[k] = JSON.parse(t); continue; } catch { /* fall through */ } }
+      out[k] = t ? t.split(/\n|,\s*(?![^()]*\))/).map((s) => s.trim()).filter(Boolean) : [];
+    }
+    if (typeof v === "string" && (k === "servings" || k === "limit" || k === "lat" || k === "lng") && v.trim() && Number.isFinite(Number(v))) out[k] = Number(v);
+    if (v === "" || v === null) delete out[k];
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------------------------ *
+ * Tool results the model sees: real, but bounded. A 300-row list is cut to 40 rows with a
+ * `truncated` count rather than flooding the context window.
+ * ------------------------------------------------------------------------------------ */
+function boundResult(value) {
+  const shrink = (v, depth = 0) => {
+    if (Array.isArray(v)) {
+      const cut = v.slice(0, 40).map((x) => shrink(x, depth + 1));
+      return v.length > 40 ? [...cut, { truncated: v.length - 40 }] : cut;
+    }
+    if (v && typeof v === "object") {
+      const o = {};
+      for (const k of Object.keys(v)) o[k] = shrink(v[k], depth + 1);
+      return o;
+    }
+    if (typeof v === "string" && v.length > 2500) return v.slice(0, 2500) + "…";
+    return v;
+  };
+  const s = shrink(value);
+  const text = JSON.stringify(s);
+  if (text && text.length > TOOL_RESULT_CHARS) return { truncated: true, preview: text.slice(0, TOOL_RESULT_CHARS) };
+  return s;
+}
+const short = (v, n = 160) => { const s = typeof v === "string" ? v : JSON.stringify(v ?? ""); return s.length > n ? s.slice(0, n) + "…" : s; };
+function summarizeForCard(toolId, result) {
+  if (!result || typeof result !== "object") return short(result);
+  const r = result;
+  if (r.title) return String(r.title);
+  if (r.note) return String(r.note);
+  const arr = Object.values(r).find((v) => Array.isArray(v));
+  if (arr) return `${arr.length} result${arr.length === 1 ? "" : "s"}`;
+  if (r.message) return String(r.message);
+  return short(r, 120);
+}
+
+/* ------------------------------------------------------------------------------------ *
+ * Native FamiliOS tools that only the chat needs: reading the household graph beyond the
+ * context slice, and editing what already exists. (The internal-functions catalog can
+ * CREATE events/tasks but has no way to list, move, complete or delete them — which is most
+ * of what a family asks a scheduling assistant to do.) Same visibility and ownership rules
+ * as the HTTP routes in index.mjs, mirrored here so chat can never do more than the app.
+ * ------------------------------------------------------------------------------------ */
+const badStamp = (v) => v != null && v !== "" && Number.isNaN(+new Date(v));
+const startOfLocalDay = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
+function withinRange(stamp, from, to) {
+  if (!stamp) return true;
+  const t = +new Date(stamp);
+  if (Number.isNaN(t)) return true;
+  return (!from || t >= +from) && (!to || t <= +to);
+}
+function parseRange(input, defaultDays) {
+  const from = input?.from ? new Date(input.from) : startOfLocalDay();
+  const to = input?.to ? new Date(input.to) : new Date(+from + defaultDays * 86_400_000);
+  if (input?.to && /^\d{4}-\d{2}-\d{2}$/.test(String(input.to))) to.setHours(23, 59, 59, 999);
+  return { from: Number.isNaN(+from) ? startOfLocalDay() : from, to: Number.isNaN(+to) ? null : to };
+}
+const matches = (q, ...fields) => !q || fields.some((f) => String(f ?? "").toLowerCase().includes(String(q).toLowerCase()));
+const memberName = (hh, id) => (id ? listMembers({ householdId: hh }).find((m) => m.actorId === id)?.displayName ?? id : null);
+
+function publicEvent(hh, e) {
+  return {
+    id: e.id, title: e.title, startAt: e.startAt ?? null, endAt: e.endAt ?? null, allDay: e.allDay === true,
+    location: e.location || undefined, status: e.status ?? undefined, category: e.category ?? undefined,
+    source: e.layer === "canonical" ? "FamiliOS" : (e.source ?? e.layer ?? "external"), editable: e.layer === "canonical" || e.layer === "linked",
+    owner: memberName(hh, e.ownerId), driver: memberName(hh, e.driverId),
+    participants: (e.participantIds ?? []).map((id) => memberName(hh, id)).filter(Boolean),
+    notes: e.notes ? short(e.notes, 300) : undefined,
+    checklist: (e.checklist ?? []).length ? e.checklist.map((c) => `${c.done ? "[x]" : "[ ]"} ${c.text}`) : undefined,
+    visibility: e.visibility ?? "household",
+  };
+}
+function publicTask(hh, t) {
+  return {
+    id: t.id, title: t.title, type: t.type ?? "task", status: t.status ?? "todo", listName: t.listName ?? undefined,
+    dueAt: t.dueAt ?? null, startAt: t.startAt ?? undefined, priority: t.priority ?? undefined,
+    assignedTo: memberName(hh, t.assignedMemberId), notes: t.notes ? short(t.notes, 200) : undefined, visibility: t.visibility ?? "household",
+  };
+}
+
+function nativeTools(ctx) {
+  const { session } = ctx;
+  const hh = session.householdId;
+  const canWrite = roleAtLeast(session.role, "Limited Member");
+  const readOnly = () => ({ ok: false, error: "read_only_profile", message: "This profile can look things up but not change them. Ask a parent or an adult member to do it." });
+  const defs = [];
+  const add = (id, name, description, schema, run, { action = "Read" } = {}) => defs.push({ id, name, description, schema, run, action, connectorName: "FamiliOS" });
+
+  add("famili.list_events", "List calendar events",
+    "List the household's calendar events the asker can see. Defaults to today through the next 30 days. Use it before answering any question about what is scheduled, before moving or deleting an event, and to check for conflicts before adding one.",
+    { type: "object", properties: { from: { type: "string", description: "Range start (ISO or YYYY-MM-DD). Default: start of today." }, to: { type: "string", description: "Range end (ISO or YYYY-MM-DD). Default: 30 days after from." }, query: { type: "string", description: "Only events whose title or location contains this." }, limit: { type: "number" } }, additionalProperties: false },
+    async (input) => {
+      const { from, to } = parseRange(input, 30);
+      const limit = Math.min(200, Math.max(1, Number(input?.limit) || 60));
+      const rows = listEvents((e) => e.householdId === hh).filter((e) => canSeeEntity(e, session))
+        .filter((e) => withinRange(e.startAt, from, to) || (e.endAt && withinRange(e.endAt, from, to)))
+        .filter((e) => matches(input?.query, e.title, e.location))
+        .sort((a, b) => String(a.startAt ?? "").localeCompare(String(b.startAt ?? "")));
+      return { ok: true, result: { events: rows.slice(0, limit).map((e) => publicEvent(hh, e)), count: rows.length, range: { from: from.toISOString(), to: to?.toISOString() ?? null } } };
+    });
+
+  add("famili.list_tasks", "List tasks and list items",
+    "List the household's tasks, chores and list items (groceries, shopping, packing) the asker can see. Use it before answering about what is due or to find a task's id before completing, changing or deleting it.",
+    { type: "object", properties: { status: { type: "string", enum: ["open", "done", "all"], description: "Default open." }, listName: { type: "string", description: "Only items on this list (e.g. Groceries)." }, assignedMemberId: { type: "string" }, query: { type: "string", description: "Only tasks whose title contains this." }, limit: { type: "number" } }, additionalProperties: false },
+    async (input) => {
+      const status = input?.status ?? "open";
+      const limit = Math.min(200, Math.max(1, Number(input?.limit) || 80));
+      const rows = listTasks((t) => t.householdId === hh).filter((t) => canSeeEntity(t, session))
+        .filter((t) => status === "all" ? true : status === "done" ? t.status === "done" : (t.status !== "done" && t.status !== "archived"))
+        .filter((t) => !input?.listName || String(t.listName ?? "").toLowerCase() === String(input.listName).toLowerCase())
+        .filter((t) => !input?.assignedMemberId || t.assignedMemberId === input.assignedMemberId)
+        .filter((t) => matches(input?.query, t.title, t.notes))
+        .sort((a, b) => String(a.dueAt ?? "9").localeCompare(String(b.dueAt ?? "9")));
+      return { ok: true, result: { tasks: rows.slice(0, limit).map((t) => publicTask(hh, t)), count: rows.length } };
+    });
+
+  add("famili.list_meals", "List planned meals",
+    "List the meal plan for a date range (default: today through 14 days). Use it before planning meals so you never double-book a slot.",
+    { type: "object", properties: { from: { type: "string", description: "YYYY-MM-DD" }, to: { type: "string", description: "YYYY-MM-DD" } }, additionalProperties: false },
+    async (input) => {
+      const from = /^\d{4}-\d{2}-\d{2}$/.test(String(input?.from ?? "")) ? input.from : new Date().toISOString().slice(0, 10);
+      const to = /^\d{4}-\d{2}-\d{2}$/.test(String(input?.to ?? "")) ? input.to : new Date(Date.parse(from) + 14 * 86_400_000).toISOString().slice(0, 10);
+      const rows = listMeals((m) => m.householdId === hh && !m.archived).filter((m) => canSeeEntity(m, session))
+        .filter((m) => !m.date || (m.date >= from && m.date <= to))
+        .sort((a, b) => String(a.date ?? "").localeCompare(String(b.date ?? "")));
+      return { ok: true, result: { meals: rows.map((m) => ({ id: m.id, date: m.date, slot: m.slot, title: m.title, servings: m.servings ?? null, ingredientCount: (m.ingredients ?? []).length, recipeUrl: m.recipeUrl || undefined })), count: rows.length } };
+    });
+
+  add("famili.list_members", "List household members",
+    "The household roster with member ids, roles and relationships. Use it to resolve a name to the id that assign/driver/participant fields need.",
+    { type: "object", properties: {}, additionalProperties: false },
+    async () => {
+      const rows = listMembers({ householdId: hh }).filter((m) => !m.archived)
+        .map((m) => ({ id: m.actorId, name: m.displayName, role: m.role, relationship: m.relationship ?? null, isYou: m.actorId === session.actorId }));
+      return { ok: true, result: { members: rows, count: rows.length } };
+    });
+
+  add("famili.search_memory", "Search family memory",
+    "Search what the family has told Famili to remember (preferences, routines, facts) and past conversation knowledge. Use it when a request depends on something the family may have said before.",
+    { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false },
+    async (input) => {
+      const q = String(input?.query ?? "").trim();
+      if (!q) return { ok: false, error: "query_required", message: "What should I search for?" };
+      const visible = (m) => m.scope !== "personal" || (m.sourceActorId ?? m.source?.actorId) === session.actorId;
+      const health = await memoryProvider.health();
+      if (health.ok) {
+        const r = await memoryProvider.search(q, { containerTag: hh, limit: 10 });
+        if (r.ok) return { ok: true, result: { memories: (r.results ?? []).filter(visible).map((m) => ({ text: m.text, scope: m.scope })), degraded: !!r.degraded } };
+      }
+      const rows = listMemory({ householdId: hh, limit: 200 }).filter(visible).filter((m) => matches(q, m.text)).slice(0, 10);
+      return { ok: true, result: { memories: rows.map((m) => ({ text: m.text, scope: m.scope })), degraded: true } };
+    });
+
+  add("famili.list_approvals", "List pending approvals",
+    "Approvals the household still has to decide on (things waiting before they can send or run).",
+    { type: "object", properties: {}, additionalProperties: false },
+    async () => {
+      const rows = listApprovals({ householdId: hh }).filter((a) => a.status === "pending")
+        .filter((a) => a.visibility !== "personal" || a.requestedBy === session.actorId)
+        .map((a) => ({ id: a.id, toolId: a.toolId, preview: a.preview, risk: a.risk, expiresAt: a.expiresAt ? new Date(a.expiresAt).toISOString() : null }));
+      return { ok: true, result: { approvals: rows, count: rows.length } };
+    });
+
+  add("famili.update_event", "Change an existing event",
+    "Move, rename, or edit a calendar event the asker owns (time, end, all-day, location, notes, participants, driver, status confirmed|draft). Look the event up first. Someone else's event, or one mirrored from an outside calendar, can't have its time/title changed here — the result says so.",
+    { type: "object", properties: { eventId: KEY_HINTS.eventId, title: KEY_HINTS.title, startAt: KEY_HINTS.startAt, endAt: KEY_HINTS.endAt, allDay: { type: "boolean" }, location: KEY_HINTS.location, notes: KEY_HINTS.notes, participantIds: KEY_HINTS.participantIds, driverId: KEY_HINTS.driverId, status: { type: "string", enum: ["draft", "confirmed", "cancelled"] } }, required: ["eventId"], additionalProperties: false },
+    async (input) => {
+      if (!canWrite) return readOnly();
+      const ev = getEvent(String(input?.eventId ?? ""));
+      if (!ev || ev.householdId !== hh) return { ok: false, error: "event_not_found", message: "No such event — list events to find the right id." };
+      if (!canSeeEntity(ev, session)) return { ok: false, error: "forbidden", message: "That event isn't visible to this person." };
+      const { eventId, ...patch } = input ?? {};
+      for (const k of Object.keys(patch)) if (patch[k] === undefined) delete patch[k];
+      if (badStamp(patch.startAt)) return { ok: false, error: "invalid_startAt", message: "startAt isn't a valid timestamp." };
+      if (badStamp(patch.endAt)) return { ok: false, error: "invalid_endAt", message: "endAt isn't a valid timestamp." };
+      const linkedGoogle = ev.layer === "linked" && isEditableLinkedGoogle(ev, hh, session.actorId);
+      const ownerMember = ev.ownerId ? getMember(ev.ownerId) : null;
+      const isOwner = ownerMember ? (ev.ownerId === session.actorId || linkedGoogle) : (ev.createdBy === session.actorId || linkedGoogle || isAdultRole(session.role));
+      if (!isOwner) {
+        const who = getMember(ev.ownerId ?? ev.createdBy)?.displayName ?? "its owner";
+        return { ok: false, error: "not_event_owner", message: `This is ${who}'s event — only they can change it. Offer to draft a message to them instead.` };
+      }
+      if (ev.layer && ev.layer !== "canonical" && !linkedGoogle) {
+        const SOURCE = ["title", "startAt", "endAt", "allDay", "location"];
+        const claimed = Object.keys(patch).filter((k) => SOURCE.includes(k));
+        if (claimed.length) return { ok: false, error: "read_only_layer", message: `This event comes from a calendar outside FamiliOS, so its ${claimed.join(", ")} can only change there. Notes, who's going and a driver can still be added here.` };
+        const updated = patchEvent(ev.id, patch);
+        appendAudit({ type: "event.append", eventId: ev.id, fields: Object.keys(patch), via: "assistant", householdId: hh, actorId: session.actorId });
+        return { ok: true, result: { event: publicEvent(hh, updated), localOnly: true } };
+      }
+      if (linkedGoogle) {
+        const { title, startAt, endAt, location, notes, ...localOnly } = patch;
+        const gPatch = Object.fromEntries(Object.entries({ title, startAt, endAt, location, notes }).filter(([, v]) => v !== undefined));
+        if (Object.keys(gPatch).length) {
+          if (getSettings(hh).externalActionsEnabled === false) return { ok: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch, so the Google copy can't be changed right now." };
+          const r = await editLinkedGoogleEvent({ ev, patch: gPatch, householdId: hh, actorId: session.actorId });
+          appendAudit({ type: "event.update", eventId: ev.id, ok: r.ok, target: "google-linked", via: "assistant", householdId: hh, actorId: session.actorId });
+          if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "Google rejected the change." };
+        }
+        const updated = Object.keys(localOnly).length ? patchEvent(ev.id, localOnly) : getEvent(ev.id);
+        return { ok: true, result: { event: publicEvent(hh, updated), google: "updated" } };
+      }
+      const updated = patchEvent(ev.id, patch);
+      appendAudit({ type: "event.update", eventId: ev.id, fields: Object.keys(patch), via: "assistant", householdId: hh, actorId: session.actorId });
+      let google;
+      if (getSettings(hh).calendarAutoSync === true && updated.provenance?.googleEventId && getSettings(hh).externalActionsEnabled !== false) {
+        const r = await pushEventToGoogle({ ev: updated, householdId: hh, actorId: session.actorId }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+        google = r.ok ? "updated" : `not updated (${r.error})`;
+      }
+      return { ok: true, result: { event: publicEvent(hh, updated), ...(google ? { google } : {}) } };
+    }, { action: "Write" });
+
+  add("famili.delete_event", "Delete an event",
+    "Remove a calendar event the asker owns (or any event, for an adult). Look it up first and confirm it is the right one. Events mirrored from an outside calendar can't be deleted here.",
+    { type: "object", properties: { eventId: KEY_HINTS.eventId }, required: ["eventId"], additionalProperties: false },
+    async (input) => {
+      if (!canWrite) return readOnly();
+      const ev = getEvent(String(input?.eventId ?? ""));
+      if (!ev || ev.householdId !== hh) return { ok: false, error: "event_not_found", message: "No such event." };
+      if (!isAdultRole(session.role) && ev.ownerId !== session.actorId) return { ok: false, error: "forbidden", message: "Only the event's owner or an adult can delete it." };
+      const editableLinked = isEditableLinkedGoogle(ev, hh, session.actorId);
+      if (ev.layer && ev.layer !== "canonical" && !editableLinked) return { ok: false, error: "read_only_layer", message: "This event is synced from another calendar and can't be deleted here." };
+      const external = getSettings(hh).externalActionsEnabled !== false;
+      if (ev.layer === "linked" && editableLinked) {
+        if (!external) return { ok: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch." };
+        const r = await deleteLinkedGoogleEvent({ ev, householdId: hh, actorId: session.actorId });
+        appendAudit({ type: "event.delete", eventId: ev.id, ok: r.ok, target: "google-linked", via: "assistant", householdId: hh, actorId: session.actorId });
+        if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "Google rejected the delete." };
+        return { ok: true, result: { deleted: true, title: ev.title, google: "deleted" } };
+      }
+      let google = null;
+      if (ev.provenance?.googleEventId) {
+        if (!external) google = "kept (external actions paused)";
+        else { const r = await deleteGoogleCopy({ ev, householdId: hh, actorId: session.actorId }); google = r.ok ? "deleted" : `kept (${r.error ?? "google error"})`; }
+      }
+      deleteEventRec(ev.id);
+      appendAudit({ type: "event.delete", eventId: ev.id, ok: true, via: "assistant", ...(google ? { google } : {}), householdId: hh, actorId: session.actorId });
+      return { ok: true, result: { deleted: true, title: ev.title, ...(google ? { google } : {}) } };
+    }, { action: "Write" });
+
+  add("famili.update_task", "Change or complete a task",
+    "Update a task or list item: mark done (status \"done\") or reopen (\"todo\"), rename, change due date, assignee, priority, notes, or list. Look the task up first.",
+    { type: "object", properties: { taskId: KEY_HINTS.taskId, title: KEY_HINTS.title, status: { type: "string", enum: ["todo", "in_progress", "done"] }, dueAt: KEY_HINTS.dueAt, assignedMemberId: KEY_HINTS.assignedMemberId, priority: KEY_HINTS.priority, notes: KEY_HINTS.notes, listName: KEY_HINTS.listName, remindMinutesBefore: { type: "number", description: "Reminder lead in minutes (15, 30, 60, 1440…)." } }, required: ["taskId"], additionalProperties: false },
+    async (input) => {
+      if (!canWrite) return readOnly();
+      const tk = getTask(String(input?.taskId ?? ""));
+      if (!tk || tk.householdId !== hh) return { ok: false, error: "task_not_found", message: "No such task — list tasks to find the right id." };
+      if (!canSeeEntity(tk, session)) return { ok: false, error: "forbidden", message: "That task isn't visible to this person." };
+      const { taskId, ...patch } = input ?? {};
+      for (const k of Object.keys(patch)) if (patch[k] === undefined) delete patch[k];
+      const onlyStatus = Object.keys(patch).every((k) => k === "status");
+      const mayEdit = isAdultRole(session.role) || tk.createdBy === session.actorId || (onlyStatus && tk.assignedMemberId === session.actorId);
+      if (!mayEdit) return { ok: false, error: "forbidden", message: "Only an adult, the person who created it, or (to complete it) the person it's assigned to can change this task." };
+      if (badStamp(patch.dueAt)) return { ok: false, error: "bad_timestamp", message: "dueAt isn't a valid date and time." };
+      if ("remindMinutesBefore" in patch && !isValidReminder(patch.remindMinutesBefore)) return { ok: false, error: "bad_reminder", message: "Pick a reminder lead the app offers (e.g. 15, 30, 60, 1440 minutes)." };
+      if ("remindMinutesBefore" in patch && !isValidReminderList([patch.remindMinutesBefore])) return { ok: false, error: "bad_reminder", message: "That reminder lead isn't supported." };
+      const timingChanged = ["dueAt", "remindMinutesBefore"].some((k) => k in patch && JSON.stringify(patch[k]) !== JSON.stringify(tk[k]));
+      if (timingChanged) { patch.reminderSentAt = null; patch.remindersSent = []; }
+      if (patch.status === "done" && tk.status !== "done") patch.completedAt = new Date().toISOString();
+      if (patch.status && patch.status !== "done" && (tk.status === "done" || tk.status === "archived")) patch.completedAt = null;
+      patch.updatedAt = new Date().toISOString();
+      const updated = patchTask(tk.id, patch);
+      appendAudit({ type: "task.update", taskId: tk.id, fields: Object.keys(patch), via: "assistant", householdId: hh, actorId: session.actorId });
+      return { ok: true, result: { task: publicTask(hh, updated) } };
+    }, { action: "Write" });
+
+  add("famili.delete_task", "Delete a task or list item",
+    "Remove a task or list item for good. Prefer marking it done unless the family asked to delete it.",
+    { type: "object", properties: { taskId: KEY_HINTS.taskId }, required: ["taskId"], additionalProperties: false },
+    async (input) => {
+      if (!canWrite) return readOnly();
+      const tk = getTask(String(input?.taskId ?? ""));
+      if (!tk || tk.householdId !== hh) return { ok: false, error: "task_not_found", message: "No such task." };
+      if (!isAdultRole(session.role) && tk.createdBy !== session.actorId) return { ok: false, error: "forbidden", message: "Only an adult or the person who created it can delete this." };
+      deleteTaskRec(tk.id);
+      appendAudit({ type: "task.delete", taskId: tk.id, via: "assistant", householdId: hh, actorId: session.actorId });
+      return { ok: true, result: { deleted: true, title: tk.title } };
+    }, { action: "Write" });
+
+  add("famili.propose_build", "Propose a durable helper or automation",
+    "ONLY for a durable or recurring capability the family asked for (\"every morning…\", \"create a helper that…\", \"from now on…\", \"automate…\"). Nothing is created by this call: it shows the family a card describing the skill, helper and/or schedule for them to confirm. Use tool ids from your tool list for skill steps (with the original dotted id, e.g. homeops.notify_contact). For a schedule at a time of day set automation.anchor to 24-hour HH:MM and type recurring with intervalMs 86400000. Prefer homeops.notify_contact over gmail.send for scheduled delivery. To change an EXISTING helper use edits with its id instead of creating a duplicate.",
+    { type: "object", properties: {
+      summary: { type: "string", description: "One sentence: what this will do." },
+      skill: { type: "object", description: "The steps a helper follows.", properties: { name: { type: "string" }, description: { type: "string" }, domain: { type: "string" }, planner_guidance: { type: "string" }, risk_level: { type: "string", enum: ["Low", "Medium", "High", "Sensitive"] }, steps: { type: "array", items: { type: "object", properties: { name: { type: "string" }, tool_id: { type: "string" }, approval_required: { type: "boolean" } }, required: ["name"] } } }, required: ["name", "steps"] },
+      agent: { type: "object", description: "A long-lived helper that owns the skill.", properties: { name: { type: "string" }, purpose: { type: "string" }, instructions: { type: "string" } }, required: ["name", "purpose", "instructions"] },
+      automation: { type: "object", description: "When it runs.", properties: { name: { type: "string" }, type: { type: "string", enum: ["recurring", "schedule", "webhook", "manual"] }, intervalMs: { type: "number" }, runAt: { type: "string", description: "ISO date-time for a one-time schedule." }, anchor: { type: "string", description: "24-hour HH:MM time of day for recurring runs." } }, required: ["name", "type"] },
+      edits: { type: "array", description: "Changes to EXISTING helpers/skills by id.", items: { type: "object", properties: { kind: { type: "string", enum: ["agent", "skill"] }, id: { type: "string" }, summary: { type: "string" }, patch: { type: "object" } }, required: ["kind", "id", "patch"] } },
+    }, required: ["summary"], additionalProperties: false },
+    async (input) => {
+      if (!roleAtLeast(session.role, "Adult Member")) return { ok: false, error: "insufficient_role", message: "Only an adult member can set up helpers or automations. Tell the person that, and offer to do the one-off thing now instead." };
+      const build = normalizeBuild(input ?? {});
+      const hasEdits = Array.isArray(build.edits) && build.edits.length > 0;
+      if (!build.skill && !build.agent && !build.automation && !hasEdits) return { ok: false, error: "empty_build", message: "Describe at least a skill, helper, automation, or an edit." };
+      if (session.role === "Adult Member") {
+        if (build.agent) build.agent.visibility = "personal";
+        delete build.automation;
+        build.edits = [];
+      }
+      ctx.proposedBuild = build;
+      return { ok: true, result: { proposed: true, message: "The proposal card is now shown to the family. Tell them what it will do and that nothing runs until they confirm." } };
+    }, { action: "Write" });
+
+  return defs;
+}
+
+/* ------------------------------------------------------------------------------------ *
+ * The tool set for one turn: the household's live catalog (permitted for the acting
+ * helper; connected only), plus the native tools above. Each executes through
+ * executeToolForChat, and an approval-gated call becomes a durable run.
+ * ------------------------------------------------------------------------------------ */
+function buildToolSet(ctx) {
+  const { session, agent, message, providerId, conversationId, visibility } = ctx;
+  const catalog = toolCatalog(session);
+  const permittedIds = new Set(pruneCatalogForPrompt(catalog, { agent, goal: message, providerId }).map((t) => t.id));
+  const tools = {};
+  const names = new Map(); // toolName → { id, label, action, connectorName }
+  const notConnected = [];
+
+  const record = (entry, status, extra = {}) => {
+    const call = { tool: entry.id, label: entry.label, status, ...extra };
+    ctx.toolCalls.push(call);
+    return call;
+  };
+
+  for (const t of catalog) {
+    if (!permittedIds.has(t.toolId)) continue;
+    if (!t.connected) { if (t.connectorName) notConnected.push(`${t.connectorName} (${t.name})`); continue; }
+    const name = toToolName(t.toolId);
+    const entry = { id: t.toolId, label: t.name, action: t.action, connectorName: t.connectorName };
+    names.set(name, entry);
+    const inputs = t.source === "internal" ? (INTERNAL_INPUTS[t.toolId] ?? t.inputs) : t.inputs;
+    const schema = schemaForInputs(inputs, EXTRA_INPUT_KEYS[t.toolId] ?? []);
+    const approvalNote = t.requiresApproval ? " Requires the family's approval: calling it queues the step and reports that it is waiting — nothing happens until a person approves." : "";
+    tools[name] = tool({
+      description: `${t.name} (${t.connectorName ?? t.connectorId}; ${t.action.toLowerCase()}, ${String(t.risk).toLowerCase()} risk).${t.description ? " " + t.description : ""}${approvalNote}`,
+      inputSchema: jsonSchema(schema),
+      execute: async (rawInput) => {
+        const input = coerceInput(rawInput);
+        ctx.onToolStart?.(entry);
+        const out = await executeToolForChat({ toolId: t.toolId, input, session, agent, conversationId });
+        if (out.ok) {
+          record(entry, "done", { summary: summarizeForCard(t.toolId, out.result), ok: true });
+          return { ok: true, result: boundResult(out.result) };
+        }
+        if (out.needsApproval) {
+          const q = await queueApprovalRun({ toolId: t.toolId, input, title: t.name, session, conversationId, goal: message, visibility });
+          if (!q.ok) { record(entry, "failed", { ok: false, summary: q.message ?? q.error }); return { ok: false, error: q.error, message: q.message }; }
+          if (q.status === "completed") { record(entry, "done", { ok: true, summary: summarizeForCard(t.toolId, q.result), runId: q.runId }); return { ok: true, result: boundResult(q.result), runId: q.runId }; }
+          if (!ctx.firstRunId) ctx.firstRunId = q.runId;
+          ctx.runIds.push(q.runId);
+          const waiting = q.status === "waiting_for_connector";
+          record(entry, waiting ? "blocked" : "awaiting_approval", { ok: false, summary: waiting ? "Needs a connection first" : "Waiting for approval", runId: q.runId, approvalId: q.approvalId ?? undefined });
+          return waiting
+            ? { ok: false, status: "waiting_for_connector", runId: q.runId, message: "This step is parked until the service it needs is connected in Connections. Nothing was sent." }
+            : { ok: false, status: "awaiting_approval", runId: q.runId, approvalId: q.approvalId, message: `Queued for the family's approval (run ${q.runId}). Nothing has been sent or changed yet — an approver will see it in Approvals. Tell the person this is waiting on their approval; do not retry the call.` };
+        }
+        record(entry, out.policyBlocked ? "blocked" : "failed", { ok: false, summary: out.message ?? out.error });
+        return { ok: false, error: out.error, message: out.message, ...(out.needsSetup ? { needsSetup: out.needsSetup } : {}) };
+      },
+    });
+  }
+
+  for (const d of nativeTools(ctx)) {
+    const name = toToolName(d.id);
+    const entry = { id: d.id, label: d.name, action: d.action, connectorName: "FamiliOS" };
+    names.set(name, entry);
+    tools[name] = tool({
+      description: d.description,
+      inputSchema: jsonSchema(d.schema),
+      execute: async (rawInput) => {
+        const input = coerceInput(rawInput);
+        ctx.onToolStart?.(entry);
+        let out;
+        try { out = await d.run(input); } catch (e) { out = { ok: false, error: "tool_failed", message: String(e?.message ?? e) }; }
+        appendAudit({ type: "assistant.tool", toolId: d.id, ok: !!out?.ok, error: out?.ok ? undefined : out?.error, action: d.action, householdId: session.householdId, actorId: session.actorId, conversationId });
+        if (out?.ok) { record(entry, "done", { ok: true, summary: summarizeForCard(d.id, out.result) }); return { ok: true, result: boundResult(out.result) }; }
+        record(entry, "failed", { ok: false, summary: out?.message ?? out?.error });
+        return { ok: false, error: out?.error ?? "tool_failed", message: out?.message ?? "The tool failed." };
+      },
+    });
+  }
+  return { tools, names, notConnected };
+}
+
+/** Approval-gated step → a durable run, parked for a human. Waits briefly for the park so
+ *  the model can name the approval; a run the policy lets straight through returns its result. */
+async function queueApprovalRun({ toolId, input, title, session, conversationId, goal, visibility }) {
+  if (!roleAtLeast(session.role, "Limited Member")) return { ok: false, error: "insufficient_role", message: "This profile can't start actions that need approval." };
+  let r;
+  try {
+    r = await orchestrate({
+      source: "assistant", via: "chat", session, conversationId, goal, visibility,
+      plan: { title, summary: `Asked in chat: ${String(goal).slice(0, 140)}`, steps: [{ toolId, title, detail: String(goal).slice(0, 240), input, requiresApproval: true }] },
+    });
+  } catch (e) { return { ok: false, error: "run_failed", message: String(e?.message ?? e) }; }
+  if (!r?.ok) return { ok: false, error: r?.error ?? "run_failed", message: r?.message ?? "Couldn't queue that step." };
+  const settled = new Set(["waiting_for_approval", "waiting_for_connector", "waiting_for_provider", "completed", "partially_failed", "failed", "cancelled", "expired"]);
+  let run = r.run;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    run = getRun(r.run.id) ?? run;
+    if (settled.has(run.status)) break;
+    await sleep(80);
+  }
+  const step = run.steps?.[0];
+  if (run.status === "failed") return { ok: false, error: run.error ?? "run_failed", message: step?.detail ?? run.error ?? "The step failed." };
+  return { ok: true, runId: run.id, status: run.status, approvalId: step?.approvalId ?? null, result: run.status === "completed" ? step?.result : undefined };
+}
+
+/* ------------------------------------------------------------------------------------ *
+ * Instructions. The voice and the honesty rules carry over from the previous engine; what
+ * changes is that the assistant now DOES things with tools and reports what actually
+ * happened, instead of describing a plan.
+ * ------------------------------------------------------------------------------------ */
+function instructionsFor({ now, timeZone, notConnected, hasBuildTool }) {
+  return `You are Famili, the warm, capable assistant inside FamiliOS — a family's shared operating system for schedules, tasks, meals, helpers and messages. You talk to one member of the household at a time. Be concise, concrete and kind; write for a phone screen in plain markdown (short paragraphs, real lists, no headings).
+
+Right now it is ${now} (household time zone: ${timeZone}). Resolve "today", "tomorrow", "Friday", "next week" against that, and write timestamps in ISO 8601 with the household's UTC offset.
+
+HOW YOU WORK
+- You have real tools. Use them. Read before you answer when the question depends on data (what's scheduled, what's due, who's who, what the family said before); act when the person asked for something to be done. Never describe a plan you could simply carry out.
+- One-off requests ("add…", "move…", "mark done", "put X on the list", "remind…", "find me…"): do them now with the tools, then report exactly what happened using the tool results — ids are yours, names/dates are theirs.
+- Check state first: before adding, look for an existing event/task/meal that already matches and extend it instead of duplicating; before scheduling, look for a conflict at that time and mention it ("Wednesday dinner is already Tacos — swap, or pick another night?"). Size meals to the household roster.
+- If a tool fails, read its message, fix the input once if that is the cause, and otherwise tell the person plainly what didn't work and what would unlock it (connect a service in Connections, verify a contact method, ask an adult). Never pretend.
+- A tool that says awaiting_approval or waiting_for_connector did NOT happen yet. Say it is waiting for the family's approval (or a connection) and that nothing has been sent — do not call it again in this turn.
+- NEVER claim you did something a tool did not confirm. "Created", "moved", "sent", "updated" are only true after the matching tool returned ok. If you could not do it, say what you did do and what remains.
+- Never announce content you don't then include: if you say "here's your list", the items follow in that same message, written out with the real titles, dates/times and people. An honest empty ("nothing on the calendar Saturday") is fine; a promised list that isn't there is not.
+- Do the thing, don't offer to do it. Pick the obvious default (sort order, which member, how many) and state the choice. Offer a refinement only after delivering.
+- Current outside information (news, weather, prices, hours, recipes, how-tos): use web__search, then web__read or web__recipe on the best result, and cite sources with inline markdown links. Local questions ("near us"): use homeops__find_places with context.location when present, and say out loud any limitation the tool reports.
+- Durable facts and preferences the family states ("we're vegetarian", "Grandma visits Sundays"): save them with homeops__write_memory (scope household) so every future conversation knows.
+- Helpers (agents): to fix one, homeops__get_agent first, then homeops__update_agent with the COMPLETE rewritten instructions. It is approval-gated — say the change is waiting for sign-off. "Don't ask for permission any more" means homeops__update_agent with runUnattended true (and includeSendAndSpend if they said so); then repeat the tool's unattendedNote honestly.
+- Attachments: an ATTACHED section in the message is the real contents of a file just read on the server — answer from it. context.attachedAlsoNames lists files you have NOT read; say so. A schedule/invitation/permission slip in a file: use homeops__extract_from_file so the family picks what to add; don't add nine events yourself.
+- Roster changes (add/remove members) are done by people in Settings → Household; point there.
+${hasBuildTool ? `- Something that should happen on a schedule or from now on — "every morning", "each week", "create a helper that…", "automate…" — is a durable capability: call famili__propose_build with the full design and tell the family it is a proposal they confirm. For a one-off request, never propose a build.` : `- This profile can't set up helpers or automations; do the one-off version now and say an adult can automate it.`}
+${notConnected.length ? `\nNOT CONNECTED YET (their tools are unavailable until the family connects them in Connections; say so when one is needed): ${notConnected.slice(0, 12).join("; ")}.` : ""}
+
+Allowed automation trigger types: ${TRIGGERS.join(", ")}. Space types: ${SPACE_TYPES.join(", ")}.
+
+When you are done, answer in a friendly, direct voice. Lead with the result. Keep it short.`;
+}
+
+/* ------------------------------------------------------------------------------------ *
+ * History: the durable conversation's prior turns, as model messages. Tool activity from
+ * an earlier assistant turn is folded into that turn's text so the model knows what it
+ * already did without replaying raw tool payloads.
+ * ------------------------------------------------------------------------------------ */
+function historyMessages(history) {
+  const out = [];
+  for (const m of (Array.isArray(history) ? history : []).slice(-12)) {
+    if (!m || !m.text) continue;
+    if (m.role === "user") { out.push({ role: "user", content: String(m.text).slice(0, 2000) }); continue; }
+    if (m.role !== "assistant") continue;
+    if (m.kind === "error") continue;
+    let text = String(m.text).slice(0, 2000);
+    const calls = Array.isArray(m.toolCalls) ? m.toolCalls : [];
+    if (calls.length) text += `\n\n(Actions I took that turn: ${calls.map((c) => `${c.label ?? c.tool} → ${c.status}${c.summary ? `: ${short(c.summary, 80)}` : ""}`).join("; ")})`;
+    out.push({ role: "assistant", content: text });
+  }
+  // The model API needs alternation to start with a user turn; drop a leading assistant turn.
+  while (out.length && out[0].role !== "user") out.shift();
+  return out;
+}
+
+function householdNow(timeZone) {
+  try {
+    return new Date().toLocaleString("en-US", { timeZone, weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+  } catch { return new Date().toString(); }
+}
+
+/**
+ * Run one Ask Famili turn.
+ * @returns {Promise<{ok:true, kind:"answer"|"build", answer:string, model:string, toolCalls:Array, runId?:string, runIds:string[], build?:object, degraded?:boolean, fellBackFrom?:string, steps:number} | {ok:false, error:string, message:string}>}
+ */
+export async function runAssistantAgent({ message, context, session, providerId, history, agent = null, conversationId = null, visibility } = {}, { onToken, onPhase, onEvent } = {}) {
+  const text = String(message ?? "").trim();
+  if (!text) return { ok: false, error: "empty_message", message: "Type a message first." };
+  if (!session?.householdId) return { ok: false, error: "authentication_required", message: "Sign in first." };
+  const primaryId = activeProviderId(providerId, session.householdId);
+  if (!primaryId) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
+  if (aiBudgetExhausted(session.householdId)) return { ok: false, error: "ai_budget_exhausted", message: "Your household's daily AI budget is used up — it resets at midnight (UTC). An admin can raise or remove the limit in Settings." };
+
+  const phase = (p) => { try { onPhase?.(p); } catch { /* progress must never break a turn */ } };
+  const event = (e) => { try { onEvent?.(e); } catch { /* ditto */ } };
+  const settings = getSettings(session.householdId);
+  const timeZone = settings.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+  const serverCtx = await buildServerContext(session, context, { goal: text });
+  const ctxStr = JSON.stringify(serverCtx).slice(0, CONTEXT_CHARS);
+  const userTurn = `Household context (JSON, visibility-filtered for this person): ${ctxStr}${attachmentSection(context)}\n\nUser message: ${text}`;
+  const messages = [...historyMessages(history), { role: "user", content: userTurn }];
+
+  const attempt = async (pid, { fellBackFrom } = {}) => {
+    const lm = await languageModelFor(pid);
+    if (!lm.ok) return { ok: false, error: lm.error, message: lm.message };
+    const ctx = {
+      session, agent, message: text, providerId: pid, conversationId, visibility,
+      toolCalls: [], runIds: [], firstRunId: null, proposedBuild: null,
+      onToolStart: (entry) => {
+        event({ type: "tool", tool: entry.id, label: entry.label, status: "running" });
+        if (/^web\./.test(entry.id) || entry.id === "homeops.find_places") phase("searching");
+        else if (entry.action !== "Read" || entry.id === "famili.propose_build") phase("creating");
+      },
+    };
+    const { tools, notConnected } = buildToolSet(ctx);
+    const agentLoop = new ToolLoopAgent({
+      model: lm.model,
+      instructions: instructionsFor({ now: householdNow(timeZone), timeZone, notConnected, hasBuildTool: roleAtLeast(session.role, "Adult Member") }),
+      tools,
+      stopWhen: isStepCount(MAX_STEPS),
+    });
+    let streamError = null;
+    let answer = "";
+    let steps = 0;
+    try {
+      const result = await agentLoop.stream({
+        messages,
+        timeout: { totalMs: TURN_TIMEOUT_MS, stepMs: STEP_TIMEOUT_MS },
+        onStepFinish: () => { steps++; recordAiUsage(session.householdId, "assistant"); },
+      });
+      for await (const part of result.fullStream) {
+        if (part.type === "text-delta") { answer += part.text; try { onToken?.(part.text); } catch { /* liveness only */ } }
+        else if (part.type === "tool-call") event({ type: "tool", tool: part.toolName, status: "called" });
+        else if (part.type === "tool-error") event({ type: "tool", tool: part.toolName, status: "error", message: String(part.error?.message ?? part.error ?? "") });
+        else if (part.type === "error") streamError = part.error;
+      }
+      // The assembled text is authoritative (a mid-stream fallback answer counts too).
+      try { const t = await result.text; if (t && t.trim()) answer = t; } catch { /* keep what streamed */ }
+    } catch (e) {
+      streamError = e;
+    }
+    const errMessage = streamError ? String(streamError?.message ?? streamError) : null;
+    // Provider failed before anything happened → let the caller fall through to another one.
+    if (streamError && !answer.trim() && ctx.toolCalls.length === 0) {
+      appendAudit({ type: "assistant.provider_error", providerId: pid, error: errMessage?.slice(0, 300), householdId: session.householdId, actorId: session.actorId });
+      return { ok: false, error: "provider_error", message: errMessage ?? "The AI provider did not respond.", transient: true };
+    }
+    if (!answer.trim()) {
+      // Ran out of steps or the model went quiet after acting: report the actions honestly.
+      const done = ctx.toolCalls.filter((c) => c.status === "done");
+      const waiting = ctx.toolCalls.filter((c) => c.status === "awaiting_approval");
+      const failed = ctx.toolCalls.filter((c) => c.status === "failed" || c.status === "blocked");
+      const lines = [];
+      if (done.length) lines.push(`Done: ${done.map((c) => `${c.label}${c.summary ? ` (${short(c.summary, 60)})` : ""}`).join(", ")}.`);
+      if (waiting.length) lines.push(`Waiting for your approval: ${waiting.map((c) => c.label).join(", ")} — nothing has been sent yet.`);
+      if (failed.length) lines.push(`Couldn't finish: ${failed.map((c) => `${c.label} (${short(c.summary ?? "", 80)})`).join("; ")}.`);
+      if (streamError) lines.push(`I hit a snag with the AI provider (${short(errMessage, 120)}).`);
+      answer = lines.join("\n\n") || "I'm not sure how to help with that yet — could you say a bit more?";
+    }
+    return {
+      ok: true,
+      kind: ctx.proposedBuild ? "build" : "answer",
+      answer: answer.trim(),
+      ...(ctx.proposedBuild ? { build: ctx.proposedBuild } : {}),
+      model: `${lm.providerId}/${lm.modelId}`,
+      toolCalls: ctx.toolCalls,
+      runIds: ctx.runIds,
+      ...(ctx.firstRunId ? { runId: ctx.firstRunId } : {}),
+      steps,
+      ...(fellBackFrom ? { degraded: true, fellBackFrom } : {}),
+      ...(streamError ? { providerWarning: short(errMessage, 200) } : {}),
+    };
+  };
+
+  let out = await attempt(primaryId);
+  if (!out.ok && out.transient) {
+    for (const alt of fallbackProviderIds(primaryId)) {
+      const again = await attempt(alt, { fellBackFrom: primaryId });
+      if (again.ok) { out = again; break; }
+    }
+  }
+  if (!out.ok) delete out.transient;
+  return out;
+}

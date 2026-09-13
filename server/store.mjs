@@ -206,9 +206,11 @@ function ensureRev(tenant) {
 }
 export function getDataRev() { return ensureRev(T()); }
 export function getDataRevForTenant(tenant) { return ensureRev(tenant); }
-function bumpRev(file) {
+// `tenant` defaults to the ambient context; a caller that writes ANOTHER household's doc
+// (setSettings from a webhook, a cross-tenant sweep) must name it, or the resident
+// household gets a phantom refetch while the family that actually changed never hears.
+function bumpRev(file, tenant = T()) {
   if (REV_EXCLUDE.has(file)) return;
-  const tenant = T();
   const next = ensureRev(tenant) + 1;
   _dataRevByTenant.set(tenant, next);
   revEmitter.emit("bump", { tenant, rev: next });
@@ -356,7 +358,7 @@ export function setSettings(patch, householdId) {
   const t = householdId ?? T();
   const next = { ...getSettings(t), ...patch };
   engine.putDoc(t, "settings.json", next);
-  bumpRev("settings.json"); // rev is a single shared signal until per-tenant rev lands
+  bumpRev("settings.json", t);
   return next;
 }
 
@@ -1073,6 +1075,32 @@ export const deleteEvolution = (id) => _evolution.remove(id);
  * model (participants, driver/owner, what-to-bring, checklist, provenance, layer). */
 const _events = keyedCollection("events.json");
 export const listEvents = (filter) => _events.list(filter);
+/* ---- Event tombstones ----
+ * A canonical event that was deleted here while its pushed Google copy could NOT be deleted
+ * (Google error, or external actions paused) used to come straight back on the next
+ * subscription sync — the reported "deleted events resurrect" loop. The tombstone remembers
+ * the Google event id so syncSubscription skips it. Pruned after 90 days; by then the copy
+ * has long since been handled or has itself left the feed. Per household by construction
+ * (the doc lives in the tenant's own db). */
+const TOMBSTONE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+export function addEventTombstone({ googleEventId, title = "", reason = "" }) {
+  if (!googleEventId) return null;
+  const all = readJSON("event_tombstones.json", {});
+  const now = Date.now();
+  for (const [k, v] of Object.entries(all)) if (!v?.at || now - v.at > TOMBSTONE_TTL_MS) delete all[k];
+  all[googleEventId] = { at: now, title: String(title).slice(0, 120), reason: String(reason).slice(0, 80) };
+  writeJSON("event_tombstones.json", all);
+  return all[googleEventId];
+}
+export function isEventTombstoned(googleEventId) {
+  if (!googleEventId) return false;
+  const rec = readJSON("event_tombstones.json", {})[googleEventId];
+  return !!rec && Date.now() - (rec.at ?? 0) <= TOMBSTONE_TTL_MS;
+}
+export function clearEventTombstone(googleEventId) {
+  const all = readJSON("event_tombstones.json", {});
+  if (all[googleEventId]) { delete all[googleEventId]; writeJSON("event_tombstones.json", all); }
+}
 export const getEvent = (id) => _events.get(id);
 export const putEvent = (e) => _events.put(e);
 export const patchEvent = (id, patch) => _events.patch(id, patch);

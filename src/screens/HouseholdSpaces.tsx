@@ -50,7 +50,7 @@ const ROLE_ACCESS: { role: Role; icon: string; desc: string }[] = [
 export function HouseholdSpaces() {
   const params = useStore((s) => s.route.params);
   const [tab, setTab] = useState("spaces");
-  useEffect(() => { if (params?.tab && ["spaces", "members", "roles"].includes(params.tab)) setTab(params.tab); if (params?.member) setTab("members"); if (params?.space) setTab("spaces"); }, [params?.tab, params?.member, params?.space]);
+  useEffect(() => { if (params?.tab && ["spaces", "members", "roles"].includes(params.tab)) setTab(params.tab); if (params?.member || params?.new) setTab("members"); if (params?.space) setTab("spaces"); }, [params?.tab, params?.member, params?.space, params?.new]);
   return (
     <div className="animate-fade-in">
       <PageHeader title="Household Spaces" subtitle="Members, shared spaces, and who can access what." icon="Users" />
@@ -149,7 +149,10 @@ function SpaceModal({ onClose }: { onClose: () => void }) {
 
 function Members() {
   const { members, methods, loaded, error, reload, setError } = useServerMembers();
+  const params = useStore((s) => s.route.params);
   const [creating, setCreating] = useState(false);
+  // The command palette's "Add family member" navigates with {new:"1"} — open the form.
+  useEffect(() => { if (params?.new) setCreating(true); }, [params?.new]);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const friendly = (e?: string, msg?: string) =>

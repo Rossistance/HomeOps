@@ -3,6 +3,7 @@ import type { ServerRun, RunStepView } from "@/connectors/api";
 import type { AccentColor } from "@/types";
 import { Badge, Button } from "@/components/ui";
 import { Icon } from "@/components/Icon";
+import { runStatusView } from "@/store/useStore";
 
 /* Shared live run timeline — renders a durable SERVER run's steps with attribution,
    per-step status, timing, expandable input/output, and an inline approval gate.
@@ -30,16 +31,23 @@ const RUN_STATUS_UI: Record<string, { label: string; color: Color }> = {
   expired: { label: "Expired", color: "amber" },
 };
 
+/** ONE status vocabulary (runStatusView in the store) — this component used to keep its own
+ *  map with different labels for the same state and no entry for partially_failed, so the
+ *  Live tab printed a raw enum next to a Run History that said "Partly done". */
 export function RunStatusBadge({ status }: { status: string }) {
-  const m = RUN_STATUS_UI[status] ?? { label: status, color: "gray" as Color };
-  const live = ["running", "retrying", "routing", "planning", "selecting_agent", "selecting_skills", "selecting_tools"].includes(status);
+  const pre = RUN_STATUS_UI[status];
+  const v = runStatusView(status);
+  // Pre-run phases (routing, planning, …) keep their own labels; everything else is the shared view.
+  const label = pre && !(status in SHARED) ? pre.label : v.label;
+  const color = (pre && !(status in SHARED) ? pre.color : v.tone) as Color;
   return (
-    <Badge color={m.color}>
-      {live && <Icon name="Loader2" size={12} className="animate-spin" />}
-      {m.label}
+    <Badge color={color}>
+      {v.active && <Icon name="Loader2" size={12} className="animate-spin" />}
+      {label}
     </Badge>
   );
 }
+const SHARED: Record<string, true> = { waiting_for_approval: true, waiting_for_connector: true, waiting_for_provider: true, completed: true, partially_failed: true, failed: true, expired: true, cancelled: true, running: true, retrying: true, queued: true, pending: true };
 
 const STEP_UI: Record<string, { icon: string; cls: string }> = {
   succeeded: { icon: "CircleCheck", cls: "text-sage-500" },

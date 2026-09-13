@@ -10,7 +10,7 @@ import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type ApprovalRec, type EventRec, type EvolutionRec, type HelpRequestRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
-import { coversDay, eventTimeLabel } from "@/lib/event-days";
+import { coversDay, effectiveEndMs, eventTimeLabel } from "@/lib/event-days";
 import { fade, memberColor } from "@/lib/member-colors";
 import { isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
@@ -301,10 +301,10 @@ function AdminToday() {
         if (!e.startAt) return false;
         const start = new Date(e.startAt).getTime();
         if (isNaN(start)) return false;
-        // Still "live" until its end, or until the end of its day when it's all-day.
-        const endsAt = e.allDay
-          ? new Date(new Date(e.startAt).setHours(23, 59, 59, 999)).getTime()
-          : (e.endAt ? new Date(e.endAt).getTime() : start);
+        // Still "live" until its effective end — the end of its LAST day when it's all-day
+        // (this used to clamp to the start day, so a 3-day trip fell off after day one
+        // while coversDay still said it covered today).
+        const endsAt = effectiveEndMs(e) ?? start;
         return endsAt >= nowMs && start <= horizon;
       })
       .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
@@ -331,9 +331,7 @@ function AdminToday() {
         if (!e.startAt) return false;
         const start = new Date(e.startAt).getTime();
         if (isNaN(start)) return false;
-        const endsAt = e.allDay
-          ? new Date(new Date(e.startAt).setHours(23, 59, 59, 999)).getTime()
-          : (e.endAt ? new Date(e.endAt).getTime() : start);
+        const endsAt = effectiveEndMs(e) ?? start;
         return endsAt >= nowMs && start <= horizon;
       })
       .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))

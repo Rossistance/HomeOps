@@ -4,11 +4,14 @@ import { PageHeader, Card, Button, Badge, Drawer, Field, TextInput, TextArea, Se
 import { Icon } from "@/components/Icon";
 import { ACCENT_HEX } from "@/components/MemberAvatar";
 import { backend, type ServerEvent, type BackendApproval, type CalendarSubscription } from "@/connectors/api";
+import { dayKey, todayKey, spanDayKeys, isLive, eventTimeLabel } from "@/lib/dates";
 
 /** A calendar item's per-member colored dots (the "color-coded per user" cue). */
 type MemberDot = { id: string; color: string; name: string };
-
-const dayKey = (iso: string) => new Date(iso).toISOString().slice(0, 10);
+// Day buckets are LOCAL calendar days (lib/dates.dayKey). The UTC slice this used to be
+// filed a 9 PM event under tomorrow anywhere west of Greenwich.
+/** A datetime-local value's date half → local midnight ISO (the all-day convention). */
+const localMidnightISO = (v: string) => { const d = new Date(v.slice(0, 10) + "T00:00:00"); return isNaN(+d) ? null : d.toISOString(); };
 /** Render event notes with clickable links (recipe URLs, mini-app references). */
 function linkifyNotes(text: string) {
   return text.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
@@ -31,6 +34,7 @@ const conflictOf = (ev: ServerEvent): SyncConflict | null => ((ev.provenance as 
 export function Calendar() {
   const toast = useStore((s) => s.toast);
   const navigate = useStore((s) => s.navigate);
+  const params = useStore((s) => s.route.params);
   const role = useStore((s) => s.session?.role);
   const members = useStore((s) => s.data.members);
   const canManage = ["Owner", "Adult Admin", "Adult Member", "Limited Member"].includes(role ?? "");
@@ -47,6 +51,8 @@ export function Calendar() {
   const [busy, setBusy] = useState(false);
   const [title, setTitle] = useState("");
   const [start, setStart] = useState(toLocalInput(new Date().toISOString()));
+  const [end, setEnd] = useState("");
+  const [allDay, setAllDay] = useState(false);
   const [location, setLocation] = useState("");
 
   const [syncing, setSyncing] = useState(false);
@@ -58,6 +64,11 @@ export function Calendar() {
 
   const load = async () => setEvents(await backend.events());
   useEffect(() => { void load(); void backend.calendarSubscriptions().then(setSubs); }, []);
+  // Home hands over `{event}` to open a row and `{new}` to start composing; both used to be
+  // dropped on the floor here, landing on the plain list with nothing selected.
+  useEffect(() => {
+    if (params?.event && events.length) { const hit = events.find((e) => e.id === params.event); if (hit) setSelected(hit); }
+  }, [params?.event, events]);
 
   const conflictCount = useMemo(() => events.filter((e) => conflictOf(e)).length, [events]);
   // One "Sync" button: re-sync every subscribed calendar AND pull Google-side edits.
@@ -93,20 +104,29 @@ export function Calendar() {
     return () => window.clearInterval(t);
   }, [doSync]);
 
+  // Live = not yet ended. An all-day event stays listed all day; a timed one until its end.
+  // (The old "started within the last 12 hours" window dropped today's all-day events at noon.)
   const upcoming = useMemo(() => events
-    .filter((e) => !e.startAt || new Date(e.startAt).getTime() >= Date.now() - 12 * 3600e3)
-    .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))), [events]);
+    .filter((e) => !e.startAt || isLive(e))
+    .sort((a, b) => +new Date(a.startAt ?? 0) - +new Date(b.startAt ?? 0)), [events]);
+  const todayK = todayKey();
+  // A multi-day event lands on EVERY day it spans (spanDayKeys), not just its first — but
+  // in the agenda, days already past are folded into today so a trip in progress shows once.
   const byDay = useMemo(() => {
     const map: Record<string, ServerEvent[]> = {};
-    for (const e of upcoming) { const k = e.startAt ? dayKey(e.startAt) : "undated"; (map[k] ??= []).push(e); }
+    for (const e of upcoming) {
+      if (!e.startAt) { (map["undated"] ??= []).push(e); continue; }
+      const keys = [...new Set(spanDayKeys(e).map((k) => (k < todayK ? todayK : k)))];
+      for (const k of keys) (map[k] ??= []).push(e);
+    }
     return map;
-  }, [upcoming]);
+  }, [upcoming, todayK]);
   const days = Object.keys(byDay).filter((k) => k !== "undated").sort();
   // Month view needs ALL dated events (including past days of the visible month).
   const byDayAll = useMemo(() => {
     const map: Record<string, ServerEvent[]> = {};
-    for (const e of events) { if (!e.startAt || isNaN(+new Date(e.startAt))) continue; (map[dayKey(e.startAt)] ??= []).push(e); }
-    for (const k of Object.keys(map)) map[k].sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
+    for (const e of events) { if (!e.startAt || isNaN(+new Date(e.startAt))) continue; for (const k of spanDayKeys(e)) (map[k] ??= []).push(e); }
+    for (const k of Object.keys(map)) map[k].sort((a, b) => +new Date(a.startAt ?? 0) - +new Date(b.startAt ?? 0));
     return map;
   }, [events]);
 
@@ -130,9 +150,11 @@ export function Calendar() {
 
   const add = async () => {
     if (!title.trim()) return; setBusy(true);
-    const r = await backend.createEvent({ title: title.trim(), startAt: start ? new Date(start).toISOString() : null, location, visibility: "household" });
+    const startAt = !start ? null : allDay ? localMidnightISO(start) : new Date(start).toISOString();
+    const endAt = !end ? null : allDay ? localMidnightISO(end) : new Date(end).toISOString();
+    const r = await backend.createEvent({ title: title.trim(), startAt, endAt: endAt && startAt && Date.parse(endAt) > Date.parse(startAt) ? endAt : null, allDay, location, visibility: "household" });
     setBusy(false);
-    if (r.event) { setTitle(""); setLocation(""); await load(); toast({ kind: "success", title: "Event added" }); }
+    if (r.event) { setTitle(""); setLocation(""); setEnd(""); setAllDay(false); await load(); toast({ kind: "success", title: "Event added" }); }
     else toast({ kind: "error", title: "Couldn't add", message: r.error === "insufficient_role" ? "Adults only." : r.error });
   };
   const refreshSelected = async (id: string) => { const list = await backend.events(); setEvents(list); setSelected(list.find((e) => e.id === id) ?? null); };
@@ -185,9 +207,11 @@ export function Calendar() {
       {canManage && (
         <Card className="card-pad mb-5">
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-4">
-            <Field label="Event" className="sm:col-span-2"><TextInput value={title} placeholder="Soccer practice" onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void add(); }} /></Field>
-            <Field label="When"><TextInput type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></Field>
-            <Field label="Location"><TextInput value={location} placeholder="Field 3" onChange={(e) => setLocation(e.target.value)} /></Field>
+            <Field label="Event" className="sm:col-span-2"><TextInput autoFocus={!!params?.new} value={title} placeholder="Soccer practice" onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void add(); }} /></Field>
+            <Field label={allDay ? "Day" : "Starts"}><TextInput type={allDay ? "date" : "datetime-local"} value={allDay ? start.slice(0, 10) : start} onChange={(e) => setStart(allDay ? `${e.target.value}T00:00` : e.target.value)} /></Field>
+            <Field label={allDay ? "Last day" : "Ends"} hint="Optional"><TextInput type={allDay ? "date" : "datetime-local"} value={allDay ? end.slice(0, 10) : end} onChange={(e) => setEnd(allDay ? (e.target.value ? `${e.target.value}T00:00` : "") : e.target.value)} /></Field>
+            <Field label="Location" className="sm:col-span-2"><TextInput value={location} placeholder="Field 3" onChange={(e) => setLocation(e.target.value)} /></Field>
+            <label className="flex items-center gap-2 self-end pb-2 text-sm text-ink-700"><input type="checkbox" checked={allDay} onChange={(e) => setAllDay(e.target.checked)} className="h-4 w-4 accent-ember-500" /> All day</label>
           </div>
           <div className="mt-3"><Button variant="ember" disabled={busy || !title.trim()} onClick={add}><Icon name="Plus" size={15} /> Add event</Button></div>
         </Card>
@@ -201,7 +225,7 @@ export function Calendar() {
         <div className="space-y-3">
           {days.map((k) => (
             <Card key={k} className="card-pad">
-              <p className="mb-2 font-display text-sm font-semibold text-ink-900">{new Date(k + "T00:00:00").toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}{k === new Date().toISOString().slice(0, 10) && <span className="ml-2 text-xs font-normal text-ember-600">Today</span>}</p>
+              <p className="mb-2 font-display text-sm font-semibold text-ink-900">{new Date(k + "T00:00:00").toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}{k === todayK && <span className="ml-2 text-xs font-normal text-ember-600">Today</span>}</p>
               <ul className="space-y-1.5">{byDay[k].map((e) => <EventRow key={e.id} ev={e} driver={nameOf(e.driverId)} dots={dotsFor(e)} colors={colorsFor(e)} onOpen={() => setSelected(e)} />)}</ul>
             </Card>
           ))}
@@ -225,7 +249,7 @@ function MonthGrid({ byDay, nameOf, dotsFor, colorsFor, onOpen }: { byDay: Recor
   const first = new Date(cursor.y, cursor.m, 1);
   const daysInMonth = new Date(cursor.y, cursor.m + 1, 0).getDate();
   const lead = first.getDay(); // 0 = Sunday
-  const todayKey = today.toISOString().slice(0, 10);
+  const tKey = todayKey(today);
   const cells: (string | null)[] = [
     ...Array.from({ length: lead }, () => null),
     ...Array.from({ length: daysInMonth }, (_, i) => {
@@ -248,8 +272,8 @@ function MonthGrid({ byDay, nameOf, dotsFor, colorsFor, onOpen }: { byDay: Recor
           {cells.map((k, i) => k === null ? <div key={`b${i}`} /> : (
             <button key={k} onClick={() => setSelDay(selDay === k ? null : k)}
               aria-label={`${new Date(k + "T00:00:00").toLocaleDateString(undefined, { month: "long", day: "numeric" })}, ${(byDay[k]?.length ?? 0)} events`}
-              className={`min-h-[3.4rem] rounded-lg border p-1 text-left align-top transition-colors ${selDay === k ? "border-ember-400 bg-ember-50/70" : k === todayKey ? "border-ember-200 bg-surface" : "border-ink-900/[0.05] bg-surface-sunken/40 hover:border-ember-200"}`}>
-              <span className={`text-xs font-semibold ${k === todayKey ? "text-ember-600" : "text-ink-700"}`}>{Number(k.slice(8, 10))}</span>
+              className={`min-h-[3.4rem] rounded-lg border p-1 text-left align-top transition-colors ${selDay === k ? "border-ember-400 bg-ember-50/70" : k === tKey ? "border-ember-200 bg-surface" : "border-ink-900/[0.05] bg-surface-sunken/40 hover:border-ember-200"}`}>
+              <span className={`text-xs font-semibold ${k === tKey ? "text-ember-600" : "text-ink-700"}`}>{Number(k.slice(8, 10))}</span>
               <span className="mt-0.5 flex flex-wrap gap-0.5">
                 {(byDay[k] ?? []).slice(0, 3).map((e) => (
                   <span key={e.id} title={e.title} className="h-1.5 w-1.5 rounded-full" style={{ background: barBackground(colorsFor(e)) }} />
@@ -278,7 +302,9 @@ const barBackground = (colors: string[]) =>
   colors.length > 1 ? `linear-gradient(180deg, ${colors[0]} 0%, ${colors[0]} 48%, ${colors[1]} 52%, ${colors[1]} 100%)` : colors[0];
 
 function EventRow({ ev, driver, dots, colors, onOpen }: { ev: ServerEvent; driver: string | null; dots: MemberDot[]; colors: string[]; onOpen: () => void }) {
-  const time = ev.startAt && !isNaN(+new Date(ev.startAt)) ? new Date(ev.startAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : null;
+  // "All day" for all-day events — they used to render as 12:00 AM (the web client dropped
+  // the flag entirely).
+  const time = ev.startAt ? eventTimeLabel(ev) : null;
   return (
     <li>
       <button onClick={onOpen} className="flex w-full items-center gap-2.5 rounded-xl border border-ink-900/[0.05] bg-surface-sunken/50 px-3 py-2 text-left transition-colors hover:border-ember-200" aria-label={`Open ${ev.title}`}>
@@ -309,6 +335,10 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
   const [location, setLocation] = useState(ev.location ?? "");
   const [notes, setNotes] = useState(ev.notes ?? "");
   const [start, setStart] = useState(toLocalInput(ev.startAt));
+  // The end time was silently dropped by this editor: a parent saving "soccer 4–6pm" on the
+  // laptop produced an event with no end, which iOS then rendered wrong.
+  const [end, setEnd] = useState(toLocalInput(ev.endAt));
+  const [allDay, setAllDay] = useState(ev.allDay === true);
   // Phase 3: the rich model is editable, not just displayed.
   const [participantIds, setParticipantIds] = useState<string[]>(ev.participantIds ?? []);
   const [driverId, setDriverId] = useState<string>(ev.driverId ?? "");
@@ -325,15 +355,27 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
 
   const save = async () => {
     setBusy(true);
+    const startAt = !start ? null : allDay ? localMidnightISO(start) : new Date(start).toISOString();
+    const endAt = !end ? null : allDay ? localMidnightISO(end) : new Date(end).toISOString();
     const r = await backend.updateEvent(ev.id, {
-      title, location, notes, startAt: start ? new Date(start).toISOString() : null,
+      title, location, notes, startAt, endAt: endAt && startAt && Date.parse(endAt) > Date.parse(startAt) ? endAt : null, allDay,
       participantIds, driverId: driverId || null, whatToBring: bring, checklist,
     });
     setBusy(false);
     if (r.event) { await onChanged(ev.id); toast({ kind: "success", title: "Saved" }); }
     else toast({ kind: "error", title: "Couldn't save", message: r.error });
   };
-  const del = async () => { setBusy(true); await backend.deleteEvent(ev.id); setBusy(false); await onGone(); toast({ kind: "info", title: "Event removed" }); };
+  const del = async () => {
+    setBusy(true);
+    const r = (await backend.deleteEvent(ev.id)) as { ok?: boolean; error?: string; message?: string; google?: string };
+    setBusy(false);
+    if (r.ok === false) { toast({ kind: "error", title: "Couldn't delete", message: r.message ?? r.error }); return; }
+    await onGone();
+    // The Google copy could not be removed (paused external actions, or Google refused): say so,
+    // rather than letting the family discover it when it reappears.
+    if (r.google && r.google !== "deleted") toast({ kind: "warn", title: "Removed here — still in Google Calendar", message: r.google === "kept_external_actions_disabled" ? "External actions are paused, so the Google copy was left in place." : "Google refused the delete; the copy is remembered so it won't be re-imported." });
+    else toast({ kind: "info", title: "Event removed" });
+  };
   const copy = async () => { setBusy(true); const r = await backend.createEvent({ title: ev.title, startAt: ev.startAt, endAt: ev.endAt, location: ev.location, participantIds: ev.participantIds, visibility: "household" }); setBusy(false); if (r.event) { await onGone(); toast({ kind: "success", title: "Copied to a FamiliOS event", message: "Now editable." }); } };
 
   const push = async (approvalId?: string) => {
@@ -427,13 +469,17 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
         {canEdit ? (
           <div className="space-y-2.5">
             <Field label="Title"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
-            <Field label="When"><TextInput type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></Field>
+            <label className="flex items-center gap-2 text-sm text-ink-700"><input type="checkbox" checked={allDay} onChange={(e) => setAllDay(e.target.checked)} className="h-4 w-4 accent-ember-500" /> All day</label>
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              <Field label={allDay ? "Day" : "Starts"}><TextInput type={allDay ? "date" : "datetime-local"} value={allDay ? start.slice(0, 10) : start} onChange={(e) => setStart(allDay ? `${e.target.value}T00:00` : e.target.value)} /></Field>
+              <Field label={allDay ? "Last day" : "Ends"} hint="Optional"><TextInput type={allDay ? "date" : "datetime-local"} value={allDay ? end.slice(0, 10) : end} onChange={(e) => setEnd(allDay ? (e.target.value ? `${e.target.value}T00:00` : "") : e.target.value)} /></Field>
+            </div>
             <Field label="Location"><TextInput value={location} onChange={(e) => setLocation(e.target.value)} /></Field>
             <Field label="Details" hint="Synced as the event description on Google Calendar"><TextArea rows={5} value={notes} placeholder="Context, links, ingredients, instructions…" onChange={(e) => setNotes(e.target.value)} /></Field>
           </div>
         ) : (
           <div className="text-sm text-ink-600">
-            <p><span className="text-ink-400">When:</span> {ev.startAt ? new Date(ev.startAt).toLocaleString() : "No date set"}</p>
+            <p><span className="text-ink-400">When:</span> {!ev.startAt ? "No date set" : ev.allDay ? `${new Date(ev.startAt).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}${ev.endAt ? ` – ${new Date(ev.endAt).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}` : ""} · All day` : `${new Date(ev.startAt).toLocaleString()}${ev.endAt ? ` – ${new Date(ev.endAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}` : ""}`}</p>
             {ev.location && <p><span className="text-ink-400">Where:</span> {ev.location}</p>}
             {ev.notes && <div className="mt-1.5 whitespace-pre-wrap rounded-lg bg-surface-sunken/50 p-2 text-xs text-ink-600">{linkifyNotes(ev.notes)}</div>}
           </div>

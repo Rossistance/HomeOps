@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useStore } from "@/store/useStore";
 import { Card, Button } from "@/components/ui";
 import { Icon } from "@/components/Icon";
-import { fmtDateFull, fmtTime } from "@/lib/dates";
+import { fmtDateFull, relativeTime } from "@/lib/dates";
 import { HelpInbox, ScheduleList, useMyHelpRequests } from "./GrandparentView";
 
 /** The sitter/helper dashboard: the same calm schedule + help inbox a grandparent
@@ -57,7 +57,7 @@ export function SitterView() {
                   <Icon name={done ? "CheckCircle2" : "Circle"} size={20} className={done ? "shrink-0 text-sage-500" : "shrink-0 text-ink-300"} />
                   <div className="min-w-0 flex-1">
                     <p className={`truncate text-base font-medium ${done ? "text-ink-400 line-through" : "text-ink-800"}`}>{t.title}</p>
-                    {t.dueAt && !done && <p className="text-sm text-ink-500">Due {fmtTime(t.dueAt)}</p>}
+                    {t.dueAt && !done && <p className="text-sm text-ink-500">Due {relativeTime(t.dueAt)}</p>}
                   </div>
                   {!done && <Button size="sm" variant="success" onClick={() => setTaskStatus(t.id, "done")}><Icon name="Check" size={14} /> Done</Button>}
                   {done && <Button size="sm" variant="ghost" onClick={() => setTaskStatus(t.id, "todo")}>Undo</Button>}

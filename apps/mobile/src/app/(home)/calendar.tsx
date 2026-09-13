@@ -4,11 +4,13 @@
 // Canonical events and Google-linked events open the form sheet to edit (Google
 // edits write back two-way); ICS-fed events are read-only mirrors that expand
 // inline. Each subscribed calendar gets its own accent color on its cards.
-// Bottom: calendar subscriptions with sync status (feeds managed in Connections).
+// Calendar subscriptions with sync status sit beside the Sync control, folded behind an
+// expander (feeds managed in Connections) — they used to trail every agenda day as a card.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, ScrollView, View } from "react-native";
+import { Alert, ScrollView, StyleSheet, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type NestRec, type CalendarSubscription, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
+import { effectiveEndMs, weekStart } from "@/lib/event-days";
 import { LinearGradient } from "expo-linear-gradient";
 import { fade, memberAccent, memberColor } from "@/lib/member-colors";
 import * as SecureStore from "expo-secure-store";
@@ -19,6 +21,7 @@ import { useTheme, tapHaptic } from "@/theme";
 // still shadows the ui/ directory until old screens are deleted centrally.
 import { Badge, Chip } from "@/components/ui/badge";
 import { Coach } from "@/components/ui/coach";
+import { Expander } from "@/components/ui/expander";
 import { ScreenTour } from "@/components/ui/screen-tour";
 import { Button } from "@/components/ui/button";
 import { Card, PressableCard } from "@/components/ui/card";
@@ -78,6 +81,9 @@ function dayTitle(k: string, todayKey: string): string {
   return k === todayKey ? `Today · ${label}` : label;
 }
 
+/** The Monday that starts a day key's ISO week — the agenda draws a rule where this changes. */
+const weekOf = (k: string) => weekStart(new Date(`${k}T00:00:00`));
+
 export default function CalendarScreen() {
   const { session } = useSession();
   const { colors, spacing } = useTheme();
@@ -97,6 +103,8 @@ export default function CalendarScreen() {
     const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d;
   });
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Subscriptions fold shut by default: sync status is a glance, not a section you scroll past.
+  const [subsOpen, setSubsOpen] = useState(false);
   const [syncing, setSyncing] = useState<string | null>(null);
   const [syncingAll, setSyncingAll] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
@@ -285,13 +293,15 @@ export default function CalendarScreen() {
     [colorOf, subColorsOf],
   );
 
-  // Upcoming = anything undated, starting within the last 12h onward, or a
-  // multi-day event still running (its END hasn't passed the window).
-  const upcoming = useMemo(() => [...lensedEvents]
-    .filter((e) => !e.startAt
-      || new Date(e.startAt).getTime() >= Date.now() - 12 * 3600e3
-      || (e.endAt ? new Date(e.endAt).getTime() >= Date.now() - 12 * 3600e3 : false))
-    .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))), [lensedEvents]);
+  // Upcoming = anything undated, or anything whose EFFECTIVE end is within the last 12h
+  // onward — an all-day event runs to the end of its last day (the server stores endAt:null
+  // for a single-day one, which is how today's all-day event used to vanish at noon).
+  const upcoming = useMemo(() => {
+    const grace = Date.now() - 12 * 3600e3;
+    return [...lensedEvents]
+      .filter((e) => { const end = effectiveEndMs(e); return end === null || end >= grace; })
+      .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
+  }, [lensedEvents]);
   // ISS-121: events whose source account can no longer refresh (server-derived flag).
   const staleEvents = useMemo(() => events.filter((e) => e.staleSource), [events]);
   const byDay = useMemo(() => {
@@ -563,6 +573,50 @@ export default function CalendarScreen() {
         </View>
       ) : null}
 
+      {/* Synced feeds — the read-only "linked" layer, next to the Sync that drives them and
+          folded shut. Feeds are added/removed in Connections. */}
+      <View>
+        <PressableScale
+          haptic="select"
+          onPress={() => setSubsOpen((v) => !v)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: subsOpen }}
+          accessibilityLabel={`Subscriptions, ${subs.length} synced calendar${subs.length === 1 ? "" : "s"}`}
+        >
+          <SectionHeader
+            title={`Subscriptions${subs.length ? ` · ${subs.length}` : ""}`}
+            trailing={<Expander open={subsOpen} size={26} />}
+          />
+        </PressableScale>
+        {subsOpen ? (
+          subs.length === 0 ? (
+            <Card>
+              <T kind="sub">No synced calendars yet. Subscribe to school or team feeds in More → Connections.</T>
+            </Card>
+          ) : (
+            <Card padded={false}>
+              {subs.map((s, i) => {
+                // Whose calendar this is: "Ross · wrhixon@gmail.com" when the server
+                // knows the owning account; otherwise fall back to the source label.
+                const owner = [s.ownerName, s.accountEmail].filter(Boolean).join(" · ") || s.source;
+                return (
+                  <Row
+                    key={s.id}
+                    icon="antenna.radiowaves.left.and.right"
+                    iconColor={subColorForId(s.id) ?? colors.sky}
+                    iconBg={colors.skyBg}
+                    title={s.name}
+                    subtitle={`${owner}\n${syncLabel(s)}`}
+                    last={i === subs.length - 1}
+                    trailing={<Button small title="Sync" loading={syncing === s.id} onPress={() => void syncNow(s)} />}
+                  />
+                );
+              })}
+            </Card>
+          )
+        ) : null}
+      </View>
+
       {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
 
       {/* ISS-121: a connected calendar that can no longer refresh must never contribute
@@ -647,6 +701,17 @@ export default function CalendarScreen() {
         <>
           {visibleDays.map((k, di) => (
             <Rise key={k} index={di + 1}>
+              {/* A hairline where the ISO week turns over, so "next week" reads as a place
+                  in the list and not just a change of weekday name. */}
+              {di > 0 && +weekOf(k) !== +weekOf(visibleDays[di - 1]) ? (
+                <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, marginTop: spacing.lg }} accessibilityRole="header">
+                  <View style={{ flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: colors.border }} />
+                  <T kind="caption" color={colors.textFaint}>
+                    Week of {weekOf(k).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                  </T>
+                  <View style={{ flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: colors.border }} />
+                </View>
+              ) : null}
               <SectionHeader title={dayTitle(k, todayKey)} />
               <View style={{ gap: spacing.sm }}>
                 {byDay[k].map((e) => (
@@ -696,36 +761,6 @@ export default function CalendarScreen() {
           ) : null}
         </>
       )}
-
-      {/* Synced feeds — the read-only "linked" layer. Feeds are added/removed in Connections. */}
-      <Rise index={visibleDays.length + 2}>
-        <SectionHeader title="Subscriptions" />
-        {subs.length === 0 ? (
-          <Card>
-            <T kind="sub">No synced calendars yet. Subscribe to school or team feeds in More → Connections.</T>
-          </Card>
-        ) : (
-          <Card padded={false}>
-            {subs.map((s, i) => {
-              // Whose calendar this is: "Ross · wrhixon@gmail.com" when the server
-              // knows the owning account; otherwise fall back to the source label.
-              const owner = [s.ownerName, s.accountEmail].filter(Boolean).join(" · ") || s.source;
-              return (
-                <Row
-                  key={s.id}
-                  icon="antenna.radiowaves.left.and.right"
-                  iconColor={subColorForId(s.id) ?? colors.sky}
-                  iconBg={colors.skyBg}
-                  title={s.name}
-                  subtitle={`${owner}\n${syncLabel(s)}`}
-                  last={i === subs.length - 1}
-                  trailing={<Button small title="Sync" loading={syncing === s.id} onPress={() => void syncNow(s)} />}
-                />
-              );
-            })}
-          </Card>
-        )}
-      </Rise>
     </HScreen>
   );
 }

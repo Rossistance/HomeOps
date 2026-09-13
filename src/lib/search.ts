@@ -1,4 +1,6 @@
 import type { AppData, SearchResult } from "@/types";
+import { surfaceForTask } from "@/lib/taskSurfaces";
+import { fmtDateTime } from "@/lib/dates";
 
 /** Build a flat search index spanning every major entity in the household. */
 export function buildSearchIndex(data: AppData): SearchResult[] {
@@ -147,6 +149,33 @@ export function buildSearchIndex(data: AppData): SearchResult[] {
       updatedAt: s.updatedAt,
       route: { screen: "spaces", params: { space: s.id } },
       icon: s.icon,
+    });
+  }
+  // Events, tasks and chats — the things a family most often types into "Search everything",
+  // and the three the index used to leave out entirely.
+  for (const e of data.events) {
+    out.push({
+      id: e.id, title: e.title, type: "Event",
+      summary: `${e.startAt ? fmtDateTime(e.startAt) : "No date"}${e.location ? ` · ${e.location}` : ""}`,
+      tags: [e.allDay ? "All day" : "Event"], spaceId: e.spaceId, updatedAt: e.startAt,
+      route: { screen: "calendar", params: { event: e.id } }, icon: "CalendarDays",
+    });
+  }
+  for (const t of data.tasks) {
+    if (String(t.status) === "archived") continue;
+    const surface = surfaceForTask(t);
+    out.push({
+      id: t.id, title: t.title, type: "Task",
+      summary: `${t.type}${t.dueAt ? ` · due ${fmtDateTime(t.dueAt)}` : ""}${t.listName ? ` · ${t.listName}` : ""}`,
+      tags: [t.status], spaceId: t.spaceId, updatedAt: t.updatedAt,
+      route: surface ?? { screen: "miniapps" }, icon: t.type === "list" ? "ShoppingCart" : "ListChecks",
+    });
+  }
+  for (const c of data.conversations ?? []) {
+    const last = [...c.messages].reverse().find((m) => m.text)?.text ?? "";
+    out.push({
+      id: c.id, title: c.title, type: "Chat", summary: last.slice(0, 120), tags: ["Ask"], updatedAt: c.updatedAt,
+      route: { screen: "assistant", params: { id: c.id } }, icon: "MessageSquare",
     });
   }
   for (const e of data.activity.slice(0, 200)) {

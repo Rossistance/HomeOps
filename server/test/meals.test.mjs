@@ -110,7 +110,9 @@ test("a meal pushes to the calendar as a linked canonical event (idempotent, slo
   assert.equal(r1.data.action, "created");
   const ev = r1.data.event;
   assert.equal(ev.title, "Dinner: Lasagna");
-  assert.equal(ev.startAt, "2026-07-07T18:00:00", "dinner slot defaults to 18:00");
+  // A REAL instant now (household clock; this household declares none, so the server's):
+  // the zoneless "2026-07-07T18:00:00" this used to be meant a different time on every device.
+  assert.equal(ev.startAt, new Date(2026, 6, 7, 18, 0, 0).toISOString(), "dinner slot defaults to 18:00 local");
   assert.equal(ev.layer, "canonical", "canonical — pushable to Google via the existing route");
   assert.equal(ev.mealId, meal.id, "event carries the real meal back-reference");
   // Re-push after changing the time: updates the SAME event, no duplicate.
@@ -118,7 +120,7 @@ test("a meal pushes to the calendar as a linked canonical event (idempotent, slo
   const r2 = await adult.req(`/api/meals/${meal.id}/to-calendar`, { method: "POST" });
   assert.equal(r2.data.action, "updated");
   assert.equal(r2.data.event.id, ev.id, "same event updated, not duplicated");
-  assert.equal(r2.data.event.startAt, "2026-07-07T17:30:00", "explicit meal time wins over the slot default");
+  assert.equal(r2.data.event.startAt, new Date(2026, 6, 7, 17, 30, 0).toISOString(), "explicit meal time wins over the slot default");
 });
 
 test("a dateless meal cannot be pushed; deleting a meal deletes its calendar event", async () => {

@@ -1,3 +1,7 @@
+// LEGACY ENGINE: this suite pins the previous single-shot assistant brain (JSON envelope
+// answer|lookup|plan|build). The default Ask Famili engine is now the AI SDK agent loop
+// (server/assistant-agent.mjs, server/test/assistant-agent.test.mjs); every server here is
+// spawned with HOMEOPS_ASSISTANT_ENGINE=legacy so the rollback path stays proven.
 // FamiliOS — WP-002 (Honest delivery), slice 2: chat-run agent attribution.
 //
 // Before this WP, POST /api/assistant(/stream) started a run with NO agentId at all
@@ -102,7 +106,7 @@ describe("chat-run agent attribution (HOMEOPS_CHAT_AGENT_ATTRIBUTION default ON)
   let ctx, owner, fake;
 
   before(async () => {
-    ctx = await startServer();
+    ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy" } });
     owner = await makeSession(ctx, "m-alex");
     fake = await wireFakeProvider(ctx, owner);
   });
@@ -185,7 +189,7 @@ describe("chat-run agent attribution rollback (HOMEOPS_CHAT_AGENT_ATTRIBUTION=of
   let ctx, owner, fake;
 
   before(async () => {
-    ctx = await startServer({ env: { HOMEOPS_CHAT_AGENT_ATTRIBUTION: "off" } });
+    ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy",  HOMEOPS_CHAT_AGENT_ATTRIBUTION: "off" } });
     owner = await makeSession(ctx, "m-alex");
     fake = await wireFakeProvider(ctx, owner);
   });
@@ -221,7 +225,7 @@ describe("NEW-HOUSEHOLD self-heal (lead-2 finale): agt_household is created on f
   // open (empty = permissive, deny-only) allow-list. Pinned here at the module level
   // in a non-resident tenant context.
   test("ensureOpenDefaultAgent creates the missing default agent in a non-resident tenant, idempotently", async () => {
-    const ctx2 = await (await import("./harness.mjs")).startServer();
+    const ctx2 = await (await import("./harness.mjs")).startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy" } });
     try {
       process.env.HOMEOPS_DATA_DIR = ctx2.dataDir;
       const { runWithTenant } = await import("../tenant-context.mjs");

@@ -71,6 +71,9 @@ export async function pushApprovalNotification(approval) {
 export async function pushToMember({ householdId, actorId, title, body, data, timeSensitive = false }) {
   try {
     const hh = householdId ?? "local";
+    // A removed member's devices keep their tokens until they re-register; the archive
+    // route clears them, and this guard covers a token that slipped through.
+    if (getMember(actorId)?.archived) return { ok: false, reason: "member_archived" };
     const tokens = getPushTokens()
       .filter((r) => (r.householdId == null || r.householdId === hh) && r.actorId === actorId)
       .map((r) => r.token);
@@ -128,6 +131,10 @@ export async function deliverNotification({ session, methodId, methodType, to, t
     }
     if (agentId && !(method.allowedAgentIds ?? []).includes(agentId)) {
       return { ok: false, channel: ch, delivered: false, error: "agent_not_allowed", message: "This agent isn't allowed to message that contact method." };
+    }
+    // The address may still be verified and opted in, but the PERSON has left the household.
+    if (method.memberId && getMember(method.memberId)?.archived) {
+      return { ok: false, channel: ch, delivered: false, error: "member_archived", message: `“${method.label}” belongs to a member who was removed from the household.` };
     }
     methodType = method.type;
     to = EXTERNAL_TYPES.includes(method.type) ? method.value : null;

@@ -19,7 +19,6 @@ export function Settings() {
   const setKillSwitch = useStore((s) => s.setKillSwitch);
   const connectors = useStore((s) => s.connectors);
   const updateSettings = useStore((s) => s.updateSettings);
-  const toggleSoloMode = useStore((s) => s.toggleSoloMode);
   const reseed = useStore((s) => s.reseed);
   const startFresh = useStore((s) => s.startFresh);
   const importData = useStore((s) => s.importData);
@@ -162,25 +161,16 @@ export function Settings() {
         {/* Privacy */}
         <Card className="card-pad">
           <SectionTitle icon="Lock">Privacy</SectionTitle>
-          <Row label="Sensitive memories stay within their space"><Toggle checked={settings.privacy.sensitiveMemoryStaysInSpace} onChange={(v) => updateSettings({ privacy: { ...settings.privacy, sensitiveMemoryStaysInSpace: v } })} /></Row>
-          <Row label="Require approval for actions outside the household"><Toggle checked={settings.privacy.requireApprovalForExternal} onChange={(v) => updateSettings({ privacy: { ...settings.privacy, requireApprovalForExternal: v } })} /></Row>
+          {/* The two privacy toggles that used to sit here were read by nothing: memory scope is
+              enforced server-side per room, and external-action approval is the autonomy stance
+              below. A switch that changes nothing is worse than no switch. */}
           <Row label="Hide family names on the sign-in screen" desc="Until someone signs in, this device's profile picker shows no names (ISS-015 privacy flag; enforced server-side)."><Toggle checked={hideProfilesPreAuth} onChange={(v) => void toggleHideProfilesPreAuth(v)} ariaLabel="Hide family names on the sign-in screen" /></Row>
-        </Card>
-
-        {/* Notifications */}
-        <Card className="card-pad">
-          <SectionTitle icon="Bell">Notifications</SectionTitle>
-          <Row label="In-app notifications"><Toggle checked={settings.notifications.inApp} onChange={(v) => updateSettings({ notifications: { ...settings.notifications, inApp: v } })} /></Row>
-          <Row label="Email digest" desc="Requires a configured email connector."><Toggle checked={settings.notifications.emailDigest} onChange={(v) => updateSettings({ notifications: { ...settings.notifications, emailDigest: v } })} /></Row>
-          <Row label="Text-style alerts" desc="Requires a configured messaging connector."><Toggle checked={settings.notifications.textAlerts} onChange={(v) => updateSettings({ notifications: { ...settings.notifications, textAlerts: v } })} /></Row>
         </Card>
 
         {/* Appearance & solo mode */}
         <Card className="card-pad">
           <SectionTitle icon="Palette">Appearance & branding</SectionTitle>
-          <Row label="Theme"><Select value={settings.theme} onChange={(e) => updateSettings({ theme: e.target.value as "warm" | "warm-contrast" })} className="!w-44"><option value="warm">Warm</option><option value="warm-contrast">Warm (higher contrast)</option></Select></Row>
           <p className="mt-2 rounded-lg bg-sand-50 px-3 py-2 text-sm text-ink-500">Rename the whole product in <code className="rounded bg-sand-200 px-1">src/brand.ts</code> — currently “{brand.name}”.</p>
-          <Row label="Solo Professional Mode" desc="Optionally surfaces side-business workflows. Off by default — FamiliOS is family-first."><Toggle checked={settings.soloProfessionalMode} onChange={() => toggleSoloMode()} /></Row>
         </Card>
 
         {/* Comfort & accessibility — inclusive, neurodivergent-friendly controls */}

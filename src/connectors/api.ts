@@ -460,7 +460,32 @@ export interface BuildResult {
   updated?: { kind: string; id: string; name?: string; version?: number; ok: boolean; error?: string }[];
   notes?: string[]; error?: string; message?: string;
 }
-export interface AssistantResult { ok: boolean; kind?: "answer" | "plan" | "build"; answer?: string; plan?: AgentPlan; build?: ChatBuild; runId?: string | null; run?: ServerRun | null; model?: string; error?: string; message?: string }
+/** What the assistant engine actually DID this turn, one entry per tool call. A step that
+ *  was approval-gated becomes a durable run (`runId`) parked on `approvalId`. `status:
+ *  "running"` is client-only: a live `tool` stream frame mirrored into the message until
+ *  the final `toolCalls` list on `done` replaces it. */
+export interface AssistantToolCall {
+  tool: string;
+  label: string;
+  status: "done" | "failed" | "blocked" | "awaiting_approval" | "running";
+  ok?: boolean;
+  summary?: string;
+  runId?: string;
+  approvalId?: string;
+}
+/** A `tool` frame on /api/assistant/stream — the tool the engine is on right now. */
+export interface AssistantToolEvent { tool: string; label?: string; status: "running" | "called" | "error"; message?: string }
+export interface AssistantResult {
+  ok: boolean;
+  /** "plan" is no longer produced by the default engine; still accepted for persisted messages. */
+  kind?: "answer" | "plan" | "build";
+  answer?: string; plan?: AgentPlan; build?: ChatBuild;
+  toolCalls?: AssistantToolCall[];
+  /** Present when a step was approval-gated and became a durable run — with ANY kind. */
+  runId?: string | null; run?: ServerRun | null; runIds?: string[];
+  model?: string; degraded?: boolean; fellBackFrom?: string;
+  error?: string; message?: string;
+}
 /* ---- Evolution (LLM enrichment of a run-trace improvement proposal) ---- */
 export interface EvolutionProposalResult { ok: boolean; proposal?: { title: string; reason: string; summary: string; after?: string; risk: "Low" | "Medium" | "High" }; model?: string; error?: string; message?: string }
 export interface ServerEvolution {
@@ -511,6 +536,8 @@ export interface ServerEvolution {
 /* ---- server-owned family data (P1/P4) ---- */
 export interface ServerEvent {
   id: string; householdId: string; title: string; startAt: string | null; endAt: string | null;
+  /** All-day: startAt/endAt are date-only local days and the event has no clock time. */
+  allDay?: boolean;
   location: string; notes?: string; spaceId: string; participantIds: string[]; driverId: string | null;
   ownerId: string | null; backupOwnerId: string | null;
   /** May the CURRENT member edit this event? (canonical → adult/owner; linked Google →
@@ -552,9 +579,16 @@ export interface HelpRequest {
 }
 export interface MealIngredient { item: string; have?: boolean }
 export interface Meal { id: string; householdId: string; date: string | null; time?: string | null; slot: string; title: string; notes: string; ingredients: MealIngredient[]; instructions?: string[]; servings?: number | null; recipeUrl?: string; visibility: string; source: string; createdBy: string; createdAt: string; updatedAt: string }
-export interface ServerConversationMessage { role: "user" | "assistant"; text: string; kind?: string; plan?: AgentPlan | null; build?: ChatBuild | null; built?: boolean; builtIds?: { skillId?: string; agentId?: string; triggerId?: string }; model?: string | null; at: string }
+export interface ServerConversationMessage {
+  role: "user" | "assistant"; text: string; kind?: string; plan?: AgentPlan | null; build?: ChatBuild | null; built?: boolean;
+  builtIds?: { skillId?: string; agentId?: string; triggerId?: string }; model?: string | null; at: string;
+  /** New engine: what the turn did, and the durable run(s) an approval gate parked. */
+  toolCalls?: AssistantToolCall[] | null; runIds?: string[] | null; runId?: string | null;
+}
 export interface ServerConversation { id: string; householdId: string; actorId: string; title: string; messages: ServerConversationMessage[]; createdAt: string; updatedAt: string }
-export interface ServerMemory { id: string; householdId: string; scope: string; type: string; text: string; createdAt: number; source?: { runId?: string; actorId?: string } }
+/** `agentId` (top-level or in `source`) is the run's agent when the server attributes it;
+ *  absent for memories written outside an agent run. */
+export interface ServerMemory { id: string; householdId: string; scope: string; type: string; text: string; createdAt: number; agentId?: string | null; source?: { runId?: string; actorId?: string; agentId?: string | null } }
 /* ---- WP-007 retrieval-quality memory (DEC-014: sqlite-FTS5 fallback, or a real
  * Supermemory sidecar when configured — see server/memory-provider.mjs) ---- */
 export interface MemorySearchResult { id?: string; text: string; scope?: string; type?: string; createdAt?: number }
@@ -627,9 +661,13 @@ export function templateIdempotencyKey(templateId: string, householdId: string |
 let csrfToken: string | null = null;
 export function setCsrf(t: string | null) { csrfToken = t; }
 
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 async function req<T>(path: string, init?: RequestInit & { mutation?: boolean }): Promise<T> {
   const headers: Record<string, string> = { "content-type": "application/json", ...(init?.headers as Record<string, string> | undefined) };
-  if (init?.mutation && csrfToken) headers["x-homeops-csrf"] = csrfToken;
+  // Derived from the method, not a per-call flag: a forgotten `mutation: true` used to ship
+  // an unprotected POST/PATCH/DELETE that the server then refused. The flag can only widen.
+  const mutation = init?.mutation ?? !SAFE_METHODS.has((init?.method ?? "GET").toUpperCase());
+  if (mutation && csrfToken) headers["x-homeops-csrf"] = csrfToken;
   const res = await fetch(`/api${path}`, { credentials: "same-origin", ...init, headers });
   return (await res.json()) as T;
 }
@@ -877,11 +915,14 @@ export const backend = {
     try { return await req("/assistant", { method: "POST", body: JSON.stringify({ message, context, providerId, conversationId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }; }
   },
   // SSE streaming assistant — fires onProgress with a token count while the AI is
-  // generating, then resolves with the final parsed AssistantResult.
+  // generating, onDelta with each slice of reply text, onTool as the engine starts /
+  // finishes each tool, then resolves with the final parsed AssistantResult.
   streamAssistant(
     body: { message: string; context?: Record<string, unknown>; providerId?: string; conversationId?: string },
     onProgress?: (tokens: number) => void,
     onPhase?: (phase: string) => void,
+    onDelta?: (text: string) => void,
+    onTool?: (ev: AssistantToolEvent) => void,
   ): Promise<AssistantResult> {
     return new Promise((resolve) => {
       const headers: Record<string, string> = { "content-type": "application/json" };
@@ -919,6 +960,8 @@ export const backend = {
                 // web user watching a live web lookup read "Generating…" through the slowest
                 // part of the request, with nothing saying the assistant was out searching.
                 if (ev.type === "phase" && onPhase && typeof ev.phase === "string") onPhase(ev.phase);
+                if (ev.type === "delta" && onDelta && typeof ev.text === "string") onDelta(ev.text);
+                if (ev.type === "tool" && onTool && typeof ev.tool === "string") onTool(ev as AssistantToolEvent);
                 if (ev.type === "done") { resolve(ev.result as AssistantResult); return; }
               } catch {}
             }

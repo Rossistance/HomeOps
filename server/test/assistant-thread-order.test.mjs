@@ -1,3 +1,7 @@
+// LEGACY ENGINE: this suite pins the previous single-shot assistant brain (JSON envelope
+// answer|lookup|plan|build). The default Ask Famili engine is now the AI SDK agent loop
+// (server/assistant-agent.mjs, server/test/assistant-agent.test.mjs); every server here is
+// spawned with HOMEOPS_ASSISTANT_ENGINE=legacy so the rollback path stays proven.
 // WP-003 slice 4 (ISS-005/009/011/016 — "one run world") — THREAD ORDER.
 //
 // Bug: POST /api/assistant/stream started the plan's run (runAssistantPlan → engine
@@ -40,7 +44,7 @@ function fastPlan(suffix) {
 }
 
 before(async () => {
-  ctx = await startServer();
+  ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy" } });
   owner = await makeSession(ctx, "m-alex");
   fakeProvider = http.createServer((req, res) => {
     let body = "";
