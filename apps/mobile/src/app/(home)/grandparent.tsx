@@ -60,7 +60,18 @@ export function HelpRequestsSection({ memberId, requests, events, tasks = [], on
     });
   };
 
-  const pending = requests.filter((r) => r.status === "pending" && r.toActorId === memberId);
+  /* Deduplicated by REQUEST ID.
+   *
+   * From a TestFlight screenshot: "Can you help?" showed the same request as two identical
+   * cards. The accepted list below has had a duplicate guard since ISS-009; the pending list
+   * — the one people actually act on — never got one. Two rows with the same id are one
+   * request that arrived twice, and rendering both also means two identical React keys. */
+  const pending = useMemo(() => {
+    const seen = new Set<string>();
+    return requests
+      .filter((r) => r.status === "pending" && r.toActorId === memberId)
+      .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+  }, [requests, memberId]);
   const accepted = useMemo(() => {
     const fresh = requests
       .filter((r) => r.status === "accepted" && r.toActorId === memberId)

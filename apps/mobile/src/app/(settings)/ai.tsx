@@ -279,19 +279,19 @@ export default function SettingsScreen() {
           />
           <Row
             title="Advanced builders"
-            subtitle="Agent, skill & automation builders live on the web"
+            subtitle="The deeper helper tools live on the web"
             icon="hammer"
             iconColor={colors.textMuted}
             iconBg={colors.surfaceSunken}
             trailing={<Sym name="arrow.up.right" size={13} color={colors.textFaint} />}
             /* Cluster W — "the advanced builders to go to the web page: this should require
                a pin input", and the warning he asked for by name. A wrong tap here can
-               reconfigure agents; the pause IS the feature. Uses the same household PIN
+               reconfigure a helper; the pause IS the feature. Uses the same household PIN
                elevated sign-in already trusts. */
             onPress={() => {
               Alert.alert(
                 "Advanced builders",
-                "These edit agents, skills and automations directly — a wrong change here can break how your helpers behave. Continue on the web?",
+                "These edit your helpers directly — a wrong change here can break how they behave. Continue on the web?",
                 [
                   { text: "Cancel", style: "cancel" },
                   { text: "Continue", style: "destructive", onPress: openWeb },

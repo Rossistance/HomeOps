@@ -1,7 +1,7 @@
 // Nests — a small group inside the household.
 //
 // "GPop and Beannie are actually married. So for them it might make sense to keep their own
-//  agents and grocery list and task list available between the two of them, and yet still
+//  helpers and grocery list and task list available between the two of them, and yet still
 //  isolated from the broader family group… there should be some way to associate two profiles…
 //  there should be a way to say 'send an invite to create a nest'… and the other person would
 //  approve — you can either join or decline… and be able to leave that nest at any point."

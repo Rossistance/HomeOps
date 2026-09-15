@@ -16,7 +16,8 @@
 // the durable run record — not what a route happens to echo back.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, stopServer, makeSession } from "./harness.mjs";
+import { startServer, stopServer, makeSession, readStoreRecord } from "./harness.mjs";
+import { useFakeModel } from "./fake-model.mjs";
 
 let ctx, adult;
 before(async () => {
@@ -102,17 +103,35 @@ test("a household conversation still fans out, so nothing under-notifies", async
   }
 });
 
-test("an agent run carries its goal, not just the agent's name", async () => {
-  // startRun's title for an agent run is the AGENT'S NAME, which tells a step-level model
-  // nothing about what was asked of it.
-  const r = await adult.req("/api/agents/agt_household/run", {
-    method: "POST", body: JSON.stringify({ goal: "Summarise what's on this week" }),
-  });
-  // No AI provider in the harness, so planning may honestly refuse — assert only when a run
-  // was actually created.
-  if (r.status === 200 && r.data?.run?.id) {
-    const { getRun, runWithTenant } = await import("../store.mjs");
-    const run = await runWithTenant("local", () => getRun(r.data.run.id));
-    assert.equal(run.goal, "Summarise what's on this week");
+test("a durable run born inside a helper's turn carries the ASK, not just the step's name", async () => {
+  /* The route-level half of the first test. It used to POST /api/agents/:id/run, whose title
+   * for an agent run was the AGENT'S NAME — telling a step-level model nothing about what was
+   * asked of it. That route is gone with the seven-concepts collapse: a helper runs the chat
+   * tool loop, and the only durable run it creates is the one an approval-gated tool parks.
+   * That run is where the goal has to land, so this checks it there. */
+  const fake = await useFakeModel(adult);
+  try {
+    const helper = (await adult.req("/api/helpers", {
+      method: "POST",
+      body: JSON.stringify({ name: "Goal Carrier", instructions: "Raise an approval whenever something needs a person to sign it off." }),
+    })).data.helper;
+    fake.state.script = [
+      { toolCalls: [{ name: "homeops__create_approval", args: { subject: "Confirm the dentist", detail: "Amelia, the 14th" } }] },
+      { text: "Raised it for the family to approve." },
+    ];
+    const ran = await adult.req(`/api/helpers/${helper.id}/run`, { method: "POST" });
+    assert.equal(ran.status, 200, JSON.stringify(ran.data));
+    const runId = (ran.data.runIds ?? [])[0];
+    assert.ok(runId, `the gated step must have parked a durable run: ${JSON.stringify(ran.data).slice(0, 300)}`);
+
+    /* Read out of the SPAWNED server's own data dir: this run was created over there, and
+     * publicRun deliberately does not echo `goal` back, so the route cannot answer for it. */
+    const run = readStoreRecord(ctx, "runs", runId);
+    assert.ok(run, "the parked run is in the server's store");
+    assert.ok(run.goal, "a parked run must say what was being attempted");
+    assert.match(run.goal, /Do your job/, "and the ask is the helper's own, in the words it was given");
+    assert.notEqual(run.goal, run.title, "the step's name is not a substitute for the request");
+  } finally {
+    await new Promise((r) => fake.server.close(r));
   }
 });

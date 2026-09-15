@@ -15,8 +15,8 @@
 // keyboard is up, Save is directly above it.
 import { useEffect, useState, type ReactNode } from "react";
 import { Keyboard, Platform, StyleSheet, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "@/theme";
+import { useTabBarClearance } from "@/lib/tab-bar";
 
 /** Height to reserve at the bottom of the scrolling content so the bar never covers it. */
 export const ACTION_BAR_HEIGHT = 76;
@@ -39,16 +39,22 @@ export function useKeyboardHeight(): number {
 
 export function ActionBar({ children }: { children: ReactNode }) {
   const { colors, spacing } = useTheme();
-  const insets = useSafeAreaInsets();
   const kb = useKeyboardHeight();
+  /* …and never behind the tab bar either.
+   *
+   * This bar sat at bottom: 0, which is underneath the floating iOS 26 tab bar — the same
+   * mistake that put Today's last card out of reach (see lib/tab-bar). A Save button you
+   * cannot press is a worse version of a Save button you cannot see, and this component
+   * exists for precisely that complaint. */
+  const tabBar = useTabBarClearance();
   return (
     <View
       style={{
         position: "absolute", left: 0, right: 0,
-        // With the keyboard up the home indicator is covered by it, so the safe-area inset
-        // would double-count as a gap between the bar and the keys.
-        bottom: kb > 0 ? kb : 0,
-        paddingBottom: kb > 0 ? spacing.sm : Math.max(insets.bottom, spacing.sm),
+        // With the keyboard up it covers both the tab bar and the home indicator, so the bar
+        // rides the keys directly; anything else would double-count as a gap.
+        bottom: kb > 0 ? kb : tabBar,
+        paddingBottom: spacing.sm,
         paddingTop: spacing.sm,
         paddingHorizontal: spacing.lg,
         gap: 6,

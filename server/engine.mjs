@@ -11,7 +11,7 @@ import crypto from "node:crypto";
 import {
   createRun, getRun, patchRun, patchRunStep, appendToolCall, listRuns,
   createApproval, consumeApproval, getApproval, decideApproval,
-  appendAudit, getSettings, putEvolution, patchEvolution, recordAiUsage, aiBudgetExhausted,
+  appendAudit, getSettings, recordAiUsage, aiBudgetExhausted,
   idempotencyKey, checkIdempotency, recordIdempotency, withRunLock, hashInput,
   getRiskOverride, addArtifact, addMemory, listMemory, addNotification,
 } from "./store.mjs";
@@ -20,13 +20,11 @@ import { listConnectors, executeTool, toolActionOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
-import { resolveRegisteredFunction, runFunctionHandler, computeFunctionState } from "./functions.mjs";
-import { getAgent, getSkill } from "./store.mjs";
-import { isToolStepAllowed, partialUpdateAgent } from "./agents.mjs";
+import { getAgent } from "./store.mjs";
+import { isToolStepAllowed } from "./helper-shape.mjs";
 import { resolveEffectivePolicy, reachesOutside, BLOCKED } from "./policy.mjs";
-import { partialUpdateSkill } from "./skills.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
-import { proposeEvolution, judgeEvolutionConfidence, INTERNAL_INPUTS, claimsExternalEffect } from "./planner.mjs";
+import { INTERNAL_INPUTS, claimsExternalEffect } from "./context.mjs";
 import { providerChat } from "./ai.mjs";
 
 const RUN_STEP_TIMEOUT_MS = 60_000;
@@ -271,8 +269,6 @@ function resolveToolBase(toolId) {
   // Registered functions (Slice 4): user-authored capabilities. requiresApproval is
   // server-authoritative (never relaxes below the wrapped tool); the "available"
   // gate is re-checked at execution in execResolved.
-  const registered = resolveRegisteredFunction(toolId);
-  if (registered) return registered;
   return null;
 }
 // Household risk override (item 9): an Owner/Adult Admin may re-class a tool's risk and
@@ -319,17 +315,6 @@ async function execResolved(resolved, input, ctx, approvalId) {
     // the recipient's per-agent allowlist, and it cannot do that without knowing who
     // is acting — an unattributed send would silently skip that gate.
     return await resolved.def.run({ householdId: ctx.householdId, actorId: ctx.actorId, runId: ctx.runId, agentId: ctx.agentId ?? null }, input);
-  }
-  if (resolved.kind === "function") {
-    // HARD RULE: a registered function executes in a run ONLY when its live state is
-    // "available" (passed a real test + deps satisfied). Anything else fails honestly;
-    // a missing dependency parks the run as resumable rather than fabricating success.
-    const { state, reason } = computeFunctionState(resolved.fn, { householdId: ctx.householdId, actorId: ctx.actorId });
-    if (state !== "available") {
-      const waiting = ["needs_connector", "needs_runtime", "degraded"].includes(state);
-      return { ok: false, error: `function_${state}`, message: reason, waiting: waiting ? "connector" : undefined };
-    }
-    return await runFunctionHandler(resolved.fn, input, { householdId: ctx.householdId, actorId: ctx.actorId, runId: ctx.runId, accountId: ctx.accountId }, { approvalConsumed: !!approvalId });
   }
   if (resolved.kind === "provider") {
     if (!externalActionsEnabled(ctx.householdId) && ["Write", "Send", "Download"].includes(resolved.action)) {
@@ -951,7 +936,6 @@ function finishFailed(runId, error) {
   const run = getRun(runId);
   appendAudit({ type: "run.failed", runId, error, failureClass: classifyFailure(error), householdId: run?.householdId });
   if (run) {
-    recordFailureEvolution(run); // real, evidence-backed proposal (deterministic baseline)
     notifyRepeatedNonDelivery(run, classifyFailure(error));
   }
   emit(runId, "run.failed");
@@ -991,102 +975,7 @@ function notifyRepeatedNonDelivery(run, failureClass) {
   } catch { /* alerting must never mask the original outcome */ }
 }
 
-// WP-008a (ISS-007/DEC-015/HYP-002): the ONE place that actually mutates an agent's
-// instructions or a skill's planner_guidance FROM an evolution record — shared by both
-// the auto-accept path just below and the human /api/evolution/:id/review route in
-// index.mjs (handoff: index.mjs calls this instead of duplicating the two branches).
-// Recording `beforeVersionId` here (the target's version NUMBER immediately before the
-// patch — i.e. exactly what partialUpdateAgent/partialUpdateSkill just snapshotted) is
-// what a later revert (server/evolution-revert.mjs) needs to restore the exact prior
-// text without falling back to timestamp correlation. Never touches evolution.status —
-// callers own accept/reject/pending transitions themselves.
-export function applyEvolutionToTarget(e) {
-  if (!e?.after) return { applied: false, applyError: null };
-  if (e.kind === "agent" && e.agentId) {
-    const before = getAgent(e.agentId);
-    if (!before) return { applied: false, applyError: "not_found" };
-    const r = partialUpdateAgent(e.agentId, { instructions: e.after });
-    if (!r || r.error) return { applied: false, applyError: r?.error ?? "update_failed" };
-    patchEvolution(e.id, { beforeVersionId: before.version ?? 1, applied: true });
-    return { applied: true, applyError: null };
-  }
-  if (e.kind === "skill" && e.skillId) {
-    const before = getSkill(e.skillId);
-    if (!before) return { applied: false, applyError: "not_found" };
-    const r = partialUpdateSkill(e.skillId, { planner_guidance: e.after });
-    if (!r || r.error) return { applied: false, applyError: r?.error ?? "update_failed" };
-    patchEvolution(e.id, { beforeVersionId: before.version ?? 1, applied: true });
-    return { applied: true, applyError: null };
-  }
-  return { applied: false, applyError: null };
-}
 
-// Evidence-backed improvement proposal from a real failed run. Writes a
-// deterministic trace-based baseline immediately, then fires an async AI
-// enrichment pass (proposeEvolution) to upgrade it with better wording +
-// a concrete "after" suggestion. Never invents a failure.
-function recordFailureEvolution(run) {
-  const bad = run.steps.find((s) => s.status === "failed");
-  if (!bad) return;
-  const evoId = "evo_" + crypto.randomBytes(8).toString("hex");
-  const kind = run.sourceRef?.skillId ? "skill" : run.sourceRef?.agentId ? "agent" : "tool";
-  putEvolution({
-    id: evoId,
-    householdId: run.householdId,
-    kind,
-    skillId: run.sourceRef?.skillId ?? null,
-    agentId: run.sourceRef?.agentId ?? null,
-    runId: run.id,
-    status: "pending",
-    source: "trace",
-    title: `Improve: ${bad.title}`,
-    reason: `Step "${bad.title}" (${bad.toolId ?? "unknown"}) failed: ${bad.detail ?? run.error ?? "unknown error"}`,
-    summary: `Handle "${bad.toolId ?? "this tool"}" failures more gracefully, or connect the required service before running.`,
-    createdAt: Date.now(),
-    updatedAt: new Date().toISOString(),
-  });
-  // Fire-and-forget AI enrichment — upgrades the deterministic baseline with
-  // better wording + a concrete "after" suggestion. Non-fatal if provider absent.
-  const trace = {
-    runId: run.id, status: run.status, error: run.error,
-    steps: (run.steps ?? []).map((s) => ({ title: s.title, toolId: s.toolId, status: s.status, detail: s.detail })),
-    sourceRef: run.sourceRef,
-  };
-  proposeEvolution({ trace }).then(async (r) => {
-    if (!(r.ok && r.proposal)) return;
-    patchEvolution(evoId, {
-      title: r.proposal.title,
-      reason: r.proposal.reason,
-      summary: r.proposal.summary,
-      after: r.proposal.after,
-      risk: r.proposal.risk,
-      source: "ai",
-      model: r.model,
-      updatedAt: new Date().toISOString(),
-    });
-    // Auto-approval (conservative). Only a LOW-risk enriched proposal that carries a
-    // concrete `after`, only when the household hasn't opted out, and only when an AI
-    // confidence judge (a VALIDATION pass — it does NOT re-run the failing task) says
-    // the change directly fixes the failure. Medium/High always waits for a human.
-    // Fully wrapped: auto-approval must never throw into the failure/run path.
-    try {
-      const settings = getSettings(run.householdId);
-      if (settings.autoApproveImprovements !== false && r.proposal.risk === "Low" && r.proposal.after) {
-        const judged = await judgeEvolutionConfidence({ trace, proposal: r.proposal, session: { householdId: run.householdId } });
-        if (judged.confident) {
-          // Shared with the human accept route (WP-008a) — also stamps beforeVersionId.
-          const { applied } = applyEvolutionToTarget({
-            id: evoId, kind, agentId: run.sourceRef?.agentId ?? null, skillId: run.sourceRef?.skillId ?? null, after: r.proposal.after,
-          });
-          if (applied) {
-            patchEvolution(evoId, { status: "accepted", reviewedAt: Date.now(), reviewedBy: "ai", autoApproved: true, autoReason: judged.reason });
-            appendAudit({ type: "evolution.auto_accept", id: evoId, kind, agentId: run.sourceRef?.agentId ?? null, householdId: run.householdId, reason: judged.reason });
-          }
-        }
-      }
-    } catch { /* auto-approval is best-effort; never disrupt the failure path */ }
-  }).catch(() => {});
-}
 
 /* ---- resume after approval / connector / provider becomes available ---- */
 export function resumeRun(runId) {

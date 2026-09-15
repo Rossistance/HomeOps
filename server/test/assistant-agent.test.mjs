@@ -206,24 +206,63 @@ describe("Ask Famili — the AI SDK agent engine", () => {
     assert.ok(types.indexOf("done") === types.length - 1, "done is last");
   });
 
-  test("a durable ask becomes a BUILD proposal the family confirms — nothing is created by the turn", async () => {
-    const agentsBefore = (await owner.req("/api/agents")).data.agents?.length ?? 0;
+  test("a durable ask CREATES the helper \u2014 no proposal card, no confirmation step", async () => {
+    /* The old engine answered "every morning at 7, email me a briefing" with a card
+     * describing a skill, an agent and an automation, and waited for the family to confirm
+     * three concepts it had never explained. Worse, the card rendered whether or not the
+     * app could actually do the thing \u2014 a TestFlight screenshot shows a two-step plan whose
+     * second step is an apology that no Alexa connector exists. A helper is a real record
+     * created by a real tool call, and the answer reports what was made. */
+    const before = (await owner.req("/api/helpers")).data.helpers.length;
     fake.state.script = [
-      { toolCalls: [{ name: "famili__propose_build", args: {
-        summary: "Email a morning briefing every day at 7 AM",
-        skill: { name: "Morning briefing", description: "Compose and send the day's briefing", domain: "Family", risk_level: "Low", steps: [{ name: "Compose briefing", tool_id: null, approval_required: false }, { name: "Send it", tool_id: "homeops.notify_contact", approval_required: false }] },
-        agent: { name: "Morning briefer", purpose: "Sends the daily briefing", instructions: "Every morning compose and send the household briefing." },
-        automation: { name: "Daily 7 AM briefing", type: "recurring", intervalMs: 86400000, anchor: "07:00" },
+      { toolCalls: [{ name: "famili__list_helpers", args: {} }] },
+      { toolCalls: [{ name: "famili__create_helper", args: {
+        name: "Morning Briefing",
+        purpose: "One short summary of the day, every morning.",
+        instructions: "Every morning look at today's calendar and anything due today, and write the family one short summary of who has to be where, what is due, and anything still waiting on someone.",
+        schedule: { kind: "daily", time: "07:00" },
+        autonomy: "act",
       } }] },
-      { text: "Here's what I'd set up — confirm and I'll create it." },
+      { text: "Done \u2014 \u201cMorning Briefing\u201d runs every day at 7:00 AM. You can edit or pause it in Helpers." },
     ];
-    const r = await owner.req("/api/assistant", { method: "POST", body: JSON.stringify({ message: "every morning at 7 email me a briefing" }) });
+    const r = await owner.req("/api/assistant", { method: "POST", body: JSON.stringify({ message: "every morning at 7 give me a briefing" }) });
     assert.equal(r.data.ok, true, JSON.stringify(r.data));
-    assert.equal(r.data.kind, "build");
-    assert.equal(r.data.build?.automation?.anchor, "07:00");
-    assert.equal(r.data.build?.skill?.steps?.length, 2);
-    const agentsAfter = (await owner.req("/api/agents")).data.agents?.length ?? 0;
-    assert.equal(agentsAfter, agentsBefore, "proposing creates nothing");
+    assert.equal(r.data.kind, "answer", "there is no 'build' kind any more");
+    assert.equal(r.data.build, undefined);
+
+    const helpers = (await owner.req("/api/helpers")).data.helpers;
+    assert.equal(helpers.length, before + 1, "the helper really exists");
+    const made = helpers.find((h) => h.name === "Morning Briefing");
+    assert.ok(made, "created under the name the family will see");
+    assert.equal(made.scheduleText, "Every day at 7:00 AM", "the schedule is rendered for a person, not as intervalMs");
+    assert.equal(made.autonomy, "act");
+    assert.match(made.instructions, /calendar/, "the instructions are the helper");
+    assert.equal(made.enabled, true);
+
+    // A schedule is not a second thing to set up: creating the helper armed it.
+    const triggers = readStoreDoc(ctx, "triggers.json", {});
+    const armed = Object.values(triggers).find((t) => t.helperId === made.id);
+    assert.ok(armed, "the helper's schedule is armed without a separate automation record");
+    assert.equal(armed.anchor, "07:00");
+    assert.ok(armed.nextRunAt > Date.now(), "and it is pointed at a future 7 AM");
+  });
+
+  test("a helper cannot be handed send-and-spend autonomy from a chat message", async () => {
+    /* The one setting that lets a helper act with nobody watching stays behind the household
+     * PIN in Helpers. Asking for it in chat lands the tier below it rather than failing \u2014 the
+     * family still gets their helper, just not the grant they could not authorise here. */
+    fake.state.script = [
+      { toolCalls: [{ name: "famili__create_helper", args: {
+        name: "Bill Payer", instructions: "Pay every bill the moment it arrives without asking anyone.",
+        schedule: { kind: "daily", time: "09:00" }, autonomy: "full",
+      } }] },
+      { text: "Set up \u2014 it will still check with you before anything is sent or paid." },
+    ];
+    const r = await owner.req("/api/assistant", { method: "POST", body: JSON.stringify({ message: "make a helper that pays bills automatically" }) });
+    assert.equal(r.data.ok, true);
+    const made = (await owner.req("/api/helpers")).data.helpers.find((h) => h.name === "Bill Payer");
+    assert.ok(made);
+    assert.notEqual(made.autonomy, "full", "chat cannot grant the unattended send/spend tier");
   });
 
   test("the durable thread keeps the turn's tool activity, and the next turn sees it as history", async () => {
@@ -297,31 +336,3 @@ describe("Ask Famili — the AI SDK agent engine", () => {
   });
 });
 
-describe("HOMEOPS_ASSISTANT_ENGINE=legacy restores the single-shot planner", () => {
-  let ctx, adult, provider;
-  before(async () => {
-    ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy" } });
-    adult = await makeSession(ctx, "m-morgan");
-    provider = http.createServer((req, res) => {
-      let b = ""; req.on("data", (c) => (b += c));
-      req.on("end", () => {
-        if (req.url === "/api/tags") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ models: [{ name: "t" }] })); return; }
-        res.writeHead(200, { "content-type": "application/x-ndjson" });
-        res.end(JSON.stringify({ message: { content: JSON.stringify({ kind: "answer", answer: "legacy says hi" }) } }) + "\n");
-      });
-    });
-    await new Promise((r) => provider.listen(0, r));
-    const port = provider.address().port;
-    await adult.req("/api/ai/providers/ollama/config", { method: "POST", body: JSON.stringify({ baseUrl: `http://localhost:${port}`, model: "t" }) });
-    await adult.req("/api/ai/active", { method: "POST", body: JSON.stringify({ providerId: "ollama" }) });
-  });
-  after(async () => { await stopServer(ctx); await new Promise((r) => provider.close(r)); });
-
-  test("the legacy JSON envelope is honoured under the flag", async () => {
-    const r = await adult.req("/api/assistant", { method: "POST", body: JSON.stringify({ message: "hello" }) });
-    assert.equal(r.data.ok, true);
-    assert.equal(r.data.kind, "answer");
-    assert.equal(r.data.answer, "legacy says hi");
-    assert.equal(r.data.toolCalls, undefined);
-  });
-});

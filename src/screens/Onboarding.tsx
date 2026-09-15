@@ -90,7 +90,7 @@ export function Onboarding() {
             </div>
             <div className="mt-4 flex items-start gap-2 rounded-2xl border border-sky-200/70 bg-sky-50 px-3.5 py-2.5 text-xs text-sky-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
               <Icon name="Sparkles" size={15} className="mt-0.5 shrink-0" />
-              <span>You'll start in <strong>Simple mode</strong> — just Ask {brand.name}, Helpers, Automations, and the family essentials. Turn on <strong>Advanced tools</strong> (Skills &amp; Functions) anytime in Settings.</span>
+              <span>You'll start with Ask {brand.name}, your Helpers, and the family essentials. A helper is one standing job written in plain English — you can add your first one whenever you're ready.</span>
             </div>
             <div className="mt-4 flex justify-end">
               <Button variant="ember" disabled={busy || !owner.trim()} onClick={async () => { setBusy(true); setAdvancedMode(false); await complete("blank", { householdName: household, ownerName: owner }); }}>

@@ -4,15 +4,15 @@
 import { useCallback, useState } from "react";
 import { Alert, View } from "react-native";
 import { useFocusEffect } from "expo-router";
-import { api, type AuditEvent, type EvolutionReviewRec, type MemoryRec, type RunRec } from "@/lib/api";
+import { api, type AuditEvent, type MemoryRec, type RunRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useAdvancedMode } from "@/lib/prefs";
 import { useRevSync } from "@/lib/rev-sync";
 import { useRun } from "@/lib/run-context";
-import { useTheme, statusColor, riskColor, tapHaptic } from "@/theme";
+import { useTheme, statusColor, tapHaptic } from "@/theme";
 import { humanDetail } from "@/lib/format";
 import {
-  T, Card, Badge, Button, Row, SectionHeader, SkeletonCards, ErrorState, Notice,
+  T, Card, Badge, Row, SectionHeader, SkeletonCards, ErrorState, Notice,
   Rise, HScreen, Sym, PressableScale,
 } from "@/components/ui";
 
@@ -20,7 +20,7 @@ const RUN_LABEL: Record<string, string> = {
   running: "Running", waiting: "Waiting for approval", completed: "Completed", failed: "Failed",
 };
 
-const FILTERS = ["All", "Agents", "Approvals", "Files"] as const;
+const FILTERS = ["All", "Helpers", "Approvals", "Files"] as const;
 type Filter = (typeof FILTERS)[number];
 
 function matchesFilter(e: AuditEvent, f: Filter): boolean {
@@ -28,7 +28,7 @@ function matchesFilter(e: AuditEvent, f: Filter): boolean {
   switch (f) {
     case "Approvals": return k.includes("approv") || k.includes("decide") || k.includes("deny");
     case "Files": return k.includes("file") || k.includes("upload") || k.includes("doc");
-    case "Agents": return k.includes("run") || k.includes("agent") || k.includes("tool");
+    case "Helpers": return k.includes("run") || k.includes("helper") || k.includes("agent") || k.includes("tool");
     default: return true;
   }
 }
@@ -68,23 +68,19 @@ export default function ActivityScreen() {
   const { session } = useSession();
   const { advanced } = useAdvancedMode();
   const { activeRun, clearRun } = useRun();
-  const canManage = session?.role === "Owner" || session?.role === "Adult Admin";
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [runs, setRuns] = useState<RunRec[]>([]);
   const [memory, setMemory] = useState<MemoryRec[]>([]);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
-  const [evolutions, setEvolutions] = useState<EvolutionReviewRec[]>([]);
-  const [evoBusy, setEvoBusy] = useState<string | null>(null);
-  const [evoMsg, setEvoMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("All");
 
   const load = useCallback(async () => {
-    const [h, rs, mem, ev, evos] = await Promise.all([api.health(), api.runs(), api.memory(), api.audit(20), api.evolutionReviews()]);
+    const [h, rs, mem, ev] = await Promise.all([api.health(), api.runs(), api.memory(), api.audit(20)]);
     setOffline(!h);
-    if (h) { setRuns(rs); setMemory(mem); setAudit(ev); setEvolutions(evos); }
+    if (h) { setRuns(rs); setMemory(mem); setAudit(ev); }
     setLoading(false);
   }, []);
 
@@ -118,31 +114,8 @@ export default function ActivityScreen() {
     );
   };
 
-  // Accept applies the improvement (server versions the agent/skill); dismiss rejects it.
-  // Adult Admin+ only — the server returns 403 for anyone else, surfaced inline.
-  const reviewEvo = async (ev: EvolutionReviewRec, accept: boolean) => {
-    setEvoBusy(ev.id); setEvoMsg(null);
-    const r = await api.reviewEvolution(ev.id, accept);
-    setEvoBusy(null);
-    if (r.error) {
-      tapHaptic("error");
-      setEvoMsg({ ok: false, text: r.error === "insufficient_role" ? "Only an Owner or Adult Admin can review improvements." : r.message ?? "Couldn't save that — try again." });
-      return;
-    }
-    if (accept && r.applyError) {
-      tapHaptic("warning");
-      setEvoMsg({ ok: false, text: `Accepted, but couldn't apply automatically: ${r.applyError}` });
-    } else {
-      tapHaptic(accept ? "success" : "select");
-      setEvoMsg({ ok: true, text: accept ? (r.applied ? "Accepted and applied." : "Accepted.") : "Dismissed." });
-    }
-    await load();
-  };
-  // Dismissed proposals drop off the list; keep pending + accepted (incl. auto-applied).
-  const improvements = evolutions.filter((e) => e.status !== "rejected");
-
   // WP-003/WP-004: a step that did NOT deliver must never read as neutral-pending.
-  // `not_sent` (no delivery tool behind a send step), `skipped` (agent policy refused)
+  // `not_sent` (no delivery tool behind a send step), `skipped` (a helper's permission refused)
   // and `expired` (approval window closed) all land amber — the same weight as a
   // waiting gate — so a non-delivery is as visible as a success.
   const stepDot = (s: string) =>
@@ -256,57 +229,6 @@ export default function ActivityScreen() {
           </Rise>
           ) : null}
 
-          {improvements.length > 0 ? (
-            <Rise index={2}>
-              <SectionHeader title="Improvements" />
-              {evoMsg ? <View style={{ marginBottom: spacing.sm }}><Notice text={evoMsg.text} ok={evoMsg.ok} /></View> : null}
-              <View style={{ gap: spacing.sm }}>
-                {improvements.map((ev) => {
-                  const rc = ev.risk ? riskColor(colors, ev.risk) : null;
-                  const auto = ev.status === "accepted" && ev.autoApproved;
-                  return (
-                    <Card key={ev.id} style={{ gap: 6 }}>
-                      <View style={{ flexDirection: "row", alignItems: "flex-start", gap: spacing.sm }}>
-                        <T kind="h3" color={colors.text} style={{ flex: 1 }}>{ev.title}</T>
-                        {rc ? <Badge label={ev.risk!} fg={rc.fg} bg={rc.bg} /> : null}
-                      </View>
-                      {ev.reason ? <T kind="sub">{ev.reason}</T> : null}
-                      {ev.summary && ev.summary !== ev.reason ? <T kind="sub" color={colors.textMuted}>{ev.summary}</T> : null}
-                      {ev.agentName ? (
-                        <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
-                          <Sym name="sparkles" size={12} color={colors.textFaint} />
-                          <T kind="caption" color={colors.textMuted}>{ev.agentName}</T>
-                        </View>
-                      ) : null}
-
-                      {auto ? (
-                        <View style={{ gap: 4, marginTop: 2 }}>
-                          <View style={{ flexDirection: "row" }}>
-                            <Badge label="Auto-applied by AI" icon="sparkles" fg={colors.sky} bg={colors.skyBg} />
-                          </View>
-                          {ev.autoReason ? <T kind="caption" color={colors.textMuted}>{ev.autoReason}</T> : null}
-                        </View>
-                      ) : ev.status === "accepted" ? (
-                        <View style={{ flexDirection: "row", marginTop: 2 }}>
-                          <Badge label="Accepted" icon="checkmark" fg={colors.sage} bg={colors.sageBg} />
-                        </View>
-                      ) : canManage ? (
-                        <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: 4 }}>
-                          <Button title="Accept" variant="success" small loading={evoBusy === ev.id} disabled={evoBusy !== null && evoBusy !== ev.id} onPress={() => void reviewEvo(ev, true)} />
-                          <Button title="Dismiss" variant="ghost" small disabled={evoBusy !== null} onPress={() => void reviewEvo(ev, false)} />
-                        </View>
-                      ) : (
-                        <View style={{ flexDirection: "row", marginTop: 2 }}>
-                          <Badge label="Pending review" fg={colors.amber} bg={colors.amberBg} />
-                        </View>
-                      )}
-                    </Card>
-                  );
-                })}
-              </View>
-            </Rise>
-          ) : null}
-
           <Rise index={3}>
             <SectionHeader title="Memory" />
             {memory.length === 0 ? (
@@ -347,7 +269,7 @@ export default function ActivityScreen() {
             {(() => {
               const filtered = audit.filter((e) => matchesFilter(e, filter));
               if (filtered.length === 0) {
-                return <Card style={{ marginTop: spacing.md }}><T kind="sub">Nothing here yet — agent actions land in this timeline.</T></Card>;
+                return <Card style={{ marginTop: spacing.md }}><T kind="sub">Nothing here yet — what your helpers do lands in this timeline.</T></Card>;
               }
               const groups = ["Today", "Yesterday", "Earlier"].map((g) => ({
                 label: g, items: filtered.filter((e) => dayGroup(e.at) === g),
@@ -379,7 +301,7 @@ export default function ActivityScreen() {
           </Rise>
 
           <T kind="detail" center style={{ marginTop: spacing.sm }}>
-            Everything agents do is logged here.{"\n"}Nothing leaves the household without approval.
+            Everything your helpers do is logged here.{"\n"}Nothing leaves the household without approval.
           </T>
           </>
           ) : null}

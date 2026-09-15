@@ -39,20 +39,82 @@ export interface ApprovalRec {
 }
 export interface PlanStep { toolId: string | null; title: string; detail: string; requiresApproval: boolean; risk: string; connectorName: string | null; connected: boolean }
 export interface AgentPlan { title: string; summary: string; risk: string; steps: PlanStep[]; missing: string[]; approvalRequired: boolean; triggerType: string }
-// Unified chat-builder: a proposed set of durable entities to stand up from a chat turn.
-export interface ChatBuild {
-  summary: string;
-  skill?: { name: string; description?: string; planner_guidance?: string; risk_level?: string; steps?: { name: string; tool_id: string | null; approval_required: boolean }[] };
-  agent?: { name: string; purpose?: string; instructions?: string } | null;
-  automation?: { name: string; type: string; intervalMs?: number | null; runAt?: string | null } | null;
-  edits?: { kind: "agent" | "skill"; id: string; summary?: string; patch: Record<string, unknown> }[];
+
+/* ---- Helpers ------------------------------------------------------------------------
+ *
+ * ONE concept. Agent, Skill, Function, Playbook, Automation, Trigger and Evolution were
+ * seven records, seven screens and seven vocabularies for the same idea, and the family
+ * could never tell which one was in charge of what: "overly complicated and cumbersome
+ * with what happens where, what gates approve what."
+ *
+ * A Helper is a name, what it does in plain words, when it runs, and how much it may do
+ * without asking. Nothing else. The server owns every piece of human wording it carries —
+ * `scheduleText`, `autonomyText` — so the phone can never describe a schedule differently
+ * from the machine that keeps it.
+ */
+export type HelperSchedule =
+  | { kind: "manual" }
+  | { kind: "hourly" }
+  /** "HH:MM", 24h, on the HOUSEHOLD's clock — not the phone's. */
+  | { kind: "daily"; time: string }
+  /** weekday: 0 = Sunday … 6 = Saturday. */
+  | { kind: "weekly"; time: string; weekday: number };
+
+/** What a helper may do on its own. `full` is the send-and-spend grant and needs the PIN. */
+export type HelperAutonomy = "ask" | "act" | "full";
+
+/** The last time it ran, as the server recorded it. `ok: false` carries the real `error`. */
+export interface HelperRunRec {
+  at: number; finishedAt: number; ok: boolean; reason: string; summary: string;
+  runIds: string[]; error: string | null;
 }
-export interface BuildResult {
-  ok: boolean;
-  created?: { skill?: { id: string; name: string }; agent?: { id: string; name: string }; automation?: { id: string; name: string } };
-  updated?: { kind: string; id: string; name?: string; ok: boolean }[];
-  notes?: string[]; error?: string; message?: string;
+
+export interface PublicHelper {
+  id: string; name: string; icon: string; purpose: string; instructions: string;
+  visibility: "household" | "personal" | "nest"; nestId: string | null;
+  status: "Active" | "Paused"; enabled: boolean;
+  schedule: HelperSchedule;
+  /** "Every day at 7:00 AM" — already human. Never re-derive it on the device. */
+  scheduleText: string;
+  autonomy: HelperAutonomy;
+  /** Already human. The three sentences live on the server. */
+  autonomyText: string;
+  /** True when the household's own stance is stricter than this helper asked for, so what
+   *  it will actually do is less than what its own setting says. Worth one quiet line. */
+  autonomyDowngraded: boolean;
+  conversationId: string | null;
+  lastRun: HelperRunRec | null;
+  createdBy: string | null; isMine: boolean; system: boolean; version: number; updatedAt: string;
 }
+
+/** A starter helper. It is real, editable text — never saved without someone reading it. */
+export interface HelperTemplate {
+  id: string; name: string; icon: string; category: string; purpose: string;
+  instructions: string; schedule: HelperSchedule; autonomy: HelperAutonomy;
+  scheduleText: string; autonomyText: string;
+}
+export interface HelperTemplateSection { key: string; title: string; templates: HelperTemplate[] }
+
+/** What a helper's turn produced. 422 means it ran and failed: `error` + `message` say why. */
+export interface HelperRunResult {
+  ok?: boolean; answer?: string; toolCalls?: AssistantToolCall[];
+  runIds?: string[]; conversationId?: string; lastRun?: HelperRunRec | null;
+  error?: string; message?: string;
+}
+export interface HelperHistory {
+  conversationId: string | null; messages: ConversationMessage[]; lastRun: HelperRunRec | null;
+}
+/** Fields a create or edit may send. All optional on PATCH; `instructions` is required on POST. */
+export interface HelperInput {
+  name?: string; purpose?: string; instructions?: string;
+  schedule?: HelperSchedule; autonomy?: HelperAutonomy;
+  visibility?: "household" | "personal" | "nest"; nestId?: string | null;
+  status?: "Active" | "Paused"; enabled?: boolean;
+  /** Required by the server ONLY when asking for `autonomy: "full"`. Never stored. */
+  pin?: string;
+}
+/** Every refusal the helper routes can return. `message` is always safe to show verbatim. */
+export interface HelperError { error?: string; message?: string }
 /** One tool the Ask Famili engine called during a turn — shown as a quiet receipt under the
  *  reply. `awaiting_approval` carries the approval to answer; `runId` the run it ran in. */
 export interface AssistantToolCall {
@@ -60,11 +122,13 @@ export interface AssistantToolCall {
   status: "done" | "failed" | "blocked" | "awaiting_approval";
   ok?: boolean; summary?: string; runId?: string; approvalId?: string;
 }
-// kind: "answer" | "build" from the replaced engine — "plan" no longer occurs but old
-// persisted messages still carry it. A `run` may arrive WITH kind "answer" when a step was
-// queued for approval, so run-watching must never be gated on kind.
+/* Every successful turn is kind "answer" now. The engine that returned "plan" and "build"
+ * proposals is gone with the seven-concept model: the assistant creates a Helper itself and
+ * says so in prose, rather than handing back a card for someone to approve. A `run` may
+ * arrive WITH kind "answer" when a step was queued for approval, so run-watching must never
+ * be gated on kind. `plan` survives only on OLD persisted messages (ConversationMessage). */
 export interface AssistantResult {
-  ok: boolean; kind?: "answer" | "plan" | "build"; answer?: string; plan?: AgentPlan; build?: ChatBuild; run?: RunRec; model?: string; error?: string; message?: string;
+  ok: boolean; kind?: "answer"; answer?: string; run?: RunRec; model?: string; error?: string; message?: string;
   toolCalls?: AssistantToolCall[]; runId?: string; runIds?: string[];
 }
 // Server-durable assistant conversations — same records the web client uses, so a chat
@@ -102,8 +166,9 @@ export interface ResultGroupRec {
 }
 export interface ConversationMessage {
   role: "user" | "assistant"; text: string; at: string; kind?: string;
-  plan?: AgentPlan | null; build?: ChatBuild | null; built?: boolean;
-  builtIds?: { skillId?: string; agentId?: string; triggerId?: string };
+  /** Legacy only — a plan drafted by the engine that came before Helpers. New turns never
+   *  carry one; the field stays so an old thread still renders its runnable card. */
+  plan?: AgentPlan | null;
   runId?: string | null; status?: string;
   resultGroups?: ResultGroupRec[] | null;
   /** The same message with the row bullets removed — read this when rendering resultGroups. */
@@ -272,21 +337,7 @@ export interface KnowledgeRec {
   tags: string[]; visibility: "household" | "personal" | "private" | "nest"; nestId?: string | null; sensitive: boolean; fileIds: string[];
   createdBy: string; createdAt: string; updatedAt: string;
 }
-// Server evolution registry — improvement proposals mined from real run traces
-// (mirror of the web's ServerEvolution; read-only on the Today "what I learned" card).
-export interface EvolutionRec {
-  id: string; kind: "skill" | "agent" | "tool" | "function"; householdId?: string;
-  agentId?: string | null; agentName?: string | null; skillId?: string | null; runId?: string;
-  status: "pending" | "accepted" | "rejected"; source: string;
-  title: string; reason: string; summary: string; after?: string; risk?: "Low" | "Medium" | "High";
-  createdAt: number;
-}
 export interface MemoryRec { id: string; scope: string; type: string; text: string; createdAt: number; source?: { runId?: string; actorId?: string } }
-export interface PlaybookRec {
-  id: string; name: string; description: string; whenToUse: string; category: string;
-  steps: string[]; requiredConnections: string[]; outputFormat: string; approvalRules: string[];
-  archived: boolean; system: boolean; createdAt: string;
-}
 export interface ArtifactRec { id: string; runId?: string; kind: string; title: string; body?: string; createdAt: number }
 export interface MemberRec { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean; color?: string | null; photoFileId?: string | null; aiEnabled?: boolean }
 // Contact methods — the server-owned delivery registry (per-member email/phone/in-app/
@@ -322,15 +373,6 @@ export interface HelpRequestRec {
   status: "pending" | "accepted" | "declined" | "cancelled";
   responseNote: string | null;
   createdAt: string; respondedAt: string | null;
-}
-/** Server evolution/improvement proposals (mined from real run traces). Adult Admins
- * accept/reject; low-risk ones the AI is confident about are auto-applied server-side. */
-export interface EvolutionReviewRec {
-  id: string; kind: "skill" | "agent" | "tool" | "function";
-  status: "pending" | "accepted" | "rejected"; source: string;
-  title: string; reason: string; summary: string; after?: string;
-  risk?: "Low" | "Medium" | "High"; agentId?: string | null; agentName?: string | null;
-  autoApproved?: boolean; autoReason?: string | null; createdAt: number;
 }
 /** Household settings the mobile client can read/toggle. */
 export interface AppSettingsRec {
@@ -821,11 +863,6 @@ export const api = {
     if (r.status === 403) return { error: "forbidden" };
     return r.data ?? { error: "network" };
   },
-  // Playbooks — server-owned workflow library (browse-only on mobile).
-  async playbooks(): Promise<PlaybookRec[]> {
-    const r = await req<{ playbooks: PlaybookRec[] }>("/playbooks");
-    return r.data?.playbooks ?? [];
-  },
   // Knowledge — household memory + run artifacts (read-only, written by runs).
   async memory(): Promise<MemoryRec[]> {
     const r = await req<{ memory: MemoryRec[] }>("/memory");
@@ -834,12 +871,6 @@ export const api = {
   async artifacts(): Promise<ArtifactRec[]> {
     const r = await req<{ artifacts: ArtifactRec[] }>("/artifacts");
     return r.data?.artifacts ?? [];
-  },
-  // Server evolution registry — improvement proposals mined from run traces (route is
-  // singular /evolution; mirrors the web backend). Read-only surfacing on Today.
-  async evolutions(): Promise<EvolutionRec[]> {
-    const r = await req<{ evolutions: EvolutionRec[] }>("/evolution");
-    return r.data?.evolutions ?? [];
   },
   /* ---- Knowledge — server-durable household knowledge items (create/edit/delete) ---- */
   async knowledge(): Promise<KnowledgeRec[]> {
@@ -912,13 +943,6 @@ export const api = {
     const r = await req<{ ok?: boolean; event?: EventRec; error?: string; message?: string }>(`/events/${encodeURIComponent(id)}/resolve-conflict`, { method: "POST", body: JSON.stringify({ choice }) });
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
-  },
-  // Unified chat-builder: materialize a proposed build into durable entities (Adult Admin).
-  // conversationId makes the outcome durable on the thread (built flag + confirmation).
-  async buildFromChat(build: ChatBuild, conversationId?: string): Promise<BuildResult> {
-    const r = await req<BuildResult>("/assistant/build", { method: "POST", body: JSON.stringify({ build, conversationId }) });
-    if (r.status === 403) return { ok: false, error: "insufficient_role" };
-    return r.data ?? { ok: false, error: "network" };
   },
   async runStep(toolId: string, input: Record<string, unknown>, approvalId?: string): Promise<ToolResult> {
     const body: Record<string, unknown> = { input: input ?? {} };
@@ -1105,11 +1129,59 @@ export const api = {
     return r.data ?? { error: "network" };
   },
 
-  /* ---- Agents (list / run / pause / duplicate / delete) ---- */
-  async agents(): Promise<AgentRec[]> {
-    const r = await req<{ agents: AgentRec[] }>("/agents");
-    return r.data?.agents ?? [];
+  /* ---- Helpers (list / read / create / edit / run / delete / history / templates) ----
+   *
+   * The whole surface. There is no separate skill, function, playbook, automation, trigger
+   * or evolution endpoint any more — every one of those routes 404s, and everything they
+   * used to do is a field on a Helper.
+   *
+   * Refusals travel intact. A 403 from here is one of five different things — you're not an
+   * adult, it isn't yours, it's the household's, the PIN is missing, the PIN is wrong — and
+   * the server writes a sentence for each. Collapsing them into "insufficient_role" is how a
+   * fixable refusal comes to look permanent, so `message` is passed through untouched and
+   * every caller shows it verbatim.
+   */
+  async helpers(): Promise<PublicHelper[]> {
+    const r = await req<{ helpers: PublicHelper[] }>("/helpers");
+    return r.data?.helpers ?? [];
   },
+  async helper(id: string): Promise<PublicHelper | null> {
+    const r = await req<{ helper?: PublicHelper }>(`/helpers/${encodeURIComponent(id)}`);
+    return r.data?.helper ?? null;
+  },
+  async createHelper(body: HelperInput & { instructions: string }): Promise<{ helper?: PublicHelper } & HelperError> {
+    const r = await req<{ helper?: PublicHelper } & HelperError>("/helpers", { method: "POST", body: JSON.stringify(body) });
+    if (!r.data) return { error: "network" };
+    return r.data;
+  },
+  async patchHelper(id: string, patch: HelperInput): Promise<{ helper?: PublicHelper } & HelperError> {
+    const r = await req<{ helper?: PublicHelper } & HelperError>(`/helpers/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+    if (!r.data) return { error: "network" };
+    return r.data;
+  },
+  async deleteHelper(id: string): Promise<{ ok?: boolean } & HelperError> {
+    const r = await req<{ ok?: boolean } & HelperError>(`/helpers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!r.data) return { error: "network" };
+    return r.data;
+  },
+  /** Runs it now, in the foreground. This can take well over 30 seconds — the caller owns
+   *  showing that. A 422 means it genuinely ran and failed; the body says why. */
+  async runHelper(id: string): Promise<HelperRunResult> {
+    const r = await req<HelperRunResult>(`/helpers/${encodeURIComponent(id)}/run`, { method: "POST", body: "{}" });
+    if (!r.data) return { ok: false, error: "network", message: "Couldn't reach Famili — check your connection." };
+    return r.data;
+  },
+  async helperHistory(id: string): Promise<HelperHistory> {
+    const r = await req<HelperHistory>(`/helpers/${encodeURIComponent(id)}/history`);
+    return { conversationId: r.data?.conversationId ?? null, messages: r.data?.messages ?? [], lastRun: r.data?.lastRun ?? null };
+  },
+  /** Starter helpers, grouped. A template is real instructions, shown for editing before
+   *  anything is saved — never a blind "create this for me". */
+  async helperTemplates(): Promise<HelperTemplateSection[]> {
+    const r = await req<{ sections: HelperTemplateSection[] }>("/helper-templates");
+    return r.data?.sections ?? [];
+  },
+
   // E1 — address autocomplete for the event location field. Never throws and never surfaces
   // an error: this runs while someone is typing, and a lookup that can't answer must not
   // interrupt them.
@@ -1119,60 +1191,6 @@ export const api = {
     const r = await req<{ suggestions?: AddressSuggestionRec[] }>(`/places/suggest?${p}`).catch(() => null);
     return r?.data?.suggestions ?? [];
   },
-  // G6 — the starter-helper catalog, grouped, from the server. Mobile used to carry four
-  // hand-written entries of its own while the web read thirteen from a different file.
-  async agentTemplates(): Promise<AgentTemplateSectionRec[]> {
-    const r = await req<{ sections: AgentTemplateSectionRec[] }>("/agent-templates");
-    return r.data?.sections ?? [];
-  },
-  // G2/G3/G4 — the one server computation behind "what does this helper actually use, what
-  // is it allowed to do, and will it run without me?" (server/agents.mjs agentContext).
-  async agentContext(id: string): Promise<AgentContextRec | null> {
-    const r = await req<{ context?: AgentContextRec }>(`/agents/${encodeURIComponent(id)}/context`);
-    return r.data?.context ?? null;
-  },
-  async patchAgent(id: string, patch: Record<string, unknown>): Promise<{ agent?: AgentRec; error?: string }> {
-    const r = await req<{ agent?: AgentRec; error?: string }>(`/agents/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
-  },
-  async runAgent(id: string): Promise<{ ok?: boolean; run?: RunRec; error?: string; message?: string }> {
-    const r = await req<{ ok?: boolean; run?: RunRec; error?: string; message?: string }>(`/agents/${encodeURIComponent(id)}/run`, { method: "POST", body: "{}" });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
-  },
-  async duplicateAgent(id: string): Promise<{ agent?: AgentRec; error?: string }> {
-    const r = await req<{ agent?: AgentRec; error?: string }>(`/agents/${encodeURIComponent(id)}/duplicate`, { method: "POST", body: "{}" });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
-  },
-  async deleteAgent(id: string): Promise<{ ok?: boolean; error?: string }> {
-    const r = await req<{ ok?: boolean; error?: string }>(`/agents/${encodeURIComponent(id)}`, { method: "DELETE" });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
-  },
-
-  /* ---- Automations (server "triggers": schedules, webhooks, watchers) ---- */
-  async triggers(): Promise<TriggerRec[]> {
-    const r = await req<{ triggers: TriggerRec[] }>("/triggers");
-    return r.data?.triggers ?? [];
-  },
-  async patchTrigger(id: string, patch: Record<string, unknown>): Promise<{ trigger?: TriggerRec; error?: string }> {
-    const r = await req<{ trigger?: TriggerRec; error?: string }>(`/triggers/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
-  },
-  async fireTrigger(id: string): Promise<{ ok?: boolean; runId?: string; error?: string; message?: string }> {
-    const r = await req<{ ok?: boolean; runId?: string; error?: string; message?: string }>(`/triggers/${encodeURIComponent(id)}/fire`, { method: "POST", body: "{}" });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
-  },
-  async deleteTrigger(id: string): Promise<{ ok?: boolean; error?: string }> {
-    const r = await req<{ ok?: boolean; error?: string }>(`/triggers/${encodeURIComponent(id)}`, { method: "DELETE" });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
-  },
-
   /* ---- One-button calendar sync: every subscription + pull Google edits ---- */
   async syncAllCalendars(): Promise<SyncAllResult> {
     const r = await req<SyncAllResult>("/calendar/sync-all", { method: "POST", body: "{}" });
@@ -1203,18 +1221,6 @@ export const api = {
     return r.data ?? { error: "network" };
   },
 
-  /* ---- Evolution / improvement proposals (mirror of the web "what I learned") ---- */
-  async evolutionReviews(): Promise<EvolutionReviewRec[]> {
-    const r = await req<{ evolutions: EvolutionReviewRec[] }>("/evolution");
-    return r.data?.evolutions ?? [];
-  },
-  // Accept applies the improvement (versions the agent/skill); reject dismisses it. Adult Admin+.
-  async reviewEvolution(id: string, accept: boolean): Promise<{ ok?: boolean; applied?: boolean; applyError?: string | null; evolution?: EvolutionReviewRec; error?: string; message?: string }> {
-    const r = await req<{ ok?: boolean; applied?: boolean; applyError?: string | null; evolution?: EvolutionReviewRec; error?: string; message?: string }>(`/evolution/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({ accept }) });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
-  },
-
   /* ---- Household settings (read + toggle) ---- */
   async settings(): Promise<AppSettingsRec | null> {
     const r = await req<{ settings: AppSettingsRec }>("/settings");
@@ -1231,29 +1237,11 @@ export const api = {
   },
 };
 
-/* ---- Records for the agents/automations surfaces (mirrors server publicAgent/publicTrigger) ---- */
-export interface AgentRec {
-  id: string; name: string; purpose?: string; status: string; instructions?: string;
-  /** Agent space: "household" (family — shared, the default) or "personal" (only its creator sees/uses it). */
-  visibility?: "household" | "personal" | "nest";
-  /** T1: when visibility is "nest", the nest this helper belongs to. */
-  nestId?: string | null;
-  createdBy?: string | null;
-  lastRunAt?: string | null; runCount?: number; toolIds?: string[]; createdAt?: string; updatedAt?: string;
-  approvalPolicy?: {
-    autoAllow?: string[]; alwaysApprove?: string[];
-    unattended?: { enabled?: boolean; includeHighRisk?: boolean; setByRole?: string | null; setAt?: string | null };
-  };
-  skillIds?: string[];
-  /** The household PIN, required by the server ONLY when raising
-   *  approvalPolicy.unattended.includeHighRisk — the send-and-spend grant. Never stored. */
-  pin?: string;
-}
 // E1 — one address suggestion: the name a family recognises, the address under it, and the
 // full string that goes INTO the field (a label alone won't navigate anywhere).
 export interface AddressSuggestionRec { label: string; detail: string; value: string; placeId: string | null }
 /* Nests — a small group inside the household. "GPop and Beannie are actually married… their
- * own agents and grocery list and task list available between the two of them, and yet still
+ * own helpers and grocery list and task list available between the two of them, and yet still
  * isolated from the broader family group." A third space alongside Personal and Family. */
 export interface NestMemberRec { actorId: string; name: string | null; status: "joined" | "invited" | "declined" | "left"; respondedAt: string | null }
 export interface NestRec {
@@ -1261,47 +1249,4 @@ export interface NestRec {
   createdBy: string; createdAt: string;
   members: NestMemberRec[];
   myStatus: NestMemberRec["status"] | null;
-}
-
-// G6 — starter helpers, grouped into navigable sections (server/agent-templates.mjs).
-// A template is an opening sentence, not a pre-built agent: `prompt` goes to the planner,
-// which drafts against THIS household's real connections, and the family approves it.
-export interface AgentTemplateRec { id: string; name: string; category: string; icon: string; desc: string; prompt: string }
-export interface AgentTemplateSectionRec { key: string; title: string; blurb?: string; templates: AgentTemplateRec[] }
-// The effective-policy view, computed server-side in ONE pass (server/agents.mjs
-// agentContext) so a row and a count can never tell different stories.
-export interface EffectivePolicyRec {
-  decision: "allowed" | "needs_approval" | "blocked";
-  rule: string; reason: string; requiresApproval: boolean;
-  risk: string; baseRequiresApproval: boolean; riskOverridden: boolean;
-  /** Whether per-capability "run without asking" can take effect (false for send/spend). */
-  canAutoAllow?: boolean;
-}
-export interface AgentContextRec {
-  agentId: string;
-  openAllowList: boolean;
-  openToolAllowList: boolean;
-  openFunctionAllowList: boolean;
-  tools: { toolId: string; name: string; connectorName: string; action: string; requiresApproval: boolean; available: boolean; permitted: boolean; denied: boolean; policy: EffectivePolicyRec }[];
-  functions: { id: string; name: string; type: string; requiresApproval: boolean; available: boolean; state: string; permitted: boolean; denied: boolean; policy: EffectivePolicyRec }[];
-  executable: string[];
-  availableCount: number; permittedCount: number; executableCount: number;
-  /** G2 — [18:06] "it says it runs the assigned use case skill. Well, what IS that skill?" */
-  skills: { id: string; name: string; description?: string; stepCount: number; stepNames?: string[]; ready: boolean; blockedReason?: string | null }[];
-  /** G4 — the grant that actually applies, refused tiers included. */
-  unattended: { enabled: boolean; includeHighRisk: boolean; setByRole: string | null; setAt: string | null };
-  /** G3 — "will it run unattended?" answered from the policy, not from a label. */
-  runsUnattended: boolean;
-  gatedCapabilityNames: string[];
-  gatedCount: number;
-  /** "Can't run yet" is its own state — it used to render as the green "runs on its own" bolt
-   *  purely because an unconnected send tool couldn't be counted as a gate. */
-  notReady: boolean;
-  notReadySkillNames: string[];
-  gatedWhenReadyNames: string[];
-}
-export interface TriggerRec {
-  id: string; name: string; type: string; enabled: boolean; agentId?: string | null;
-  intervalMs?: number | null; runAt?: string | null; lastFiredAt?: string | null;
-  lastResult?: { ok?: boolean; error?: string } | null; createdAt?: string; updatedAt?: string;
 }

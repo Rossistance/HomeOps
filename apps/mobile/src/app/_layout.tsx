@@ -41,7 +41,7 @@ Notifications.setNotificationHandler({
   handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: true, shouldShowBanner: true, shouldShowList: true }),
 });
 
-// Handoff IA: Today · Ask (sparkle) · Agents (bot) · Library (folder) · Settings (gear).
+// Handoff IA: Today · Ask (sparkle) · Helpers (wand) · Library (folder) · Settings (gear).
 // The trigger set is role-scoped: children see Today (plus Ask when an adult enabled
 // AI for them); grandparents/sitters see Today + Ask; adults/owners see all five.
 function TabsNav({ caps }: { caps: Capabilities }) {
@@ -80,7 +80,9 @@ function TabsNav({ caps }: { caps: Capabilities }) {
             What it CAN be is a better-chosen symbol: `cpu` drew a literal microchip, which
             said "hardware" about the one part of the app that's meant to feel like help. */}
         <NativeTabs.Trigger.Icon sf="wand.and.stars" md="auto_fix_high" />
-        <NativeTabs.Trigger.Label>Agents</NativeTabs.Trigger.Label>
+        {/* "Agents" was a word from the architecture, and the architecture had seven of them.
+            There is one thing now, and it is called what it does. */}
+        <NativeTabs.Trigger.Label>Helpers</NativeTabs.Trigger.Label>
       </NativeTabs.Trigger>,
       <NativeTabs.Trigger key="(library)" name="(library)">
         <NativeTabs.Trigger.Icon sf="folder.fill" md="folder" />

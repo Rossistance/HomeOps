@@ -1,7 +1,16 @@
-// Ask Famili — the one front door. A first-class iOS chat that answers,
-// drafts executable plans (run via the durable run flow), and builds helpers
-// (skills/agents/automations) straight from conversation. Streams via
-// /api/assistant/stream with a silent fallback to POST /api/assistant.
+// Ask Famili — the one front door. A first-class iOS chat that answers, calls tools and
+// shows the receipts. Streams via /api/assistant/stream with a silent fallback to POST
+// /api/assistant.
+//
+// THE BUILD CARD IS GONE. The engine used to reply with a proposal — a skill, an agent, an
+// automation — and a big "Approve & build" button under a summary of entities nobody had
+// asked about by those names. Two things were wrong with it. The summary was not the thing
+// being built (the instructions were, and they were never shown), and approving it was a
+// second, quieter permission system sitting next to the real one.
+//
+// The assistant creates a Helper itself now and says so in prose, like it says everything
+// else. If you want to see what it made, it is on the Helpers tab, whole and editable. That
+// is one place instead of two, and the text you read there is the text that runs.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
@@ -18,40 +27,29 @@ import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { api, type AgentPlan, type AssistantResult, type AssistantToolCall, type ChatBuild, type ConversationRec, type MemberRec, type NestRec, type ResultGroupRec, type RunRec } from "@/lib/api";
+import { api, type AgentPlan, type AssistantResult, type AssistantToolCall, type ConversationRec, type MemberRec, type NestRec, type ResultGroupRec, type RunRec } from "@/lib/api";
 import { ResultCards } from "@/components/ResultCards";
 import { streamAssistant, type AssistantPhase } from "@/lib/assistant-stream";
 import { coversDay } from "@/lib/event-days";
 import { getLocationContext } from "@/lib/location";
 import { canManageHousehold, canManageOwn, capabilitiesFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
+import { useTabBarClearance } from "@/lib/tab-bar";
 import { useRun } from "@/lib/run-context";
 import { useTheme, useCalmMotion, riskColor, tapHaptic } from "@/theme";
 import { humanDetail } from "@/lib/format";
 import { depth, rimColor } from "@/theme/neumorph";
 // NOTE: explicit /index path — the legacy src/components/ui.tsx (old design
 // system, deleted with the old screens) shadows the ui/ directory otherwise.
-import { Badge, Button, Card, Coach, DictateButton, EmptyState, FamiliMark, GoArrow, MarkdownText, Notice, PressableScale, ScreenTour, Sym, SymTile, T, useDictation } from "@/components/ui";
-
-// The server returns richer creation data than the shared BuildResult/ChatBuild
-// types declare (WP-006): created.agent carries its REAL post-build `status` —
-// Active only when the build also stood up an automation to run it, Draft
-// otherwise (ISS-007, see server/index.mjs materializeBuild()) — and
-// created.automation carries a human `scheduleText`/`anchor` alongside
-// `nextRunAt`, never raw intervalMs. Widened defensively here rather than
-// trusted blindly, same as the mobile Automations screen does for TriggerRec.
-type BuiltAgentInfo = { id: string; name: string; status?: "Active" | "Draft" | "Paused" | "Needs Attention" | "Archived" };
-type BuiltAutomationInfo = { id: string; name: string; type?: string; scheduleText?: string; anchor?: string | null; nextRunAt?: string | number | null };
+import { Badge, Button, Card, Coach, DictateButton, EmptyState, FamiliMark, GoArrow, MarkdownText, PressableScale, ScreenTour, Sym, SymTile, T, useDictation } from "@/components/ui";
 
 interface Msg {
   id: string;
   role: "user" | "assistant";
   text: string;
+  /** Legacy only — a plan from the engine that came before Helpers, persisted on an old
+   *  thread. New turns never carry one; the card stays so an old thread is still usable. */
   plan?: AgentPlan;
-  build?: ChatBuild;
-  built?: boolean;
-  builtAgent?: BuiltAgentInfo;
-  builtAutomation?: BuiltAutomationInfo;
   error?: boolean;
   runId?: string; // plan messages that the server already started executing
   // K2 — what the run actually fetched, as cards, in line. "still not returned in line, in
@@ -111,17 +109,12 @@ export default function AskScreen() {
   const { colors, spacing, radii, type, dark } = useTheme();
   const calm = useCalmMotion();
   const insets = useSafeAreaInsets();
+  const tabBarClearance = useTabBarClearance();
   const { session } = useSession();
   const { startRun, activeRun } = useRun();
-  // Any adult can build from chat now. For an Adult Member the server scopes what lands:
-  // the helper is personal and any automation is dropped (index.mjs demoteBuildForRole).
-  const canBuild = canManageOwn(session?.role);
+  // Approvals are an adult's job, so only an adult is offered a prompt about them.
+  const canApprove = canManageOwn(session?.role);
   const isAdmin = canManageHousehold(session?.role);
-  // ISS-011: the server already demotes a build proposal to a plain answer for
-  // anyone below Adult Admin on THEIR OWN turn (server/index.mjs demoteBuildForRole)
-  // — this covers the other path, a build card an Owner/Admin proposed earlier
-  // that's still visible when a Guest opens a shared household conversation.
-  const isGuest = session?.role === "Guest/Helper";
 
   const [text, setText] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
@@ -137,7 +130,6 @@ export default function AskScreen() {
   /* The tool the server is calling right now, by its human label — "Working: Calendar" under
    * the dots. Cleared when the call finishes; the receipt row under the reply is the record. */
   const [working, setWorking] = useState<string | null>(null);
-  const [buildingId, setBuildingId] = useState<string | null>(null);
   // Server-durable thread: created on the first send so both turns persist and
   // the same conversation shows up on the web. Opening a recent chat resumes it.
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -272,7 +264,7 @@ export default function AskScreen() {
     // from what's actually going on in THIS household right now, role-aware.
     const out: Suggestion[] = [];
     const pending = approvals.filter((a) => a.status === "pending").length;
-    if (pending > 0 && canBuild) out.push({ text: pending === 1 ? "What's waiting on my approval?" : `Summarize the ${pending} approvals waiting on me`, icon: "checkmark.shield" });
+    if (pending > 0 && canApprove) out.push({ text: pending === 1 ? "What's waiting on my approval?" : `Summarize the ${pending} approvals waiting on me`, icon: "checkmark.shield" });
     // Local calendar day, spans included — a UTC string prefix put the evening's plans on
     // tomorrow and missed a multi-day event that started yesterday.
     const now = new Date();
@@ -285,7 +277,7 @@ export default function AskScreen() {
     if (out.length < 3) out.push({ text: "Set up a helper that triages our family inbox", icon: "tray.full" });
     if (out.length < 4) out.push({ text: "What can you do for our household?", icon: "sparkles" });
     setSuggestions(out.slice(0, 4));
-  }, [canBuild]);
+  }, [canApprove]);
 
   useEffect(() => { if (session) void loadHome(); }, [session, loadHome]);
 
@@ -320,7 +312,7 @@ export default function AskScreen() {
         // With cards rendering the rows, the prose drops them so the same five results
         // aren't read twice — the server ships both forms of the same message.
         text: groups ? (m.textWithoutRows ?? m.text) : m.text,
-        plan: m.plan ?? undefined, build: m.build ?? undefined, built: !!m.built,
+        plan: m.plan ?? undefined,
         error: m.kind === "error" || (m.kind === "run_result" && m.status === "failed"),
         runId: m.runId ?? undefined,
         resultGroups: groups,
@@ -666,19 +658,13 @@ export default function AskScreen() {
       void api.conversations().then((cs) => setRecent(cs.slice(0, 8))).catch(() => null);
     }
     if (r.ok) {
-      // "plan" no longer comes out of the replaced engine, but the branch stays: an old
-      // thread's persisted plan message still renders through the same shape.
-      const full =
-        r.kind === "plan" && r.plan ? (r.answer || r.plan.summary || "On it.")
-        : r.kind === "build" && r.build ? (r.answer || r.build.summary || "Here's what I'll set up.")
-        : (r.answer || streamed || "I'm not sure how to help with that yet.");
-      // Every run this turn started — `run` rides along with ANY kind now (an "answer"
-      // whose step was queued for approval still has one), so never gate this on kind.
+      // Every successful turn is prose now — there is no proposal branch left to unwrap.
+      const full = r.answer || streamed || "I'm not sure how to help with that yet.";
+      // Every run this turn started — `run` rides along with ANY kind (an "answer" whose
+      // step was queued for approval still has one), so never gate this on kind.
       const runIds = [...new Set([r.run?.id, r.runId, ...(r.runIds ?? [])].filter((x): x is string => !!x))];
       upsertMsg({
         id: aid, role: "assistant", text: streamed ? full : "",
-        plan: r.kind === "plan" ? r.plan ?? undefined : undefined,
-        build: r.kind === "build" ? r.build ?? undefined : undefined,
         runId: runIds[0],
         toolCalls: r.toolCalls?.length ? r.toolCalls : undefined,
       });
@@ -819,7 +805,7 @@ export default function AskScreen() {
     ]);
   }, [attachFromCamera, attachFromDocument, attachFromPhotos]);
 
-  /* ---------- plan + build actions ---------- */
+  /* ---------- runs from a legacy plan card ---------- */
   // Runs stay IN the chat: live progress renders inline below the messages and
   // the finished run's results come back as a chat message (no Activity detour).
   const expectRunResult = useRef(false);
@@ -862,45 +848,19 @@ export default function AskScreen() {
     })();
   }, [activeRun, conversationId]);
 
-  const runBuild = useCallback(async (msgId: string, build: ChatBuild) => {
-    setBuildingId(msgId);
-    // conversationId travels so built state + confirmation persist server-side.
-    const res = await api.buildFromChat(build, conversationId ?? undefined);
-    setBuildingId(null);
-    if (res.ok) {
-      tapHaptic("success");
-      const cr = res.created ?? {};
-      const builtAgent: BuiltAgentInfo | undefined = cr.agent;
-      const builtAutomation: BuiltAutomationInfo | undefined = cr.automation;
-      const parts = [
-        cr.skill && `skill “${cr.skill.name}”`,
-        cr.agent && `helper “${cr.agent.name}”`,
-        cr.automation && `automation “${cr.automation.name}”`,
-        ...(res.updated ?? []).filter((u) => u.ok).map((u) => `updated ${u.kind}`),
-      ].filter(Boolean);
-      setMsgs((m) => m.map((x) => (x.id === msgId ? { ...x, built: true, builtAgent, builtAutomation } : x)).concat({
-        id: msgId + "done", role: "assistant",
-        text: `Done — I set up ${parts.join(", ")}.${res.notes?.length ? "\n\n" + res.notes.map((n) => `- ${n}`).join("\n") : ""}`,
-      }));
-    } else {
-      tapHaptic("error");
-      setMsgs((m) => m.concat({
-        id: msgId + "err", role: "assistant", error: true,
-        text: res.error === "insufficient_role"
-          ? "Only an Owner or Adult Admin can build helpers."
-          : (res.message || "Couldn't build that."),
-      }));
-    }
-  }, [conversationId]);
-
   /* ---------- render ---------- */
-  // The floating native tab bar already overlays above the safe-area inset, so
-  // the composer only needs the inset + a hair of breathing room — no guessed
-  // tab-bar clearance (expo-router NativeTabs has no useBottomTabBarHeight).
-  // When the keyboard is up the bar is covered and the composer hugs the keyboard.
-  /* M5 [05:52] — "the bottom of this message family is way too close to the top of the
+  /* The composer clears the floating tab bar.
+   *
+   * This used to read "the floating native tab bar already overlays above the safe-area
+   * inset, so the composer only needs the inset" — and the TestFlight report that Today's
+   * last card sat behind the bar is that assumption being wrong. It is not a Today bug; it
+   * is every screen that stops at the safe-area inset, and the composer is one of them.
+   * See lib/tab-bar for why the height has to be a constant.
+   *
+   * With the keyboard up the bar is covered by it, so the composer hugs the keyboard instead.
+   * M5 [05:52] — "the bottom of this message family is way too close to the top of the
    * keyboard. It needs to have a little more spacing." */
-  const composerPadBottom = kbVisible ? spacing.md + 4 : insets.bottom + 8;
+  const composerPadBottom = kbVisible ? spacing.md + 4 : tabBarClearance + 8;
 
   // Child members chat only when an adult flipped on aiEnabled (server 403s too).
   const caps = me ? capabilitiesFor(me) : null;
@@ -1147,7 +1107,6 @@ export default function AskScreen() {
 
           {msgs.map((m) => {
             const plan = m.plan;
-            const build = m.build;
             if (m.role === "user") {
               // Handoff: user bubbles are fixed ink-navy in BOTH modes (18/18/4/18).
               return (
@@ -1204,21 +1163,6 @@ export default function AskScreen() {
                       the step that's still waiting on someone. */}
                   {m.toolCalls?.length ? <ToolCallsRow calls={m.toolCalls} /> : null}
                   {plan ? <PlanCard plan={plan} autoRun={!!m.runId} onRun={() => void runPlan(plan)} /> : null}
-                  {build ? (
-                    isGuest && !m.built ? (
-                      <BuildGuidance build={build} />
-                    ) : (
-                      <BuildCard
-                        build={build}
-                        built={!!m.built}
-                        builtAgent={m.builtAgent}
-                        builtAutomation={m.builtAutomation}
-                        busy={buildingId === m.id}
-                        canBuild={canBuild}
-                        onBuild={() => void runBuild(m.id, build)}
-                      />
-                    )
-                  ) : null}
                 </View>
               </Animated.View>
             );
@@ -1594,115 +1538,5 @@ function PlanCard({ plan, onRun, autoRun }: { plan: AgentPlan; onRun: () => void
         </>
       )}
     </Card>
-  );
-}
-
-/** Proposed build: entities to create/update, Owner/Adult Admin approve action. */
-function BuildCard({ build, built, builtAgent, builtAutomation, busy, canBuild, onBuild }: {
-  build: ChatBuild; built: boolean; builtAgent?: BuiltAgentInfo; builtAutomation?: BuiltAutomationInfo;
-  busy: boolean; canBuild: boolean; onBuild: () => void;
-}) {
-  const { colors, spacing } = useTheme();
-  const edits = build.edits ?? [];
-  const editOnly = !build.skill && !build.agent && !build.automation && edits.length > 0;
-  const skillSteps = build.skill?.steps?.length ?? 0;
-  // A build only lands its new agent Active when it's ALSO standing up an
-  // automation to run it — otherwise the agent stays a Draft until someone
-  // activates it (ISS-007, see server/index.mjs materializeBuild()). Read the
-  // proposal's own shape rather than assuming "built = live".
-  const willActivate = !!build.agent && !!build.automation;
-  const proposedSchedule = (build.automation as { scheduleText?: string } | null | undefined)?.scheduleText;
-  return (
-    <Card>
-      <T kind="h3" color={colors.text}>{built ? "Built" : editOnly ? "I'll update this" : "I'll set this up"}</T>
-      {build.summary ? <T kind="sub" style={{ marginTop: 2 }}>{build.summary}</T> : null}
-      <View style={{ marginTop: spacing.md, gap: spacing.sm }}>
-        {build.skill ? (
-          <EntityRow
-            icon="list.bullet" fg={colors.sky} bg={colors.skyBg} kind="Skill" name={build.skill.name}
-            sub={build.skill.description || (skillSteps ? `${skillSteps} step${skillSteps === 1 ? "" : "s"}` : undefined)}
-          />
-        ) : null}
-        {build.agent ? <EntityRow icon="cpu" fg={colors.lavender} bg={colors.lavenderBg} kind="Helper" name={build.agent.name} sub={build.agent.purpose} /> : null}
-        {build.automation ? <EntityRow icon="clock.arrow.circlepath" fg={colors.amber} bg={colors.amberBg} kind="Automation" name={build.automation.name} sub={proposedSchedule ?? build.automation.type} /> : null}
-        {edits.map((e, i) => (
-          <EntityRow key={i} icon="pencil" fg={colors.textMuted} bg={colors.surfaceSunken} kind={`Update ${e.kind}`} name={e.id} sub={e.summary} />
-        ))}
-      </View>
-      {built ? (
-        <View style={{ marginTop: spacing.md }}>
-          <Notice ok text={builtSummary(build, builtAgent, builtAutomation)} />
-        </View>
-      ) : !canBuild ? (
-        <T kind="sub" style={{ marginTop: spacing.md }}>Only an Owner or Adult Admin can build helpers.</T>
-      ) : (
-        <View style={{ marginTop: spacing.md, gap: spacing.sm }}>
-          <Button
-            title={busy ? (editOnly ? "Applying…" : "Building…") : (editOnly ? "Approve & apply" : "Approve & build")}
-            variant="ember" icon="hammer.fill" full loading={busy} onPress={onBuild}
-          />
-          <T kind="sub" center>
-            {editOnly
-              ? "Changes are versioned and reversible."
-              : willActivate
-                ? `Starts Active and runs ${proposedSchedule ?? "on its schedule"} — gated steps still pause for approval.`
-                : build.agent
-                  ? "Creates a Draft — it won't run until you activate it, and gated steps still pause for approval when it does."
-                  : "Gated steps still pause for approval."}
-          </T>
-        </View>
-      )}
-    </Card>
-  );
-}
-
-/** Honest post-build copy: what actually landed, and its real lifecycle state —
- * never "live" for a Draft (ISS-007). Prefers the server's own status/schedule
- * over guessing from the proposal. */
-function builtSummary(build: ChatBuild, agent?: BuiltAgentInfo, automation?: BuiltAutomationInfo): string {
-  if (agent) {
-    const name = agent.name || build.agent?.name || "your helper";
-    if (agent.status === "Draft") return `Done — “${name}” is saved as a Draft — it won't run until you activate it in Helper Agents.`;
-    if (automation) return `Done — “${name}” is Active and runs ${automation.scheduleText ?? "on its schedule"}.`;
-    return `Done — “${name}” is set up. Find it under Helper Agents.`;
-  }
-  if (build.skill) return `Done — the “${build.skill.name}” skill is saved.`;
-  return "Done — your changes are saved.";
-}
-
-/** A Guest/Helper role sees this instead of the full proposal card: guidance,
- * not a build card with no way to act on it (ISS-011). The server already
- * demotes a build response to a plain answer for anyone below Adult Admin on
- * THEIR OWN turn (server/index.mjs demoteBuildForRole) — this covers the other
- * path, a card an Owner/Admin proposed earlier that's still visible when a
- * Guest opens a shared household conversation. Reuses Card/T/SymTile — no new
- * layout primitive. */
-function BuildGuidance({ build }: { build: ChatBuild }) {
-  const { colors, spacing } = useTheme();
-  return (
-    <Card>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-        <SymTile name="person.badge.clock" color={colors.lavender} bg={colors.lavenderBg} size={30} iconSize={14} />
-        <T kind="h3" color={colors.text} style={{ flex: 1 }}>Needs an Owner or Adult Admin</T>
-      </View>
-      <T kind="sub" style={{ marginTop: spacing.sm }}>
-        {build.summary ? `Famili drafted this: ${build.summary}. ` : ""}Guest accounts can't set up helpers or automations — ask an Owner or Adult Admin in your household to open this chat and approve it.
-      </T>
-    </Card>
-  );
-}
-
-function EntityRow({ icon, fg, bg, kind, name, sub }: {
-  icon: string; fg: string; bg: string; kind: string; name: string; sub?: string;
-}) {
-  const { colors, spacing, radii } = useTheme();
-  return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, backgroundColor: colors.surfaceSunken, borderRadius: radii.sm, borderCurve: "continuous", padding: spacing.sm + 2 }}>
-      <SymTile name={icon} color={fg} bg={bg} size={30} />
-      <View style={{ flex: 1 }}>
-        <T kind="subMedium" color={colors.text} numberOfLines={1}>{kind} · {name}</T>
-        {sub ? <T kind="sub" numberOfLines={2}>{sub}</T> : null}
-      </View>
-    </View>
   );
 }

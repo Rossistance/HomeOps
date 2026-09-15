@@ -3,55 +3,41 @@ import { useEffect, useState } from "react";
 import type {
   AppData,
   Agent,
-  AgentStatus,
   ApprovalRequest,
-  Automation,
   ContactMethod,
   FileAsset,
   KnowledgeItem,
   MemoryEntry,
   MemoryType,
   MiniApp,
-  Playbook,
   Route,
   ScreenId,
   Space,
   Member,
   Task,
   TaskStatus,
-  TriggerType,
   CalendarEvent,
   AssistantConversation,
   AssistantMessage,
   AssistantToolCall,
   MessageThread,
   AppSettings,
-  WorkflowPlan,
-  WorkflowStep,
-  AutomationRun,
+  HelperRun,
   RunStep,
   RunStatus,
   RunStatusView,
   SearchResult,
   Role,
-  EvolutionProposal,
-  WorkflowTemplate,
 } from "@/types";
 import { capabilitiesFor } from "@/lib/roles";
-import { multiAgentRosterResolved } from "@/lib/multiAgent";
 import { buildSeedData, buildEmptyData, isSampleData } from "@/data/seed";
-import { agentTemplates } from "@/data/agentTemplates";
-import { playbookCatalog } from "@/data/playbooksCatalog";
-import { workflowTemplates } from "@/data/workflowTemplates";
 import { loadAppData, saveAppData, clearAppData, detectStorageMode, type StorageMode } from "@/storage/db";
 import { uid } from "@/lib/ids";
 import { mergeServerAuthoritative } from "@/store/reconcile";
-import { pushActivity, executeAgentRun, subagentDefsFor, processFile } from "@/lib/runtime";
-import { parseAgentPrompt, buildWorkflowPlan, routeToAgent, detectApprovalGates } from "@/lib/ai";
+import { pushActivity, processFile } from "@/lib/runtime";
 import { buildSearchIndex, search } from "@/lib/search";
-import { getAdvancedMode, setAdvancedMode } from "@/lib/prefs";
 import { isLive } from "@/lib/dates";
-import { backend, templateIdempotencyKey, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type GeneratedPlaybook, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerConversationMessage, type ServerMemory, type ServerAgent, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge, type ServerTrigger, type BackendApproval, type ServerNotification, type AutomationValidationError, type AutomationLifecycleState } from "@/connectors/api";
+import { backend, type BackendConnector, type BackendHealth, type ExecResult, type Session, type ConnectorProvider, type ConnectedAccount, type AgentPlan, type GeneratedMiniApp, type ServerRun, type ServerEvent, type ServerTask, type ServerConversation, type ServerConversationMessage, type ServerMemory, type PublicHelper, type ServerContactMethod, type ServerArtifact, type ServerFile, type ServerKnowledge, type BackendApproval, type ServerNotification } from "@/connectors/api";
 
 /** A plan shape the live runner can execute (AgentPlan satisfies this). */
 export interface RunnableStep { toolId: string | null; title: string; detail: string; input: Record<string, unknown>; requiresApproval: boolean }
@@ -64,7 +50,7 @@ export interface RunnablePlan { title?: string; summary?: string; steps: Runnabl
 const knowledgeServerIdPending = new Map<string, Promise<string | undefined>>();
 
 /* ---- Server run → local projection (the SERVER is the source of truth; the
-   client mirrors its durable runs into the existing AutomationRun shape) ---- */
+   client mirrors its durable runs into the local HelperRun shape) ---- */
 function mapRunStatus(s: string): RunStatus {
   if (s === "completed") return "Completed";
   // WP-101 (sibling slice): partially_failed is terminal and NOT a success — it must
@@ -171,7 +157,7 @@ export function formatApprovalInput(input: Record<string, unknown> | undefined |
   }
   return lines.join("\n");
 }
-export function runFromServer(sr: ServerRun, ctx: { agentId: string; automationId?: string; label?: string; startedAt: string }): AutomationRun {
+export function runFromServer(sr: ServerRun, ctx: { agentId: string; label?: string; startedAt: string }): HelperRun {
   const status = mapRunStatus(sr.status);
   const ran = sr.steps.filter((s) => s.status === "succeeded").length;
   // A connector/provider wait has no approval to act on — say so plainly rather than
@@ -201,7 +187,6 @@ export function runFromServer(sr: ServerRun, ctx: { agentId: string; automationI
             : "Running…";
   return {
     id: sr.id,
-    automationId: ctx.automationId,
     agentId: ctx.agentId,
     triggerLabel: ctx.label ?? "Live run",
     status,
@@ -220,7 +205,6 @@ export function runFromServer(sr: ServerRun, ctx: { agentId: string; automationI
       timestamp: s.finishedAt ? new Date(s.finishedAt).toISOString() : undefined,
     })),
     approvalRequestIds: [],
-    subagentRunIds: [],
     activityEntryIds: [],
     error: sr.error ?? undefined,
   };
@@ -228,37 +212,35 @@ export function runFromServer(sr: ServerRun, ctx: { agentId: string; automationI
 
 /**
  * WP-003 slice 2 — ONE HISTORY. Render a server run directly for LISTING surfaces
- * (Automations » Run History, Agent-detail » Run History) without going through the
+ * without going through the
  * local `data.runs` write-mirror — that mirror only ever contains runs THIS session
  * started/synced (runPlan/syncServerRun), never every run in the household, so it was
  * never a truthful listing source. Both screens call this over GET /api/runs, so the
  * SAME run renders IDENTICAL status text everywhere it appears.
  */
-export function runViewFromServer(sr: ServerRun): AutomationRun {
+export function runViewFromServer(sr: ServerRun): HelperRun {
   const ref = sr.sourceRef ?? {};
   const agentId = typeof ref.agentId === "string" ? ref.agentId : "";
-  const automationId = typeof ref.automationId === "string" ? ref.automationId : undefined;
   const startedAtMs = sr.startedAt ?? sr.createdAt;
   return runFromServer(sr, {
     agentId,
-    automationId,
     label: sr.title || sr.summary || undefined,
     startedAt: startedAtMs ? new Date(startedAtMs).toISOString() : new Date().toISOString(),
   });
 }
 
 /**
- * WP-003 slice 2 — shared server-truth run listing for Automations » Run History and
- * Agent-detail » Run History. Fetches GET /api/runs (optionally scoped to one agent),
+ * WP-003 slice 2 — shared server-truth run listing. Fetches GET /api/runs (optionally
+ * scoped to one helper),
  * maps every row through runViewFromServer, and — matching the existing degraded-mode
  * pattern used elsewhere (Dashboard "backend offline" banners) — keeps the last
  * successful fetch on screen with `stale` set true rather than flashing an empty list
  * the moment the backend blips. `backend.runs()` itself swallows network errors into an
  * empty array, so an empty result is only trusted once the backend is confirmed online.
  */
-export function useServerRuns(filter?: { agentId?: string }): { runs: AutomationRun[]; loading: boolean; stale: boolean; fetchedAt: number | null; refresh: () => void } {
+export function useServerRuns(filter?: { agentId?: string }): { runs: HelperRun[]; loading: boolean; stale: boolean; fetchedAt: number | null; refresh: () => void } {
   const backendOnline = useStore((s) => s.backendOnline);
-  const [runs, setRuns] = useState<AutomationRun[]>([]);
+  const [runs, setRuns] = useState<HelperRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -292,24 +274,6 @@ export function isErrorOnlyThread(c: AssistantConversation): boolean {
   return assistantMsgs.length > 0 && assistantMsgs.every((m) => m.status === "error");
 }
 
-/** Convert a planner AgentPlan into the legacy WorkflowPlan shape stored on automations. */
-function workflowPlanFromAgentPlan(plan: AgentPlan, agentId: string, agentName: string): WorkflowPlan {
-  const steps: WorkflowStep[] = plan.steps.map((s, i) => ({ id: `step-${i + 1}`, order: i + 1, label: s.title, detail: s.detail, tool: s.toolId ?? undefined, needsApproval: s.requiresApproval }));
-  return {
-    trigger: `${plan.triggerType}${plan.triggerDetail ? ` · ${plan.triggerDetail}` : ""}`,
-    inputSources: plan.requiredConnectors.map((c) => c.name),
-    agentId,
-    agentName,
-    steps,
-    toolsActions: [...new Set(plan.steps.map((s) => s.toolId).filter(Boolean))] as string[],
-    approvalGates: plan.approvalGates.length ? plan.approvalGates : ["No external action — runs without approval."],
-    output: plan.summary || "In-app summary",
-    notifications: ["In-app notification", "Message thread"],
-    errorHandling: "If a connector isn't ready or confidence is low, the agent stops and asks rather than guessing.",
-    activityLogging: "Trigger fired → steps executed → output delivered (each logged with status).",
-  };
-}
-
 /** Role authority ranks (frontend mirror of the backend), highest first. */
 const ROLE_RANK: Record<Role, number> = {
   Owner: 6, "Adult Admin": 5, "Adult Member": 4, "Limited Member": 3, "Child View": 2, "Guest/Helper": 1,
@@ -321,7 +285,6 @@ export function roleAtLeast(role: Role | undefined, min: Role): boolean {
 const SCREEN_MIN_ROLE: Partial<Record<ScreenId, Role>> = {
   settings: "Adult Admin",
   connections: "Adult Admin",
-  automations: "Adult Member",
   activity: "Adult Member",
 };
 export function screenAllowedForRole(screen: ScreenId, role: Role | undefined): boolean {
@@ -413,43 +376,35 @@ function connectorIdsForToolIds(toolIds: string[], connectors: BackendConnector[
   }
   return [...ids];
 }
-// Merge server-registry agents into client state (server-wins-by-id, same pattern as
-// events/tasks/memory). Chat-built agents exist ONLY server-side — without this merge
-// they never appeared in Helper Agents even though the chat truthfully said "created".
-// For ids that already exist locally, only server-authoritative fields are overlaid so
-// local presentation wiring (space, owner, playbooks, files) is preserved.
-function mergeServerAgents(d: AppData, serverAgents: ServerAgent[], opts: { connectors: BackendConnector[]; providers: ConnectorProvider[]; actorId?: string }) {
-  // Deletion propagates: a local agent that WAS server-backed (has serverId) but is no
-  // longer in the server registry was deleted there — drop the local ghost. Purely
-  // local agents (no serverId yet) are always kept.
-  const serverIds = new Set(serverAgents.map((a) => a.id));
+// Merge the household's helpers into the local display mirror (`data.agents`).
+//
+// A helper is the server's record; this mirror exists only so surfaces that name a helper
+// by id — Messages, Spaces, Files, Activity, search — can resolve a name and an icon
+// without a round-trip each. Nothing is authored here, so the merge is server-wins and a
+// helper deleted upstream disappears rather than lingering as an un-openable ghost.
+function mergeHelpersIntoAgents(d: AppData, helpers: PublicHelper[], opts: { actorId?: string }) {
+  const serverIds = new Set(helpers.map((h) => h.id));
   d.agents = d.agents.filter((a) => !a.serverId || serverIds.has(a.serverId));
-  for (const sa of serverAgents) {
-    const local = d.agents.find((a) => a.id === sa.id || a.serverId === sa.id);
+  for (const h of helpers) {
+    const local = d.agents.find((a) => a.id === h.id || a.serverId === h.id);
     if (local) {
-      local.serverId = sa.id;
-      local.name = sa.name;
-      local.purpose = sa.purpose;
-      local.instructions = sa.instructions;
-      local.status = sa.status;
-      if (sa.allowedToolIds.length) {
-        local.allowedToolIds = sa.allowedToolIds;
-        const conns = connectorIdsForToolIds(sa.allowedToolIds, opts.connectors, opts.providers);
-        if (conns.length) local.connectionIds = conns;
-      }
+      local.serverId = h.id;
+      local.name = h.name;
+      local.icon = h.icon || local.icon;
+      local.purpose = h.purpose;
+      local.instructions = h.instructions;
+      local.status = h.status;
+      local.updatedAt = h.updatedAt;
     } else {
-      const space = d.spaces.find((s) => s.type === sa.spaceType) ?? d.spaces.find((s) => s.id === "sp-family") ?? d.spaces[0];
       d.agents.unshift({
-        id: sa.id, serverId: sa.id, name: sa.name, icon: sa.icon || "Bot", purpose: sa.purpose,
-        status: sa.status, spaceId: space?.id ?? "sp-family",
-        ownerMemberId: opts.actorId ?? d.members.find((m) => m.isCurrentUser)?.id ?? d.members[0]?.id ?? "",
-        instructions: sa.instructions,
-        connectionIds: connectorIdsForToolIds(sa.allowedToolIds, opts.connectors, opts.providers),
-        allowedToolIds: sa.allowedToolIds,
-        playbookIds: [], memoryIds: [], knowledgeItemIds: [], fileIds: [],
-        approvalPolicy: sa.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] },
+        id: h.id, serverId: h.id, name: h.name, icon: h.icon || "Bot", purpose: h.purpose,
+        status: h.status, spaceId: d.spaces.find((sp) => sp.id === "sp-family")?.id ?? d.spaces[0]?.id ?? "sp-family",
+        ownerMemberId: h.createdBy ?? opts.actorId ?? d.members.find((m) => m.isCurrentUser)?.id ?? d.members[0]?.id ?? "",
+        instructions: h.instructions,
+        connectionIds: [], allowedToolIds: [], memoryIds: [], knowledgeItemIds: [], fileIds: [],
+        approvalPolicy: { autoAllow: [], alwaysApprove: [] },
         safetyLimits: [],
-        createdAt: new Date(sa.createdAt).toISOString(), updatedAt: sa.updatedAt,
+        createdAt: h.updatedAt, updatedAt: h.updatedAt,
       });
     }
   }
@@ -530,46 +485,22 @@ export interface Store extends UIState {
   /* derived */
   currentMember: () => Member;
   searchEverything: (q: string) => SearchResult[];
-  planFromPrompt: (prompt: string) => {
-    plan: WorkflowPlan;
-    agentId: string;
-    agentName: string;
-    approvalRequired: boolean;
-  };
 
-  /* agents */
-  createAgent: (input: Partial<Agent> & { name: string }) => string;
-  createAgentFromTemplate: (templateId: string) => string;
-  createAgentFromPrompt: (prompt: string) => string;
-  createAgentFromPlan: (plan: AgentPlan, opts?: { connectorIds?: string[]; status?: AgentStatus }) => string;
-  updateAgent: (id: string, patch: Partial<Agent>) => void;
-  setAgentStatus: (id: string, status: AgentStatus) => void;
-  duplicateAgent: (id: string) => string;
-  deleteAgent: (id: string) => void;
-  runAgent: (id: string) => string;
-  runAgentLive: (id: string) => Promise<string>;
+  /* helpers — the server owns them; this is the shared read of GET /api/helpers so the
+   * Helpers screen and every surface that merely NAMES one stay in step. */
+  helpers: PublicHelper[];
+  refreshHelpers: () => Promise<PublicHelper[]>;
 
-  /* planner brain (plain English → real plan, mini app, playbook) */
-  planAgentFromGoal: (goal: string) => Promise<{ ok: boolean; plan?: AgentPlan; error?: string; message?: string }>;
+  /* mini-app generator (plain English → a real mini app) */
   generateMiniAppFromGoal: (input: { goal: string; type?: string }) => Promise<{ ok: boolean; app?: GeneratedMiniApp; error?: string; message?: string }>;
-  generatePlaybookFromGoal: (goal: string) => Promise<{ ok: boolean; playbook?: GeneratedPlaybook; error?: string; message?: string }>;
-  runPlan: (plan: RunnablePlan, opts?: { agentId?: string; automationId?: string; label?: string }) => Promise<string>;
+  runPlan: (plan: RunnablePlan, opts?: { agentId?: string; label?: string }) => Promise<string>;
   /** Poll a durable SERVER run to terminal/parked and mirror it into local state. */
   syncServerRun: (runId: string) => Promise<void>;
   // Assistant — the conversational NL → answer/build (+ approval-gated runs) → history loop.
   startConversation: (text: string, opts?: { visibility?: "household" | "personal" }) => Promise<string>;
   sendToAssistant: (conversationId: string, text: string, extraContext?: Record<string, unknown>) => Promise<void>;
   runConversationPlan: (conversationId: string, messageId: string) => Promise<void>;
-  buildFromChat: (conversationId: string, messageId: string) => Promise<void>;
   deleteConversation: (id: string) => void;
-  /** Server-side triggers (chat-built automations live here, not in `data.automations`).
-   *  Refreshed after a chat build and by the Triggers tab, so a just-built automation is
-   *  reachable from "Open automation" instead of resolving to nothing. */
-  serverTriggers: ServerTrigger[];
-  refreshTriggers: () => Promise<ServerTrigger[]>;
-  // Evolution — evidence-backed improvement proposals from real run traces.
-  maybeProposeEvolution: (runId: string) => Promise<void>;
-  reviewEvolution: (id: string, accept: boolean) => Promise<void>;
 
   /* connectors (real backend infrastructure) */
   connectors: BackendConnector[];
@@ -591,7 +522,6 @@ export interface Store extends UIState {
   refreshApprovalsAndNotifications: () => Promise<void>;
   decideServerApproval: (id: string, approve: boolean) => Promise<boolean>;
   markServerNotificationRead: (id: string) => Promise<boolean>;
-  migrateAgentsToServer: () => Promise<void>;
   migrateContactMethodsToServer: () => Promise<void>;
   configureConnector: (id: string, values: Record<string, string>) => Promise<void>;
   revokeConnector: (id: string) => Promise<void>;
@@ -603,29 +533,6 @@ export interface Store extends UIState {
   runTool: (toolId: string, input?: Record<string, unknown>, opts?: { agentId?: string; label?: string; approvalId?: string; accountId?: string; quiet?: boolean }) => Promise<ExecResult>;
   sendWebhookTest: (payload: Record<string, unknown>) => Promise<void>;
   setKillSwitch: (enabled: boolean) => Promise<void>;
-
-  /* automations */
-  createAutomation: (input: Partial<Automation> & { name: string; agentId: string; plan: WorkflowPlan }, opts?: { silentToast?: boolean }) => string;
-  createAutomationFromPlan: (plan: AgentPlan, opts?: { enabled?: boolean; connectorIds?: string[] }) => string;
-  updateAutomation: (id: string, patch: Partial<Automation>) => void;
-  toggleAutomation: (id: string) => void;
-  runAutomation: (id: string, opts?: { forceFail?: boolean }) => string;
-  testAutomation: (id: string) => Promise<string>;
-  deleteAutomation: (id: string) => void;
-  /** WP-101 s5 — resolves the template, runs the server activation preflight, and
-   *  creates the automation as "ready" or honestly "blocked_configuration" (never a
-   *  silent Active). WP-102 s1 — by default refuses to duplicate an existing
-   *  semantic match (same template + same name); pass forceDuplicate to create a
-   *  separate copy anyway (the "create separate" choice in the dedup prompt). */
-  createAutomationFromTemplate: (templateId: string, opts?: { forceDuplicate?: boolean }) => Promise<string>;
-  /** WP-102 s1 — the "update existing" choice in the dedup prompt: re-compiles the
-   *  template and applies the result to an already-existing automation instead of
-   *  creating a new row. */
-  updateAutomationFromTemplate: (automationId: string, templateId: string) => Promise<string>;
-  /** WP-102 s1 (ISS-111) — pure lookup: does an automation already exist for this
-   *  template + household + semantic key? Used by the UI to offer update-existing /
-   *  create-separate / cancel before calling createAutomationFromTemplate. */
-  findTemplateAutomationMatch: (templateId: string) => Automation | undefined;
 
   /* messages + approvals */
   sendMessage: (threadId: string, body: string) => void;
@@ -665,15 +572,6 @@ export interface Store extends UIState {
   createKnowledgeItem: (input: Partial<KnowledgeItem> & { title: string }) => string;
   updateKnowledgeItem: (id: string, patch: Partial<KnowledgeItem>) => void;
   deleteKnowledgeItem: (id: string) => void;
-
-  /* playbooks */
-  createPlaybook: (input: Partial<Playbook> & { name: string }) => string;
-  updatePlaybook: (id: string, patch: Partial<Playbook>) => void;
-  duplicatePlaybook: (id: string) => string;
-  archivePlaybook: (id: string) => void;
-  deletePlaybook: (id: string) => void;
-  runPlaybook: (id: string) => Promise<void>;
-  addPlaybookFromCatalog: (catalogId: string) => string;
 
   /* memory */
   createMemory: (input: Partial<MemoryEntry> & { title: string; content: string }) => string;
@@ -729,26 +627,12 @@ export interface ApprovalRequestInput {
 }
 
 /** One honest sentence for a refused/unreachable server write, shared by every
- *  optimistic mutation that rolls back (tasks, events, agents, approvals). */
+ *  optimistic mutation that rolls back (tasks, events, approvals). */
 function refusalMessage(error: string | undefined, fallback = "The server refused it — nothing was saved."): string {
   if (error === "insufficient_role") return "Your role can't make this change.";
   if (error === "authentication_required") return "Sign in to make this change.";
   if (error === "backend_unreachable") return "Couldn't reach the server — nothing was saved.";
   return fallback;
-}
-
-/** The subset of an Agent patch the server registry stores. Presentation-only keys
- *  (space, playbooks, files, connectionIds) stay local and never warrant a round-trip. */
-function serverAgentPatch(patch: Partial<Agent>): Partial<ServerAgent> {
-  const p: Partial<ServerAgent> = {};
-  if (patch.name !== undefined) p.name = patch.name;
-  if (patch.icon !== undefined) p.icon = patch.icon;
-  if (patch.purpose !== undefined) p.purpose = patch.purpose;
-  if (patch.instructions !== undefined) p.instructions = patch.instructions;
-  if (patch.status !== undefined) p.status = patch.status;
-  if (patch.allowedToolIds !== undefined) p.allowedToolIds = patch.allowedToolIds;
-  if (patch.approvalPolicy !== undefined) p.approvalPolicy = patch.approvalPolicy;
-  return p;
 }
 
 /* --------------------------- persistence plumbing --------------------------- */
@@ -782,71 +666,6 @@ export const useStore = create<Store>((set, get) => {
   const toast = (t: Omit<Toast, "id">) => {
     const id = uid("toast");
     set((s) => ({ toasts: [...s.toasts, { ...t, id }] }));
-  };
-
-  /** WP-101 s5 (ISS-102/103/110): resolve a template into a concrete agent + plan,
-   *  then run it through the server's real compile-step preflight before it's ever
-   *  allowed to present as Active. Shared by createAutomationFromTemplate and
-   *  updateAutomationFromTemplate (WP-102 s1's "update existing" dedup choice) so
-   *  both compile identically. */
-  const compileTemplate = async (tmpl: WorkflowTemplate) => {
-    const d0 = get().data;
-    const live = (a: Agent) => a.status !== "Archived";
-    // routeToAgent() always returns SOME agent once any exist — its score floor is
-    // -1, so a zero-relevance candidate still "wins" the tie-break. That zero-signal
-    // pick is exactly how a grocery agent used to land on a daycare-research
-    // template, so it's only trusted here when the template's own prompt actually
-    // shares a real word with the candidate's name/purpose/instructions.
-    const confidentRouteMatch = (a: Agent) => {
-      const hay = `${a.name} ${a.purpose} ${a.instructions}`.toLowerCase();
-      return tmpl.prompt.toLowerCase().split(/\s+/).some((w) => w.length > 4 && hay.includes(w));
-    };
-    const routed = routeToAgent(tmpl.prompt, d0.agents.filter(live));
-    const agent =
-      (tmpl.recommendedAgentTemplateId && d0.agents.find((a) => live(a) && a.templateId === tmpl.recommendedAgentTemplateId)) ||
-      d0.agents.find((a) => live(a) && a.name === tmpl.recommendedAgent) ||
-      (routed && confidentRouteMatch(routed) ? routed : undefined);
-    // No further fallback: the old `d0.agents.find(a => a.status === "Active") ||
-    // d0.agents[0]` guess is gone on purpose (WP-101 s5) — an unresolved agent means
-    // agentId stays "" and this compiles as blocked_configuration below, not Active.
-    const agentId = agent?.id ?? "";
-
-    const plan = buildWorkflowPlan(tmpl.prompt, { agentId, agentName: agent?.name ?? tmpl.recommendedAgent });
-    plan.trigger = tmpl.triggerType;
-    plan.inputSources = [...tmpl.requiredConnections, ...tmpl.optionalConnections];
-    const realGates = tmpl.approvalRequirements.filter((a) => /approval required/i.test(a));
-    if (realGates.length) plan.approvalGates = realGates;
-    plan.output = tmpl.outputFormat.join(" · ");
-    const approvalRequired = realGates.length > 0;
-
-    // Multi-agent honesty (WP-101 s5 — option (b), see the task report): the
-    // multi-agent roster is only ever claimed — to the user, and to the validator —
-    // when EVERY named role already resolves to a real, non-archived agent by name.
-    // An unresolved roster is simply never sent: the automation still validates and
-    // runs on its one real agent, it just never gets to claim specialists that don't
-    // exist (server-side, an unresolved multiAgentRoles entry blocks the whole
-    // automation — see server/automation-preflight.mjs validateMultiAgentRoles — so
-    // sending a roster we know won't resolve would wrongly block an otherwise-fine
-    // single-agent automation).
-    // Same predicate the Templates grid chip and the template detail roster use
-    // (src/lib/multiAgent.ts) — what the user is shown and what gets compiled must agree.
-    const multiAgentRoles = multiAgentRosterResolved(d0.agents, tmpl.multiAgent)
-      ? tmpl.multiAgent!.map((m) => ({ name: m.name, role: m.role }))
-      : undefined;
-
-    const validation = await backend.validateAutomation({ templateId: tmpl.id, plan, agentId: agentId || undefined, multiAgentRoles });
-    const errors: AutomationValidationError[] = [...validation.errors];
-    if (!agentId) {
-      errors.unshift({
-        node: "agent",
-        kind: "no_confident_agent_match",
-        message: "No agent could be confidently matched to this template — choose one to activate it.",
-        repairSurface: "/agents",
-      });
-    }
-    const lifecycleState: AutomationLifecycleState = agentId && validation.lifecycleState === "ready" ? "ready" : "blocked_configuration";
-
-    return { agent, agentId, plan, approvalRequired, lifecycleState, blockedErrors: errors, compiledManifestVersion: validation.compiledManifestVersion };
   };
 
   /** Mint a client-only session (T-03) — used whenever the backend won't confirm a
@@ -1041,7 +860,7 @@ export const useStore = create<Store>((set, get) => {
       // the local-claim path (which would orphan the new household behind a stranger's
       // roster). This browser's prior local data (sample content, a previous local-only
       // household) isn't this new server household's — start it from a clean template so
-      // the post-signup hydrate doesn't leave stale local agents/automations lying around.
+      // the post-signup hydrate doesn't leave stale local helpers lying around.
       if (input.resetLocalData) set({ data: buildEmptyData(input.householdName ?? "My Household", input.ownerName) });
       set({ authBusy: true });
       const r = await backend.signup(input);
@@ -1113,15 +932,6 @@ export const useStore = create<Store>((set, get) => {
 
     /* --------------------------- navigation / UI -------------------------- */
     navigate: (screen, params) => {
-      // Advanced screens are hidden from the nav by default, but flows may legitimately
-      // land here (function deep links, playbook chips, activity entries). Auto-enable
-      // Advanced Mode on arrival so the nav entries appear and the user isn't stranded
-      // on a screen they can't navigate back to. (User-chosen behavior, item 14.)
-      const ADVANCED_SCREENS: ScreenId[] = ["skills", "functions", "playbooks"];
-      if (ADVANCED_SCREENS.includes(screen) && !getAdvancedMode()) {
-        setAdvancedMode(true);
-        toast({ kind: "info", title: "Advanced Mode enabled", message: "Skills and Functions are now in your menu — turn Advanced Mode off in Settings anytime." });
-      }
       set((s) => {
         // Same screen with the same params isn't a new place — don't stack a duplicate
         // that Back would then have to be pressed twice to escape.
@@ -1165,294 +975,23 @@ export const useStore = create<Store>((set, get) => {
       return d.members.find((m) => m.isCurrentUser) ?? d.members[0];
     },
     searchEverything: (q) => search(buildSearchIndex(get().data), q),
-    planFromPrompt: (prompt) => {
-      const d = get().data;
-      const routed = routeToAgent(prompt, d.agents);
-      const parsed = parseAgentPrompt(prompt);
-      const agentId = routed?.id ?? "";
-      const agentName = routed?.name ?? parsed.name;
-      const plan = buildWorkflowPlan(prompt, { agentId, agentName });
-      const { gates } = detectApprovalGates(prompt);
-      return { plan, agentId, agentName, approvalRequired: gates.length > 0 };
+    /* -------------------------------- helpers ------------------------------- *
+     * The server is the registry. This holds one shared copy so the Helpers screen and
+     * every surface that merely names a helper read the same rows, and refreshes the
+     * local display mirror in the same pass. */
+    helpers: [],
+    refreshHelpers: async () => {
+      const helpers = await backend.helpers();
+      set({ helpers });
+      commit((d) => mergeHelpersIntoAgents(d, helpers, { actorId: get().session?.actorId }));
+      return helpers;
     },
 
-    /* ------------------------------- agents ------------------------------- */
-    createAgent: (input) => {
-      const id = uid("agent");
-      commit((d) => {
-        const space = input.spaceId ? d.spaces.find((s) => s.id === input.spaceId) : findSpaceByType(d, "Personal");
-        const agent: Agent = {
-          id,
-          name: input.name,
-          icon: input.icon ?? "Bot",
-          purpose: input.purpose ?? "Helps with household tasks.",
-          status: input.status ?? "Draft",
-          spaceId: input.spaceId ?? space?.id ?? d.spaces[0].id,
-          ownerMemberId: input.ownerMemberId ?? (d.members.find((m) => m.isCurrentUser)?.id ?? d.members[0].id),
-          templateId: input.templateId,
-          instructions: input.instructions ?? "",
-          connectionIds: input.connectionIds ?? [],
-          allowedToolIds: input.allowedToolIds ?? [],
-          playbookIds: input.playbookIds ?? [],
-          memoryIds: input.memoryIds ?? [],
-          knowledgeItemIds: input.knowledgeItemIds ?? [],
-          fileIds: input.fileIds ?? [],
-          approvalPolicy: input.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] },
-          safetyLimits: input.safetyLimits ?? ["Asks for approval before any action outside the household."],
-          createdAt: nowISO(),
-          updatedAt: nowISO(),
-        };
-        d.agents.unshift(agent);
-        if (space && !space.agentIds.includes(id)) space.agentIds.push(id);
-        pushActivity(d, {
-          actorType: "user",
-          actorId: d.members.find((m) => m.isCurrentUser)?.id ?? "user",
-          actorName: d.members.find((m) => m.isCurrentUser)?.displayName ?? "You",
-          actionType: "agent.created",
-          description: `Created helper agent “${agent.name}”`,
-          entityType: "agent",
-          entityId: id,
-          spaceId: agent.spaceId,
-          status: "success",
-        });
-      });
-      toast({ kind: "success", title: "Helper agent created", message: input.name });
-      return id;
-    },
-    createAgentFromTemplate: (templateId) => {
-      const tmpl = agentTemplates.find((t) => t.id === templateId);
-      const d0 = get().data;
-      const space = tmpl ? findSpaceByType(d0, tmpl.defaultSpaceType) : undefined;
-      const connIds = tmpl ? connectorIdsForNames(tmpl.suggestedConnections) : [];
-      const playbookIds = tmpl
-        ? d0.playbooks.filter((p) => tmpl.suggestedPlaybooks.some((n) => p.name === n)).map((p) => p.id)
-        : [];
-      return get().createAgent({
-        name: tmpl?.name ?? "New Agent",
-        icon: tmpl?.icon ?? "Bot",
-        purpose: tmpl?.purpose ?? "",
-        instructions: tmpl?.defaultInstructions ?? "",
-        status: "Active",
-        templateId,
-        spaceId: space?.id,
-        connectionIds: connIds,
-        allowedToolIds: toolIdsForConnectorIds(connIds, get().connectors, get().providers),
-        playbookIds,
-        // Prose can't match a capability id — see the note in src/data/seed.ts. The sentences
-        // go to safetyLimits (notes); the policy lists are filled by id from Capabilities.
-        approvalPolicy: { autoAllow: [], alwaysApprove: [] },
-        safetyLimits: tmpl?.defaultApprovalRules ?? [],
-      });
-    },
-    createAgentFromPrompt: (prompt) => {
-      const parsed = parseAgentPrompt(prompt);
-      const d0 = get().data;
-      const space = d0.spaces.find((s) => s.type === parsed.spaceType);
-      const connIds = connectorIdsForNames(parsed.connections);
-      return get().createAgent({
-        name: parsed.name,
-        icon: parsed.icon,
-        purpose: parsed.purpose,
-        instructions: parsed.instructions,
-        status: "Draft",
-        spaceId: space?.id,
-        connectionIds: connIds,
-        allowedToolIds: toolIdsForConnectorIds(connIds, get().connectors, get().providers),
-        // These five strings were the clearest case of the problem: a hardcoded list of things
-        // the helper may do without asking, none of which is a capability id, so none of which
-        // ever cleared a single gate. See src/data/seed.ts.
-        approvalPolicy: { autoAllow: [], alwaysApprove: [] },
-        safetyLimits: parsed.approvalGates.length ? parsed.approvalGates : ["Asks before acting outside the household."],
-      });
-    },
-    // Server-registry agents are re-overlaid on every hydrate (mergeServerAgents), so a
-    // local-only edit/pause/delete used to be reverted within seconds of the next poll.
-    // Each write below persists through the backend when the agent has a serverId, and
-    // rolls the optimistic change back — with the reason — when the server refuses.
-    updateAgent: (id, patch) => {
-      const before = get().data.agents.find((x) => x.id === id);
-      commit((d) => {
-        const a = d.agents.find((x) => x.id === id);
-        if (a) Object.assign(a, patch, { updatedAt: nowISO() });
-      });
-      const server = serverAgentPatch(patch);
-      if (!before?.serverId || !Object.keys(server).length) return;
-      void backend.patchAgent(before.serverId, server).then((r) => {
-        if (r.agent) return;
-        commit((d) => { const i = d.agents.findIndex((x) => x.id === id); if (i >= 0) d.agents[i] = before; });
-        toast({ kind: "error", title: "Couldn't save agent", message: refusalMessage(r.error, "The server refused the change — it was undone.") });
-      });
-    },
-    setAgentStatus: (id, status) => {
-      const before = get().data.agents.find((x) => x.id === id);
-      commit((d) => {
-        const a = d.agents.find((x) => x.id === id);
-        if (a) {
-          a.status = status;
-          a.updatedAt = nowISO();
-          pushActivity(d, {
-            actorType: "user",
-            actorId: d.members.find((m) => m.isCurrentUser)?.id ?? "user",
-            actorName: "You",
-            actionType: status === "Archived" ? "agent.archived" : status === "Paused" ? "agent.paused" : "agent.updated",
-            description: `${a.name} → ${status}`,
-            entityType: "agent",
-            entityId: id,
-            spaceId: a.spaceId,
-            status: "info",
-          });
-        }
-      });
-      toast({ kind: "info", title: `Agent ${status.toLowerCase()}` });
-      if (!before?.serverId) return;
-      void backend.patchAgent(before.serverId, { status }).then((r) => {
-        if (r.agent) return;
-        commit((d) => { const a = d.agents.find((x) => x.id === id); if (a) { a.status = before.status; a.updatedAt = nowISO(); } });
-        toast({ kind: "error", title: `Couldn't ${status === "Paused" ? "pause" : "update"} agent`, message: refusalMessage(r.error, "The server refused the change — it was undone.") });
-      });
-    },
-    duplicateAgent: (id) => {
-      const newId = uid("agent");
-      const source = get().data.agents.find((x) => x.id === id);
-      commit((d) => {
-        const a = d.agents.find((x) => x.id === id);
-        if (a) {
-          const copy: Agent = { ...structuredClone(a), id: newId, name: `${a.name} (Copy)`, status: "Draft", createdAt: nowISO(), updatedAt: nowISO() };
-          // The clone must NOT inherit the original's serverId: mergeServerAgents matches
-          // local agents by serverId, so the copy would be overwritten by the original on
-          // the very next hydrate — name, purpose and status all snapping back.
-          delete copy.serverId;
-          d.agents.unshift(copy);
-          pushActivity(d, { actorType: "user", actorId: "user", actorName: "You", actionType: "agent.created", description: `Duplicated “${a.name}”`, entityType: "agent", entityId: newId, status: "success" });
-        }
-      });
-      toast({ kind: "success", title: "Agent duplicated" });
-      // A server-backed original gets a server-backed copy too, so the duplicate survives
-      // a refresh and other devices. If a hydrate already pulled the server copy in under
-      // its own id before this resolves, the local draft is the redundant one.
-      if (source?.serverId) {
-        void backend.duplicateAgentServer(source.serverId).then((r) => {
-          if (!r.agent) return;
-          const sid = r.agent.id;
-          commit((d) => {
-            if (d.agents.some((x) => x.id === sid || x.serverId === sid)) { d.agents = d.agents.filter((x) => x.id !== newId); return; }
-            const c = d.agents.find((x) => x.id === newId);
-            if (c) c.serverId = sid;
-          });
-        });
-      }
-      return newId;
-    },
-    runAgent: (id) => {
-      let runId = "";
-      commit((d) => {
-        const automation = d.automations.find((a) => a.agentId === id && a.enabled) ?? d.automations.find((a) => a.agentId === id);
-        const res = executeAgentRun(d, {
-          agentId: id,
-          automation,
-          triggerLabel: "Manual run",
-          manual: true,
-          subagents: subagentDefsFor(automation),
-        });
-        runId = res.runId;
-      });
-      const last = get().data.runs.find((r) => r.id === runId);
-      // ISS-116: name the helper, so this can't be mistaken for a different run's result.
-      const who = get().data.agents.find((a) => a.id === id)?.name;
-      toast({
-        kind: last?.status === "Waiting for Approval" ? "warn" : "success",
-        title: `${last?.status === "Waiting for Approval" ? "Run paused for approval" : "Agent run complete"}${who ? ` — ${who}` : ""}`,
-        message: last?.outputSummary,
-      });
-      return runId;
-    },
-    createAgentFromPlan: (plan, opts) => {
-      const d0 = get().data;
-      const space = d0.spaces.find((s) => s.type === plan.spaceType);
-      const finalConnectorIds = new Set(opts?.connectorIds ?? plan.connectorIds);
-      // Every tool the plan's steps actually use — EXCEPT tools behind a connector the
-      // user unchecked in the plan-preview step (a step with no connector, e.g. an
-      // internal homeops.* tool or a reasoning step, is always kept).
-      const allowedToolIds = [...new Set(
-        plan.steps
-          .filter((s) => s.toolId && (s.connectorId == null || finalConnectorIds.has(s.connectorId)))
-          .map((s) => s.toolId),
-      )] as string[];
-      return get().createAgent({
-        name: plan.title,
-        icon: plan.icon,
-        purpose: plan.summary || plan.title,
-        instructions: plan.instructions,
-        status: opts?.status ?? "Draft",
-        spaceId: space?.id,
-        connectionIds: opts?.connectorIds ?? plan.connectorIds,
-        allowedToolIds,
-        /* This one was the closest to working and still didn't: it mapped the plan's ungated
-         * steps into autoAllow by `s.title` — the human label — when `s.toolId` was right
-         * there. A helper a family built by talking to it therefore came out with a list of
-         * waivers that matched nothing. Left EMPTY rather than switched to s.toolId: writing
-         * the ids would silently grant real per-capability waivers at creation time, which is
-         * a decision for the family, not a side effect of how the plan happened to parse. */
-        approvalPolicy: { autoAllow: [], alwaysApprove: [] },
-        safetyLimits: plan.approvalGates.length ? plan.approvalGates : ["Asks before any action that leaves the household."],
-      });
-    },
-    deleteAgent: (id) => {
-      const before = get().data.agents.find((x) => x.id === id);
-      const index = get().data.agents.findIndex((x) => x.id === id);
-      commit((d) => {
-        const a = d.agents.find((x) => x.id === id);
-        d.agents = d.agents.filter((x) => x.id !== id);
-        d.spaces.forEach((s) => { s.agentIds = s.agentIds.filter((x) => x !== id); });
-        if (a) pushActivity(d, { actorType: "user", actorId: get().session?.actorId ?? "user", actorName: get().session?.actorName ?? "You", actionType: "agent.deleted", description: `Deleted agent “${a.name}”`, entityType: "agent", entityId: id, spaceId: a.spaceId, status: "warning" });
-      });
-      toast({ kind: "info", title: "Agent deleted" });
-      if (!before?.serverId) return;
-      void backend.deleteAgent(before.serverId).then((r) => {
-        if (r.ok) return;
-        commit((d) => { d.agents.splice(Math.min(index, d.agents.length), 0, before); });
-        toast({ kind: "error", title: "Couldn't delete agent", message: refusalMessage(r.error, "The server refused — the agent was restored.") });
-      });
-    },
-    runAgentLive: async (id) => {
-      const d0 = get().data;
-      const agent = d0.agents.find((a) => a.id === id);
-      if (!agent) return "";
-      const isReal = (tid: string) => !!get().connectors.find((c) => c.tools.some((t) => t.id === tid)) || !!get().providers.find((p) => p.tools.some((t) => t.id === tid));
-      // Prefer the agent's enabled automation plan if it references real tools.
-      const auto = d0.automations.find((a) => a.agentId === id && a.enabled) ?? d0.automations.find((a) => a.agentId === id);
-      let steps: RunnableStep[] = (auto?.plan.steps ?? [])
-        .filter((s) => s.tool && isReal(s.tool))
-        .map((s) => ({ toolId: s.tool as string, title: s.label, detail: s.detail, input: {}, requiresApproval: !!s.needsApproval }));
-      // Otherwise, a read-only pass over the agent's allowed read tools.
-      if (!steps.length) {
-        steps = agent.allowedToolIds
-          .filter((tid) => isReal(tid))
-          .map((tid) => {
-            const tool = get().providers.flatMap((p) => p.tools).find((t) => t.id === tid) ?? get().connectors.flatMap((c) => c.tools).find((t) => t.id === tid);
-            return tool && !tool.requiresApproval ? { toolId: tid, title: tool.name, detail: "Read current data.", input: {}, requiresApproval: false } : null;
-          })
-          .filter(Boolean) as RunnableStep[];
-      }
-      if (!steps.length) return get().runAgent(id); // nothing real to run → local summary
-      return get().runPlan({ title: agent.name, summary: agent.purpose, steps }, { agentId: id, label: "Manual run" });
-    },
-
-    /* ---------------------------- planner brain --------------------------- */
-    planAgentFromGoal: async (goal) => {
-      const r = await backend.plan(goal);
-      if (!r.ok || !r.plan) toast({ kind: "warn", title: r.error === "no_provider" ? "Connect an AI provider first" : "Couldn't generate", message: r.message ?? r.error });
-      return { ok: !!(r.ok && r.plan), plan: r.plan, error: r.error, message: r.message };
-    },
+    /* --------------------------- mini-app generator ------------------------- */
     generateMiniAppFromGoal: async ({ goal, type }) => {
       const r = await backend.generateMiniApp({ goal, type });
       if (!r.ok || !r.app) toast({ kind: "warn", title: r.error === "no_provider" ? "Connect an AI provider first" : "Couldn't generate", message: r.message ?? r.error });
       return { ok: !!(r.ok && r.app), app: r.app, error: r.error, message: r.message };
-    },
-    generatePlaybookFromGoal: async (goal) => {
-      const r = await backend.generatePlaybook(goal);
-      if (!r.ok || !r.playbook) toast({ kind: "warn", title: r.error === "no_provider" ? "Connect an AI provider first" : "Couldn't generate", message: r.message ?? r.error });
-      return { ok: !!(r.ok && r.playbook), playbook: r.playbook, error: r.error, message: r.message };
     },
     runPlan: async (plan, opts = {}) => {
       // Execution is delegated to the durable SERVER runtime — the single source of
@@ -1467,14 +1006,14 @@ export const useStore = create<Store>((set, get) => {
       };
       const started = await backend.startRun({
         plan: planForServer,
-        source: opts.automationId ? "automation" : agentId ? "agent" : "manual",
-        sourceRef: { agentId: agentId || undefined, automationId: opts.automationId },
+        source: agentId ? "agent" : "manual",
+        sourceRef: { agentId: agentId || undefined },
       });
       if (!started.run) {
         toast({ kind: "error", title: "Couldn't start run", message: started.error === "backend_unreachable" ? "The FamiliOS runtime isn't reachable. Start it with `npm run dev`." : started.error ?? "Run could not start." });
         return "";
       }
-      const ctx = { agentId, automationId: opts.automationId, label: opts.label, startedAt };
+      const ctx = { agentId, label: opts.label, startedAt };
       commit((d) => {
         const mapped = runFromServer(started.run!, ctx);
         const i = d.runs.findIndex((r) => r.id === mapped.id);
@@ -1484,12 +1023,11 @@ export const useStore = create<Store>((set, get) => {
       const finalRun = get().data.runs.find((r) => r.id === started.run!.id);
       const status = finalRun?.status ?? "Running";
       // ISS-116: an unattributed "Run paused for approval" landing seconds after an
-      // unrelated "Automation paused" read as cause and effect, and the user blamed the
+      // unrelated pause toast read as cause and effect, and the user blamed the
       // control they had just touched. Runs are ASYNC — the only thing that makes one
       // toast distinguishable from another is the entity it belongs to.
       const subject =
-        (opts.automationId ? get().data.automations.find((a) => a.id === opts.automationId)?.name : undefined)
-        ?? (agentId ? get().data.agents.find((a) => a.id === agentId)?.name : undefined)
+        (agentId ? get().data.agents.find((a) => a.id === agentId)?.name : undefined)
         ?? opts.label ?? plan.title;
       const base = status === "Completed" ? "Run complete"
         : status === "Waiting for Approval" ? "Run paused for approval"
@@ -1499,18 +1037,14 @@ export const useStore = create<Store>((set, get) => {
         title: subject ? `${base} — ${subject}` : base,
         message: finalRun?.outputSummary,
       });
-      // The server records an evidence-backed proposal on failure (engine.mjs); the
-      // client baseline keeps the Improvements tab populated until Slice 7 surfaces
-      // server-side proposals directly.
-      if (status === "Failed") void get().maybeProposeEvolution(started.run.id);
       return started.run.id;
     },
     syncServerRun: async (runId) => {
       // Poll the server run until it reaches a terminal or parked state, mirroring
-      // each snapshot into the local AutomationRun. When parked for approval, project
+      // each snapshot into the local HelperRun. When parked for approval, project
       // the server-created approval into the console so the existing UI can decide it.
       const existing = get().data.runs.find((r) => r.id === runId);
-      const ctx = { agentId: existing?.agentId ?? "", automationId: existing?.automationId, label: existing?.triggerLabel, startedAt: existing?.startedAt ?? nowISO() };
+      const ctx = { agentId: existing?.agentId ?? "", label: existing?.triggerLabel, startedAt: existing?.startedAt ?? nowISO() };
       let sr: ServerRun | null = null;
       for (let i = 0; i < 240; i++) {
         sr = await backend.getRun(runId);
@@ -1653,7 +1187,6 @@ export const useStore = create<Store>((set, get) => {
       // even on a plain "answer" — so the attach + watcher below key off the run, not kind.
       const runId = r.ok ? (r.run?.id ?? r.runId ?? r.runIds?.[0] ?? undefined) : undefined;
       const okText = r.kind === "plan" && r.plan ? (r.answer || r.plan.summary || (runId ? "On it — doing it now." : "Here's my plan."))
-        : r.kind === "build" && r.build ? (r.answer || r.build.summary || "Here's what I'll set up.")
         : (r.answer || "I'm not sure how to help with that yet.");
       commit((d) => {
         const c = d.conversations?.find((x) => x.id === conversationId); if (!c) return;
@@ -1682,8 +1215,6 @@ export const useStore = create<Store>((set, get) => {
           // Auto-run (C-intel): the server already started executing this plan —
           // attach the run so the card shows live status instead of a Run button.
           m.status = runId ? "done" : "planned"; m.plan = r.plan;
-        } else if (r.kind === "build" && r.build) {
-          m.status = "planned"; m.build = r.build;
         } else {
           m.status = "answered";
         }
@@ -1737,63 +1268,6 @@ export const useStore = create<Store>((set, get) => {
         })();
       }
     },
-    // Unified chat-builder: approve a proposed build and materialize it server-side, then
-    // mark the chat message "built" and append a confirmation listing what was created.
-    buildFromChat: async (conversationId, messageId) => {
-      const c = get().data.conversations?.find((x) => x.id === conversationId);
-      const m = c?.messages.find((x) => x.id === messageId);
-      if (!m?.build) return;
-      commit((d) => { const mm = d.conversations?.find((x) => x.id === conversationId)?.messages.find((x) => x.id === messageId); if (mm) { mm.status = "running"; mm.buildProgress = []; } });
-      // Stream per-entity progress so the card checks off each piece as it's built.
-      // conversationId travels too: the server durably marks this message built and
-      // appends the confirmation, so the card's state survives a refresh.
-      const res = await backend.streamBuild(m.build, (ev) => {
-        commit((d) => {
-          const mm = d.conversations?.find((x) => x.id === conversationId)?.messages.find((x) => x.id === messageId);
-          if (mm) mm.buildProgress = [...(mm.buildProgress ?? []), ev.entity];
-        });
-      }, conversationId);
-      if (!res.ok) {
-        commit((d) => { const mm = d.conversations?.find((x) => x.id === conversationId)?.messages.find((x) => x.id === messageId); if (mm) mm.status = "planned"; });
-        toast({ kind: "error", title: "Couldn't build that", message: res.message ?? res.error ?? "The build failed." });
-        return;
-      }
-      const cr = res.created ?? {};
-      const edited = (res.updated ?? []).filter((u) => u.ok);
-      const parts = [
-        cr.skill && `skill “${cr.skill.name}”`,
-        cr.agent && `agent “${cr.agent.name}”`,
-        cr.automation && `automation “${cr.automation.name}”`,
-        ...edited.map((u) => `updated ${u.kind} “${u.name ?? u.id}”`),
-      ].filter(Boolean);
-      commit((d) => {
-        const cc = d.conversations?.find((x) => x.id === conversationId); if (!cc) return;
-        const mm = cc.messages.find((x) => x.id === messageId);
-        if (mm) { mm.status = "built"; mm.builtIds = { skillId: cr.skill?.id, agentId: cr.agent?.id, triggerId: cr.automation?.id }; }
-        cc.messages.push({
-          id: uid("m"), role: "assistant", createdAt: nowISO(), status: "answered",
-          text: `Done — I set up ${parts.join(", ")}.${(res.notes && res.notes.length) ? "\n\n" + res.notes.map((n) => `• ${n}`).join("\n") : ""}`,
-        });
-        cc.updatedAt = nowISO();
-      });
-      // Pull the just-created entities into client state immediately — without this the
-      // new agent existed only in the server registry and never appeared in Helper
-      // Agents (the original "app claims it was created but it wasn't" bug).
-      try {
-        const serverAgents = await backend.agents();
-        commit((d) => mergeServerAgents(d, serverAgents, { connectors: get().connectors, providers: get().providers, actorId: get().session?.actorId }));
-      } catch { /* next hydrate catches up */ }
-      // A chat-built automation is a SERVER trigger — refetch so "Open automation" lands
-      // on it instead of an Automations screen that only knows client-local rows.
-      if (cr.automation) void get().refreshTriggers();
-      toast({ kind: "success", title: "Built", message: parts.join(", ") || "Created." });
-    },
-    serverTriggers: [],
-    refreshTriggers: async () => {
-      const serverTriggers = await backend.triggers();
-      set({ serverTriggers });
-      return serverTriggers;
-    },
     runConversationPlan: async (conversationId, messageId) => {
       const c = get().data.conversations?.find((x) => x.id === conversationId);
       const m = c?.messages.find((x) => x.id === messageId);
@@ -1838,90 +1312,6 @@ export const useStore = create<Store>((set, get) => {
       // The conversation is server-durable (P1.1) — without this, it silently
       // reappears on the next hydrate because it was only ever removed locally.
       void backend.deleteConversationRemote(id).then((r) => { if (!r.ok) toast({ kind: "warn", title: "Deleted locally only", message: "Couldn't reach the backend — it may reappear next time you load." }); });
-    },
-
-    /* ---------- evolution: learn from real run traces (Phase 2) ----------- */
-    maybeProposeEvolution: async (runId) => {
-      const run = get().data.runs.find((r) => r.id === runId);
-      if (!run || run.status !== "Failed") return; // only learn from genuine failures (not approval pauses)
-      const existing = get().data.evolutions ?? [];
-      if (existing.some((e) => e.runId === runId && e.status === "pending")) return;   // dedupe per run
-      if (existing.filter((e) => e.status === "pending").length >= 24) return;          // avoid pileup
-      const agent = run.agentId ? get().data.agents.find((a) => a.id === run.agentId) : undefined;
-      const problem = run.steps.find((s) => s.status === "blocked" && !/approval/i.test(s.detail ?? ""));
-      const detail = (problem?.detail ?? run.outputSummary ?? "").slice(0, 180);
-      const connectorIssue = /connect|not ready|runtime|authoriz|unreachable|not configured|backend/i.test(detail);
-      // Deterministic, evidence-based baseline — works with NO AI provider configured.
-      const proposal: EvolutionProposal = {
-        id: uid("evo"),
-        kind: agent ? "agent" : "skill",
-        agentId: agent?.id,
-        agentName: agent?.name,
-        runId,
-        title: connectorIssue ? "Connect the required service" : `Handle "${problem?.label ?? run.triggerLabel}" more gracefully`,
-        reason: `Run "${run.triggerLabel}" failed${problem ? ` at "${problem.label}"` : ""}: ${detail}`,
-        summary: connectorIssue
-          ? "A step couldn't run because its connector isn't ready. Connect/authorize it in Connections, or have the agent stop and ask instead of failing."
-          : "A step didn't complete. Tighten the agent's guidance so it validates inputs and degrades gracefully when something is missing.",
-        before: agent?.instructions,
-        after: agent ? `${(agent.instructions ?? "").trim()}\n\nIf a required connector isn't ready or an input is missing, stop and ask the household rather than failing the run.`.trim() : undefined,
-        risk: "Low",
-        source: "trace",
-        status: "pending",
-        createdAt: nowISO(),
-      };
-      // Optional LLM enrichment — refines wording + the suggested "after". Graceful if no provider.
-      const trace = { title: run.triggerLabel, status: run.status, summary: run.outputSummary, steps: run.steps.map((s) => ({ label: s.label, status: s.status, detail: s.detail })), agent: agent ? { name: agent.name, instructions: agent.instructions } : null };
-      try {
-        const r = await backend.proposeEvolution(trace);
-        if (r.ok && r.proposal) {
-          proposal.title = r.proposal.title || proposal.title;
-          proposal.reason = r.proposal.reason || proposal.reason;
-          proposal.summary = r.proposal.summary || proposal.summary;
-          if (r.proposal.after) proposal.after = r.proposal.after;
-          proposal.risk = r.proposal.risk || proposal.risk;
-          proposal.source = "ai";
-          proposal.model = r.model;
-        }
-      } catch { /* keep the deterministic baseline */ }
-      commit((d) => { (d.evolutions ??= []).unshift(proposal); });
-      toast({ kind: "info", title: "New improvement suggestion", message: "FamiliOS learned from a failed run — review it in Activity → Improvements." });
-    },
-    reviewEvolution: async (id, accept) => {
-      const local = get().data.evolutions?.find((x) => x.id === id);
-      // Optimistically mark reviewed locally (instant UI feedback)
-      commit((d) => { const e = d.evolutions?.find((x) => x.id === id); if (e) { e.status = accept ? "accepted" : "rejected"; e.reviewedAt = Date.now(); e.reviewedBy = get().session?.actorName; } });
-      // A proposal THIS client minted (maybeProposeEvolution) has no server row, so posting
-      // its id could only ever produce an error toast and a permanently-pending card.
-      // Resolve it here: accepting applies the suggested instructions to the agent it names.
-      if (local) {
-        const applied = accept && local.kind === "agent" && !!local.agentId && !!local.after;
-        if (applied) get().updateAgent(local.agentId!, { instructions: local.after! });
-        toast({
-          kind: accept ? "success" : "info",
-          title: accept ? "Improvement accepted" : "Suggestion dismissed",
-          message: accept ? (applied ? `${local.agentName ?? "The agent"}'s instructions were updated.` : "Accepted — apply the change manually in the builder.") : undefined,
-        });
-        return;
-      }
-      // Server-side apply: versions the target entity (agent, skill) durably
-      try {
-        const r = await backend.reviewEvolution(id, accept);
-        if (!r.ok) {
-          // Revert optimistic update on server error
-          commit((d) => { const e = d.evolutions?.find((x) => x.id === id); if (e) e.status = "pending"; });
-          toast({ kind: "error", title: "Could not apply improvement", message: r.error ?? "Server error" });
-          return;
-        }
-        const applied = r.applied ?? false;
-        toast({
-          kind: accept ? "success" : "info",
-          title: accept ? "Improvement accepted" : "Suggestion dismissed",
-          message: accept && applied ? "The target was versioned with the new guidance." : accept && !applied ? "Accepted — apply the change manually in the builder." : undefined,
-        });
-      } catch {
-        toast({ kind: "error", title: "Could not reach server", message: "The improvement was marked locally but not applied server-side." });
-      }
     },
 
     /* -------------------- connectors (real backend) ----------------------- */
@@ -1977,7 +1367,6 @@ export const useStore = create<Store>((set, get) => {
         externalActionsEnabled: health ? health.externalActionsEnabled : true,
       });
       if (health) {
-        void get().migrateAgentsToServer();
         void get().migrateContactMethodsToServer();
         void get().hydrateFromServer();
         // Cross-device freshness (WP-009 / ISS-010 / HYP-006): re-hydrate the 10
@@ -2051,8 +1440,8 @@ export const useStore = create<Store>((set, get) => {
       // instead of standing up a second polling loop. Fire-and-forget — independent of the
       // AppData reconciliation this function otherwise does.
       void get().refreshApprovalsAndNotifications();
-      const [events, tasks, members, conversations, memory, serverAgents, contactMethods, household, files, knowledge] = await Promise.all([
-        backend.events(), backend.tasks(), backend.members(), backend.conversations(), backend.memory(), backend.agents(), backend.contactMethods(), backend.household(), backend.files(), backend.knowledge(),
+      const [events, tasks, members, conversations, memory, helpers, contactMethods, household, files, knowledge] = await Promise.all([
+        backend.events(), backend.tasks(), backend.members(), backend.conversations(), backend.memory(), backend.helpers(), backend.contactMethods(), backend.household(), backend.files(), backend.knowledge(),
       ]);
       const mimeToType = (mime: string, name: string): FileAsset["type"] => {
         const ext = (name.split(".").pop() ?? "").toUpperCase();
@@ -2064,7 +1453,7 @@ export const useStore = create<Store>((set, get) => {
       const mapFile = (f: ServerFile): FileAsset => ({
         id: f.id, serverId: f.id, name: f.name, type: mimeToType(f.mime ?? "", f.name), sizeBytes: f.sizeBytes ?? 0,
         tags: f.tags ?? [], ownerMemberId: f.uploadedBy, spaceId: f.spaceId ?? "sp-family", uploadedAt: f.createdAt,
-        linkedAgentIds: [], linkedWorkflowIds: [], summary: `${f.pageCount && f.pageCount > 1 ? `${f.pageCount}-page ` : ""}file synced from your household.`,
+        linkedAgentIds: [], summary: `${f.pageCount && f.pageCount > 1 ? `${f.pageCount}-page ` : ""}file synced from your household.`,
         detectedDates: [], detectedTasks: [], sensitive: (f.visibility === "personal") || /tax|medical|ssn|passport|id|bank|legal/i.test(f.name),
         searchIndexed: false, folder: "Uploads", pageCount: f.pageCount,
       });
@@ -2123,18 +1512,16 @@ export const useStore = create<Store>((set, get) => {
           const m = m0 as RawConvMsg;
           return {
             id: `${c.id}-m${i}`, role: m.role, text: m.text, createdAt: m.at,
-            plan: m.plan ?? undefined, build: m.build ?? undefined, builtIds: m.builtIds ?? undefined, model: m.model ?? undefined,
+            plan: m.plan ?? undefined, model: m.model ?? undefined,
             runId: m.runId ?? m.runIds?.[0] ?? undefined, toolCalls: m.toolCalls ?? undefined, kind: m.kind, error: m.error ?? undefined,
             artifactId: m.artifactId ?? undefined, artifactLink: m.link ?? undefined,
             taskId: m.taskId ?? undefined, approvalId: m.approvalId ?? undefined,
             links: m.links ?? undefined,
-            // Build proposals keep their card state across refreshes: the server marks
-            // the originating message `built` when the build materializes. An honest
-            // server-side error (kind:"error") must keep reading as an error after
-            // hydrate too — it used to fall through to "answered", which silently
+            // An honest server-side error (kind:"error") must keep reading as an error
+            // after hydrate too — it used to fall through to "answered", which silently
             // dropped the coral error styling and the no-provider fallback card.
             status: m.role === "assistant"
-              ? (m.kind === "error" ? "error" : m.build ? (m.built ? "built" : "planned") : m.plan ? "planned" : "answered")
+              ? (m.kind === "error" ? "error" : m.plan ? "planned" : "answered")
               : undefined,
           };
         }),
@@ -2247,35 +1634,10 @@ export const useStore = create<Store>((set, get) => {
         // Server-owned Knowledge (user-authored, editable, durable). Server-authoritative:
         // knowledge deleted on the server is dropped here; only never-synced local drafts survive.
         d.knowledge = mergeServerAuthoritative(knowledge.map(mapKnowledge), d.knowledge);
-        // Server-registry agents (incl. chat-built ones that exist ONLY server-side).
-        mergeServerAgents(d, serverAgents, { connectors: get().connectors, providers: get().providers, actorId: get().session?.actorId });
+        // Helpers (the server's registry) → the local display mirror.
+        mergeHelpersIntoAgents(d, helpers, { actorId: get().session?.actorId });
       });
-    },
-    // One-time IndexedDB→server agent migration. Pushes local agents to the durable
-    // server registry, PRESERVING ids so existing runs (sourceRef.agentId) resolve and
-    // the executor can enforce each agent's permitted∩available policy. Idempotent on
-    // the server (a supplied id that exists is returned unchanged). Only marks done
-    // when every create succeeded, so a non-admin session simply retries on next load.
-    migrateAgentsToServer: async () => {
-      if (typeof localStorage !== "undefined" && localStorage.getItem("homeops.agentsMigrated.v1")) return;
-      try {
-        const serverAgents = await backend.agents();
-        const serverIds = new Set(serverAgents.map((a) => a.id));
-        const spaces = get().data.spaces;
-        const locals = get().data.agents.filter((a) => a.status !== "Archived" && !serverIds.has(a.id));
-        let ok = true;
-        for (const a of locals) {
-          const r = await backend.createAgent({
-            id: a.id, name: a.name, icon: a.icon, purpose: a.purpose, instructions: a.instructions,
-            status: a.status, spaceType: (spaces.find((s) => s.id === a.spaceId)?.type as string) ?? "Family",
-            skillIds: [], allowedToolIds: a.allowedToolIds ?? [], allowedFunctionIds: [],
-            deniedToolIds: [], deniedFunctionIds: [],
-            approvalPolicy: a.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] },
-          });
-          if (r.error) { ok = false; break; }
-        }
-        if (ok && typeof localStorage !== "undefined") localStorage.setItem("homeops.agentsMigrated.v1", "1");
-      } catch { /* non-fatal — retry on next backend load */ }
+      set({ helpers });
     },
     // One-time IndexedDB→server contact-method migration (same contract as agents):
     // ids and verified/opt-in state are PRESERVED, the server create is idempotent on a
@@ -2470,227 +1832,6 @@ export const useStore = create<Store>((set, get) => {
       const s = await backend.setSettings({ externalActionsEnabled: enabled });
       set({ externalActionsEnabled: s.externalActionsEnabled });
       toast({ kind: enabled ? "info" : "warn", title: enabled ? "External actions enabled" : "External actions paused", message: enabled ? undefined : "All write/send tools are blocked until re-enabled." });
-    },
-
-    /* ----------------------------- automations ---------------------------- */
-    createAutomation: (input, opts) => {
-      const id = uid("auto");
-      commit((d) => {
-        const agent = d.agents.find((a) => a.id === input.agentId);
-        const auto: Automation = {
-          id,
-          name: input.name,
-          description: input.description ?? input.plan.output,
-          category: input.category ?? "Custom",
-          templateId: input.templateId,
-          agentId: input.agentId,
-          spaceId: input.spaceId ?? agent?.spaceId ?? d.spaces[0].id,
-          triggerType: input.triggerType ?? "Manual",
-          triggerConfig: input.triggerConfig ?? {},
-          secondaryTriggers: input.secondaryTriggers,
-          enabled: input.enabled ?? true,
-          status: input.status ?? "active",
-          approvalRequired: input.approvalRequired ?? input.plan.approvalGates.some((g) => !/no external/i.test(g)),
-          plan: input.plan,
-          lifecycleState: input.lifecycleState,
-          compiledManifestVersion: input.compiledManifestVersion,
-          blockedErrors: input.blockedErrors,
-          idempotencyKey: input.idempotencyKey,
-          failureCount: 0,
-          runIds: [],
-          createdAt: nowISO(),
-          updatedAt: nowISO(),
-        };
-        d.automations.unshift(auto);
-        pushActivity(d, { actorType: "user", actorId: "user", actorName: "You", actionType: "automation.created", description: `Created automation “${auto.name}”`, entityType: "automation", entityId: id, spaceId: auto.spaceId, status: "success" });
-      });
-      // WP-101 s5: callers that already know this is being created blocked (e.g. a
-      // template that failed the activation preflight) pass silentToast so they can
-      // show their own honest "created — but needs setup" message instead of the
-      // generic success one.
-      if (!opts?.silentToast) toast({ kind: "success", title: "Automation created", message: input.name });
-      return id;
-    },
-    createAutomationFromPlan: (plan, opts) => {
-      const d0 = get().data;
-      // Reuse a matching agent if one exists, otherwise create one from the plan.
-      const existing = routeToAgent(`${plan.title} ${plan.summary} ${plan.instructions}`, d0.agents);
-      const agentId = existing?.id ?? get().createAgentFromPlan(plan, { status: "Active", connectorIds: opts?.connectorIds });
-      const agentName = get().data.agents.find((a) => a.id === agentId)?.name ?? plan.title;
-      const wf = workflowPlanFromAgentPlan(plan, agentId, agentName);
-      const space = d0.spaces.find((s) => s.type === plan.spaceType);
-      return get().createAutomation({
-        name: plan.title,
-        description: plan.summary || plan.title,
-        category: "Custom",
-        agentId,
-        spaceId: space?.id,
-        triggerType: (plan.triggerType as TriggerType) ?? "Manual",
-        triggerConfig: plan.triggerDetail ? { schedule: plan.triggerDetail } : {},
-        enabled: opts?.enabled ?? true,
-        status: "active",
-        approvalRequired: plan.approvalRequired,
-        plan: wf,
-      });
-    },
-    updateAutomation: (id, patch) =>
-      commit((d) => {
-        const a = d.automations.find((x) => x.id === id);
-        if (a) Object.assign(a, patch, { updatedAt: nowISO() });
-      }),
-    toggleAutomation: (id) => {
-      commit((d) => {
-        const a = d.automations.find((x) => x.id === id);
-        if (a) {
-          a.enabled = !a.enabled;
-          a.status = a.enabled ? "active" : "paused";
-          a.updatedAt = nowISO();
-        }
-      });
-      const a = get().data.automations.find((x) => x.id === id);
-      // ISS-116: this said only "Automation paused". Seconds later an UNRELATED concurrent
-      // run said "Run paused for approval", and the two read as cause and effect — they
-      // aren't: toggleAutomation is a pure write and never starts a run. Naming the entity
-      // is what makes the two distinguishable at a glance.
-      toast({
-        kind: "info",
-        title: a?.enabled ? "Automation enabled" : "Automation paused",
-        message: a?.name,
-      });
-    },
-    runAutomation: (id, opts) => {
-      let runId = "";
-      commit((d) => {
-        const automation = d.automations.find((a) => a.id === id);
-        if (!automation) return;
-        const res = executeAgentRun(d, {
-          agentId: automation.agentId,
-          automation,
-          triggerLabel: `Test · ${automation.triggerType}`,
-          manual: true,
-          forceFail: opts?.forceFail,
-          subagents: subagentDefsFor(automation),
-        });
-        runId = res.runId;
-      });
-      const last = get().data.runs.find((r) => r.id === runId);
-      // ISS-116: this is the exact pair that was confused — a test run's approval pause
-      // arriving next to an "Automation paused" toggle toast. Both now name their entity.
-      const what = get().data.automations.find((a) => a.id === id)?.name;
-      toast({
-        kind: last?.status === "Failed" ? "error" : last?.status === "Waiting for Approval" ? "warn" : "success",
-        title:
-          `${last?.status === "Failed"
-            ? "Test run failed"
-            : last?.status === "Waiting for Approval"
-              ? "Run paused for approval"
-              : "Test run complete"}${what ? ` — ${what}` : ""}`,
-        message: last?.outputSummary,
-      });
-      return runId;
-    },
-    testAutomation: async (id) => {
-      const auto = get().data.automations.find((a) => a.id === id);
-      if (!auto) return "";
-      const isReal = (tid: string) => !!get().connectors.find((c) => c.tools.some((t) => t.id === tid)) || !!get().providers.find((p) => p.tools.some((t) => t.id === tid));
-      const steps: RunnableStep[] = (auto.plan.steps ?? [])
-        .filter((s) => s.tool && isReal(s.tool))
-        .map((s) => ({ toolId: s.tool as string, title: s.label, detail: s.detail, input: {}, requiresApproval: !!s.needsApproval }));
-      if (!steps.length) return get().runAutomation(id); // no real tools wired → local test run
-      return get().runPlan({ title: auto.name, summary: auto.description, steps }, { agentId: auto.agentId, automationId: id, label: `Run · ${auto.triggerType}` });
-    },
-    deleteAutomation: (id) => {
-      commit((d) => {
-        d.automations = d.automations.filter((a) => a.id !== id);
-      });
-      toast({ kind: "info", title: "Automation deleted" });
-    },
-    // WP-102 s1 (ISS-111): stable per template+household+name — never a random uid —
-    // so a repeat instantiation of the same template is recognizable instead of
-    // silently appending yet another near-identical automation.
-    findTemplateAutomationMatch: (templateId) => {
-      const tmpl = workflowTemplates.find((t) => t.id === templateId);
-      if (!tmpl) return undefined;
-      const semanticKey = tmpl.name.trim().toLowerCase();
-      const idempotencyKey = templateIdempotencyKey(templateId, get().session?.householdId, semanticKey);
-      return get().data.automations.find(
-        (a) => a.idempotencyKey === idempotencyKey || (a.templateId === templateId && a.name.trim().toLowerCase() === semanticKey)
-      );
-    },
-    createAutomationFromTemplate: async (templateId, opts) => {
-      const tmpl = workflowTemplates.find((t) => t.id === templateId);
-      if (!tmpl) return "";
-      const semanticKey = tmpl.name.trim().toLowerCase();
-      const idempotencyKey = templateIdempotencyKey(templateId, get().session?.householdId, semanticKey);
-      if (!opts?.forceDuplicate) {
-        const existing = get().findTemplateAutomationMatch(templateId);
-        if (existing) {
-          toast({ kind: "info", title: "Already using this template", message: `“${existing.name}” already exists — opened it instead of creating a duplicate.` });
-          return existing.id;
-        }
-      }
-      const compiled = await compileTemplate(tmpl);
-      const blocked = compiled.lifecycleState === "blocked_configuration";
-      const id = get().createAutomation(
-        {
-          name: tmpl.name,
-          description: tmpl.prompt,
-          category: tmpl.category,
-          templateId,
-          agentId: compiled.agentId,
-          spaceId: compiled.agent?.spaceId,
-          triggerType: tmpl.triggerType,
-          triggerConfig: { filters: tmpl.requiredConnections },
-          enabled: !blocked,
-          status: blocked ? "draft" : "active",
-          approvalRequired: compiled.approvalRequired,
-          plan: compiled.plan,
-          lifecycleState: compiled.lifecycleState,
-          compiledManifestVersion: compiled.compiledManifestVersion,
-          blockedErrors: blocked ? compiled.blockedErrors : undefined,
-          idempotencyKey,
-        },
-        { silentToast: blocked }
-      );
-      if (blocked) {
-        toast({ kind: "warn", title: "Created — needs setup", message: compiled.blockedErrors[0]?.message ?? "This automation needs setup before it can run." });
-      }
-      return id;
-    },
-    // WP-102 s1: the "update existing" choice — re-runs the same compile step and
-    // applies it to the automation the user already has instead of creating another.
-    updateAutomationFromTemplate: async (automationId, templateId) => {
-      const tmpl = workflowTemplates.find((t) => t.id === templateId);
-      const existing = get().data.automations.find((a) => a.id === automationId);
-      if (!tmpl || !existing) return automationId;
-      const semanticKey = tmpl.name.trim().toLowerCase();
-      const idempotencyKey = templateIdempotencyKey(templateId, get().session?.householdId, semanticKey);
-      const compiled = await compileTemplate(tmpl);
-      const blocked = compiled.lifecycleState === "blocked_configuration";
-      get().updateAutomation(automationId, {
-        name: tmpl.name,
-        description: tmpl.prompt,
-        category: tmpl.category,
-        templateId,
-        agentId: compiled.agentId,
-        spaceId: compiled.agent?.spaceId ?? existing.spaceId,
-        triggerType: tmpl.triggerType,
-        triggerConfig: { filters: tmpl.requiredConnections },
-        enabled: !blocked,
-        status: blocked ? "draft" : "active",
-        approvalRequired: compiled.approvalRequired,
-        plan: compiled.plan,
-        lifecycleState: compiled.lifecycleState,
-        compiledManifestVersion: compiled.compiledManifestVersion,
-        blockedErrors: blocked ? compiled.blockedErrors : undefined,
-        idempotencyKey,
-      });
-      toast({
-        kind: blocked ? "warn" : "success",
-        title: blocked ? "Updated — needs setup" : "Automation updated",
-        message: blocked ? (compiled.blockedErrors[0]?.message ?? undefined) : tmpl.name,
-      });
-      return automationId;
     },
 
     /* -------------------------- messages + approvals ---------------------- */
@@ -3009,9 +2150,8 @@ export const useStore = create<Store>((set, get) => {
             { title: out.plan.title || `Revised: ${serverRun?.title ?? "plan"}`, summary: out.plan.summary, steps: out.plan.steps },
             { label: "Revised after feedback", agentId: existing.requestedByAgentId },
           );
-          // Jump to the live run so the user sees the updated state immediately.
-          get().navigate("automations", { tab: "monitor", ...(newRunId ? { run: newRunId } : {}) });
-          toast({ kind: "success", title: "Revised plan started", message: "Opening the live run — gated steps still pause for approval." });
+          void newRunId;
+          toast({ kind: "success", title: "Revised plan started", message: "It's running now — gated steps still pause for approval." });
           return;
         }
         // Re-planning didn't yield a plan — honest fallback.
@@ -3116,7 +2256,6 @@ export const useStore = create<Store>((set, get) => {
             spaceId: sid,
             uploadedAt: nowISO(),
             linkedAgentIds: [],
-            linkedWorkflowIds: [],
             summary: previewContent ? `Uploaded ${ext} file. ${previewContent.slice(0, 120)}` : `Uploaded ${ext} file (${Math.round(file.size / 1024)} KB).`,
             detectedDates: dates,
             detectedTasks: tasks,
@@ -3161,7 +2300,7 @@ export const useStore = create<Store>((set, get) => {
         d.files.unshift({
           id, serverId: up.file!.id, name: up.file!.name, type: "Image", sizeBytes: up.file!.sizeBytes ?? front.size + back.size,
           tags: ["ID", "Uploaded"], ownerMemberId: d.members.find((m) => m.isCurrentUser)?.id ?? d.members[0].id, spaceId: sid,
-          uploadedAt: nowISO(), linkedAgentIds: [], linkedWorkflowIds: [], summary: "2-page document (front & back).",
+          uploadedAt: nowISO(), linkedAgentIds: [], summary: "2-page document (front & back).",
           detectedDates: [], detectedTasks: [], sensitive: true, searchIndexed: false, dataUrl: frontDataUrl, folder: "Uploads", pageCount: 2,
         });
         pushActivity(d, { actorType: "user", actorId: "user", actorName: "You", actionType: "file.uploaded", description: `Uploaded ${up.file!.name} (front & back)`, entityType: "file", entityId: id, spaceId: sid, status: "success" });
@@ -3182,7 +2321,6 @@ export const useStore = create<Store>((set, get) => {
           spaceId: input.spaceId ?? d.spaces[0].id,
           uploadedAt: nowISO(),
           linkedAgentIds: input.linkedAgentIds ?? [],
-          linkedWorkflowIds: [],
           summary: input.summary ?? "",
           detectedDates: input.detectedDates ?? [],
           detectedTasks: input.detectedTasks ?? [],
@@ -3287,80 +2425,6 @@ export const useStore = create<Store>((set, get) => {
       toast({ kind: "info", title: "Knowledge item removed" });
     },
 
-    /* ------------------------------ playbooks ----------------------------- */
-    createPlaybook: (input) => {
-      const id = uid("pb");
-      commit((d) => {
-        d.playbooks.unshift({
-          id,
-          name: input.name,
-          description: input.description ?? "",
-          whenToUse: input.whenToUse ?? "",
-          steps: input.steps ?? [],
-          requiredConnections: input.requiredConnections ?? [],
-          requiredFileTypes: input.requiredFileTypes ?? [],
-          outputFormat: input.outputFormat ?? "",
-          approvalRules: input.approvalRules ?? [],
-          supportingFileIds: input.supportingFileIds ?? [],
-          linkedAgentIds: input.linkedAgentIds ?? [],
-          category: input.category ?? "Custom",
-          createdAt: nowISO(),
-          updatedAt: nowISO(),
-        });
-      });
-      toast({ kind: "success", title: "Playbook created" });
-      return id;
-    },
-    updatePlaybook: (id, patch) =>
-      commit((d) => {
-        const p = d.playbooks.find((x) => x.id === id);
-        if (p) Object.assign(p, patch, { updatedAt: nowISO() });
-      }),
-    duplicatePlaybook: (id) => {
-      const newId = uid("pb");
-      commit((d) => {
-        const p = d.playbooks.find((x) => x.id === id);
-        if (p) {
-          d.playbooks.unshift({ ...structuredClone(p), id: newId, name: `${p.name} (Copy)`, createdAt: nowISO(), updatedAt: nowISO() });
-        }
-      });
-      toast({ kind: "success", title: "Playbook duplicated" });
-      return newId;
-    },
-    archivePlaybook: (id) => {
-      commit((d) => {
-        const p = d.playbooks.find((x) => x.id === id);
-        if (p) p.archived = !p.archived;
-      });
-      toast({ kind: "info", title: "Playbook archived" });
-    },
-    deletePlaybook: (id) => {
-      commit((d) => {
-        d.playbooks = d.playbooks.filter((x) => x.id !== id);
-        d.agents.forEach((a) => { a.playbookIds = a.playbookIds.filter((x) => x !== id); });
-      });
-      toast({ kind: "info", title: "Playbook deleted" });
-    },
-    runPlaybook: async (id) => {
-      const p = get().data.playbooks.find((x) => x.id === id);
-      if (!p) return;
-      const goal = `Run the "${p.name}" playbook. ${p.description}${p.whenToUse ? ` When to use: ${p.whenToUse}.` : ""} Steps to follow: ${[...p.steps].sort((a, b) => a.order - b.order).map((s) => s.text).join("; ")}.`;
-      toast({ kind: "info", title: "Planning playbook run…", message: p.name });
-      const r = await backend.plan(goal);
-      if (!r.ok || !r.plan) { toast({ kind: "warn", title: r.error === "no_provider" ? "Connect an AI provider first" : "Couldn't run playbook", message: r.message ?? r.error }); return; }
-      await get().runPlan(r.plan, { label: `Playbook · ${p.name}` });
-    },
-    addPlaybookFromCatalog: (catalogId) => {
-      const tmpl = playbookCatalog.find((p) => p.id === catalogId);
-      const newId = uid("pb");
-      commit((d) => {
-        if (!tmpl) return;
-        d.playbooks.unshift({ ...structuredClone(tmpl), id: newId, createdAt: nowISO(), updatedAt: nowISO() });
-      });
-      toast({ kind: "success", title: "Playbook added", message: tmpl?.name });
-      return newId;
-    },
-
     /* ------------------------------- memory ------------------------------- */
     createMemory: (input) => {
       const id = uid("mem");
@@ -3445,7 +2509,6 @@ export const useStore = create<Store>((set, get) => {
           createdByAgentId: input.createdByAgentId,
           data: input.data ?? {},
           linkedEntityIds: input.linkedEntityIds ?? [],
-          linkedAutomationIds: input.linkedAutomationIds ?? [],
           version: 1,
           status: "active",
           createdAt: nowISO(),

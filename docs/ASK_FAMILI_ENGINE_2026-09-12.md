@@ -1,5 +1,11 @@
 # Ask Famili engine replacement + scheduling consistency pass — 2026-09-12
 
+> **Superseded in part by `HELPERS_2026-09-14.md`.** The engine described here is still the
+> engine. What changed two days later is everything around it: the seven concepts that wrapped
+> it (agent, skill, function, playbook, automation, trigger, evolution) became one Helper, and
+> the `HOMEOPS_ASSISTANT_ENGINE=legacy` rollback flag was removed along with the legacy planner
+> it restored. Read that document for the current shape.
+
 **Baseline before this work:** HEAD `545ebdd`, 1,169 server tests passing, web + mobile typechecks clean.
 **After:** 1,207+ server tests + 37 web unit tests + 56 mobile unit tests passing; `npm run build` clean; mobile `tsc --noEmit` clean.
 

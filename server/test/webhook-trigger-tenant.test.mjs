@@ -11,12 +11,21 @@
 //
 // A trigger id is unique across the deployment, so — unlike an inbound text — it identifies its
 // household on its own. There was no ambiguity to resolve, just a lookup nobody was doing.
+//
+// WHAT A TRIGGER POINTS AT NOW. There is one target shape left: `{kind:"helper", helperId}`
+// (sanitizeTarget still reads `agentId`, because helpers live in the agents collection and
+// older rows spell it that way). A fire no longer starts a plan for a model to invent — it
+// runs the helper through the same tool loop a chat message uses, and finishes inside the
+// call. So this suite now points a real fake model at the FAMILY'S household, which makes the
+// tenancy claim stronger than it was: the delivery is proved to have run their helper, in
+// their household, with their model configuration.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { startServer, stopServer, makeSession } from "./harness.mjs";
+import { useFakeModel } from "./fake-model.mjs";
 
-let ctx, resident, family;
+let ctx, resident, family, fake;
 const SECRET = "s3cret-from-the-other-household";
 
 async function signup(email, householdName) {
@@ -52,29 +61,39 @@ async function deliver(id, payload, { secret = SECRET, nonce } = {}) {
   return { status: r.status, data: out };
 }
 
-let triggerId;
+let triggerId, helperId;
 
 before(async () => {
   ctx = await startServer();
   resident = await makeSession(ctx, "m-alex");
   family = await signup(`wh-${Date.now()}@example.test`, "The Okonkwo Family");
-  // A real target, so "did it fire" means "did it start a run" rather than "did it log a line".
-  const agent = await family.req("/api/agents", { method: "POST", body: JSON.stringify({ name: "Doorbell handler", status: "Active" }) });
-  assert.equal(agent.status, 200, JSON.stringify(agent.data));
+  // The fake model is configured in the FAMILY'S household, not the resident one — so a fire
+  // that reached the wrong tenant would find no provider and fail, which is the point.
+  fake = await useFakeModel(family);
+
+  // A real target, so "did it fire" means "did it run the helper" rather than "did it log a
+  // line". A helper needs instructions — that IS the helper — or runHelper refuses it.
+  const helper = await family.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Doorbell handler",
+      instructions: "When the doorbell rings, note who called and add a task to follow it up if nobody was home.",
+    }),
+  });
+  assert.equal(helper.status, 200, JSON.stringify(helper.data));
+  helperId = helper.data.helper.id;
+
   const t = await family.req("/api/triggers", {
     method: "POST",
     body: JSON.stringify({
       name: "Doorbell", type: "webhook", enabled: true, secret: SECRET,
-      // An agent target needs a skill or a goal — with neither, fireTrigger correctly refuses
-      // as `unrunnable_target` rather than starting an empty run. A goal is the lighter of the
-      // two here, and it is what a chat-built automation carries anyway.
-      target: { kind: "agent", agentId: agent.data.agent.id, goal: "Note that the doorbell rang" },
+      target: { kind: "helper", helperId },
     }),
   });
   assert.equal(t.status, 200, JSON.stringify(t.data));
   triggerId = t.data.trigger.id;
 });
-after(async () => { await stopServer(ctx); });
+after(async () => { await stopServer(ctx); await new Promise((r) => fake.server.close(r)); });
 
 test("the trigger belongs to the signed-up family, not the resident household", async () => {
   assert.match(triggerId, /^trg_/);
@@ -96,19 +115,30 @@ test("THE FIX: a correctly signed delivery is accepted and verified", async () =
 });
 
 test("…and it actually fires THEIR trigger, which is the whole point", async () => {
-  // Asserted on the trigger record rather than on a returned runId: a goal-driven agent target
-  // has to be planned by a model, and there is no AI provider configured in a test run, so the
-  // run legitimately doesn't start here. `fireCount` and `lastFiredAt` are written by
-  // fireTriggerInner before any of that and are read back from the FAMILY'S session, which is
-  // precisely the claim under test — the delivery reached and fired their trigger, in their
-  // household. A runId assertion would have been testing the AI config, not the routing.
+  /* Stronger than it used to be. A goal-driven agent target had to be planned by a model that
+   * no test run had, so the old assertion could only reach for `fireCount` — the counter
+   * written before the planning even started. A helper run finishes INSIDE the fire, so the
+   * trigger row now carries the real outcome the instant the delivery returns, and the
+   * helper's own record says what it did. Both are read back from the FAMILY'S session,
+   * which is precisely the claim under test. */
   const before = (await family.req(`/api/triggers/${triggerId}`)).data.trigger;
   const r = await deliver(triggerId, { pressed: "again" });
   assert.equal(r.status, 200);
+
   const after = (await family.req(`/api/triggers/${triggerId}`)).data.trigger;
   assert.equal(after.fireCount, (before.fireCount ?? 0) + 1, "their trigger fired");
   assert.ok(after.lastFiredAt, "and recorded when");
   assert.equal(after.lastTriggerType, "webhook");
+  assert.equal(after.lastStatus, "completed", "the helper really ran, in their household, on their model");
+
+  const helper = (await family.req(`/api/helpers/${helperId}`)).data.helper;
+  assert.equal(helper.lastRun.ok, true);
+  assert.equal(helper.lastRun.reason, "webhook", "and the helper's own record says what woke it");
+
+  // What arrived is handed to the helper, not thrown away: the thread is the record of it.
+  const hist = (await family.req(`/api/helpers/${helperId}/history`)).data.messages;
+  assert.match(hist.at(-2).text, /Something came in/);
+  assert.match(hist.at(-2).text, /again/, "the payload reaches the helper that was woken for it");
 });
 
 test("a WRONG signature is refused — routing to the right household didn't weaken the check", async () => {

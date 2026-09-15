@@ -8,6 +8,12 @@
 //
 // The asymmetry IS the design, and it's what these tests pin down: full read of the
 // household, writes confined to their own things.
+//
+// "Their own assistant" is a HELPER now — the single concept that replaced Agent, Skill,
+// Function, Playbook, Automation, Trigger and Evolution — so the helper half of this file
+// speaks to /api/helpers. The rule it holds is the same rule the chat half below holds, and
+// the two halves are deliberately kept side by side: an Adult Member's things are theirs,
+// and the family's are not theirs to change.
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, stopServer, makeSession } from "./harness.mjs";
@@ -40,64 +46,116 @@ test("they can add tasks", async () => {
 });
 
 test("THE NEW PART: they can create a helper of their own", async () => {
-  const r = await adult.req("/api/agents", {
-    method: "POST", body: JSON.stringify({ name: "My reading list", visibility: "personal" }),
+  const r = await adult.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "My reading list", instructions: "Keep track of what I am reading and nudge me to pick it back up." }),
   });
   assert.equal(r.status, 200, JSON.stringify(r.data));
-  assert.equal(r.data.agent.visibility, "personal");
-  assert.equal(r.data.agent.createdBy, "m-morgan");
+  // They did not have to ASK for personal. An Adult Member's helper is put in their own silo
+  // for them, so a mis-set toggle can never publish one into the family space.
+  assert.equal(r.data.helper.visibility, "personal");
+  assert.equal(r.data.helper.createdBy, "m-morgan");
 });
 
 test("they can edit, run and delete the helper they made", async () => {
-  const made = await adult.req("/api/agents", { method: "POST", body: JSON.stringify({ name: "Mine", visibility: "personal" }) });
-  const id = made.data.agent.id;
-  const edited = await adult.req(`/api/agents/${id}`, { method: "PATCH", body: JSON.stringify({ purpose: "Track what I'm reading" }) });
-  assert.equal(edited.status, 200);
-  assert.equal(edited.data.agent.purpose, "Track what I'm reading");
-  const ran = await adult.req(`/api/agents/${id}/run`, { method: "POST", body: "{}" });
-  assert.notEqual(ran.status, 403, "a helper you own is one you can run");
-  const gone = await adult.req(`/api/agents/${id}`, { method: "DELETE" });
+  const made = await adult.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "Mine", instructions: "Summarise my own week for me, quietly, and tell nobody else about it." }),
+  });
+  const id = made.data.helper.id;
+  const edited = await adult.req("/api/helpers/" + id, { method: "PATCH", body: JSON.stringify({ purpose: "Track what I'm reading" }) });
+  assert.equal(edited.status, 200, JSON.stringify(edited.data));
+  assert.equal(edited.data.helper.purpose, "Track what I'm reading");
+  // No AI provider is configured in this harness, so the run honestly fails (422) — which is
+  // itself the proof that it got PAST the permission check. 403 is the one answer ruled out.
+  const ran = await adult.req("/api/helpers/" + id + "/run", { method: "POST", body: "{}" });
+  assert.notEqual(ran.status, 403, "a helper you own is one you can run: " + JSON.stringify(ran.data));
+  const gone = await adult.req("/api/helpers/" + id, { method: "DELETE" });
   assert.equal(gone.status, 200);
 });
 
 /* ---- what stays out of reach ---- */
 
 test("NEGATIVE: they cannot create a HOUSEHOLD helper", async () => {
-  const r = await adult.req("/api/agents", { method: "POST", body: JSON.stringify({ name: "Runs for everyone", visibility: "household" }) });
-  assert.equal(r.status, 403);
-  assert.equal(r.data.error, "personal_only");
-  assert.match(r.data.message, /Owner or Adult Admin/);
+  /* CHANGED DELIBERATELY: this used to be a 403 `personal_only`. Asking for "household" is
+   * now answered by making them a PERSONAL helper instead — exactly the shape their chats
+   * have always had (see "their chats are forced PERSONAL" below), and it fails in the safe
+   * direction: what is lost is a refusal dialog, not a boundary. So the property is asserted
+   * on the RESULT rather than on a status code — no request an Adult Member can make puts a
+   * helper into the family space. */
+  const r = await adult.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "Runs for everyone", visibility: "household", instructions: "Do the whole family's evening round-up every night." }),
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.helper.visibility, "personal", "asking for the family space must not reach it");
+
+  // And nobody else in the household can see what they made.
+  const ownerSees = (await owner.req("/api/helpers")).data.helpers;
+  assert.ok(!ownerSees.some((h) => h.id === r.data.helper.id),
+    "not even the Owner — a silo that leaks upward is not a silo");
 });
 
 test("NEGATIVE: they cannot promote their own helper into a household one", async () => {
-  const made = await adult.req("/api/agents", { method: "POST", body: JSON.stringify({ name: "Sneaky", visibility: "personal" }) });
-  const r = await adult.req(`/api/agents/${made.data.agent.id}`, { method: "PATCH", body: JSON.stringify({ visibility: "household" }) });
-  assert.equal(r.status, 403);
-  assert.equal(r.data.error, "personal_only");
+  const made = await adult.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "Sneaky", instructions: "Something small and personal, which should stay that way." }),
+  });
+  assert.equal(made.data.helper.visibility, "personal");
+  const r = await adult.req("/api/helpers/" + made.data.helper.id, { method: "PATCH", body: JSON.stringify({ visibility: "household" }) });
+
+  /* The load-bearing one, and the reason it is asserted on the STORED visibility rather than
+   * on a status code: whether the promote is refused outright or quietly ignored is a product
+   * choice, but a helper arriving in the family space at the request of someone who may not
+   * put one there is not. It is a privilege change and not only a visibility one — a
+   * household helper's scheduled runs act as the scheduler, with Owner standing, while a
+   * personal helper's act as the member who made it (see sessionForHelper in helpers.mjs). */
+  const after = (await adult.req("/api/helpers/" + made.data.helper.id)).data.helper;
+  assert.equal(after.visibility, "personal",
+    "an Adult Member must not be able to publish a helper into the family space (PATCH answered " + r.status + ")");
 });
 
 test("NEGATIVE: they cannot touch the HOUSEHOLD's helpers — read, but not edit", async () => {
-  const hh = await owner.req("/api/agents", { method: "POST", body: JSON.stringify({ name: "Family briefing", visibility: "household" }) });
-  const id = hh.data.agent.id;
+  const hh = await owner.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "Family briefing", visibility: "household", instructions: "Brief the whole family each morning on the day ahead." }),
+  });
+  const id = hh.data.helper.id;
+  // They can READ it — the silo is about authorship, not ignorance.
+  assert.ok((await adult.req("/api/helpers")).data.helpers.some((h) => h.id === id), "a family helper is still theirs to see");
   for (const attempt of [
-    adult.req(`/api/agents/${id}`, { method: "PATCH", body: JSON.stringify({ name: "Renamed by me" }) }),
-    adult.req(`/api/agents/${id}`, { method: "DELETE" }),
-    adult.req(`/api/agents/${id}/run`, { method: "POST", body: "{}" }),
+    adult.req("/api/helpers/" + id, { method: "PATCH", body: JSON.stringify({ name: "Renamed by me" }) }),
+    adult.req("/api/helpers/" + id, { method: "DELETE" }),
+    adult.req("/api/helpers/" + id + "/run", { method: "POST", body: "{}" }),
   ]) {
     const r = await attempt;
     assert.equal(r.status, 403, "a household helper is not theirs to change");
+    assert.equal(r.data.error, "household_helper");
+    assert.ok(r.data.message, "and the refusal is a sentence, not a code");
   }
 });
 
 test("NEGATIVE: they cannot edit ANOTHER member's personal helper", async () => {
-  const theirs = await owner.req("/api/agents", { method: "POST", body: JSON.stringify({ name: "Alex's own", visibility: "personal" }) });
-  const r = await adult.req(`/api/agents/${theirs.data.agent.id}`, { method: "PATCH", body: JSON.stringify({ name: "Mine now" }) });
-  assert.equal(r.status, 403);
+  const theirs = await owner.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "Alex's own", visibility: "personal", instructions: "Alex's private reading notes, kept for Alex alone." }),
+  });
+  const r = await adult.req("/api/helpers/" + theirs.data.helper.id, { method: "PATCH", body: JSON.stringify({ name: "Mine now" }) });
+  /* 404, not the old 403: someone else's personal helper is not visible to them at all, so
+   * the refusal cannot even confirm that it exists. That is the stronger answer — and the
+   * claim under test is unchanged, so it is checked where it counts, on the record. */
+  assert.equal(r.status, 404);
+  assert.equal((await owner.req("/api/helpers/" + theirs.data.helper.id)).data.helper.name, "Alex's own",
+    "and the helper they tried to rename is untouched");
 });
 
 test("a Guest/Helper gains none of this — the silo is an ADULT-member thing", async () => {
-  const r = await other.req("/api/agents", { method: "POST", body: JSON.stringify({ name: "Nope", visibility: "personal" }) });
+  const r = await other.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "Nope", instructions: "Anything at all, which a guest has no standing to set running." }),
+  });
   assert.equal(r.status, 403);
+  assert.equal(r.data.error, "insufficient_role");
 });
 
 /* ---- the chat silo ---- */

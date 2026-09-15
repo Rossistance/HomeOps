@@ -1,6 +1,6 @@
 // Cross-device freshness: poll the server's data revision (one tiny number)
 // while a screen is focused, and trigger that screen's reload only when the
-// revision actually changed. Adds a change made on the web (or by an agent)
+// revision actually changed. Adds a change made on the web (or by a helper)
 // to the phone within ~12s, with near-zero network cost when nothing changed.
 import { useCallback, useRef } from "react";
 import { useFocusEffect } from "expo-router";

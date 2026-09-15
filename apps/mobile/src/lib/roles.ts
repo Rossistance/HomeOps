@@ -27,7 +27,7 @@ export function roleAtLeast(role: string | null | undefined, min: Role): boolean
  * spectator in the first place:
  *
  *   canManageHousehold — may this person change things that run for EVERYONE (household
- *                        helpers, automations, invites, AI providers)? Owner / Adult Admin.
+ *                        helpers, invites, AI providers)? Owner / Adult Admin.
  *   canManageOwn       — may this person build and run things for THEMSELVES? Any adult.
  *
  * These are cosmetic — the server is the source of truth (server/index.mjs mayWriteAgent) —
@@ -81,7 +81,7 @@ export function isAdultRole(role: string | null | undefined): boolean {
  *
  * None of that was a permission problem — the Adult Member silo already grants all of it. It
  * was routing: an adult grandparent was being handed the reduced grandparent home, which has
- * no Settings, Agents or Library tab at all. Being someone's grandparent describes a
+ * no Settings, Helpers or Library tab at all. Being someone's grandparent describes a
  * relationship to the family, not a reduced standing in the app.
  *
  * So: an adult is an adult. The calm grandparent and sitter homes remain for people who
@@ -105,10 +105,11 @@ export interface Capabilities {
   viewMode: ViewMode;
   isOwner: boolean;
   isAdult: boolean;
-  /** Owner or Adult Admin — can manage members, invite, create/run agents. */
+  /** Owner or Adult Admin — can manage members, invite, run household helpers. */
   canManage: boolean;
   canInvite: boolean;
-  canCreateAgents: boolean;
+  /** Any adult may build a helper for themselves; only an admin may make one for everyone. */
+  canCreateHelpers: boolean;
   /** Can edit calendar events at all (server still enforces "own synced calendar only"). */
   canEditCalendar: boolean;
   canAssignChores: boolean;
@@ -137,7 +138,7 @@ export function capabilitiesFor(m: MemberLike | null | undefined): Capabilities 
      * The server already lets any adult build a helper for themselves (the Adult Member silo);
      * this gate was still Adult-Admin-only, so the app hid the screen that would have worked.
      * A client gate stricter than the server's is just a feature nobody can find. */
-    canCreateAgents: isAdult,
+    canCreateHelpers: isAdult,
     canEditCalendar: isAdult,
     canAssignChores: isAdult,
     canUpload: isAdult,

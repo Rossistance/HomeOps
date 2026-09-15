@@ -109,7 +109,7 @@ A master **kill switch** (Settings) disables all write/send tools at the backend
 
 ## Persistence
 
-- Household app data (members, spaces, agents, automations, runs, threads, files, knowledge, playbooks, mini apps, memories, approvals, activity, tasks, events, settings) is normalized in a Zustand store, **autosaved to IndexedDB** (localStorage fallback), with JSON export/import and a sample-data reset.
+- Household app data (members, spaces, helpers, runs, threads, files, knowledge, mini apps, memories, approvals, activity, tasks, events, settings) is normalized in a Zustand store, **autosaved to IndexedDB** (localStorage fallback), with JSON export/import and a sample-data reset.
 - Connector configuration and secrets live in the **backend vault** (`server/.data/`), separate from the browser.
 
 ---

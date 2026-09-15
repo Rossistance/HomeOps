@@ -35,15 +35,15 @@ function benefits(id: string, name: string): string[] {
   ];
   if (k.includes("calendar")) return [
     "Family events stay in sync",
-    "Agents plan around your real schedule",
+    "Helpers plan around your real schedule",
   ];
   if (k.includes("sms") || k.includes("twilio") || k.includes("messag")) return [
     "Family members add grocery items by text",
     "Updates reach family the way they prefer",
   ];
   if (k.includes("weather")) return ["Morning briefings include the day's forecast"];
-  if (k.includes("webhook")) return ["Other services can ping your agents safely", "Every incoming event is logged in Activity"];
-  return [`Agents can use ${name} on your behalf — with approval`];
+  if (k.includes("webhook")) return ["Other services can ping your helpers safely", "Every incoming event is logged in Activity"];
+  return [`Helpers can use ${name} on your behalf — with approval`];
 }
 
 export function ConnectionSheet({ service, visible, onClose, onChanged }: {
@@ -89,7 +89,7 @@ export function ConnectionSheet({ service, visible, onClose, onChanged }: {
   function disconnect() {
     Alert.alert(
       `Disconnect ${service?.name}?`,
-      "FamiliOS deletes its saved access for your account. Agents lose this connection immediately; you can reconnect anytime.",
+      "FamiliOS deletes its saved access for your account. Helpers lose this connection immediately; you can reconnect anytime.",
       [
         { text: "Cancel", style: "cancel" },
         {

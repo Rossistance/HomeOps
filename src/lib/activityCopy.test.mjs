@@ -57,7 +57,7 @@ test("ISS-114: every line names its subject and ends as a sentence", () => {
 });
 
 test("ISS-114: a failure reads as a failure, never as a success", () => {
-  for (const type of ["agent.create", "skill.promote", "contact_method.verify", "meal.update"]) {
+  for (const type of ["helper.create", "helper.run", "contact_method.verify", "meal.update"]) {
     const failed = plainLanguageAudit({ type, ok: false });
     assert.match(failed, /didn't succeed|didn't work|could not|couldn't/i, `${type}: ${failed}`);
   }
@@ -65,8 +65,8 @@ test("ISS-114: a failure reads as a failure, never as a success", () => {
 
 test("ISS-114: the compositional floor says something SPECIFIC, not a shrug", () => {
   // The exact types that used to fall through — now each names its own subject and action.
-  assert.equal(plainLanguageAudit({ type: "agent.create", ok: true }), "A helper was created.");
-  assert.equal(plainLanguageAudit({ type: "skill.promote", ok: true }), "A skill was published.");
+  assert.equal(plainLanguageAudit({ type: "helper.create", ok: true }), "A helper was created.");
+  assert.equal(plainLanguageAudit({ type: "helper.update", ok: true }), "A helper was updated.");
   assert.equal(plainLanguageAudit({ type: "knowledge.delete", ok: true }), "A knowledge note was deleted.");
   assert.equal(plainLanguageAudit({ type: "contact_method.verify", ok: true }), "A contact method was verified.");
   assert.equal(plainLanguageAudit({ type: "meal.to_grocery", ok: true }), "A meal — to grocery.");
@@ -87,10 +87,19 @@ test("ISS-114: an unknown FUTURE type still reports its subject rather than a sh
 /* ---- deep links ---- */
 
 test("ISS-114: entries deep-link to the entity they are about", () => {
-  assert.deepEqual(routeForAudit({ type: "agent.run", agentId: "ag_1" }), { screen: "agents", params: { id: "ag_1" } });
-  assert.deepEqual(routeForAudit({ type: "skill.test", skillId: "sk_1" }), { screen: "skills", params: { id: "sk_1" } });
+  // Helper audits still travel under `agentId` — the server kept the field name when the
+  // seven concepts collapsed into one, so the deep link has to read it, not a new one.
+  assert.deepEqual(routeForAudit({ type: "helper.run", agentId: "ag_1" }), { screen: "helpers", params: { id: "ag_1" } });
+  assert.deepEqual(routeForAudit({ type: "helper.update", agentId: "ag_1" }), { screen: "helpers", params: { id: "ag_1" } });
   assert.deepEqual(routeForAudit({ type: "approval.decide", approvalId: "ap_1" }), { screen: "messages", params: { tab: "approvals", approval: "ap_1" } });
-  assert.deepEqual(routeForAudit({ type: "trigger.fire", triggerId: "tr_1" }), { screen: "automations", params: { id: "tr_1" } });
+  assert.deepEqual(routeForAudit({ type: "connector.health", connectorId: "google" }), { screen: "connections", params: { id: "google" } });
+});
+
+test("a schedule has no screen of its own — a helper owns it, so a bare trigger links nowhere", () => {
+  // The Triggers tab is gone; linking one to a screen that no longer exists would be a
+  // dead end dressed as a deep link. A trigger row that names its run still resolves.
+  assert.equal(routeForAudit({ type: "trigger.fire", triggerId: "tr_1" }), null);
+  assert.deepEqual(routeForAudit({ type: "trigger.fire", triggerId: "tr_1", runId: "r1" }), { screen: "activity" });
 });
 
 test("ISS-114: the most specific entity wins when several are present", () => {

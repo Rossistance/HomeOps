@@ -227,7 +227,7 @@ export function InviteSheet({ visible, onClose, householdName, onInvited }: {
               </View>
               <Well>
                 <T kind="detail">
-                  {first} only sees what their role allows — and nothing an agent does for them leaves the household without your approval. You can change or remove their access anytime from Settings → Household.
+                  {first} only sees what their role allows — and nothing a helper does for them leaves the household without your approval. You can change or remove their access anytime from Settings → Household.
                 </T>
               </Well>
             </>

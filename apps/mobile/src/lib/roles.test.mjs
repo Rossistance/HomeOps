@@ -7,7 +7,7 @@
 //
 // None of that was a permission problem — the server already grants all of it. It was ROUTING:
 // relationship outranked role, so an Adult Member who happens to be a grandparent was handed
-// the reduced grandparent home, which has no Settings, Agents or Library tab at all.
+// the reduced grandparent home, which has no Settings, Helpers or Library tab at all.
 //
 // The one thing relationship must STILL outrank is a child, and that case is here too.
 import test from "node:test";
@@ -28,7 +28,7 @@ test("THE FIX: an Adult Member who is a grandparent gets the full adult app", ()
 
 test("…which is what unlocks the tabs he couldn't find", () => {
   // app/_layout.tsx: fullNav = viewMode === "adult" || viewMode === "owner". That single
-  // boolean is Settings, Agents and Library — i.e. connections, their calendar, their tasks.
+  // boolean is Settings, Helpers and Library — i.e. connections, their calendar, their tasks.
   for (const m of [gpop, beannie]) {
     const mode = viewModeFor(m);
     assert.ok(mode === "adult" || mode === "owner", "must reach the full tab set");
@@ -37,7 +37,7 @@ test("…which is what unlocks the tabs he couldn't find", () => {
 
 test("an adult member can create their OWN helper — the client gate matched the server", () => {
   // The server already allowed this (the silo). The app was hiding a screen that would work.
-  assert.equal(capabilitiesFor(gpop).canCreateAgents, true);
+  assert.equal(capabilitiesFor(gpop).canCreateHelpers, true);
   assert.equal(capabilitiesFor(gpop).canConnect, true, "their own email and calendar");
   assert.equal(capabilitiesFor(gpop).canEditCalendar, true, "their own schedule");
 });
@@ -45,7 +45,7 @@ test("an adult member can create their OWN helper — the client gate matched th
 test("the calm homes remain for people who genuinely have limited standing", () => {
   assert.equal(viewModeFor(sitter), "sitter");
   assert.equal(viewModeFor(grandparentGuest), "grandparent");
-  assert.equal(capabilitiesFor(sitter).canCreateAgents, false);
+  assert.equal(capabilitiesFor(sitter).canCreateHelpers, false);
 });
 
 test("A CHILD IS STILL A CHILD — relationship outranks an over-generous role", () => {

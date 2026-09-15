@@ -10,28 +10,14 @@ export function buildSearchIndex(data: AppData): SearchResult[] {
     out.push({
       id: a.id,
       title: a.name,
-      type: "Agent",
+      type: "Helper",
       summary: a.purpose,
-      tags: [a.status, ...a.safetyLimits.slice(0, 1)],
+      tags: [a.status],
       spaceId: a.spaceId,
       agentId: a.id,
       updatedAt: a.updatedAt,
-      route: { screen: "agents", params: { id: a.id } },
+      route: { screen: "helpers", params: { id: a.id } },
       icon: a.icon,
-    });
-  }
-  for (const a of data.automations) {
-    out.push({
-      id: a.id,
-      title: a.name,
-      type: "Automation",
-      summary: a.description,
-      tags: [a.triggerType, a.status],
-      spaceId: a.spaceId,
-      agentId: a.agentId,
-      updatedAt: a.updatedAt,
-      route: { screen: "automations", params: { id: a.id } },
-      icon: "Workflow",
     });
   }
   for (const t of data.threads) {
@@ -71,18 +57,6 @@ export function buildSearchIndex(data: AppData): SearchResult[] {
       updatedAt: k.updatedAt,
       route: { screen: "files", params: { tab: "knowledge", item: k.id } },
       icon: "BookOpen",
-    });
-  }
-  for (const p of data.playbooks) {
-    out.push({
-      id: p.id,
-      title: p.name,
-      type: "Playbook",
-      summary: p.description,
-      tags: [p.category],
-      updatedAt: p.updatedAt,
-      route: { screen: "playbooks", params: { id: p.id } },
-      icon: "ScrollText",
     });
   }
   for (const m of data.miniApps) {

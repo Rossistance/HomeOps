@@ -15,9 +15,14 @@ process.env.HOMEOPS_SECRET_KEY = "test-secret-key-test-secret-key-32";
 const { eventFingerprint } = await import("../calendar.mjs");
 const { approvalAudience, approvalPushTokens } = await import("../notify.mjs");
 const { putMember, addPushToken } = await import("../store.mjs");
-// The confidence judge is a pure function — exercise its fail-closed default directly
-// (no HTTP), with no AI provider configured in this isolated unit data dir.
-const { judgeEvolutionConfidence } = await import("../planner.mjs");
+/* THE AI JUDGE, RE-AIMED. This used to import planner.mjs's judgeEvolutionConfidence and
+ * assert `confident:false` with no provider — the gate that stopped an AI-written rewrite
+ * of a skill being auto-approved. Evolutions and skills are both gone, so that exact call
+ * no longer exists; the PROPERTY it protected does, in the one AI judge that survived.
+ * memory-capture's judge decides, unattended, whether something a family said is written
+ * down forever — so it has to fail closed the same way when there is no provider to ask. */
+const { captureMemoryFromExchange } = await import("../memory-capture.mjs");
+const { listMemory } = await import("../store.mjs");
 
 import { startServer, stopServer, makeSession, readStoreDoc, writeStoreDoc } from "./harness.mjs";
 
@@ -204,15 +209,19 @@ test("autoApproveImprovements defaults OFF for a fresh household, and persists e
   await morgan.req("/api/settings", { method: "POST", body: JSON.stringify({ autoApproveImprovements: false }) });
 });
 
-/* ---- Confidence judge: fail-closed with no AI provider (never auto-approve blindly) ---- */
-test("judgeEvolutionConfidence returns confident:false when no AI provider is configured", async () => {
-  const r = await judgeEvolutionConfidence({
-    trace: { status: "failed", steps: [{ title: "Send email", status: "failed", detail: "no account" }] },
-    proposal: { after: "Connect Gmail before attempting to send.", risk: "Low" },
-    session: { householdId: "local" },
+/* ---- The unattended AI judge: fail-closed with no AI provider (never act blindly) ---- */
+test("the memory judge writes nothing when no AI provider is configured", async () => {
+  // This runs in the isolated UNIT data dir at the top of the file, which has no AI
+  // provider — the same starting condition the evolution-confidence test used.
+  const before = listMemory({ householdId: "local", limit: 500 }).length;
+  const out = await captureMemoryFromExchange({
+    householdId: "local", actorId: "u-owner", visibility: "household",
+    message: "We always do taco night on Wednesdays, without fail.",
+    answer: "Noted — Wednesdays are taco night.",
   });
-  assert.equal(r.ok, false);
-  assert.equal(r.confident, false, "with no provider the judge must never approve");
+  assert.equal(out, null, "with no provider the judge must never decide on its own");
+  assert.equal(listMemory({ householdId: "local", limit: 500 }).length, before,
+    "and it must not have written anything while it couldn't ask");
 });
 
 /* ---- Avatar visibility: a real profile photo becomes household-readable ---- */

@@ -174,24 +174,69 @@ test("the verification link is a GET that renders a page, and a bad token says s
 
 /* ---- a new household is not an empty one ---- */
 
-test("a fresh household inherits the deployment's built-in skills", async () => {
-  // seedDefaults() only seeds the household it runs in, and it runs at boot with no tenant
-  // context — so every signed-up family had ZERO skills and the pre-built use cases the
-  // agent templates reference simply did not exist for them.
-  const r = await fresh.req("/api/skills");
-  assert.equal(r.status, 200, JSON.stringify(r.data));
-  const skills = r.data.skills ?? [];
-  assert.ok(skills.length > 0, "the built-in catalogue is present for a brand-new household");
-  assert.ok(skills.every((s) => s.householdId === fresh.householdId),
-    "and every copy is stamped with THIS household, not the template's");
+test("a fresh household can use the assistant and make a helper straight away", async () => {
+  /* This used to assert that a fresh household INHERITED the deployment's built-in skills:
+   * seedDefaults() only seeded the household it ran in, and it ran at boot with no tenant
+   * context, so every signed-up family had zero skills and the pre-built use cases the agent
+   * templates named simply did not exist for them.
+   *
+   * Nothing is copied now, because there is nothing to copy — the seven agent concepts became
+   * one Helper, and a family writes theirs in plain English instead of accepting a library of
+   * recipes written months before the tools they named. So the claim worth holding is the one
+   * the old test was really about: a household that signed up ten seconds ago is USABLE. */
+  const helpers = await fresh.req("/api/helpers");
+  assert.equal(helpers.status, 200, JSON.stringify(helpers.data));
+  assert.deepEqual(helpers.data.helpers ?? [], [],
+    "a new family starts with nothing it did not ask for — the household's own assistant identity is created lazily, at the one choke point that needs it");
+
+  // Starter templates are READABLE, and reading them installs nothing: a template is a draft
+  // of the instructions, not a recipe that arrives already running.
+  const templates = await fresh.req("/api/helper-templates");
+  assert.equal(templates.status, 200);
+  assert.ok((templates.data.sections ?? []).flatMap((s) => s.templates).length >= 5, "there are real starters to choose from");
+  assert.deepEqual((await fresh.req("/api/helpers")).data.helpers, [], "and none of them installed themselves");
+
+  // And the family can set one up immediately, without connecting anything first.
+  const made = await fresh.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Morning Briefing",
+      instructions: "Every morning, summarise today's calendar and anything due, in under 120 words.",
+      schedule: { kind: "daily", time: "07:00" },
+    }),
+  });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  assert.equal(made.data.helper.scheduleText, "Every day at 7:00 AM", "armed on their own clock, in their own household");
+
+  // The assistant answers for them too. No AI provider is configured in this harness, so an
+  // honest refusal is the pass — a 403/404 would mean the door itself was shut.
+  const asked = await fresh.req("/api/assistant", { method: "POST", body: JSON.stringify({ message: "What is on today?" }) });
+  assert.ok(![403, 404].includes(asked.status), `a brand-new household may ask: ${asked.status} ${JSON.stringify(asked.data)}`);
 });
 
-test("NEGATIVE: only system skills are copied — a family's own work never travels", async () => {
-  // The template is the resident household, so the filter matters: a household's authored
-  // skills must never be copied into a stranger's database.
-  const r = await fresh.req("/api/skills");
-  assert.ok((r.data.skills ?? []).every((s) => s.system === true),
-    "nothing but system skills crossed the tenant boundary");
+test("NEGATIVE: a family's own work never travels — nothing crossed the tenant boundary", async () => {
+  // The template WAS the resident household, so the filter mattered: a household's authored
+  // work must never be copied into a stranger's database. Nothing is copied at all now, which
+  // is the strongest form of that — asserted by naming the resident family's own helper and
+  // showing it is not in the new household's list.
+  const mine = await ctx.fetch("/api/session", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ actorId: "m-alex", actorName: "m-alex" }),
+  });
+  const residentCookie = (mine.headers.get("set-cookie") || "").split(";")[0];
+  const residentCsrf = (await mine.json()).session.csrf;
+  const made = await ctx.fetch("/api/helpers", {
+    method: "POST",
+    headers: { "content-type": "application/json", Cookie: residentCookie, "x-homeops-csrf": residentCsrf },
+    body: JSON.stringify({ name: "Resident-only helper", instructions: "Something the resident family wrote for itself alone." }),
+  });
+  assert.equal(made.status, 200);
+
+  const theirs = (await fresh.req("/api/helpers")).data.helpers ?? [];
+  assert.ok(!theirs.some((h) => h.name === "Resident-only helper"), "nothing the resident family authored crossed over");
+  assert.ok(theirs.some((h) => h.name === "Morning Briefing"), "their own work is still there…");
+  assert.ok(theirs.every((h) => h.id === "agt_household" || h.name === "Morning Briefing"),
+    "…and a signed-up household holds only what it made itself, plus the default assistant identity if one was needed");
 });
 
 test("Week 1 invariants still hold: keywords classify, backups are scoped", async () => {

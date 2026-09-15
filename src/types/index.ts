@@ -5,7 +5,7 @@
  * local-first shape. Collections are stored as arrays inside `AppData` and
  * persisted to IndexedDB. UI/session state lives in the store, not here.
  */
-import type { AgentPlan, ChatBuild, AssistantToolCall } from "@/connectors/api";
+import type { AgentPlan, AssistantToolCall } from "@/connectors/api";
 export type { AssistantToolCall };
 
 /* ----------------------------------------------------------------------- */
@@ -65,25 +65,6 @@ export type ActionType =
   | "Payment/Purchase";
 
 export type RiskLevel = "Low" | "Medium" | "High" | "Sensitive";
-
-export type TriggerType =
-  | "Schedule"
-  | "Webhook"
-  | "RSS Feed"
-  | "Email Received"
-  | "Email Label Applied"
-  | "Text Message Received"
-  | "Email Reply Received"
-  | "Calendar Event Created"
-  | "Calendar Event Changed"
-  | "Calendar Event Starting"
-  | "Calendar Event Ended"
-  | "File Changed"
-  | "Note Updated"
-  | "Shortcut/Siri Placeholder"
-  | "Location Placeholder"
-  | "Manual"
-  | "Agent-to-Agent";
 
 export type RunStatus =
   | "Queued"
@@ -294,7 +275,6 @@ export interface Agent {
   instructions: string;
   connectionIds: string[];
   allowedToolIds: string[];
-  playbookIds: string[];
   memoryIds: string[];
   knowledgeItemIds: string[];
   fileIds: string[];
@@ -348,72 +328,6 @@ export interface ConnectionScope {
   granted: boolean;
 }
 
-export interface WorkflowStep {
-  id: string;
-  order: number;
-  label: string;
-  detail: string;
-  tool?: string;
-  needsApproval?: boolean;
-  agentName?: string;
-}
-
-export interface WorkflowPlan {
-  trigger: string;
-  inputSources: string[];
-  agentId: string;
-  agentName: string;
-  steps: WorkflowStep[];
-  toolsActions: string[];
-  approvalGates: string[];
-  output: string;
-  notifications: string[];
-  errorHandling: string;
-  activityLogging: string;
-}
-
-export interface Automation {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-  templateId?: string;
-  agentId: string;
-  spaceId: string;
-  triggerType: TriggerType;
-  triggerConfig: {
-    schedule?: string;
-    frequency?: string;
-    filters?: string[];
-    sourceConnectionId?: string;
-  };
-  secondaryTriggers?: { type: TriggerType; detail: string }[];
-  enabled: boolean;
-  status: "active" | "paused" | "draft" | "error";
-  approvalRequired: boolean;
-  plan: WorkflowPlan;
-  lastRunAt?: string;
-  nextRunAt?: string;
-  failureCount: number;
-  runIds: string[];
-  createdAt: string;
-  updatedAt: string;
-  /** WP-101 s5 (ISS-102/103/110) — result of the server-side activation preflight.
-   *  Absent means "never validated" (pre-existing automations, or a validator that
-   *  hasn't run yet). "blocked_configuration" must never render or behave as Active. */
-  lifecycleState?: "ready" | "blocked_configuration";
-  /** Opaque version tag for the compiled manifest the validator checked against. */
-  compiledManifestVersion?: string;
-  /** Present when lifecycleState is "blocked_configuration" — one entry per unresolved
-   *  dependency, in plain language, with an optional screen to fix it on. */
-  blockedErrors?: { node: string; kind: string; message: string; repairSurface?: string }[];
-  /** WP-102 s1 (ISS-111) — deterministic idempotency key for template instantiation
-   *  (templateId + household + a semantic key, never a random uid). Used to detect a
-   *  repeat instantiation instead of blindly appending a duplicate. Absent on
-   *  automations not created from a template. */
-  idempotencyKey?: string;
-}
-
 export interface RunStep {
   label: string;
   status: "done" | "running" | "pending" | "blocked" | "skipped";
@@ -422,9 +336,10 @@ export interface RunStep {
   agentName?: string;
 }
 
-export interface AutomationRun {
+/** The local projection of ONE durable server run. The server owns runs; this is the
+ *  write-mirror a screen reads so an attached run renders without a round-trip. */
+export interface HelperRun {
   id: string;
-  automationId?: string;
   agentId: string;
   triggerLabel: string;
   status: RunStatus;
@@ -439,24 +354,8 @@ export interface AutomationRun {
   actionsTaken: string[];
   steps: RunStep[];
   approvalRequestIds: string[];
-  subagentRunIds: string[];
   error?: string;
   activityEntryIds: string[];
-}
-
-export interface SubagentRun {
-  id: string;
-  parentRunId: string;
-  name: string;
-  icon: string;
-  taskScope: string;
-  status: RunStatus;
-  inputSummary: string;
-  outputSummary: string;
-  resultMerged: boolean;
-  effortEstimate: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface Message {
@@ -505,7 +404,6 @@ export interface FileAsset {
   spaceId: string;
   uploadedAt: string;
   linkedAgentIds: string[];
-  linkedWorkflowIds: string[];
   summary: string;
   detectedDates: string[];
   detectedTasks: string[];
@@ -543,29 +441,6 @@ export interface KnowledgeItem {
   visibility?: string;
 }
 
-export interface PlaybookStep {
-  order: number;
-  text: string;
-}
-
-export interface Playbook {
-  id: string;
-  name: string;
-  description: string;
-  whenToUse: string;
-  steps: PlaybookStep[];
-  requiredConnections: string[];
-  requiredFileTypes: string[];
-  outputFormat: string;
-  approvalRules: string[];
-  supportingFileIds: string[];
-  linkedAgentIds: string[];
-  category: string;
-  archived?: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface MiniApp {
   id: string;
   name: string;
@@ -575,7 +450,6 @@ export interface MiniApp {
   createdByAgentId?: string;
   data: Record<string, unknown>;
   linkedEntityIds: string[];
-  linkedAutomationIds: string[];
   version: number;
   status: "active" | "archived";
   createdAt: string;
@@ -614,7 +488,6 @@ export interface Webhook {
   urlPlaceholder: string;
   secretPlaceholder: string;
   agentId: string;
-  automationId?: string;
   enabled: boolean;
   schemaDescription: string;
   samplePayload: Record<string, unknown>;
@@ -663,7 +536,7 @@ export interface ApprovalRequest {
 export interface ActivityLogEntry {
   id: string;
   timestamp: string;
-  actorType: "agent" | "user" | "automation" | "system" | "webhook";
+  actorType: "agent" | "user" | "system" | "webhook";
   actorId: string;
   actorName: string;
   actionType: string;
@@ -788,90 +661,6 @@ export interface SandboxRun {
 }
 
 /* ----------------------------------------------------------------------- */
-/* Catalog (static-ish) entities                                           */
-/* ----------------------------------------------------------------------- */
-
-export interface WorkflowTemplate {
-  id: string;
-  name: string;
-  category: string;
-  prompt: string;
-  recommendedAgent: string;
-  recommendedAgentTemplateId?: string;
-  requiredConnections: string[];
-  optionalConnections: string[];
-  triggerType: TriggerType;
-  approvalRequirements: string[];
-  fileProcessingNeeds: string[];
-  browserNeeds: string;
-  outputFormat: string[];
-  exampleOutput: string[];
-  activityLogEvents: string[];
-  failureStates: string[];
-  setupChecklist: string[];
-  multiAgent?: { name: string; icon: string; role: string }[];
-}
-
-export interface AgentTemplate {
-  id: string;
-  name: string;
-  icon: string;
-  category: string;
-  purpose: string;
-  description: string;
-  defaultSpaceType: SpaceType;
-  suggestedTriggers: string[];
-  suggestedConnections: string[];
-  suggestedPlaybooks: string[];
-  sampleOutputs: string[];
-  defaultApprovalRules: string[];
-  defaultInstructions: string;
-  defaultAutoAllow: string[];
-}
-
-/**
- * WP-005 — a packaged Helper Agent template.
- *
- * The unified surface treats an agent as ONE package: instructions + suggested
- * skills + a trigger/schedule + tools + approval gates. This is the merged shape
- * of the three legacy catalogs (agentTemplates + workflowTemplates + playbooks),
- * built in src/data/packagedTemplates.ts. Additive — the legacy AgentTemplate /
- * WorkflowTemplate types are unchanged and still power the flag-off flows.
- */
-export interface PackagedTemplate {
-  id: string;
-  name: string;
-  icon: string;
-  category: string;
-  /** One-line purpose shown on the catalog card. */
-  summary: string;
-  description: string;
-  /** Agent instructions the package seeds. */
-  instructions: string;
-  defaultSpaceType: SpaceType;
-  /** Primary trigger/schedule the package suggests. */
-  trigger: { type: TriggerType; detail: string };
-  /** Bundled skills/playbooks/workflows, by display name. */
-  suggestedSkills: string[];
-  /** Connectors / tools the package wants attached. */
-  suggestedConnections: string[];
-  approvalRules: string[];
-  autoAllow: string[];
-  /**
-   * When set, "New agent" builds from this legacy AgentTemplate id (full-fidelity
-   * path). Absent for packages distilled purely from a workflow template — those
-   * are built directly from the fields above.
-   */
-  agentTemplateId?: string;
-  /** Provenance — which legacy catalog entries this package folds in (dedupe map). */
-  sources: {
-    agentTemplateIds: string[];
-    workflowTemplateIds: string[];
-    playbookIds: string[];
-  };
-}
-
-/* ----------------------------------------------------------------------- */
 /* Settings & meta                                                         */
 /* ----------------------------------------------------------------------- */
 
@@ -913,7 +702,7 @@ export interface AppSettings {
 // which the web client used to discard — so a live web lookup read "Generating…" through the
 // slowest part of the request. Mobile has shown these for a while; these two members are what
 // let the web say the same true thing.
-export type AssistantMessageStatus = "thinking" | "streaming" | "searching" | "creating" | "answered" | "planned" | "running" | "done" | "error" | "built";
+export type AssistantMessageStatus = "thinking" | "streaming" | "searching" | "creating" | "answered" | "planned" | "running" | "done" | "error";
 
 export interface AssistantMessage {
   id: string;
@@ -922,13 +711,7 @@ export interface AssistantMessage {
   createdAt: string;
   /** Present when the assistant proposed an executable plan. */
   plan?: AgentPlan;
-  /** Present when the assistant proposed durable entities to build (unified chat-builder). */
-  build?: ChatBuild;
-  /** IDs created when a build proposal was approved (so the card can show "built"). */
-  builtIds?: { skillId?: string; agentId?: string; triggerId?: string };
-  /** Live per-entity progress while a build is materializing (entity keys done so far). */
-  buildProgress?: string[];
-  /** Set once the plan has been dispatched — links to an AutomationRun in `runs`. */
+  /** Set once the plan has been dispatched — links to a HelperRun in `runs`. */
   runId?: string;
   /** What the assistant did this turn (new engine) — rendered as a compact strip under the answer. */
   toolCalls?: AssistantToolCall[];
@@ -960,34 +743,6 @@ export interface AssistantConversation {
   messages: AssistantMessage[];
 }
 
-/* ----------------------------------------------------------------------- */
-/* Evolution — evidence-backed skill/agent improvement proposals from runs  */
-/* ----------------------------------------------------------------------- */
-
-export interface EvolutionProposal {
-  id: string;
-  kind: "skill" | "agent" | "tool" | "function";
-  agentId?: string;
-  agentName?: string;
-  skillId?: string;
-  skillName?: string;
-  functionId?: string;
-  toolId?: string;
-  runId: string;
-  title: string;
-  reason: string;   // evidence: what in the run trace prompted this
-  summary: string;  // the proposed improvement, in plain language
-  before?: string;  // current instructions (when kind === "agent" | "skill")
-  after?: string;   // proposed instructions / tool-usage tip
-  risk: "Low" | "Medium" | "High";
-  source: "trace" | "ai"; // deterministic trace analysis vs. LLM-enriched
-  status: "pending" | "accepted" | "rejected";
-  createdAt: string | number;
-  reviewedAt?: number;
-  reviewedBy?: string;
-  model?: string;
-}
-
 export interface AppData {
   schemaVersion: number;
   seededAt: string;
@@ -996,14 +751,11 @@ export interface AppData {
   contactMethods: ContactMethod[];
   spaces: Space[];
   agents: Agent[];
-  automations: Automation[];
-  runs: AutomationRun[];
-  subagentRuns: SubagentRun[];
+  runs: HelperRun[];
   threads: MessageThread[];
   messages: Message[];
   files: FileAsset[];
   knowledge: KnowledgeItem[];
-  playbooks: Playbook[];
   miniApps: MiniApp[];
   memories: MemoryEntry[];
   approvals: ApprovalRequest[];
@@ -1013,8 +765,6 @@ export interface AppData {
   settings: AppSettings;
   /** Assistant conversations (optional — defaults to [] for pre-existing stores). */
   conversations?: AssistantConversation[];
-  /** Evolution proposals from run traces (optional — defaults to []). */
-  evolutions?: EvolutionProposal[];
 }
 
 /* ----------------------------------------------------------------------- */
@@ -1024,10 +774,7 @@ export interface AppData {
 export type ScreenId =
   | "dashboard"
   | "assistant"
-  | "agents"
-  | "automations"
-  | "skills"
-  | "functions"
+  | "helpers"
   | "connections"
   | "messages"
   | "files"
@@ -1035,7 +782,6 @@ export type ScreenId =
   | "spaces"
   | "meals"
   | "calendar"
-  | "playbooks"
   | "activity"
   | "settings";
 

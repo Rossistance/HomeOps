@@ -18,10 +18,7 @@ export function CommandBar() {
   const setOpen = useStore((s) => s.setCommandOpen);
   const navigate = useStore((s) => s.navigate);
   const searchEverything = useStore((s) => s.searchEverything);
-  const createAgentFromPrompt = useStore((s) => s.createAgentFromPrompt);
   const createTask = useStore((s) => s.createTask);
-  const planFromPrompt = useStore((s) => s.planFromPrompt);
-  const createAutomation = useStore((s) => s.createAutomation);
 
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
@@ -54,9 +51,7 @@ export function CommandBar() {
 
   const quickActions: CommandItem[] = useMemo(
     () => [
-      { id: "qa-agent", label: "Create helper agent", icon: "Bot", kind: "Action", run: () => go("agents", { new: "1" }) },
-      { id: "qa-auto", label: "Create automation", icon: "Workflow", kind: "Action", run: () => go("automations", { tab: "builder" }) },
-      { id: "qa-template", label: "Start from a template", icon: "Sparkles", kind: "Action", run: () => go("automations", { tab: "templates" }) },
+      { id: "qa-helper", label: "New helper", icon: "Bot", kind: "Action", run: () => go("helpers", { new: "1" }) },
       { id: "qa-upload", label: "Upload document", icon: "Upload", kind: "Action", run: () => go("files", { new: "1" }) },
       { id: "qa-reminder", label: "Create reminder", icon: "BellPlus", kind: "Action", run: () => go("dashboard", { new: "reminder" }) },
       { id: "qa-member", label: "Add family member", icon: "UserPlus", kind: "Action", run: () => go("spaces", { tab: "members", new: "1" }) },
@@ -72,18 +67,15 @@ export function CommandBar() {
     const q = query.trim();
     const out: CommandItem[] = [];
     let m: RegExpMatchArray | null;
-    if ((m = q.match(/^create (?:an? )?agent(?:\s+(?:that|to))?[:\s]+(.+)/i))) {
+    if ((m = q.match(/^create (?:an? )?(?:agent|helper)(?:\s+(?:that|to))?[:\s]+(.+)/i))) {
       const rest = m[1];
       out.push({
-        id: "nl-agent",
-        label: `Create agent: “${rest}”`,
-        hint: "Generates a configured helper agent",
+        id: "nl-helper",
+        label: `New helper: “${rest}”`,
+        hint: "Opens the helper form so you read and edit what it gets told to do",
         icon: "Bot",
         kind: "Create",
-        run: () => {
-          const id = createAgentFromPrompt(rest);
-          go("agents", { id });
-        },
+        run: () => go("helpers", { new: "1" }),
       });
     }
     if ((m = q.match(/^(?:remind me|reminder|create reminder|add reminder)[:\s]+(.+)/i))) {
@@ -99,23 +91,8 @@ export function CommandBar() {
         },
       });
     }
-    if ((m = q.match(/^(?:new |create )?(?:workflow|automation)[:\s]+(.+)/i))) {
-      const rest = m[1];
-      out.push({
-        id: "nl-workflow",
-        label: `New workflow: “${rest}”`,
-        hint: "Builds a workflow plan from your description",
-        icon: "Workflow",
-        kind: "Create",
-        run: () => {
-          const { plan, agentId, approvalRequired } = planFromPrompt(rest);
-          const id = createAutomation({ name: rest.slice(0, 48), description: rest, agentId, plan, approvalRequired, status: "draft", enabled: false });
-          go("automations", { id });
-        },
-      });
-    }
     return out;
-  }, [query, createAgentFromPrompt, createTask, planFromPrompt, createAutomation]);
+  }, [query, createTask]);
 
   const results: CommandItem[] = useMemo(() => {
     if (!query.trim()) return [];
@@ -176,7 +153,7 @@ export function CommandBar() {
           {query.trim() && nlActions.length > 0 && <p className="px-2 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-ink-400">Create</p>}
           {visible.length === 0 && (
             <div className="px-3 py-8 text-center text-sm text-ink-400">
-              No matches. Try “create agent that…”, “remind me to…”, or a name.
+              No matches. Try “create helper that…”, “remind me to…”, or a name.
             </div>
           )}
           {query.trim() && results.length > 0 && nlActions.length > 0 && (

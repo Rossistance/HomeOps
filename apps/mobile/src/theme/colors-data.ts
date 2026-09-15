@@ -30,7 +30,7 @@ export interface HearthColors {
    * we're going to need to expand the colour palette across the app."
    *
    * Six accents could not carry fourteen categories, so everything collapsed to ember and the
-   * colour stopped meaning anything — every agent orange, every playbook orange, Bills and
+   * colour stopped meaning anything — every helper orange, every category orange, Bills and
    * Medical and Caregiving indistinguishable. Six more hues, chosen to stay legible against
    * both the porcelain and the near-black, and to stay apart from EACH OTHER at a 20pt icon
    * (adjacent hues are the failure mode here, not clashing ones).

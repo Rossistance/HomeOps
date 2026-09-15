@@ -22,8 +22,11 @@ import { ToolLoopAgent, tool, jsonSchema, isStepCount } from "ai";
 import { languageModelFor, fallbackProviderIds } from "./ai-model.mjs";
 import {
   toolCatalog, pruneCatalogForPrompt, buildServerContext, activeProviderId, INTERNAL_INPUTS,
-  normalizeBuild, attachmentSection, TRIGGERS, SPACE_TYPES,
-} from "./planner.mjs";
+  attachmentSection,
+} from "./context.mjs";
+/* helpers.mjs imports runAssistantAgent from here; both sides only reach across at CALL
+ * time, which is what makes the cycle safe. */
+import { createHelper, updateHelper, listHelpers, publicHelper, runHelper, AUTONOMY, SCHEDULE_KINDS } from "./helpers.mjs";
 import { executeToolForChat } from "./engine.mjs";
 import { orchestrate } from "./orchestrator.mjs";
 import {
@@ -430,28 +433,106 @@ function nativeTools(ctx) {
       return { ok: true, result: { deleted: true, title: tk.title } };
     }, { action: "Write" });
 
-  add("famili.propose_build", "Propose a durable helper or automation",
-    "ONLY for a durable or recurring capability the family asked for (\"every morning…\", \"create a helper that…\", \"from now on…\", \"automate…\"). Nothing is created by this call: it shows the family a card describing the skill, helper and/or schedule for them to confirm. Use tool ids from your tool list for skill steps (with the original dotted id, e.g. homeops.notify_contact). For a schedule at a time of day set automation.anchor to 24-hour HH:MM and type recurring with intervalMs 86400000. Prefer homeops.notify_contact over gmail.send for scheduled delivery. To change an EXISTING helper use edits with its id instead of creating a duplicate.",
-    { type: "object", properties: {
-      summary: { type: "string", description: "One sentence: what this will do." },
-      skill: { type: "object", description: "The steps a helper follows.", properties: { name: { type: "string" }, description: { type: "string" }, domain: { type: "string" }, planner_guidance: { type: "string" }, risk_level: { type: "string", enum: ["Low", "Medium", "High", "Sensitive"] }, steps: { type: "array", items: { type: "object", properties: { name: { type: "string" }, tool_id: { type: "string" }, approval_required: { type: "boolean" } }, required: ["name"] } } }, required: ["name", "steps"] },
-      agent: { type: "object", description: "A long-lived helper that owns the skill.", properties: { name: { type: "string" }, purpose: { type: "string" }, instructions: { type: "string" } }, required: ["name", "purpose", "instructions"] },
-      automation: { type: "object", description: "When it runs.", properties: { name: { type: "string" }, type: { type: "string", enum: ["recurring", "schedule", "webhook", "manual"] }, intervalMs: { type: "number" }, runAt: { type: "string", description: "ISO date-time for a one-time schedule." }, anchor: { type: "string", description: "24-hour HH:MM time of day for recurring runs." } }, required: ["name", "type"] },
-      edits: { type: "array", description: "Changes to EXISTING helpers/skills by id.", items: { type: "object", properties: { kind: { type: "string", enum: ["agent", "skill"] }, id: { type: "string" }, summary: { type: "string" }, patch: { type: "object" } }, required: ["kind", "id", "patch"] } },
-    }, required: ["summary"], additionalProperties: false },
-    async (input) => {
-      if (!roleAtLeast(session.role, "Adult Member")) return { ok: false, error: "insufficient_role", message: "Only an adult member can set up helpers or automations. Tell the person that, and offer to do the one-off thing now instead." };
-      const build = normalizeBuild(input ?? {});
-      const hasEdits = Array.isArray(build.edits) && build.edits.length > 0;
-      if (!build.skill && !build.agent && !build.automation && !hasEdits) return { ok: false, error: "empty_build", message: "Describe at least a skill, helper, automation, or an edit." };
-      if (session.role === "Adult Member") {
-        if (build.agent) build.agent.visibility = "personal";
-        delete build.automation;
-        build.edits = [];
-      }
-      ctx.proposedBuild = build;
-      return { ok: true, result: { proposed: true, message: "The proposal card is now shown to the family. Tell them what it will do and that nothing runs until they confirm." } };
-    }, { action: "Write" });
+  /* ------------------------------ helpers ------------------------------------
+   * The old design had ONE tool here — propose_build — which did not build anything.
+   * It returned a card describing a "skill" with steps, an "agent" to own it and an
+   * "automation" to fire it, and the family had to confirm three concepts they had
+   * never been taught in order to get a reminder. Worse, the card rendered whether or
+   * not anything was possible, so a request the app could not satisfy still came back
+   * looking like a plan.
+   *
+   * A helper is now made the same way anything else in this app is made: the tool
+   * creates it, and the assistant says what it created and when it will next run. */
+  const managesHelpers = roleAtLeast(session.role, "Adult Member") && !ctx.asHelper;
+
+  if (managesHelpers) {
+    const scheduleSchema = {
+      type: "object",
+      description: "When it runs. Leave it out for a helper the family runs by hand.",
+      properties: {
+        kind: { type: "string", enum: SCHEDULE_KINDS, description: "manual, hourly, daily or weekly." },
+        time: { type: "string", description: "Time of day on the household clock, 24-hour HH:MM. Needed for daily and weekly." },
+        weekday: { type: "number", description: "0 = Sunday … 6 = Saturday. Needed for weekly." },
+      },
+      required: ["kind"], additionalProperties: false,
+    };
+
+    add("famili.list_helpers", "List the family's helpers",
+      "List the helpers this household has, what each one does, when it runs and how it last went. Use it before creating one (so you extend an existing helper instead of making a near-duplicate) and to answer any question about what the helpers are doing.",
+      { type: "object", properties: {}, additionalProperties: false },
+      async () => ({ ok: true, result: { helpers: listHelpers(session).map((h) => {
+        const v = publicHelper(h, session);
+        return { id: v.id, name: v.name, purpose: v.purpose, instructions: short(v.instructions, 400), schedule: v.scheduleText, autonomy: v.autonomyText, enabled: v.enabled, lastRun: v.lastRun ? { at: new Date(v.lastRun.at).toISOString(), ok: v.lastRun.ok, summary: v.lastRun.summary } : null };
+      }) } }));
+
+    add("famili.create_helper", "Create a helper",
+      "Create a standing helper that does a job over and over — \"every morning…\", \"each week…\", \"from now on…\", \"remind us whenever…\". The instructions you write ARE the helper: write them as a clear paragraph addressed to the helper, saying what to look at, what to do, what to leave alone, and how to report back. It is created immediately, so tell the family its name, when it next runs and that they can edit or pause it in Helpers. Never use this for a one-off request — just do that now.",
+      { type: "object", properties: {
+        name: { type: "string", description: "Short, plain name the family will recognise, e.g. \"Morning Briefing\"." },
+        purpose: { type: "string", description: "One sentence: what it is for." },
+        instructions: { type: "string", description: "The helper's standing instructions, in plain English, written to the helper." },
+        schedule: scheduleSchema,
+        autonomy: { type: "string", enum: ["ask", "act"], description: "ask = it checks with the family before doing anything; act = it does everyday things itself and still asks before sending or spending. Default ask." },
+        visibility: { type: "string", enum: ["household", "personal"], description: "household = the whole family, personal = just this person. Default household." },
+      }, required: ["name", "instructions"], additionalProperties: false },
+      async (input) => {
+        const name = String(input?.name ?? "").trim();
+        const instructions = String(input?.instructions ?? "").trim();
+        if (!name) return { ok: false, error: "name_required", message: "Give the helper a name." };
+        if (instructions.length < 20) return { ok: false, error: "instructions_required", message: "Write the helper real instructions — a sentence or two saying what it should actually do." };
+        // An Adult Member gets a helper of their own; making one for the whole family is an
+        // Owner/Adult Admin act, and saying so beats silently creating a narrower thing.
+        const visibility = session.role === "Adult Member" ? "personal" : (input?.visibility === "personal" ? "personal" : "household");
+        const h = createHelper({
+          name, purpose: input?.purpose ?? "", instructions,
+          schedule: input?.schedule, visibility,
+          // "full" autonomy is never granted from a chat message: it is the one setting that
+          // lets a helper send and spend with nobody watching, and it belongs behind the
+          // household PIN in Helpers.
+          autonomy: input?.autonomy === "act" ? "act" : "ask",
+        }, session);
+        const v = publicHelper(h, session);
+        ctx.helperChanged = true;
+        return { ok: true, result: { created: true, helperId: v.id, name: v.name, schedule: v.scheduleText, autonomy: v.autonomyText, visibility: v.visibility, note: visibility === "personal" && session.role === "Adult Member" ? "Created as a personal helper — an Owner or Adult Admin can share it with the whole family." : undefined } };
+      }, { action: "Write" });
+
+    add("famili.update_helper", "Change a helper",
+      "Change an existing helper: its instructions, name, schedule, autonomy, or pause/resume it. Use famili__list_helpers first to get its id. To fix a helper that is doing the wrong thing, rewrite the WHOLE instructions paragraph rather than appending a correction to it.",
+      { type: "object", properties: {
+        helperId: { type: "string", description: "The helper's id (starts with agt_)." },
+        name: { type: "string" },
+        purpose: { type: "string" },
+        instructions: { type: "string", description: "The complete replacement instructions." },
+        schedule: scheduleSchema,
+        autonomy: { type: "string", enum: ["ask", "act"] },
+        enabled: { type: "boolean", description: "false pauses it." },
+      }, required: ["helperId"], additionalProperties: false },
+      async (input) => {
+        const h = listHelpers(session).find((x) => x.id === String(input?.helperId ?? ""));
+        if (!h) return { ok: false, error: "helper_not_found", message: "No such helper. List them first." };
+        if (session.role === "Adult Member" && h.visibility === "household") {
+          return { ok: false, error: "household_helper", message: "That helper belongs to the whole family, so an Owner or Adult Admin looks after it. Say so." };
+        }
+        const patch = { ...input };
+        delete patch.helperId;
+        if (patch.autonomy === "full") patch.autonomy = "act";
+        const next = updateHelper(h.id, patch, session);
+        const v = publicHelper(next, session);
+        ctx.helperChanged = true;
+        return { ok: true, result: { updated: true, helperId: v.id, name: v.name, schedule: v.scheduleText, autonomy: v.autonomyText, enabled: v.enabled } };
+      }, { action: "Write" });
+
+    add("famili.run_helper", "Run a helper now",
+      "Run one of the family's helpers immediately, instead of waiting for its schedule. Returns what it did. Use it when someone asks for a helper's output right now (\"give me the morning briefing\").",
+      { type: "object", properties: { helperId: { type: "string", description: "The helper's id (starts with agt_)." } }, required: ["helperId"], additionalProperties: false },
+      async (input) => {
+        const h = listHelpers(session).find((x) => x.id === String(input?.helperId ?? ""));
+        if (!h) return { ok: false, error: "helper_not_found", message: "No such helper. List them first." };
+        const out = await runHelper({ helperId: h.id, session, reason: "manual" });
+        if (!out.ok) return { ok: false, error: out.error, message: out.message };
+        return { ok: true, result: { ran: h.name, said: out.answer, did: (out.toolCalls ?? []).filter((c) => c.status === "done").length } };
+      }, { action: "Write" });
+  }
 
   return defs;
 }
@@ -565,7 +646,7 @@ async function queueApprovalRun({ toolId, input, title, session, conversationId,
  * changes is that the assistant now DOES things with tools and reports what actually
  * happened, instead of describing a plan.
  * ------------------------------------------------------------------------------------ */
-function instructionsFor({ now, timeZone, notConnected, hasBuildTool }) {
+function instructionsFor({ now, timeZone, notConnected, managesHelpers, helper }) {
   return `You are Famili, the warm, capable assistant inside FamiliOS — a family's shared operating system for schedules, tasks, meals, helpers and messages. You talk to one member of the household at a time. Be concise, concrete and kind; write for a phone screen in plain markdown (short paragraphs, real lists, no headings).
 
 Right now it is ${now} (household time zone: ${timeZone}). Resolve "today", "tomorrow", "Friday", "next week" against that, and write timestamps in ISO 8601 with the household's UTC offset.
@@ -584,12 +665,17 @@ HOW YOU WORK
 - Helpers (agents): to fix one, homeops__get_agent first, then homeops__update_agent with the COMPLETE rewritten instructions. It is approval-gated — say the change is waiting for sign-off. "Don't ask for permission any more" means homeops__update_agent with runUnattended true (and includeSendAndSpend if they said so); then repeat the tool's unattendedNote honestly.
 - Attachments: an ATTACHED section in the message is the real contents of a file just read on the server — answer from it. context.attachedAlsoNames lists files you have NOT read; say so. A schedule/invitation/permission slip in a file: use homeops__extract_from_file so the family picks what to add; don't add nine events yourself.
 - Roster changes (add/remove members) are done by people in Settings → Household; point there.
-${hasBuildTool ? `- Something that should happen on a schedule or from now on — "every morning", "each week", "create a helper that…", "automate…" — is a durable capability: call famili__propose_build with the full design and tell the family it is a proposal they confirm. For a one-off request, never propose a build.` : `- This profile can't set up helpers or automations; do the one-off version now and say an adult can automate it.`}
+${managesHelpers ? `- Something that should keep happening — "every morning", "each week", "from now on", "remind us whenever…" — is a HELPER. Call famili__list_helpers first (extend one that already covers it rather than making a near-duplicate), then famili__create_helper with instructions written as a clear paragraph addressed to the helper. It is created immediately: say what you made, when it next runs, and that they can edit or pause it in Helpers. A one-off request is never a helper — just do it.` : `- This profile can't set up helpers; do the one-off version now and say an adult can make it a standing helper.`}
 ${notConnected.length ? `\nNOT CONNECTED YET (their tools are unavailable until the family connects them in Connections; say so when one is needed): ${notConnected.slice(0, 12).join("; ")}.` : ""}
 
-Allowed automation trigger types: ${TRIGGERS.join(", ")}. Space types: ${SPACE_TYPES.join(", ")}.
+${helper ? `
+YOUR STANDING INSTRUCTIONS
+The family set you up as "${helper.name}" and wrote this. It is your job, in their words — follow it:
 
-When you are done, answer in a friendly, direct voice. Lead with the result. Keep it short.`;
+${String(helper.instructions ?? "").slice(0, 4000)}
+
+You are running on your own, so nobody is waiting to answer a question. Do the job against the household as it is right now, and write the short note the family will read afterwards: what you found, what you did, what still needs a person. If there was genuinely nothing to do, say that in one line rather than padding it. Never invent activity to look useful.` : `
+When you are done, answer in a friendly, direct voice. Lead with the result. Keep it short.`}`;
 }
 
 /* ------------------------------------------------------------------------------------ *
@@ -624,7 +710,7 @@ function householdNow(timeZone) {
  * Run one Ask Famili turn.
  * @returns {Promise<{ok:true, kind:"answer"|"build", answer:string, model:string, toolCalls:Array, runId?:string, runIds:string[], build?:object, degraded?:boolean, fellBackFrom?:string, steps:number} | {ok:false, error:string, message:string}>}
  */
-export async function runAssistantAgent({ message, context, session, providerId, history, agent = null, conversationId = null, visibility } = {}, { onToken, onPhase, onEvent } = {}) {
+export async function runAssistantAgent({ message, context, session, providerId, history, agent = null, conversationId = null, visibility, asHelper = false } = {}, { onToken, onPhase, onEvent } = {}) {
   const text = String(message ?? "").trim();
   if (!text) return { ok: false, error: "empty_message", message: "Type a message first." };
   if (!session?.householdId) return { ok: false, error: "authentication_required", message: "Sign in first." };
@@ -647,17 +733,21 @@ export async function runAssistantAgent({ message, context, session, providerId,
     if (!lm.ok) return { ok: false, error: lm.error, message: lm.message };
     const ctx = {
       session, agent, message: text, providerId: pid, conversationId, visibility,
-      toolCalls: [], runIds: [], firstRunId: null, proposedBuild: null,
+      toolCalls: [], runIds: [], firstRunId: null, helperChanged: false, asHelper,
       onToolStart: (entry) => {
         event({ type: "tool", tool: entry.id, label: entry.label, status: "running" });
         if (/^web\./.test(entry.id) || entry.id === "homeops.find_places") phase("searching");
-        else if (entry.action !== "Read" || entry.id === "famili.propose_build") phase("creating");
+        else if (entry.action !== "Read") phase("creating");
       },
     };
     const { tools, notConnected } = buildToolSet(ctx);
     const agentLoop = new ToolLoopAgent({
       model: lm.model,
-      instructions: instructionsFor({ now: householdNow(timeZone), timeZone, notConnected, hasBuildTool: roleAtLeast(session.role, "Adult Member") }),
+      instructions: instructionsFor({
+        now: householdNow(timeZone), timeZone, notConnected,
+        managesHelpers: roleAtLeast(session.role, "Adult Member") && !asHelper,
+        helper: asHelper ? agent : null,
+      }),
       tools,
       stopWhen: isStepCount(MAX_STEPS),
     });
@@ -701,13 +791,13 @@ export async function runAssistantAgent({ message, context, session, providerId,
     }
     return {
       ok: true,
-      kind: ctx.proposedBuild ? "build" : "answer",
+      kind: "answer",
       answer: answer.trim(),
-      ...(ctx.proposedBuild ? { build: ctx.proposedBuild } : {}),
       model: `${lm.providerId}/${lm.modelId}`,
       toolCalls: ctx.toolCalls,
       runIds: ctx.runIds,
       ...(ctx.firstRunId ? { runId: ctx.firstRunId } : {}),
+      ...(ctx.helperChanged ? { helperChanged: true } : {}),
       steps,
       ...(fellBackFrom ? { degraded: true, fellBackFrom } : {}),
       ...(streamError ? { providerWarning: short(errMessage, 200) } : {}),

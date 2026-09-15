@@ -3,7 +3,6 @@
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
 import { addMemory, addArtifact, putEvent, getEvent, patchEvent, deleteEventRec, putTask, listTasks, patchTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods, listAgents, getAgent, getMember } from "./store.mjs";
-import { partialUpdateAgent } from "./agents.mjs";
 import { mealEventNotes, pushEventToGoogle, deleteGoogleCopy } from "./calendar.mjs";
 import { householdTimeZone, localMidnightISO, wallClockISO } from "./household-time.mjs";
 import { searchPlaces } from "./places.mjs";
@@ -38,125 +37,6 @@ export const INTERNAL_FUNCTIONS = {
    * update is approval-gated — the family sees the before/after and signs off. Reading is
    * free.
    */
-  "homeops.list_agents": {
-    id: "homeops.list_agents",
-    name: "List helpers",
-    action: "Read",
-    risk: "Low",
-    requiresApproval: false,
-    delivers: false,
-    connectorId: "homeops",
-    connectorName: "FamiliOS",
-    async run(ctx) {
-      const rows = listAgents((a) => a.householdId === ctx.householdId || a.householdId === "local")
-        .map((a) => ({ id: a.id, name: a.name, purpose: a.purpose ?? "", status: a.status ?? "Active" }));
-      return { ok: true, result: { agents: rows, count: rows.length } };
-    },
-  },
-  "homeops.get_agent": {
-    id: "homeops.get_agent",
-    name: "Read a helper's setup",
-    action: "Read",
-    risk: "Low",
-    requiresApproval: false,
-    delivers: false,
-    connectorId: "homeops",
-    connectorName: "FamiliOS",
-    // The full instructions, so the model can reason about WHY a helper behaves as it does
-    // instead of guessing from its name.
-    async run(ctx, input) {
-      const id = String(input?.agentId ?? "").trim();
-      if (!id) return { ok: false, error: "agent_id_required", message: "Which helper? Pass its agentId (use list_agents first)." };
-      const a = getAgent(id);
-      if (!a || (a.householdId !== ctx.householdId && a.householdId !== "local")) {
-        return { ok: false, error: "unknown_agent", message: `There's no helper "${id}" in this household.` };
-      }
-      return { ok: true, result: {
-        id: a.id, name: a.name, purpose: a.purpose ?? "", instructions: a.instructions ?? "",
-        status: a.status ?? "Active", version: a.version ?? 1, system: a.system === true,
-        allowedToolIds: a.allowedToolIds ?? [], deniedToolIds: a.deniedToolIds ?? [],
-      } };
-    },
-  },
-  "homeops.update_agent": {
-    id: "homeops.update_agent",
-    name: "Change a helper's setup",
-    action: "Write",
-    risk: "Medium",
-    // Approval-gated: this rewrites what a helper will do on its own, later, unattended.
-    // The family should see that change before it takes effect — not discover it in a
-    // briefing next week.
-    requiresApproval: true,
-    delivers: false,
-    connectorId: "homeops",
-    connectorName: "FamiliOS",
-    async run(ctx, input) {
-      const id = String(input?.agentId ?? "").trim();
-      if (!id) return { ok: false, error: "agent_id_required", message: "Which helper? Pass its agentId." };
-      const a = getAgent(id);
-      if (!a || (a.householdId !== ctx.householdId && a.householdId !== "local")) {
-        return { ok: false, error: "unknown_agent", message: `There's no helper "${id}" in this household.` };
-      }
-      // Only these fields — a chat turn must not be able to widen a helper's permissions
-      // (allowedToolIds/deniedToolIds stay with the policy screens, where WP-105's
-      // effective-policy view can explain them).
-      const patch = {};
-      for (const f of ["name", "purpose", "instructions", "status"]) {
-        if (typeof input?.[f] === "string" && input[f].trim()) patch[f] = input[f].trim();
-      }
-      // G5 — [18:52], on a helper the family built by talking to it: "don't ask for
-      // permission, you have approval." That sentence is said IN CHAT, so this is where it
-      // has to be actionable. It is not a permission WIDENING (the helper's allow-lists are
-      // untouched); it removes the pause on the steps it can already run.
-      //
-      // The role is read from the store for the acting member — never from the model's input
-      // — so the high-risk tier is granted only when the person actually asking has the
-      // standing to grant it (agents.mjs sanitizeApprovalPolicy makes the same check again).
-      // And this tool is approval-gated, so the family sees the change before it takes hold.
-      let unattendedNote = null;
-      if (typeof input?.runUnattended === "boolean") {
-        const role = getMember(ctx.actorId)?.role ?? null;
-        patch.approvalPolicy = {
-          ...(a.approvalPolicy ?? { autoAllow: [], alwaysApprove: [] }),
-          unattended: input.runUnattended
-            ? { enabled: true, includeHighRisk: input.includeSendAndSpend === true }
-            : { enabled: false },
-        };
-        unattendedNote = !input.runUnattended
-          ? "It will ask before gated steps again."
-          : input.includeSendAndSpend === true && ["Owner", "Adult Admin"].includes(String(role))
-            ? "It will now run on its own, including steps that send or spend."
-            : input.includeSendAndSpend === true
-              ? "It will now run low-risk steps on its own. Sending and spending still needs an Owner to allow it, so those still pause."
-              : "It will now run low-risk steps on its own. Anything that sends or spends still pauses for you.";
-      }
-      if (Object.keys(patch).length === 0) {
-        return { ok: false, error: "nothing_to_change", message: "Say what to change — name, purpose, instructions, status, or whether it runs unattended." };
-      }
-      const before = { name: a.name, purpose: a.purpose ?? "", instructions: a.instructions ?? "", status: a.status ?? "Active" };
-      const next = partialUpdateAgent(id, patch, { actorId: ctx.actorId, householdId: ctx.householdId, role: getMember(ctx.actorId)?.role ?? null });
-      if (!next) return { ok: false, error: "update_failed", message: "Couldn't save that change." };
-      // before/after travels back so the chat can show what actually changed — and so a
-      // claim of having edited a helper is backed by a diff, not by assertion.
-      return { ok: true, result: {
-        id: next.id, name: next.name, version: next.version,
-        changed: Object.keys(patch), before, after: { ...before, ...patch },
-        // Read back what ACTUALLY applies, so a refused tier can't be reported as granted.
-        ...(unattendedNote ? { unattended: next.approvalPolicy?.unattended ?? { enabled: false }, unattendedNote } : {}),
-      } };
-    },
-  },
-  /* ---- Real places (K4) ------------------------------------------------------------
-   * Typed in full, and answered with prose and two links: "give me a list of the 5 best
-   * restaurants near me, sort them by highest to lowest and for each give me the results on
-   * whether it is often busy or not right now, estimated wait time" — plus distance and
-   * drive time. There was no place data behind the assistant at all; it could only guess or
-   * link out.
-   *
-   * The result rows are deliberately shaped so assistant-runs.mjs rowCard renders them as
-   * comparable cards with no extra mapping (K2). And `limitations` travels with them because
-   * two of the four things he asked for genuinely are not published by any mapping API — the
-   * honest answer is to name that, not to fill the gap with something plausible. */
   "homeops.find_places": {
     id: "homeops.find_places",
     name: "Find places nearby",

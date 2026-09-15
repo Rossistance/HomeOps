@@ -1,7 +1,7 @@
 // Contacts — the server-owned contact-method registry on mobile: each member's
 // delivery addresses (email/text/in-app/dashboard) with their real verified and
 // opt-in state. Everything here is enforced server-side: adults manage anyone's
-// methods, everyone else manages only their own, and agents can only message a
+// methods, everyone else manages only their own, and helpers can only message a
 // method that's verified and opted-in.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, TextInput, View } from "react-native";
@@ -127,7 +127,7 @@ export default function ContactsScreen() {
     setBusy(null);
     if (r.contactMethod) {
       setLabel(""); setValue(""); setComposerOpen(false);
-      setNotice({ text: r.contactMethod.verified ? "Contact method added." : "Contact method added — verify it before agents can message it.", ok: true });
+      setNotice({ text: r.contactMethod.verified ? "Contact method added." : "Contact method added — verify it before helpers can message it.", ok: true });
       await load();
     } else {
       setNotice({
@@ -166,7 +166,7 @@ export default function ContactsScreen() {
     setBusy(null);
     if (r.ok || r.alreadyVerified) {
       setCodeEntryId(null); setCode("");
-      setNotice({ text: `“${c.label}” verified — agents can now message it.`, ok: true });
+      setNotice({ text: `“${c.label}” verified — helpers can now message it.`, ok: true });
       await load();
     } else {
       setNotice({ text: r.message ?? (r.error === "code_incorrect" ? `That code doesn't match${r.attemptsLeft != null ? ` — ${r.attemptsLeft} attempts left` : ""}.` : `Couldn't verify: ${r.error ?? "unknown error"}`), ok: false });
@@ -243,7 +243,7 @@ export default function ContactsScreen() {
   };
 
   const confirmRemove = (c: ContactMethodRec) => {
-    Alert.alert(`Remove “${c.label}”?`, "Agents will no longer be able to message it.", [
+    Alert.alert(`Remove “${c.label}”?`, "Helpers will no longer be able to message it.", [
       { text: "Cancel", style: "cancel" },
       { text: "Remove", style: "destructive", onPress: () => void remove(c) },
     ]);
@@ -270,7 +270,7 @@ export default function ContactsScreen() {
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh} keyboardAware>
       <Rise index={0} style={{ gap: spacing.sm }}>
-        <T kind="sub">How the family gets reached. Agents can only message a method that's verified and opted-in.</T>
+        <T kind="sub">How the family gets reached. Helpers can only message a method that's verified and opted-in.</T>
         {!isAdult ? <T kind="caption" color={colors.textFaint}>You can manage your own methods; changing someone else's needs an adult.</T> : null}
         <Button
           title={composerOpen ? "Close" : "Add contact method"}
@@ -379,7 +379,7 @@ export default function ContactsScreen() {
                               <T kind="bodyMedium" color={colors.text}>{c.label}</T>
                               <T kind="sub" numberOfLines={1}>
                                 {c.value ? `${c.value} · ` : ""}{c.optInStatus === "Opted In" ? "Opted in" : c.optInStatus}
-                                {c.allowedAgentIds.length > 0 ? ` · ${c.allowedAgentIds.length} agent${c.allowedAgentIds.length === 1 ? "" : "s"} allowed` : ""}
+                                {c.allowedAgentIds.length > 0 ? ` · ${c.allowedAgentIds.length} helper${c.allowedAgentIds.length === 1 ? "" : "s"} allowed` : ""}
                               </T>
                             </View>
                             {statusBadge(c)}

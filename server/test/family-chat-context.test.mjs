@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 
 process.env.HOMEOPS_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "familios-famctx-"));
-const { buildServerContext } = await import("../planner.mjs");
+const { buildServerContext } = await import("../context.mjs");
 const { putConversation, putAgent, runWithTenant } = await import("../store.mjs");
 
 const HH = "local";
@@ -73,13 +73,16 @@ test("the household's data is all still visible to an Adult Member", async () =>
   }
 });
 
+/* One list, not three: the model used to be handed existingAgents AND existingSkills AND
+ * existingAutomations. The privacy rule survives the collapse into `existingHelpers`
+ * unchanged, and matters MORE now — an Adult Member's helpers are personal by default. */
 test("PRIVACY: another member's PERSONAL helper is not named in your context", async () => {
   await T(async () => {
     putAgent({ id: "agt_rossonly", householdId: HH, name: "Ross's private helper", visibility: "personal", createdBy: "m-ross", status: "Active", createdAt: Date.now(), updatedAt: new Date().toISOString() });
     putAgent({ id: "agt_shared", householdId: HH, name: "Family briefing", visibility: "household", createdBy: "m-ross", status: "Active", createdAt: Date.now(), updatedAt: new Date().toISOString() });
   });
   const ctx = await T(() => buildServerContext(mel));
-  const names = (ctx.existingAgents ?? []).map((a) => a.name);
+  const names = (ctx.existingHelpers ?? []).map((a) => a.name);
   assert.ok(names.includes("Family briefing"), "shared helpers are everyone's business");
   assert.ok(!names.includes("Ross's private helper"),
     "a personal helper belongs to whoever made it — the assistant should not name it to anyone else");
@@ -88,5 +91,5 @@ test("PRIVACY: another member's PERSONAL helper is not named in your context", a
 test("…and your own personal helper IS in your context", async () => {
   await T(() => putAgent({ id: "agt_melonly", householdId: HH, name: "Melissa's helper", visibility: "personal", createdBy: "m-mel", status: "Active", createdAt: Date.now(), updatedAt: new Date().toISOString() }));
   const ctx = await T(() => buildServerContext(mel));
-  assert.ok((ctx.existingAgents ?? []).some((a) => a.name === "Melissa's helper"));
+  assert.ok((ctx.existingHelpers ?? []).some((a) => a.name === "Melissa's helper"));
 });

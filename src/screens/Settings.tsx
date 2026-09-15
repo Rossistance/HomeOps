@@ -6,7 +6,7 @@ import { PageHeader, Card, SectionTitle, Button, Toggle, Select, Badge, Modal, H
 import { Icon } from "@/components/Icon";
 import { AIProvidersPanel } from "@/screens/AIProviders";
 import { backend, type CatalogTool, type RiskOverride, type Autonomy, type BackendSettings } from "@/connectors/api";
-import { useCalmMode, useAdvancedMode, useUnifiedNav } from "@/lib/prefs";
+import { useCalmMode, useAdvancedMode } from "@/lib/prefs";
 
 export function Settings() {
   const data = useStore((s) => s.data);
@@ -33,13 +33,9 @@ export function Settings() {
   const me = data.members.find((m) => m.id === session?.actorId) ?? data.members.find((m) => m.isCurrentUser);
   const [calm, setCalm] = useCalmMode();
   const [advanced, setAdvanced] = useAdvancedMode();
-  const [unifiedNav, setUnifiedNav] = useUnifiedNav();
   const setOwnerPin = async () => { if (!pin) return; await backend.setSettings({ ownerPin: pin }); setPin(""); toast({ kind: "success", title: "Owner PIN set", message: "Elevated profiles now require this PIN to sign in." }); };
   // Calendar auto-sync (server-owned, Adult Admin): pre-authorized Google pushes + two-way sweep.
   const [calendarAutoSync, setCalendarAutoSync] = useState(false);
-  // Auto-approve low-risk improvements (server-owned, Adult Admin): the server applies
-  // low-risk evolution proposals without a human and labels each one. Default on.
-  const [autoApproveImprovements, setAutoApproveImprovements] = useState(true);
   const [hideProfilesPreAuth, setHideProfilesPreAuth] = useState(false);
   // Household timezone (server-owned, Adult Admin): anchors "every day at 7 AM" triggers
   // to a real wall-clock time. Unset silently falls back to the SERVER's clock — a
@@ -52,12 +48,12 @@ export function Settings() {
     const supportedValuesOf = (Intl as unknown as { supportedValuesOf?: (key: "timeZone") => string[] }).supportedValuesOf;
     try { return typeof supportedValuesOf === "function" ? supportedValuesOf("timeZone") : [browserTz]; } catch { return [browserTz]; }
   })();
-  useEffect(() => { void backend.getSettings().then((s) => { setCalendarAutoSync(s.calendarAutoSync === true); setAutoApproveImprovements(s.autoApproveImprovements !== false); setTimezoneState(s.timezone ?? null); setHideProfilesPreAuth(s.hideProfilesPreAuth === true); }); }, []);
+  useEffect(() => { void backend.getSettings().then((s) => { setCalendarAutoSync(s.calendarAutoSync === true); setTimezoneState(s.timezone ?? null); setHideProfilesPreAuth(s.hideProfilesPreAuth === true); }); }, []);
   const setTimezone = async (tz: string) => {
     setTimezoneState(tz);
     const s = await backend.setSettings({ timezone: tz });
     setTimezoneState(s.timezone ?? null);
-    toast({ kind: "success", title: "Timezone set", message: `Scheduled automations (like a 7 AM briefing) now anchor to ${tz}.` });
+    toast({ kind: "success", title: "Timezone set", message: `Scheduled helpers (like a 7 AM briefing) now anchor to ${tz}.` });
   };
   const toggleCalendarAutoSync = async (v: boolean) => {
     setCalendarAutoSync(v);
@@ -72,12 +68,6 @@ export function Settings() {
     const s = await backend.setSettings({ hideProfilesPreAuth: v });
     setHideProfilesPreAuth(s.hideProfilesPreAuth === true);
     toast({ kind: v ? "success" : "info", title: v ? "Sign-in screen hides your family" : "Sign-in screen shows profiles", message: v ? "Visitors on this device see no family names before signing in." : "The profile picker lists family members again." });
-  };
-  const toggleAutoApproveImprovements = async (v: boolean) => {
-    setAutoApproveImprovements(v);
-    const s = await backend.setSettings({ autoApproveImprovements: v });
-    setAutoApproveImprovements(s.autoApproveImprovements !== false);
-    toast({ kind: v ? "success" : "info", title: v ? "Auto-approving low-risk improvements" : "Auto-approve off", message: v ? "FamiliOS applies low-risk improvements automatically and labels each one." : "Every improvement now waits for your review." });
   };
 
   const onImport = async (file?: File | null) => {
@@ -131,10 +121,7 @@ export function Settings() {
           <Row label="Calendar auto-sync" desc="Pre-authorize Google Calendar: pushes skip per-event approvals, local edits mirror to Google instantly, and the server sweeps both directions automatically. Conflicts still ask a human.">
             <Toggle checked={calendarAutoSync} onChange={(v) => void toggleCalendarAutoSync(v)} ariaLabel="Calendar auto-sync" />
           </Row>
-          <Row label="Auto-approve low-risk improvements" desc="Let FamiliOS apply the low-risk improvements it learns from run traces automatically. Each auto-applied change is labelled and logged; higher-risk ideas still wait for your review.">
-            <Toggle checked={autoApproveImprovements} onChange={(v) => void toggleAutoApproveImprovements(v)} ariaLabel="Auto-approve low-risk improvements" />
-          </Row>
-          <Row label="Household timezone" desc={timezone ? "Scheduled automations (like a daily briefing) fire at this wall-clock time." : `Not set — scheduled automations currently anchor to the SERVER's clock, not your household's. This browser is in ${browserTz}.`}>
+          <Row label="Household timezone" desc={timezone ? "A helper that runs on a schedule — a 7 AM briefing, say — fires at this wall-clock time." : `Not set — scheduled helpers currently anchor to the SERVER's clock, not your household's. This browser is in ${browserTz}.`}>
             <Select value={timezone ?? ""} onChange={(e) => void setTimezone(e.target.value)} aria-label="Household timezone">
               <option value="" disabled>{timezone ? timezone : "Choose a timezone…"}</option>
               {!timezoneOptions.includes(browserTz) ? null : (
@@ -187,10 +174,7 @@ export function Settings() {
         {/* Advanced */}
         <Card className="card-pad">
           <SectionTitle icon="FlaskConical">Advanced</SectionTitle>
-          <Row label="Unified Helper Agents (preview)" desc="Make Helper Agents the one place to build, schedule, and run household helpers. Automations folds in as a scheduling view, and the low-level Skills, Functions, and Workflow builders move behind Advanced Mode. Your existing automations and screens are untouched — only where they live in the menu changes.">
-            <Toggle checked={unifiedNav} onChange={(v) => setUnifiedNav(v)} ariaLabel="Unified Helper Agents navigation" />
-          </Row>
-          <Row label="Advanced Mode" desc="Show the Skills and Functions builders — the low-level building blocks agents and automations run on. Most households never need to open these directly.">
+          <Row label="Advanced Mode" desc="Show the full activity log — every low-level thing your helpers and the runtime did, in the runtime’s own words. Most households never need it.">
             <Toggle checked={advanced} onChange={(v) => setAdvanced(v)} ariaLabel="Advanced Mode" />
           </Row>
         </Card>

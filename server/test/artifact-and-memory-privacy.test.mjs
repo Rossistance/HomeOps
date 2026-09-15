@@ -1,7 +1,3 @@
-// LEGACY ENGINE: this suite pins the previous single-shot assistant brain (JSON envelope
-// answer|lookup|plan|build). The default Ask Famili engine is now the AI SDK agent loop
-// (server/assistant-agent.mjs, server/test/assistant-agent.test.mjs); every server here is
-// spawned with HOMEOPS_ASSISTANT_ENGINE=legacy so the rollback path stays proven.
 // The two ways a private room leaked, and the writer that never wrote.
 //
 // BUG-05 — "There is no privacy with these artifacts… you can see artifacts that were
@@ -23,35 +19,18 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { startServer, stopServer, makeSession, writeStoreRecord, writeStoreDoc, readStoreDoc } from "./harness.mjs";
+import { useFakeModel } from "./fake-model.mjs";
 
-let ctx, owner, adult, provider, hh;
+let ctx, owner, adult, fake, hh;
 
 before(async () => {
-  ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy" } });
+  ctx = await startServer();
   owner = await makeSession(ctx, "m-alex");
   adult = await makeSession(ctx, "m-morgan");
   hh = owner.raw?.session?.householdId; // the seeded household's real id — never guess it
-  // One fake provider, two personalities: the judge call (its user turn starts "Member
-  // said:") gets a remember verdict; the chat call gets a plain answer.
-  provider = http.createServer((req, res) => {
-    let b = ""; req.on("data", (c) => (b += c));
-    req.on("end", () => {
-      const isJudge = b.includes("Member said:");
-      // The judge must not return one fixed sentence: the capture path dedupes identical
-      // text, so a constant reply would make the SECOND test's memory silently vanish.
-      const content = isJudge
-        ? JSON.stringify({ remember: true, type: "preference", text: b.includes("door code") ? "The door code routine is evenings only." : "Morgan prefers decaf after 3pm." })
-        : JSON.stringify({ kind: "answer", answer: "Noted." });
-      res.writeHead(200, { "content-type": "application/x-ndjson" });
-      res.end(JSON.stringify({ message: { content } }) + "\n");
-    });
-  });
-  await new Promise((r) => provider.listen(0, r));
-  const port = provider.address().port;
-  await adult.req("/api/ai/providers/ollama/config", { method: "POST", body: JSON.stringify({ baseUrl: `http://localhost:${port}`, model: "t" }) });
-  await adult.req("/api/ai/active", { method: "POST", body: JSON.stringify({ providerId: "ollama" }) });
+  fake = await useFakeModel(owner);
 });
-after(async () => { await stopServer(ctx); await new Promise((r) => provider.close(r)); });
+after(async () => { await stopServer(ctx); await new Promise((r) => fake.server.close(r)); });
 
 /** Seed an artifact + the run it came from + (optionally) tie the run to a conversation. */
 function seedArtifact(ctx, { id, title, conversationId }) {
@@ -98,6 +77,8 @@ test("…and an artifact whose run has vanished fails OPEN to household, not clo
 test("BUG-06: an ordinary personal-chat exchange now WRITES a memory", async () => {
   const conv = await adult.req("/api/conversations", { method: "POST", body: JSON.stringify({ title: "Coffee", visibility: "personal" }) });
   const convId = conv.data?.conversation?.id ?? conv.data?.id;
+  fake.state.script = [{ text: "Noted — decaf after 3pm." }];
+  fake.state.memoryJudge = { remember: true, type: "preference", text: "Morgan prefers decaf after 3pm." };
   const r = await adult.req("/api/assistant", {
     method: "POST",
     body: JSON.stringify({ message: "Remember that I only drink decaf after 3pm.", conversationId: convId }),
@@ -123,6 +104,8 @@ test("…and that personal memory is invisible to the household Owner — just m
 test("a family-chat exchange writes a household memory everyone can see", async () => {
   const conv = await adult.req("/api/conversations", { method: "POST", body: JSON.stringify({ title: "Family", visibility: "household" }) });
   const convId = conv.data?.conversation?.id ?? conv.data?.id;
+  fake.state.script = [{ text: "Got it — evenings only." }];
+  fake.state.memoryJudge = { remember: true, type: "fact", text: "The door code routine is evenings only." };
   await adult.req("/api/assistant", { method: "POST", body: JSON.stringify({ message: "For everyone: our door code routine changed to evenings only.", conversationId: convId }) });
   let mem = [];
   for (let i = 0; i < 20 && mem.length === 0; i++) {
@@ -135,6 +118,10 @@ test("a family-chat exchange writes a household memory everyone can see", async 
 test("the same fact is not memorised twice", async () => {
   const conv = await adult.req("/api/conversations", { method: "POST", body: JSON.stringify({ title: "Coffee again", visibility: "personal" }) });
   const convId = conv.data?.conversation?.id ?? conv.data?.id;
+  // The judge returns the SAME sentence as the first test: the capture path is what has
+  // to notice that, not the model.
+  fake.state.script = [{ text: "Still noted." }];
+  fake.state.memoryJudge = { remember: true, type: "preference", text: "Morgan prefers decaf after 3pm." };
   await adult.req("/api/assistant", { method: "POST", body: JSON.stringify({ message: "Reminder again, I only drink decaf after 3pm.", conversationId: convId }) });
   await new Promise((res) => setTimeout(res, 1200));
   const mem = (await adult.req("/api/memory")).data.memory.filter((m) => m.text.includes("decaf"));

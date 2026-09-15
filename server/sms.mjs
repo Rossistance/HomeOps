@@ -12,7 +12,7 @@ import {
   appendConversationMessage, getSecret, patchContactMethod, appendAudit,
   forEachTenant, runWithTenant,
 } from "./store.mjs";
-import { assistantRespond } from "./planner.mjs";
+import { runAssistantAgent } from "./assistant-agent.mjs";
 
 /* ---------------------------- carrier keyword handling ----------------------------
  * Every A2P 10DLC and toll-free campaign asserts that a recipient can text STOP to stop
@@ -299,12 +299,14 @@ async function respondInTenant({ from, body }) {
   const session = { actorId: member.actorId, actorName: member.displayName ?? member.actorId, role: member.role, householdId };
   const at = new Date().toISOString();
   appendConversationMessage(conv.id, { role: "user", text: String(body), channel: "sms", at });
-  const out = await assistantRespond({ message: String(body), session });
+  // A text gets the same engine the app does — it reads real data and does real work,
+  // rather than the old one-shot classifier that could only ever answer or describe a plan.
+  const out = await runAssistantAgent({ message: String(body), session, conversationId: conv.id, visibility: "personal" });
   const replyText = smsReplyText(out);
   appendConversationMessage(conv.id, out.ok
-    ? { role: "assistant", kind: out.kind, text: out.kind === "answer" ? (out.answer ?? "") : replyText, plan: out.plan ?? null, build: out.build ?? null, model: out.model ?? null, channel: "sms", at }
+    ? { role: "assistant", kind: "answer", text: out.answer ?? replyText, model: out.model ?? null, channel: "sms", at, ...(out.toolCalls?.length ? { toolCalls: out.toolCalls } : {}) }
     : { role: "assistant", kind: "error", text: replyText, error: out.error ?? "assistant_error", channel: "sms", at });
-  return { replyText, conversationId: conv.id, actorId: member.actorId, kind: out.ok ? out.kind : "error" };
+  return { replyText, conversationId: conv.id, actorId: member.actorId, kind: out.ok ? "answer" : "error" };
 }
 
 const escapeXml = (s) => String(s).replace(/[<>&'"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c]));

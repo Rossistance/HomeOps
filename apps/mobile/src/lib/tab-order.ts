@@ -6,7 +6,7 @@
 // device, but WHERE a swipe lands is pure logic and it is role-dependent, which is exactly the
 // kind of thing that looks right on the one account you happen to be testing with.
 //
-// The order is the order of the tabs THIS person has. A child with no Agents tab must swipe
+// The order is the order of the tabs THIS person has. A child with no Helpers tab must swipe
 // from Today to whatever is actually next to it — deriving from the same capabilities the tab
 // bar is built from is what stops a swipe landing on a screen the tab bar says you don't have.
 import type { Capabilities } from "@/lib/roles";

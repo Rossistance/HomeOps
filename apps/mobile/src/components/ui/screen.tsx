@@ -24,6 +24,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from "rea
 import { Keyboard, RefreshControl, ScrollView } from "react-native";
 import { useTheme } from "@/theme";
 import { useTutorial } from "@/lib/tutorial";
+import { useTabBarClearance } from "@/lib/tab-bar";
 
 export function HScreen({ children, refreshing, onRefresh, bottomPad = 40, scrollRef, keyboardAware = false }: {
   children: ReactNode;
@@ -40,6 +41,18 @@ export function HScreen({ children, refreshing, onRefresh, bottomPad = 40, scrol
   const { registerScroller } = useTutorial();
   const own = useRef<ScrollView | null>(null);
   const [kb, setKb] = useState(0);
+  /* THE LAST CARD, VISIBLE.
+   *
+   * Reported from TestFlight on Today: "Nothing on the calendar today" and the THIS WEEK
+   * heading were cut off behind the floating tab bar, with no amount of scrolling reaching
+   * them. The automatic inset above accounts for the home indicator; it does NOT account for
+   * the iOS 26 tab bar floating over it (see lib/tab-bar for why nothing here can be asked).
+   *
+   * Solved once, HERE, because HScreen is the first child of every route — so it's every
+   * screen at once rather than Today today and the next one after the next report. As
+   * padding, never an inset: see the note at the top of this file for what a second inset
+   * owner does to a scroll view. */
+  const tabBar = useTabBarClearance();
 
   // Let the walkthrough bring a target below the fold into view before pointing at it. HScreen
   // is the first child of every route, so registering here covers every screen at once.
@@ -64,7 +77,8 @@ export function HScreen({ children, refreshing, onRefresh, bottomPad = 40, scrol
       style={{ flex: 1, backgroundColor: colors.bg }}
       contentContainerStyle={{
         padding: spacing.lg,
-        paddingBottom: bottomPad + kb,
+        // The keyboard and the tab bar are never both in the way: the keyboard covers the bar.
+        paddingBottom: bottomPad + (kb > 0 ? kb : tabBar),
         gap: spacing.md,
       }}
       keyboardShouldPersistTaps="handled"

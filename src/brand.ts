@@ -11,9 +11,8 @@ export const brand = {
   oneLiner: "Your family operating system.",
   householdLabel: "Household",
   circleLabel: "Family Circle",
-  agentLabel: "Helper Agent",
-  agentLabelPlural: "Helper Agents",
-  playbookLabel: "Playbook",
+  agentLabel: "Helper",
+  agentLabelPlural: "Helpers",
   knowledgeLabel: "Knowledge Library",
 } as const;
 

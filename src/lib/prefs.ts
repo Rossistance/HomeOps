@@ -73,9 +73,9 @@ export function prefersReducedMotion(): boolean {
 }
 
 /**
- * Advanced Mode — reveals the low-level Skills/Functions builders. Hidden by default
- * so new households see just Ask FamiliOS, Agents, Automations, and Mini Apps; power
- * users who want to hand-edit the underlying building blocks opt in from Settings.
+ * Advanced Mode — reveals the raw audit trail and the low-level detail behind what a
+ * helper did. Off by default so the everyday surfaces stay calm; power users opt in
+ * from Settings.
  */
 const ADVANCED_STORAGE_KEY = "homeops:advanced-mode";
 
@@ -113,55 +113,4 @@ function subscribeAdvanced(cb: () => void): () => void {
 export function useAdvancedMode(): [boolean, (value: boolean) => void] {
   const value = useSyncExternalStore(subscribeAdvanced, getAdvancedMode, () => false);
   return [value, setAdvancedMode];
-}
-
-/**
- * WP-005 — Unified Helper Agents nav (redesign A), behind a persisted flag.
- *
- * DEFAULT OFF this wave: with the flag off the sidebar and New-Agent flow are
- * byte-for-byte the pre-WP-005 experience, so every existing spec stays green.
- * When ON, the product collapses one mental model into a single "Helper Agents"
- * surface: the top-level "Automations" entry folds away (its screens stay routable
- * and re-appear only under Advanced Mode), and the New-Agent flow offers the
- * merged packaged-template catalog instead of the 12-agent-template modal.
- *
- * Same tiny external-store pattern as Calm / Advanced above so it can be read
- * during first paint without a flash of the wrong nav.
- */
-const UNIFIED_NAV_STORAGE_KEY = "homeops:helper-agents-unified-nav";
-
-function readUnifiedNav(): boolean {
-  try {
-    return localStorage.getItem(UNIFIED_NAV_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-let unifiedNav = readUnifiedNav();
-const unifiedNavListeners = new Set<() => void>();
-
-export function getUnifiedNav(): boolean {
-  return unifiedNav;
-}
-
-export function setUnifiedNav(value: boolean): void {
-  unifiedNav = value;
-  try {
-    localStorage.setItem(UNIFIED_NAV_STORAGE_KEY, value ? "1" : "0");
-  } catch {
-    /* storage may be unavailable; state still holds for the session */
-  }
-  unifiedNavListeners.forEach((l) => l());
-}
-
-function subscribeUnifiedNav(cb: () => void): () => void {
-  unifiedNavListeners.add(cb);
-  return () => unifiedNavListeners.delete(cb);
-}
-
-/** React hook — re-renders when the unified Helper Agents nav flag changes. */
-export function useUnifiedNav(): [boolean, (value: boolean) => void] {
-  const value = useSyncExternalStore(subscribeUnifiedNav, getUnifiedNav, () => false);
-  return [value, setUnifiedNav];
 }

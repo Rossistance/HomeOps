@@ -1,7 +1,7 @@
-// WP-007 s4 — planner.mjs's buildServerContext() memory read path: profile()+search(goal)
+// WP-007 s4 — context.mjs's buildServerContext() memory read path: profile()+search(goal)
 // when the memory-provider is healthy, legacy flat listMemory() with an EXPLICIT
 // disclosure marker when it's degraded. Pure store-level test (no HTTP server) — same
-// isolation convention as planner-catalog-prune.test.mjs.
+// isolation convention the other store-level context tests use.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -12,7 +12,7 @@ const DATA_DIR = fs.mkdtempSync(join(os.tmpdir(), "homeops-planner-mem-"));
 process.env.HOMEOPS_DATA_DIR = DATA_DIR;
 process.env.HOMEOPS_SECRET_KEY = "test-secret-key-test-secret-key-32";
 
-const { buildServerContext } = await import("../planner.mjs");
+const { buildServerContext } = await import("../context.mjs");
 const store = await import("../store.mjs");
 const { memoryProvider } = await import("../memory-provider.mjs");
 

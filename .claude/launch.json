@@ -4,8 +4,20 @@
     {
       "name": "homeops",
       "runtimeExecutable": "C:\\Users\\rhixon\\AppData\\Roaming\\nvm\\v25.8.2\\node.exe",
-      "runtimeArgs": ["scripts/dev.mjs"],
+      "runtimeArgs": [
+        "scripts/dev.mjs"
+      ],
       "port": 5173,
+      "autoPort": false
+    },
+    {
+      "name": "mobile-web",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "cd apps\\mobile && set HOMEOPS_MOBILE_API_URL=http://localhost:8787&& npx expo start --web --port 8081"
+      ],
+      "port": 8081,
       "autoPort": false
     }
   ]

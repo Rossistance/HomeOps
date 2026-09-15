@@ -264,7 +264,7 @@ function FileDrawer({ file: f, onClose }: { file: FileAsset; onClose: () => void
           </div>
         </Block>
 
-        {agents.length > 0 && <Block label="Linked agents"><div className="flex flex-wrap gap-2">{agents.map((a) => <button key={a.id} onClick={() => navigate("agents", { id: a.id })} className="chip bg-surface-sunken text-ink-600 transition-colors hover:bg-surface-overlay"><Icon name={a.icon} size={12} /> {a.name}</button>)}</div></Block>}
+        {agents.length > 0 && <Block label="Linked agents"><div className="flex flex-wrap gap-2">{agents.map((a) => <button key={a.id} onClick={() => navigate("helpers", { id: a.id })} className="chip bg-surface-sunken text-ink-600 transition-colors hover:bg-surface-overlay"><Icon name={a.icon} size={12} /> {a.name}</button>)}</div></Block>}
 
         <Block label="Tags">
           <div className="flex flex-wrap items-center gap-1.5">

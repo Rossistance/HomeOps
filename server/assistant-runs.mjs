@@ -19,7 +19,6 @@ import {
 } from "./store.mjs";
 import { onRunFinished, onRunParked } from "./engine.mjs";
 import { orchestrate } from "./orchestrator.mjs";
-import { toolCatalog, normalizePlan } from "./planner.mjs";
 import { providerChatWithFallback } from "./ai.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
 import { findToolGlobal } from "./providers.mjs";
@@ -400,72 +399,6 @@ function traceFor(run) {
   };
 }
 
-async function repairFailedRun(run) {
-  const conversationId = run.sourceRef.conversationId;
-  if (aiBudgetExhausted(run.householdId)) {
-    appendToConversation(run, { kind: "status", text: "That run failed, and the household's daily AI budget is used up — I'll leave the failure details in Activity instead of retrying." });
-    return;
-  }
-  const member = getMember(run.actorId);
-  const session = { householdId: run.householdId, actorId: run.actorId, role: member?.role ?? "Adult Member" };
-  const providerId = getSettings(run.householdId).aiActiveProvider;
-  if (!providerId) return; // nothing to repair with — the honest failure message already landed
-  appendToConversation(run, {
-    kind: "status",
-    text: `Looks like that run failed — I've gathered details from the failed steps and I'm executing an improved plan now. I'll report back here when it's done.`,
-  });
-  const catalog = toolCatalog(session);
-  const compact = catalog.map((t) => ({ id: t.toolId, name: t.name, action: t.action, approval: t.requiresApproval, connected: t.connected, inputs: t.inputs.map((i) => i.key) }));
-  recordAiUsage(run.householdId, "run");
-  const out = await providerChatWithFallback(providerId, {
-    messages: [
-      { role: "system", content: REPAIR_SYS },
-      { role: "user", content: `Failed run trace (JSON): ${JSON.stringify(traceFor(run)).slice(0, 5000)}\n\nTool catalog (JSON): ${JSON.stringify(compact).slice(0, 6000)}` },
-    ],
-  }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
-  let parsed = null;
-  if (out.ok) { try { const t = String(out.text); const a = t.indexOf("{"); const b = t.lastIndexOf("}"); parsed = JSON.parse(t.slice(a, b + 1)); } catch { /* handled below */ } }
-  if (!parsed?.plan) {
-    appendToConversation(run, { kind: "status", text: `I couldn't work out a safe fix automatically (${out.error ?? "the repair pass returned nothing usable"}). The failure details are in Activity, and I've logged an improvement proposal.` });
-    return;
-  }
-  const plan = normalizePlan(parsed.plan, catalog, run.title);
-  appendAudit({ type: "run.auto_repair", fromRunId: run.id, diagnosis: String(parsed.diagnosis ?? "").slice(0, 300) });
-  // CARRY THE ORIGINAL RUN'S IDENTITY, GOAL AND ROOM.
-  //
-  // The repair used to start with a bare sourceRef, which had three consequences nobody
-  // asked for. Without an agentId the engine's whole agent-policy block (engine.mjs, gated
-  // on `run.sourceRef?.agentId`) was SKIPPED — so a repaired plan ran with no permission
-  // re-validation at all, and `homeops.notify_contact` hard-refused `no_acting_agent`,
-  // meaning the one thing the family wanted (the message actually going out) was precisely
-  // what a successful repair still could not do. Without the goal, the repaired run's
-  // step-level model calls fell back to a title. Without the visibility, a repair of a
-  // personal run announced its approvals to the whole household.
-  //
-  // Inheriting rather than re-deriving is deliberate: a repair is the SAME request, retried.
-  // It must not be able to acquire authority the original run did not have, and copying the
-  // original's agentId gives it exactly that and no more.
-  // Through the single orchestrate() entry, like every other run source. Calling startRun
-  // here skipped the visible-skip clamp (orchestrator.runAssistantPlan): a repaired plan
-  // with one step the helper isn't allowed hard-failed the WHOLE run (engine re-validation
-  // = finishFailed) instead of skipping that step — and recorded no routing decision.
-  const orchestrated = await orchestrate({
-    source: "assistant", via: "chat", plan, session, conversationId,
-    agentId: run.sourceRef?.agentId ?? undefined,
-    goal: run.goal ?? null, visibility: run.visibility,
-    sourceRef: { isRepair: true, repairedFrom: run.id, originalTitle: run.title, skillId: run.sourceRef?.skillId ?? null },
-  });
-  if (!orchestrated?.ok) {
-    appendToConversation(run, { kind: "status", text: `I couldn't start the corrected plan (${orchestrated?.message ?? orchestrated?.error ?? "unknown error"}). The failure details are in Activity.` });
-    return;
-  }
-  const repaired = orchestrated.run;
-  appendToConversation(run, {
-    kind: "status",
-    text: `Diagnosis: ${String(parsed.diagnosis ?? "adjusted the failing step").slice(0, 280)} — running the corrected plan now.`,
-    runId: repaired.id,
-  });
-}
 
 function offerToSaveAgent(run, { repaired } = {}) {
   const plan = { title: run.title, summary: run.summary, steps: run.steps };
@@ -556,7 +489,6 @@ export function registerAssistantRunHooks() {
     });
     // 2. Self-healing, once.
     if (run.status === "failed" && !run.sourceRef.isRepair) {
-      await repairFailedRun(run).catch((e) => appendAudit({ type: "run.auto_repair", ok: false, fromRunId: run.id, error: String(e?.message ?? e) }));
     } else if (run.status === "completed" && run.sourceRef.isRepair) {
       offerToSaveAgent(run, { repaired: true });
     } else if (run.status === "completed" && !run.sourceRef.isRepair && worthSavingAsHelper(run)) {

@@ -30,8 +30,7 @@ function lazyWithReload<T extends React.ComponentType<unknown>>(factory: () => P
 }
 const Dashboard = lazyWithReload(() => import("@/screens/Dashboard").then((m) => ({ default: m.Dashboard })));
 const Assistant = lazyWithReload(() => import("@/screens/Assistant").then((m) => ({ default: m.Assistant })));
-const Agents = lazyWithReload(() => import("@/screens/Agents").then((m) => ({ default: m.Agents })));
-const Automations = lazyWithReload(() => import("@/screens/Automations").then((m) => ({ default: m.Automations })));
+const Helpers = lazyWithReload(() => import("@/screens/Helpers").then((m) => ({ default: m.Helpers })));
 const Connections = lazyWithReload(() => import("@/screens/Connections").then((m) => ({ default: m.Connections })));
 const Messages = lazyWithReload(() => import("@/screens/Messages").then((m) => ({ default: m.Messages })));
 const FilesKnowledge = lazyWithReload(() => import("@/screens/FilesKnowledge").then((m) => ({ default: m.FilesKnowledge })));
@@ -41,16 +40,11 @@ const Meals = lazyWithReload(() => import("@/screens/Meals").then((m) => ({ defa
 const Calendar = lazyWithReload(() => import("@/screens/Calendar").then((m) => ({ default: m.Calendar })));
 const ActivityMemory = lazyWithReload(() => import("@/screens/ActivityMemory").then((m) => ({ default: m.ActivityMemory })));
 const Settings = lazyWithReload(() => import("@/screens/Settings").then((m) => ({ default: m.Settings })));
-const SkillBuilder = lazyWithReload(() => import("@/screens/SkillBuilder").then((m) => ({ default: m.SkillBuilder })));
-const FunctionBuilder = lazyWithReload(() => import("@/screens/FunctionBuilder").then((m) => ({ default: m.FunctionBuilder })));
 
 const SCREENS: Record<ScreenId, React.ComponentType> = {
   dashboard: Dashboard,
   assistant: Assistant,
-  agents: Agents,
-  automations: Automations,
-  skills: SkillBuilder,
-  functions: FunctionBuilder,
+  helpers: Helpers,
   connections: Connections,
   messages: Messages,
   files: FilesKnowledge,
@@ -58,9 +52,6 @@ const SCREENS: Record<ScreenId, React.ComponentType> = {
   spaces: HouseholdSpaces,
   meals: Meals,
   calendar: Calendar,
-  // Playbooks folded into Skills as a read-only "Recipes" tab — old deep links (search
-  // results, agent detail chips) that still navigate to "playbooks" land there.
-  playbooks: SkillBuilder,
   activity: ActivityMemory,
   settings: Settings,
 };

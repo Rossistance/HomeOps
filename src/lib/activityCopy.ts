@@ -24,10 +24,10 @@ export interface AuditLike {
   connectorId?: string;
   toolId?: string;
   runId?: string;
+  /** Helper audits still travel under `agentId` — the server kept the field name when
+   *  the seven concepts collapsed into one, and renaming it client-side would just
+   *  break the deep link for every row already written. */
   agentId?: string;
-  skillId?: string;
-  functionId?: string;
-  automationId?: string;
   triggerId?: string;
   approvalId?: string;
   eventId?: string;
@@ -74,18 +74,18 @@ function errorLine(error: string | undefined, label: string, connect: string): s
 
 /** What the first segment of an audit type refers to, in household words. */
 const SUBJECT: Record<string, string> = {
-  run: "a task", agent: "a helper", skill: "a skill", function: "a function",
-  automation: "an automation", trigger: "a scheduled automation", approval: "an approval",
+  run: "a task", helper: "a helper", agent: "a helper", trigger: "a schedule",
+  approval: "an approval",
   calendar: "the calendar", event: "a calendar event", task: "a to-do", meal: "a meal",
-  file: "a file", knowledge: "a knowledge note", memory: "a memory",
+  tasklist: "a list", file: "a file", knowledge: "a knowledge note", memory: "a memory",
   member: "a household member", contact_method: "a contact method", identity: "an account",
-  session: "a sign-in", household: "the household", backup: "a backup",
+  session: "a sign-in", household: "the household", backup: "a backup", admin: "an admin action",
   connector: "a connection", account: "a connected account", oauth: "a connection",
-  ai: "the AI settings", playbook: "a recipe", miniapp: "a mini app", invite: "an invite",
-  help: "a help request", evolution: "a suggested improvement", notify: "a notification",
+  ai: "the AI settings", miniapp: "a mini app", invite: "an invite", nest: "a nest",
+  help: "a help request", notify: "a notification", conversation: "a chat",
   push: "push notifications", job: "a background job", webhook: "an incoming webhook",
   sms: "a text message", billing: "billing", browser: "the browser helper",
-  engine: "the runtime", server: "the server", store: "stored data",
+  engine: "the runtime", server: "the server", store: "stored data", vault: "the secret vault",
   risk_override: "an approval rule", rate: "rate limiting", profiles: "profiles",
   assistant: "Ask FamiliOS", settings: "a household setting", tool: "a tool",
 };
@@ -101,6 +101,7 @@ const ACTION: Record<string, string> = {
   revoke: "was disconnected", health: "was checked", config: "was configured",
   decide: "was decided", review: "was reviewed", propose: "was suggested",
   restored: "was restored", failed: "didn't work", login: "happened",
+  default_seeded: "was set up for you",
   logout: "ended", generate: "was generated", draft: "was drafted",
   infer: "had its capabilities inferred", deprecate: "was retired", sync: "was synced",
   import: "was imported", subscribe: "was subscribed to", unsubscribe: "was unsubscribed",
@@ -143,10 +144,10 @@ export function plainLanguageAudit(a: AuditLike): string {
     case "run.preflight_refused": return "A task was refused before it started — something it needed wasn't set up.";
     case "run.approval_skipped_by_override": return "An approval step was skipped because an Owner cleared that gate for the household.";
     case "run.approval_skipped_by_agent_policy": return "An approval step was skipped because this helper is set to run it without asking.";
+    case "helper.run": return ok ? "A helper ran and reported what it did." : "A helper ran into a problem and couldn't finish.";
+    case "helper.default_seeded": return "A starter helper was set up for your household.";
     case "run.sweep_failed": return "A background tidy-up couldn't finish for one task — it will be retried.";
-    case "skill.test_refused": return "A skill test was refused because some steps have no capability behind them yet.";
     case "client.error": return "The app hit an error on someone's device and reported it here.";
-    case "evolution.auto_accept": return "FamiliOS applied a small self-improvement on its own.";
     case "notify.deliver": return ok ? "A notification was delivered." : "A notification could not be delivered.";
     case "notify.blocked_by_kill_switch": return "A message was held back because external actions are paused.";
     case "notify.delivered_inapp": return "A message was shown in the app.";
@@ -157,7 +158,7 @@ export function plainLanguageAudit(a: AuditLike): string {
     case "oauth.callback": return ok ? "A connection finished linking." : "A connection attempt didn't finish.";
     case "calendar.autopush": case "calendar.googledelete": case "calendar.auto_two_way": return "An event was synced with the calendar.";
     case "backup.created": return "A backup of the household's data was made.";
-    case "trigger.fire": return "A scheduled automation started.";
+    case "trigger.fire": return "A helper started on its schedule.";
     case "job.run": return "A background job ran.";
     default: break;
   }
@@ -180,16 +181,12 @@ export function plainLanguageAudit(a: AuditLike): string {
  */
 export function routeForAudit(a: AuditLike): Route | null {
   if (a.approvalId) return { screen: "messages", params: { tab: "approvals", approval: a.approvalId } };
-  if (a.agentId) return { screen: "agents", params: { id: a.agentId } };
-  if (a.skillId) return { screen: "skills", params: { id: a.skillId } };
-  if (a.automationId) return { screen: "automations", params: { id: a.automationId } };
-  if (a.triggerId) return { screen: "automations", params: { id: a.triggerId } };
+  if (a.agentId) return { screen: "helpers", params: { id: a.agentId } };
   if (a.connectorId) return { screen: "connections", params: { id: a.connectorId } };
   if (a.memoryId) return { screen: "activity", params: { tab: "memory" } };
   // Screen-granularity for entities whose screens take no id param (verified, not assumed).
   if (a.eventId || a.subscriptionId) return { screen: "calendar" };
   if (a.fileId) return { screen: "files" };
-  if (a.functionId) return { screen: "functions" };
   if (a.taskId) return { screen: "miniapps" };
   if (a.runId) return { screen: "activity" };
   return null;

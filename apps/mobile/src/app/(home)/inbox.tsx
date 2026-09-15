@@ -1,5 +1,5 @@
 // Unified Inbox — everything waiting on you in one place. A chip-style
-// segmented bar switches between Approvals (decisions the agents are blocked
+// segmented bar switches between Approvals (decisions the helpers are blocked
 // on), Updates (the durable delivery inbox), and Chats (assistant
 // conversations). Counts stay live across all three segments.
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -69,11 +69,12 @@ function expiryLabel(expiresAt: number, now: number): { text: string; urgent: bo
   return { text: `Expires in ${Math.floor(h / 24)}d`, urgent: false, expired: false };
 }
 
-// Last-message preview for a conversation row (plan/build turns may carry no text).
+// Last-message preview for a conversation row. An old thread's plan turn can carry no text
+// of its own, so its title stands in rather than leaving the row blank.
 function convoPreview(c: ConversationRec): string {
   const last = c.messages[c.messages.length - 1];
   if (!last) return "No messages yet";
-  const text = last.text || last.plan?.title || last.build?.summary || "";
+  const text = last.text || last.plan?.title || "";
   return text.replace(/\s+/g, " ").trim() || "No messages yet";
 }
 
@@ -173,7 +174,7 @@ export default function InboxScreen() {
     if (!r.ok) void load(); // restore server truth on failure
   }, [load]);
 
-  // Real delivery through the same channel router the agents use — no fake success.
+  // Real delivery through the same channel router the helpers use — no fake success.
   const sendTest = useCallback(async () => {
     setTesting(true);
     setTestResult(null);
@@ -261,7 +262,7 @@ export default function InboxScreen() {
           {decisionMsg ? <Rise index={1}><Notice text={decisionMsg.text} ok={decisionMsg.ok} /></Rise> : null}
           {pending.length === 0 ? (
             <Rise index={1}>
-              <EmptyState icon="checkmark.seal" title="Nothing waiting on you" hint="When an agent needs your sign-off, the request lands here. Server-enforced — nothing runs without it." />
+              <EmptyState icon="checkmark.seal" title="Nothing waiting on you" hint="When a helper needs your sign-off, the request lands here. Server-enforced — nothing runs without it." />
             </Rise>
           ) : (
             pending.map((a, i) => {
@@ -333,7 +334,7 @@ export default function InboxScreen() {
         <>
           {notices.length === 0 ? (
             <Rise index={1}>
-              <EmptyState icon="app.badge" title="No updates yet" hint="In-app deliveries from agents and approvals land here. Send a test below to see the real path work." />
+              <EmptyState icon="app.badge" title="No updates yet" hint="In-app deliveries from helpers and approvals land here. Send a test below to see the real path work." />
             </Rise>
           ) : (
             <Rise index={1}>
@@ -379,7 +380,7 @@ export default function InboxScreen() {
           <Rise index={2}>
             <SectionHeader title="Delivery check" />
             <Card>
-              <T kind="sub">Sends a real in-app notification through the same channel router agents use.</T>
+              <T kind="sub">Sends a real in-app notification through the same channel router helpers use.</T>
               <View style={{ marginTop: spacing.md, alignSelf: "flex-start" }}>
                 <Button title="Send test" small icon="paperplane" loading={testing} onPress={() => void sendTest()} />
               </View>

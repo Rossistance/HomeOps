@@ -1,717 +1,675 @@
-// Agent detail — what this helper is, what it actually uses, what it's allowed to do,
-// whether it will run without you, and how to change any of it.
+// One helper, one screen.
 //
-// The 2026-07-25 walkthrough spent [17:48]–[18:52] on this one screen:
-//   [17:48] "There's not really anything I can do here except run it, pause it, and blank
-//           space. I should be able to change the name of the agent, edit what it does."
-//   [18:06] "It says it runs the assigned use case skill. Well, what IS that skill?"
-//   [18:30] "I should see the connections, the skills, the current permissions… will it run
-//           unattended?"
-//   [18:47] "There should be an override to run all the time no matter what."
-//   [18:52] and for one built from chat: "don't ask for permission, you have approval."
+// "Overly complicated and cumbersome with what happens where, what gates approve what."
 //
-// Every answer here comes from the server's ONE effective-policy computation
-// (server/agents.mjs agentContext) — the same pass the engine enforces — so this screen can
-// state not just what the policy is but which rule decided it. Nothing on it is a label
-// standing in for a fact.
-import { useCallback, useMemo, useState } from "react";
-import { Alert, View } from "react-native";
-import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
-import { LinearGradient } from "expo-linear-gradient";
-import { api, type AgentContextRec, type AgentRec, type ApprovalRec, type NestRec, type RunRec, type TriggerRec } from "@/lib/api";
-import { useSession } from "@/lib/session";
-import { canManageHousehold } from "@/lib/roles";
-import { useTheme, statusColor, tapHaptic, type HearthColors } from "@/theme";
+// The old detail screen had eleven sections, because a helper's behaviour was spread across
+// seven records: an Agent that named it, a Skill that held its steps, Functions and tools it
+// was permitted, a Playbook it might follow, an Automation and a Trigger that decided when,
+// and an Evolution registry proposing changes to it. Every one of those had its own notion
+// of permission, and the screen's job was to reconcile them on the reader's behalf. It could
+// not, and neither could the reader.
+//
+// There is one record now, with four fields a person can change:
+//
+//   Name             what to call it
+//   What it does     the instructions — THIS IS THE HELPER. Everything else is scheduling.
+//   When it runs     manual / hourly / daily / weekly
+//   Permission       ask · act · full, in the server's own three sentences
+//
+// and three things a person can do to it: run it now, pause it, delete it. Below that, what
+// it has actually been saying and doing, as a thread.
+//
+// Two rules this screen keeps:
+//
+//   THE INSTRUCTIONS ARE NEVER HIDDEN. Not behind an edit sheet, not clamped to four lines,
+//   not summarised into bullet points by something that guessed. They are the tallest control
+//   on the screen and they are always editable, because they are the only thing that decides
+//   what this helper will do.
+//
+//   REFUSALS ARE QUOTED, NOT TRANSLATED. The server distinguishes "you're not an adult",
+//   "this isn't yours", "this belongs to the household", "the PIN is missing" and "the PIN is
+//   wrong", and writes a sentence for each. Three of those are things the reader can act on.
+//   Collapsing them into "you can't do that" is how a fixable refusal becomes a wall.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, ScrollView, TextInput, View } from "react-native";
+import { router, useLocalSearchParams } from "expo-router";
 import {
-  T, Card, Badge, Chip, ChipRow, Row, SectionHeader, SkeletonCards, ErrorState,
-  Rise, HScreen, PressableScale, Sym, ExpandCard, useConfirmFlash, PinPrompt,
+  api,
+  type AssistantToolCall, type ConversationMessage, type HelperAutonomy,
+  type HelperInput, type HelperRunRec, type HelperSchedule, type PublicHelper,
+} from "@/lib/api";
+import { useSession } from "@/lib/session";
+import { canManageOwn } from "@/lib/roles";
+import { useTheme, tapHaptic } from "@/theme";
+import {
+  T, Card, Well, Badge, Chip, ChipRow, SectionHeader, SkeletonCards, ErrorState, Notice,
+  Rise, HScreen, PressableScale, Sym, SymTile, Button, MarkdownText, PinPrompt, useConfirmFlash,
 } from "@/components/ui";
-import { AgentEditSheet, type AgentEdits } from "@/components/sheets/agent-edit-sheet";
-import { agentIcon, agentTint, humanSchedule } from "@/lib/agent-meta";
+import { ActionBar, ACTION_BAR_HEIGHT } from "@/components/ui/action-bar";
+import { helperLook, helperTint, describeSchedule, clockLabel, runClock, WEEKDAYS } from "@/lib/helper-meta";
 
-type RunX = RunRec & { sourceRef?: { agentId?: string | null } | null; createdAt?: string | number };
+/* The three sentences. They are the server's, word for word — the same strings it puts in
+ * `autonomyText` — so the choice you make here reads identically to the state you read back
+ * on the card. A paraphrase here would be a second, quieter policy. */
+const AUTONOMY: { key: HelperAutonomy; sentence: string; icon: string }[] = [
+  { key: "ask", sentence: "Asks before it does anything", icon: "hand.raised" },
+  { key: "act", sentence: "Does everyday things on its own, asks before sending or spending", icon: "bolt" },
+  { key: "full", sentence: "Does everything on its own, including sending and spending", icon: "bolt.fill" },
+];
 
-// WP-004: the shared statusColor() helper doesn't know "waiting_for_approval",
-// "waiting_for_connector"/"waiting_for_provider", or "expired" — they fall to its
-// neutral gray default, which reads as "nothing to see here" for a run that is
-// either parked waiting on the household or one that expired unattended (sent
-// nothing). Override just those cases; everything else still defers to the shared
-// helper so its palette stays the single source of truth.
-function runToneOverride(colors: HearthColors, status: string) {
-  if (status === "waiting_for_approval" || status === "waiting_for_connector" || status === "waiting_for_provider") {
-    return { fg: colors.amber, bg: colors.amberBg };
-  }
-  if (status === "expired") return { fg: colors.coral, bg: colors.coralBg };
-  return statusColor(colors, status);
+const HOURS = Array.from({ length: 24 }, (_, h) => h);
+const MINUTES = ["00", "15", "30", "45"];
+
+function splitTime(t: string): { h: number; m: string } {
+  const [hh, mm] = String(t ?? "").split(":");
+  const h = Number(hh);
+  return { h: Number.isFinite(h) && h >= 0 && h <= 23 ? h : 8, m: MINUTES.includes(mm) ? mm : "00" };
+}
+const joinTime = (h: number, m: string) => `${String(h).padStart(2, "0")}:${m}`;
+
+/** Parse a schedule that arrived as a route param, without trusting a word of it. */
+function parseSchedule(raw: string | undefined): HelperSchedule {
+  try {
+    const s = JSON.parse(String(raw ?? "")) as HelperSchedule;
+    if (s?.kind === "hourly" || s?.kind === "manual") return { kind: s.kind };
+    if (s?.kind === "daily" && typeof s.time === "string") return { kind: "daily", time: s.time };
+    if (s?.kind === "weekly" && typeof s.time === "string") return { kind: "weekly", time: s.time, weekday: Number(s.weekday) || 0 };
+  } catch { /* a malformed param is a manual helper, not a crash */ }
+  return { kind: "manual" };
 }
 
-function stepsFrom(instructions: string | undefined): string[] {
-  if (!instructions) return [];
-  const lines = instructions
-    .split(/\n+|(?<=[.!?])\s+(?=[A-Z])/)
-    .map((s) => s.replace(/^\s*[-*\d.)]+\s*/, "").trim())
-    .filter((s) => s.length > 8);
-  return lines.slice(0, 4);
-}
+const sameSchedule = (a: HelperSchedule, b: HelperSchedule) => JSON.stringify(a) === JSON.stringify(b);
 
-export default function AgentDetailScreen() {
-  const { colors, spacing } = useTheme();
+export default function HelperScreen() {
+  const { colors, spacing, radii, type } = useTheme();
   const { session } = useSession();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const params = useLocalSearchParams<{
+    id: string; name?: string; purpose?: string; instructions?: string; autonomy?: string; schedule?: string; icon?: string;
+  }>();
+  const id = params.id;
+  const isNew = id === "new";
   const { flash, show } = useConfirmFlash();
-  /* Two questions, not one (lib/roles): may they manage the HOUSEHOLD's helpers, or only
-   * their own? An Adult Member gets full control of a helper they made and none over one
-   * that runs for everyone — which is exactly what the server enforces. */
-  const isAdmin = canManageHousehold(session?.role);
+  const scroller = useRef<ScrollView>(null);
 
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!isNew);
   const [refreshing, setRefreshing] = useState(false);
-  const [agent, setAgent] = useState<AgentRec | null>(null);
-  // The nests this person is in — the third answer in the Space control below.
-  const [myNests, setMyNests] = useState<NestRec[]>([]);
-  const [ctx, setCtx] = useState<AgentContextRec | null>(null);
-  const [triggers, setTriggers] = useState<TriggerRec[]>([]);
-  const [runs, setRuns] = useState<RunX[]>([]);
-  const [pendingApproval, setPendingApproval] = useState<ApprovalRec | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [editing, setEditing] = useState(false);
+  const [helper, setHelper] = useState<PublicHelper | null>(null);
+  const [gone, setGone] = useState(false);
+  const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
+
+  /* ---- the form ---- */
+  const [name, setName] = useState(params.name ?? "");
+  const [purpose, setPurpose] = useState(params.purpose ?? "");
+  const [instructions, setInstructions] = useState(params.instructions ?? "");
+  const [schedule, setSchedule] = useState<HelperSchedule>(() => parseSchedule(params.schedule));
+  const [autonomy, setAutonomy] = useState<HelperAutonomy>(
+    params.autonomy === "act" || params.autonomy === "full" ? params.autonomy : "ask",
+  );
   const [saving, setSaving] = useState(false);
 
+  /* ---- running now ---- */
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string; toolCalls?: AssistantToolCall[] } | null>(null);
+
+  /* ---- the thread ---- */
+  const [history, setHistory] = useState<ConversationMessage[]>([]);
+  const [lastRun, setLastRun] = useState<HelperRunRec | null>(null);
+
+  const canWrite = canManageOwn(session?.role);
+
+  const seed = useCallback((h: PublicHelper) => {
+    setHelper(h);
+    setName(h.name);
+    setPurpose(h.purpose);
+    setInstructions(h.instructions);
+    setSchedule(h.schedule);
+    setAutonomy(h.autonomy);
+  }, []);
+
   const load = useCallback(async () => {
-    const [ags, tg, rn, aps, context, ns] = await Promise.all([
-      api.agents(), api.triggers(), api.runs(), api.approvals(),
-      id ? api.agentContext(id).catch(() => null) : Promise.resolve(null),
-      api.nests().catch(() => ({ nests: [] as NestRec[], invitations: [] as NestRec[] })),
-    ]);
-    const a = ags.find((x) => x.id === id) ?? null;
-    setAgent(a);
-    setMyNests(ns.nests);
-    setCtx(context);
-    setTriggers(tg.filter((t) => t.agentId === id));
-    const mine = (rn as RunX[]).filter((r) =>
-      r.sourceRef?.agentId === id || (a && r.title?.toLowerCase().includes(a.name.toLowerCase())));
-    setRuns(mine.slice(0, 5));
-    // Best-effort: surface a pending approval created by one of this agent's runs.
-    const waitingRunIds = new Set(mine.filter((r) => r.status === "waiting_for_approval").flatMap((r) => r.steps.map((s) => s.approvalId).filter(Boolean)));
-    setPendingApproval(aps.find((p) => p.status === "pending" && waitingRunIds.has(p.id)) ?? null);
+    if (isNew || !id) { setLoading(false); return; }
+    const [h, hist] = await Promise.all([api.helper(id), api.helperHistory(id)]);
+    if (!h) { setGone(true); setLoading(false); return; }
+    seed(h);
+    setHistory(hist.messages);
+    setLastRun(hist.lastRun ?? h.lastRun);
     setLoading(false);
-  }, [id]);
-  useFocusEffect(useCallback(() => { if (session) void load(); }, [session, load]));
+  }, [id, isNew, seed]);
+
+  // Once, on mount. Refetching on every focus would throw away half-typed instructions the
+  // moment a sheet closed over this screen — the editor is a document, not a dashboard.
+  useEffect(() => { if (session) void load(); }, [session, load]);
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
-  const ownsThis = !!agent && agent.createdBy === session?.actorId && (agent.visibility ?? "household") === "personal";
-  const moveAgent = async (next: Pick<AgentRec, "visibility" | "nestId">, prev: Pick<AgentRec, "visibility" | "nestId">) => {
-    if (!agent) return;
-    setAgent({ ...agent, ...next });
-    const r = await api.patchAgent(agent.id, next);
-    if (r.error) {
-      setAgent({ ...agent, ...prev });
-      Alert.alert("Couldn't move the agent", r.error === "insufficient_role" || r.error === "personal_only"
-        ? "Household agents are set up by an Owner or Adult Admin."
-        : "Something went wrong.");
-    }
-  };
-  const canManage = isAdmin || ownsThis;
+  const dirty = isNew
+    ? !!(name.trim() || instructions.trim())
+    : !!helper && (
+      name.trim() !== helper.name
+      || purpose !== helper.purpose
+      || instructions !== helper.instructions
+      || autonomy !== helper.autonomy
+      || !sameSchedule(schedule, helper.schedule)
+    );
+  const canSave = canWrite && dirty && !!name.trim() && !!instructions.trim() && !saving;
 
-  const steps = useMemo(() => stepsFrom(agent?.instructions), [agent]);
-
-  // G3 — the connections this helper reaches, named from the SERVER's catalog rather than
-  // guessed from a tool-id prefix, and split by whether they're actually usable today.
-  const connections = useMemo(() => {
-    const map = new Map<string, { name: string; available: boolean }>();
-    for (const t of ctx?.tools ?? []) {
-      if (!t.permitted || !t.connectorName || t.connectorName === "FamiliOS") continue;
-      const prev = map.get(t.connectorName);
-      map.set(t.connectorName, { name: t.connectorName, available: (prev?.available ?? false) || t.available });
-    }
-    return [...map.values()];
-  }, [ctx]);
-
-  async function runNow() {
-    if (!agent || busy) return;
-    setBusy(true);
-    const r = await api.runAgent(agent.id);
-    setBusy(false);
-    if (r.error) {
-      Alert.alert("Couldn't run the agent", r.message ?? (r.error === "insufficient_role" ? "Only an Owner or Adult Admin can run agents." : "Something went wrong."));
-      return;
-    }
-    show("run", () => void load());
-  }
-
-  async function togglePause() {
-    if (!agent || busy) return;
-    const next = agent.status === "Active" ? "Paused" : "Active";
-    setAgent({ ...agent, status: next });
-    const r = await api.patchAgent(agent.id, { status: next });
-    if (!r.agent) {
-      setAgent(agent);
-      Alert.alert("Couldn't change status", r.error === "insufficient_role" ? "Only an Owner or Adult Admin can do that." : "Something went wrong.");
-    }
-  }
-
-  /* ---- G1: rename + edit what it does ---- */
-  const saveEdits = useCallback(async (edits: AgentEdits) => {
-    if (!agent) return;
-    setSaving(true);
-    const r = await api.patchAgent(agent.id, { ...edits });
-    setSaving(false);
-    if (!r.agent) {
-      Alert.alert("Couldn't save", r.error === "insufficient_role" ? "Only an Owner or Adult Admin can edit a helper." : "Something went wrong.");
-      return;
-    }
-    setAgent(r.agent);
-    setEditing(false);
-    show("agent", () => void load());
-  }, [agent, load, show]);
-
-  /* ---- G4: run unattended, in two honest tiers ---- */
-  const setUnattended = useCallback(async (enabled: boolean, includeHighRisk: boolean, pin?: string) => {
-    if (!agent) return { ok: false as const, error: "no_agent" };
-    const r = await api.patchAgent(agent.id, {
-      approvalPolicy: {
-        autoAllow: agent.approvalPolicy?.autoAllow ?? [],
-        alwaysApprove: agent.approvalPolicy?.alwaysApprove ?? [],
-        unattended: enabled ? { enabled: true, includeHighRisk } : { enabled: false },
-      },
-      ...(pin ? { pin } : {}),
-    });
-    if (!r.agent) {
-      // A missing/incorrect PIN is a different problem from "you can't do this", and the
-      // caller decides how to surface it — the PIN sheet shows it inline rather than in an
-      // Alert that would dismiss the sheet the person is still typing into.
-      return { ok: false as const, error: r.error ?? "unknown", message: (r as { message?: string }).message };
-    }
-    tapHaptic("success");
-    await load();          // re-read the policy: the tier that APPLIES may not be the one asked for
-    return { ok: true as const };
-  }, [agent, load]);
-
-  /* THE PIN, for the raise only.
+  /* ---- saving, and the one gate that is real ---------------------------------------
    *
-   * Granting send-and-spend used to be a destructive Alert button and nothing more — the
-   * single most powerful autonomy switch in the product, behind one tap, while re-classing
-   * one tool demanded the household PIN. The server now requires the PIN here too; this is
-   * the surface that collects it, reusing the same PinPrompt the risk-override list uses so
-   * the two dangerous switches feel like the same act.
-   *
-   * Turning it back OFF stays a straight-through tap: making someone prove themselves in
-   * order to become MORE careful is how you teach them to leave it on. */
+   * `autonomy: "full"` is the send-and-spend grant, and the server asks for the household
+   * PIN before it will take it. The PIN sheet only appears when the server asks: guessing
+   * ahead of it would mean demanding a PIN in households that haven't set one, which teaches
+   * people that PIN boxes are a formality. */
   const [pinOpen, setPinOpen] = useState(false);
   const [pinBusy, setPinBusy] = useState(false);
   const [pinErr, setPinErr] = useState<string | null>(null);
 
-  const confirmHighRisk = useCallback(() => { setPinErr(null); setPinOpen(true); }, []);
-  const submitHighRisk = useCallback(async (pin: string) => {
-    setPinBusy(true); setPinErr(null);
-    const r = await setUnattended(true, true, pin);
-    setPinBusy(false);
-    if (!r.ok) {
-      setPinErr(r.error === "insufficient_role"
-        ? "Only an Owner or Adult Admin can allow this."
-        : (r.message ?? "Couldn't save that."));
+  const body = useCallback((pin?: string): HelperInput & { instructions: string } => ({
+    name: name.trim(),
+    purpose: purpose.trim(),
+    instructions,
+    schedule,
+    autonomy,
+    ...(pin ? { pin } : {}),
+  }), [autonomy, instructions, name, purpose, schedule]);
+
+  const commit = useCallback(async (pin?: string) => {
+    const payload = body(pin);
+    return isNew ? api.createHelper(payload) : api.patchHelper(id, payload);
+  }, [body, id, isNew]);
+
+  const save = useCallback(async () => {
+    if (!canSave) return;
+    setSaving(true); setNotice(null);
+    const r = await commit();
+    setSaving(false);
+    if (r.helper) {
+      seed(r.helper);
+      tapHaptic("success");
+      if (isNew) {
+        // Replace, so Back from the saved helper goes to the list rather than to the blank
+        // form you just filled in.
+        show("helper", () => router.replace(`/(agents)/${r.helper!.id}`));
+        return;
+      }
+      show("helper");
+      setNotice({ ok: true, text: "Saved." });
       return;
     }
-    setPinOpen(false);
-  }, [setUnattended]);
+    if (r.error === "pin_required" || r.error === "pin_invalid") {
+      setPinErr(r.error === "pin_invalid" ? (r.message ?? "That PIN didn't match.") : null);
+      setPinOpen(true);
+      return;
+    }
+    setNotice({ ok: false, text: r.message ?? "Couldn't save that." });
+  }, [canSave, commit, isNew, seed, show]);
+
+  const submitPin = useCallback(async (pin: string) => {
+    setPinBusy(true); setPinErr(null);
+    const r = await commit(pin);
+    setPinBusy(false);
+    if (r.helper) {
+      setPinOpen(false);
+      seed(r.helper);
+      tapHaptic("success");
+      if (isNew) { show("helper", () => router.replace(`/(agents)/${r.helper!.id}`)); return; }
+      show("helper");
+      setNotice({ ok: true, text: "Saved." });
+      return;
+    }
+    // Stays open on a bad PIN: dismissing the sheet someone is typing into, to tell them
+    // what they typed was wrong, is the worst possible place to put that sentence.
+    setPinErr(r.message ?? "Couldn't save that.");
+  }, [commit, isNew, seed, show]);
+
+  /* ---- run now ----------------------------------------------------------------------
+   *
+   * This is a foreground request that regularly takes half a minute: the helper is thinking,
+   * calling tools and possibly waiting on an approval. A spinner on the button is not enough
+   * information for thirty seconds of silence, so the card below says what is happening and
+   * stays put until there is a real answer to replace it with. */
+  const runNow = useCallback(async () => {
+    if (!helper || running) return;
+    setRunning(true); setResult(null); setNotice(null);
+    const r = await api.runHelper(helper.id);
+    setRunning(false);
+    if (r.ok) {
+      tapHaptic("success");
+      setResult({ ok: true, text: r.answer?.trim() || "Done — nothing needed doing.", toolCalls: r.toolCalls });
+      setLastRun(r.lastRun ?? null);
+      // The turn is now in the thread server-side; pull it so the history below agrees.
+      const [fresh, hist] = await Promise.all([api.helper(helper.id), api.helperHistory(helper.id)]);
+      if (fresh) setHelper(fresh);
+      setHistory(hist.messages);
+      return;
+    }
+    tapHaptic("error");
+    setResult({ ok: false, text: r.message ?? "It couldn't finish this time.", toolCalls: r.toolCalls });
+    if (r.lastRun) setLastRun(r.lastRun);
+  }, [helper, running]);
+
+  const togglePause = useCallback(async () => {
+    if (!helper) return;
+    const next = helper.status === "Active" ? "Paused" : "Active";
+    const before = helper;
+    setHelper({ ...helper, status: next, enabled: next === "Active" });
+    const r = await api.patchHelper(helper.id, { status: next });
+    if (r.helper) { setHelper(r.helper); tapHaptic("select"); return; }
+    setHelper(before);
+    setNotice({ ok: false, text: r.message ?? "Couldn't change that." });
+  }, [helper]);
+
+  const confirmDelete = useCallback(() => {
+    if (!helper) return;
+    Alert.alert(
+      `Delete ${helper.name}?`,
+      "It stops running and its history goes with it. This can't be undone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete", style: "destructive",
+          onPress: () => void (async () => {
+            const r = await api.deleteHelper(helper.id);
+            if (r.ok) { tapHaptic("warning"); router.back(); return; }
+            setNotice({ ok: false, text: r.message ?? "Couldn't delete that." });
+          })(),
+        },
+      ],
+    );
+  }, [helper]);
+
+  /* A saved helper wears the look it wears on the list — reading its colour off the name
+   * field would repaint the tile on every keystroke and disagree with the card you came from.
+   * An unsaved one has nothing else to go on, so it follows what you type. */
+  const look = useMemo(
+    () => helperLook(colors, helper ?? { name, purpose, icon: params.icon }),
+    [colors, helper, name, purpose, params.icon],
+  );
+  const scheduleLine = useMemo(() => {
+    // A saved, unchanged schedule shows the SERVER's sentence — it is the authority. Only a
+    // schedule that hasn't been saved yet gets described locally (see lib/helper-meta).
+    if (helper && sameSchedule(schedule, helper.schedule)) return helper.scheduleText;
+    return describeSchedule(schedule);
+  }, [helper, schedule]);
 
   if (loading) return <HScreen><SkeletonCards count={3} /></HScreen>;
-  if (!agent) return <HScreen refreshing={refreshing} onRefresh={onRefresh}><ErrorState message="This agent no longer exists." onRetry={() => router.back()} /></HScreen>;
+  if (gone) {
+    return (
+      <HScreen refreshing={refreshing} onRefresh={onRefresh}>
+        <ErrorState message="This helper no longer exists." onRetry={() => router.back()} />
+      </HScreen>
+    );
+  }
 
-  const tint = agentTint(colors, agent.status);
-  const un = ctx?.unattended;
-  const gated = ctx?.gatedCount ?? 0;
-  // The one condition that earns the green bolt: active, nothing parks, nothing outstanding.
-  const running = !!ctx?.runsUnattended && agent.status === "Active";
+  const tint = helper ? helperTint(colors, helper.status) : { fg: colors.textMuted, bg: colors.surfaceSunken };
 
   return (
-    <HScreen refreshing={refreshing} onRefresh={onRefresh}>
-      <Rise index={0}>
-        <View style={{ alignItems: "center", gap: 10, marginTop: spacing.sm }}>
-          <View style={{ width: 58, height: 58, borderRadius: 17, borderCurve: "continuous", backgroundColor: tint.bg, alignItems: "center", justifyContent: "center" }}>
-            <Sym name={agentIcon(agent.name)} size={26} color={tint.fg} />
-          </View>
-          <T kind="h2Serif" center>{agent.name}</T>
-          <Badge label={agent.status} fg={tint.fg} bg={tint.bg} />
-          {!!agent.purpose && <T kind="body" center>{agent.purpose}</T>}
-        </View>
-      </Rise>
+    <>
+      <HScreen refreshing={refreshing} onRefresh={onRefresh} bottomPad={ACTION_BAR_HEIGHT + 24} scrollRef={scroller} keyboardAware>
+        {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
 
-      {canManage && (
-        <Rise index={1}>
-          <View style={{ flexDirection: "row", gap: spacing.sm }}>
-            <PressableScale onPress={() => void runNow()} disabled={busy} style={{ flex: 1.4, borderRadius: 15, borderCurve: "continuous", overflow: "hidden", opacity: busy ? 0.6 : 1 }} accessibilityRole="button" accessibilityLabel="Run now">
-              <LinearGradient colors={[colors.hero1, colors.hero2]} start={{ x: 0.1, y: 0 }} end={{ x: 0.75, y: 1 }} style={{ height: 48, alignItems: "center", justifyContent: "center" }}>
-                <T kind="bodyMedium" color={colors.heroText} style={{ fontWeight: "600" }}>Run now</T>
-              </LinearGradient>
-            </PressableScale>
-            {/* G1 — the third thing this row was missing. */}
-            <PressableScale onPress={() => { tapHaptic("light"); setEditing(true); }} style={{ flex: 1, height: 48, borderRadius: 15, borderCurve: "continuous", backgroundColor: colors.surfaceSunken, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6 }} accessibilityRole="button" accessibilityLabel="Edit helper">
-              <Sym name="pencil" size={15} color={colors.textSecondary} />
-              <T kind="bodyMedium" color={colors.textSecondary} style={{ fontWeight: "600" }}>Edit</T>
-            </PressableScale>
-            <PressableScale onPress={() => void togglePause()} style={{ flex: 1, height: 48, borderRadius: 15, borderCurve: "continuous", backgroundColor: colors.surfaceSunken, alignItems: "center", justifyContent: "center" }} accessibilityRole="button" accessibilityLabel={agent.status === "Active" ? "Pause" : "Resume"}>
-              <T kind="bodyMedium" color={colors.textSecondary} style={{ fontWeight: "600" }}>{agent.status === "Active" ? "Pause" : "Resume"}</T>
-            </PressableScale>
-          </View>
-        </Rise>
-      )}
-
-      {/* ---- G3/G4: will it run without you? The headline fact, stated first. ---- */}
-      {ctx && (
-        <Rise index={2}>
-          <SectionHeader title="Running on its own" />
-          <ExpandCard
-            /* "Can't run yet" gets its own headline and its own colour. It used to render as
-             * the green bolt — a helper waiting on an unconnected Gmail had nothing that could
-             * be counted as a gate, so the screen said "runs start to finish without you"
-             * about something that couldn't run at all. Three states, three answers. */
-            title={
-              agent.status !== "Active" ? `It won't run on its own while it's ${agent.status.toLowerCase()}`
-              : ctx.notReady ? "It can't run on its own yet"
-              : ctx.runsUnattended ? "Runs start to finish without you"
-              : gated === 1 ? "One step will stop and wait for you"
-              : `${gated} steps will stop and wait for you`
-            }
-            icon={running ? "bolt.fill" : ctx.notReady && agent.status === "Active" ? "wrench.and.screwdriver.fill" : "hand.raised.fill"}
-            iconColor={running ? colors.sage : colors.amber}
-            iconBg={running ? colors.sageBg : colors.amberBg}
-            badge={un?.enabled ? { label: un.includeHighRisk ? "Unattended · full" : "Unattended", fg: colors.sage, bg: colors.sageBg } : undefined}
-            summary={
-              ctx.notReady && agent.status === "Active"
-                ? "Something it needs isn't set up yet. Once it is, this will say what it does on its own."
-                : un?.enabled
-                  ? un.includeHighRisk
-                    ? `An ${un.setByRole ?? "admin"} allowed it to send and spend on its own.`
-                    : "It runs low-risk steps on its own. Anything that sends or spends still pauses for you."
-                  : "It pauses for your approval on gated steps."
-            }
-            chips={[
-              { label: `${ctx.executableCount} can run now`, icon: "bolt", tone: ctx.executableCount > 0 ? "good" : "warn" },
-              { label: `${ctx.permittedCount} permitted`, icon: "checkmark.shield" },
-              ...(gated > 0 ? [{ label: `${gated} need you`, icon: "hand.raised", tone: "warn" as const }] : []),
-            ]}
-          >
-            {/* Naming the steps is the difference between a status and an explanation. */}
-            {ctx.gatedCapabilityNames.length > 0 ? (
-              <View style={{ gap: 6 }}>
-                <T kind="eyebrow">Waits for you</T>
-                {ctx.gatedCapabilityNames.map((n) => (
-                  <View key={n} style={{ flexDirection: "row", gap: spacing.sm, alignItems: "center" }}>
-                    <Sym name="hand.raised" size={12} color={colors.amber} />
-                    <T kind="sub" style={{ flex: 1 }}>{n}</T>
-                  </View>
-                ))}
-                {gated > ctx.gatedCapabilityNames.length ? (
-                  <T kind="caption" color={colors.textFaint}>…and {gated - ctx.gatedCapabilityNames.length} more</T>
-                ) : null}
-              </View>
-            ) : null}
-
-            {/* Say WHAT is outstanding. "Can't run yet" without the reason is just a shrug. */}
-            {ctx.notReadySkillNames.length > 0 ? (
-              <View style={{ gap: 6 }}>
-                <T kind="eyebrow">Still needs setting up</T>
-                {ctx.notReadySkillNames.map((n) => (
-                  <View key={n} style={{ flexDirection: "row", gap: spacing.sm, alignItems: "center" }}>
-                    <Sym name="wrench.and.screwdriver" size={12} color={colors.amber} />
-                    <T kind="sub" style={{ flex: 1 }}>{n}</T>
-                  </View>
-                ))}
-              </View>
-            ) : null}
-
-            {ctx.gatedWhenReadyNames.length > 0 ? (
-              <View style={{ gap: 6 }}>
-                <T kind="eyebrow">Will wait for you once connected</T>
-                {ctx.gatedWhenReadyNames.map((n) => (
-                  <View key={n} style={{ flexDirection: "row", gap: spacing.sm, alignItems: "center" }}>
-                    <Sym name="hand.raised" size={12} color={colors.textFaint} />
-                    <T kind="sub" style={{ flex: 1 }}>{n}</T>
-                  </View>
-                ))}
-              </View>
-            ) : null}
-
-            {canManage ? (
-              <View style={{ gap: spacing.sm }}>
-                <UnattendedRow
-                  label="Run unattended"
-                  detail="Don't pause on low-risk steps."
-                  on={!!un?.enabled}
-                  onToggle={() => void setUnattended(!un?.enabled, false)}
+        {/* ---- who it is ---- */}
+        <Rise index={0}>
+          <Card style={{ gap: spacing.md }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+              <SymTile name={look.icon} color={look.fg} bg={look.bg} size={46} iconSize={22} />
+              <View style={{ flex: 1, gap: 4 }}>
+                <T kind="eyebrow">Name</T>
+                <TextInput
+                  value={name}
+                  onChangeText={setName}
+                  editable={canWrite}
+                  placeholder="What should we call it?"
+                  placeholderTextColor={colors.textFaint}
+                  accessibilityLabel="Helper name"
+                  style={{
+                    backgroundColor: colors.surfaceSunken, borderRadius: radii.sm, borderCurve: "continuous",
+                    paddingHorizontal: 12, paddingVertical: 10, ...type.bodyMedium, color: colors.text,
+                  }}
                 />
-                <UnattendedRow
-                  label="Including sending and spending"
-                  detail={
-                    un?.enabled
-                      ? "Emails, texts and payments go out without asking."
-                      : "Turn on “Run unattended” first."
-                  }
-                  on={!!un?.includeHighRisk}
-                  disabled={!un?.enabled}
-                  danger
-                  onToggle={() => (un?.includeHighRisk ? void setUnattended(true, false) : confirmHighRisk())}
-                />
+              </View>
+              {helper ? <Badge label={helper.status} fg={tint.fg} bg={tint.bg} /> : <Badge label="New" fg={colors.sky} bg={colors.skyBg} />}
+            </View>
+
+            <View style={{ gap: 4 }}>
+              <T kind="eyebrow">One line for the card</T>
+              <TextInput
+                value={purpose}
+                onChangeText={setPurpose}
+                editable={canWrite}
+                placeholder="e.g. Keeps an eye on the school calendar"
+                placeholderTextColor={colors.textFaint}
+                accessibilityLabel="What this helper is for, in one line"
+                style={{
+                  backgroundColor: colors.surfaceSunken, borderRadius: radii.sm, borderCurve: "continuous",
+                  paddingHorizontal: 12, paddingVertical: 10, ...type.body, color: colors.text,
+                }}
+              />
+            </View>
+
+            {/* Who else can see it. Read-only: where a helper lives is decided when it's made,
+                and moving one between the household and a person changes who it acts FOR. */}
+            {helper && helper.visibility !== "household" ? (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <Sym name={helper.visibility === "personal" ? "lock" : "person.2.fill"} size={12} color={colors.textFaint} />
                 <T kind="caption" color={colors.textFaint}>
-                  Steps you mark “always ask me”, and the household's external-actions switch, still override this.
+                  {helper.visibility === "personal" ? "Just you — nobody else in the household sees this one." : "Shared with your nest only."}
                 </T>
               </View>
             ) : null}
-          </ExpandCard>
+          </Card>
         </Rise>
-      )}
 
-      {/* ---- G2: name the actual skills ---- */}
-      {ctx && ctx.skills.length > 0 && (
-        <Rise index={3}>
-          <SectionHeader title={ctx.skills.length === 1 ? "The skill it runs" : "The skills it runs"} />
-          <View style={{ gap: spacing.sm }}>
-            {ctx.skills.map((s) => (
-              <ExpandCard
-                key={s.id}
-                title={s.name}
-                icon="list.bullet"
-                iconColor={s.ready ? colors.sky : colors.amber}
-                iconBg={s.ready ? colors.skyBg : colors.amberBg}
-                summary={s.description || undefined}
-                badge={s.ready ? undefined : { label: "Not ready", fg: colors.amber, bg: colors.amberBg }}
-                chips={[{ label: `${s.stepCount} step${s.stepCount === 1 ? "" : "s"}`, icon: "number" }]}
-              >
-                {(s.stepNames ?? []).length > 0 ? (
-                  <View style={{ gap: 6 }}>
-                    {s.stepNames!.map((n, i) => (
-                      <View key={`${n}-${i}`} style={{ flexDirection: "row", gap: spacing.sm }}>
-                        <T kind="sub" color={colors.textFaint} style={{ width: 18 }}>{i + 1}</T>
-                        <T kind="sub" style={{ flex: 1 }}>{n}</T>
-                      </View>
-                    ))}
-                  </View>
-                ) : null}
-                {!s.ready && s.blockedReason ? (
-                  <View style={{ flexDirection: "row", gap: spacing.sm }}>
-                    <Sym name="exclamationmark.triangle" size={13} color={colors.amber} style={{ marginTop: 2 }} />
-                    <T kind="sub" color={colors.amber} style={{ flex: 1 }}>{s.blockedReason}</T>
-                  </View>
-                ) : null}
-              </ExpandCard>
-            ))}
-          </View>
-        </Rise>
-      )}
-
-      <Rise index={4}>
-        <SectionHeader title="Runs on" />
-        <Card padded={triggers.length === 0}>
-          {triggers.length === 0 ? (
-            <T kind="sub">Runs manually — ask Famili or tap Run now.</T>
-          ) : (
-            triggers.map((t, i) => (
-              <Row
-                key={t.id}
-                icon="clock"
-                iconColor={t.enabled ? colors.sage : colors.textMuted}
-                iconBg={t.enabled ? colors.sageBg : colors.surfaceSunken}
-                title={humanSchedule(t)}
-                subtitle={t.enabled ? t.name : `${t.name} · paused`}
-                last={i === triggers.length - 1}
-              />
-            ))
-          )}
-        </Card>
-      </Rise>
-
-      {/* ---- G3: connections, then the capability list with the RULE behind each gate ---- */}
-      {connections.length > 0 && (
-        <Rise index={5}>
-          <SectionHeader title="Connections it uses" />
-          <ChipRow>
-            {connections.map((c) => (
-              <Chip
-                key={c.name}
-                label={c.available ? c.name : `${c.name} · reconnect`}
-                icon={c.available ? "link" : "link.badge.plus"}
-              />
-            ))}
-          </ChipRow>
-          {connections.some((c) => !c.available) ? (
-            <PressableScale
-              onPress={() => router.push({ pathname: "/(settings)/connections", params: { from: `/(agents)/${id}` } })}
-              haptic="select" accessibilityRole="button" accessibilityLabel="Fix connections"
-            >
-              <T kind="subMedium" color={colors.ember}>One of these needs reconnecting — fix it in Connections</T>
-            </PressableScale>
-          ) : null}
-        </Rise>
-      )}
-
-      {ctx && (
-        <Rise index={6}>
-          <SectionHeader title="What it's allowed to do" />
-          <ExpandCard
-            title={
-              ctx.openToolAllowList && ctx.openFunctionAllowList
-                ? "Anything the household allows, minus what you've blocked"
-                : ctx.openToolAllowList || ctx.openFunctionAllowList
-                  ? "A specific list, partly"
-                  : "Only the capabilities you listed"
-            }
-            icon="checkmark.shield"
-            iconColor={colors.lavender}
-            iconBg={colors.lavenderBg}
-            summary={
-              ctx.openToolAllowList && ctx.openFunctionAllowList
-                ? "No explicit list, so it inherits the household's permissions. Denied items are still denied."
-                : "It can only use what's on its list — everything else is out of scope for this helper."
-            }
-            chips={[
-              { label: `${ctx.availableCount} available`, icon: "circle.grid.2x2" },
-              { label: `${ctx.permittedCount} permitted`, icon: "checkmark.shield" },
-              { label: `${ctx.executableCount} can run now`, icon: "bolt", tone: ctx.executableCount > 0 ? "good" : "warn" },
-            ]}
-          >
-            <PolicyList
-              rows={[
-                ...ctx.tools.filter((t) => t.permitted).map((t) => ({ key: t.toolId, name: t.name, where: t.connectorName, available: t.available, policy: t.policy })),
-                ...ctx.functions.filter((f) => f.permitted).map((f) => ({ key: f.id, name: f.name, where: "FamiliOS", available: f.available, policy: f.policy })),
-              ]}
+        {/* ---- WHAT IT DOES — the whole helper, in the open ---- */}
+        <Rise index={1}>
+          <Card style={{ gap: spacing.sm }}>
+            <T kind="eyebrow">What it does</T>
+            <T kind="detail">
+              In your own words, as if you were asking a person. This is exactly what it follows
+              every time it runs.
+            </T>
+            <TextInput
+              value={instructions}
+              onChangeText={setInstructions}
+              editable={canWrite}
+              multiline
+              placeholder={"e.g. Every morning, check the family calendar for today and tomorrow.\nIf anything needs something brought — a form, kit, money — add it to the Tasks list and tell me what it's for."}
+              placeholderTextColor={colors.textFaint}
+              accessibilityLabel="What this helper does"
+              // The tallest control on the screen, on purpose. It is the helper.
+              style={{
+                backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous",
+                paddingHorizontal: 14, paddingTop: 12, paddingBottom: 12,
+                minHeight: 240, textAlignVertical: "top",
+                ...type.body, color: colors.text,
+              }}
+              // A bottom-most tall field lands under the pinned Save bar when focused; scroll
+              // it up rather than trusting an inset that can't know the bar is there.
+              onFocus={() => setTimeout(() => scroller.current?.scrollTo({ y: 240, animated: true }), 140)}
             />
-          </ExpandCard>
+          </Card>
         </Rise>
-      )}
 
-      {steps.length > 0 && (
-        <Rise index={7}>
-          <SectionHeader title="How this agent works" />
+        {/* ---- WHEN IT RUNS ---- */}
+        <Rise index={2}>
           <Card style={{ gap: spacing.md }}>
-            {steps.map((s, i) => (
-              <View key={i} style={{ flexDirection: "row", gap: spacing.md, alignItems: "flex-start" }}>
-                <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: colors.emberBg, alignItems: "center", justifyContent: "center" }}>
-                  <T kind="caption" color={colors.ember}>{i + 1}</T>
-                </View>
-                <T kind="sub" color={colors.textSecondary} style={{ flex: 1 }}>{s}</T>
+            <View style={{ gap: 4 }}>
+              <T kind="eyebrow">When it runs</T>
+              <T kind="detail">{scheduleLine}</T>
+            </View>
+            <ChipRow>
+              <Chip label="Only when I ask" icon="hand.tap" selected={schedule.kind === "manual"}
+                onPress={() => canWrite && setSchedule({ kind: "manual" })} />
+              <Chip label="Every hour" icon="clock" selected={schedule.kind === "hourly"}
+                onPress={() => canWrite && setSchedule({ kind: "hourly" })} />
+              <Chip label="Every day" icon="sun.max" selected={schedule.kind === "daily"}
+                onPress={() => canWrite && setSchedule({ kind: "daily", time: schedule.kind === "weekly" ? schedule.time : "08:00" })} />
+              <Chip label="Every week" icon="calendar" selected={schedule.kind === "weekly"}
+                onPress={() => canWrite && setSchedule({ kind: "weekly", weekday: 1, time: schedule.kind === "daily" ? schedule.time : "08:00" })} />
+            </ChipRow>
+
+            {schedule.kind === "weekly" ? (
+              <View style={{ gap: 6 }}>
+                <T kind="eyebrow">Which day</T>
+                <ChipRow>
+                  {WEEKDAYS.map((d, i) => (
+                    <Chip key={d} label={d.slice(0, 3)} selected={schedule.weekday === i}
+                      onPress={() => canWrite && setSchedule({ ...schedule, weekday: i })} />
+                  ))}
+                </ChipRow>
               </View>
-            ))}
-            {canManage ? (
-              <PressableScale onPress={() => { tapHaptic("light"); setEditing(true); }} haptic="select" accessibilityRole="button" accessibilityLabel="Edit these instructions">
-                <T kind="subMedium" color={colors.ember}>Edit these instructions</T>
-              </PressableScale>
+            ) : null}
+
+            {schedule.kind === "daily" || schedule.kind === "weekly" ? (
+              <TimePicker
+                value={schedule.time}
+                editable={canWrite}
+                onChange={(t) => setSchedule(schedule.kind === "weekly" ? { ...schedule, time: t } : { kind: "daily", time: t })}
+              />
             ) : null}
           </Card>
         </Rise>
-      )}
 
-      <Rise index={8}>
-        <SectionHeader title="Recent activity" />
-        <Card padded={runs.length === 0 && !pendingApproval}>
-          {pendingApproval && (
-            <Row
-              icon="bell.badge"
-              iconColor={colors.amber}
-              iconBg={colors.amberBg}
-              title="View pending approval"
-              subtitle="This agent is waiting on you"
-              chevron
-              onPress={() => router.push("/(home)")}
-              last={runs.length === 0}
-            />
-          )}
-          {runs.length === 0 && !pendingApproval ? (
-            <T kind="sub">No runs yet.</T>
-          ) : (
-            runs.map((r, i) => {
-              const tone = runToneOverride(colors, r.status);
-              const done = r.steps.filter((s) => ["done", "completed", "succeeded"].includes(s.status)).length;
-              return (
-                <Row
-                  key={r.id}
-                  icon="clock.arrow.circlepath"
-                  iconColor={tone.fg}
-                  iconBg={tone.bg}
-                  title={r.title || "Run"}
-                  subtitle={`${done}/${r.steps.length} steps`}
-                  trailing={<Badge label={r.status.replace(/_/g, " ")} fg={tone.fg} bg={tone.bg} />}
-                  last={i === runs.length - 1}
-                />
-              );
-            })
-          )}
-        </Card>
-      </Rise>
-
-      {/* Space: family agents are shared; personal agents exist only for you.
-          Color-coded to match chat spaces (ember = family, lavender = personal).
-          ADMIN ONLY — moving a helper into the family space makes it run for everyone, which
-          is the one thing an Adult Member's own helper may not become. */}
-      {isAdmin && (
-        <Rise index={9}>
-          <SectionHeader title="Space" />
-          <Card style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
-            {([
-              ["household", "Family", colors.ember] as const,
-              // T1 — "their own agents… available between the two of them." A nest is the
-              // third answer to "who is this for", so it sits in the same control.
-              ...myNests.map((n) => [`nest:${n.id}`, n.label, colors.sky] as const),
-              ["personal", "Personal", colors.lavender] as const,
-            ]).map(([key, label, tintC]) => {
-              const active = key.startsWith("nest:")
-                ? agent.nestId === key.slice(5) && agent.visibility === "nest"
-                : (agent.visibility ?? "household") === key && agent.visibility !== "nest";
+        {/* ---- PERMISSION ---- */}
+        <Rise index={3}>
+          <Card style={{ gap: spacing.sm }}>
+            <T kind="eyebrow">Permission</T>
+            {AUTONOMY.map((a) => {
+              const selected = autonomy === a.key;
               return (
                 <PressableScale
-                  key={key}
-                  haptic="select"
-                  onPress={() => void (async () => {
-                    if (active) return;
-                    const prev = { visibility: agent.visibility, nestId: agent.nestId };
-                    const next: Pick<AgentRec, "visibility" | "nestId"> = key.startsWith("nest:")
-                      ? { visibility: "nest", nestId: key.slice(5) }
-                      : { visibility: key as "household" | "personal", nestId: null };
-
-                    /* Cluster AA — "as an adult member, I think there should be an option
-                     * that he gets a family access button as well. However, he cannot edit
-                     * or create agents that way — it will tell him would you like to transfer
-                     * that to a personal or nest chat, and then it will change the status."
-                     *
-                     * An Adult Member may USE the household's agents but not author them, so
-                     * moving one INTO the household space is a move they can't complete. The
-                     * server refuses it (personal_only); this offers the thing they can
-                     * actually do instead of letting them discover the refusal after the tap.
-                     * Asked BEFORE the request, because a prompt that appears after an error
-                     * reads as a retry rather than as a choice. */
-                    if (key === "household" && !isAdmin) {
-                      const target = myNests[0];
-                      Alert.alert(
-                        "Make this a household agent?",
-                        `Household agents are set up by an Owner or Adult Admin. You can keep this one${target ? ` in ${target.label}, or ` : " as "}personal — it still runs for you, and the family's chats can read what it produces.`,
-                        [
-                          { text: "Cancel", style: "cancel" },
-                          ...(target ? [{ text: `Move to ${target.label}`, onPress: () => void moveAgent({ visibility: "nest", nestId: target.id }, prev) }] : []),
-                          { text: "Keep personal", onPress: () => void moveAgent({ visibility: "personal", nestId: null }, prev) },
-                        ],
-                      );
-                      return;
-                    }
-                    await moveAgent(next, prev);
-                  })()}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: active }}
-                  accessibilityLabel={`${label} space`}
+                  key={a.key}
+                  onPress={() => { if (!canWrite) return; tapHaptic("select"); setAutonomy(a.key); }}
+                  haptic={null}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected }}
+                  accessibilityLabel={a.sentence}
                   style={{
-                    flexGrow: 1, flexBasis: 100, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
-                    paddingVertical: 10, paddingHorizontal: 8, borderRadius: 12, borderCurve: "continuous",
-                    backgroundColor: active ? tintC : colors.surfaceSunken,
+                    flexDirection: "row", alignItems: "center", gap: spacing.md,
+                    padding: spacing.md, borderRadius: radii.md, borderCurve: "continuous",
+                    backgroundColor: selected ? colors.emberBg : colors.surfaceSunken,
+                    borderWidth: 1, borderColor: selected ? colors.ember : "transparent",
                   }}
                 >
-                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: active ? colors.surface : tintC }} />
-                  <T kind="subMedium" color={active ? colors.surface : colors.textSecondary} style={{ fontWeight: "600" }}>{label}</T>
+                  <Sym name={a.icon} size={17} color={selected ? colors.ember : colors.textMuted} />
+                  {/* The SENTENCE is the label. "Act" means nothing on its own, which is why
+                      the old three-way selector needed a paragraph of explanation beside it. */}
+                  <T kind="sub" color={selected ? colors.text : colors.textSecondary} style={{ flex: 1 }}>{a.sentence}</T>
+                  <Sym name={selected ? "checkmark.circle.fill" : "circle"} size={17} color={selected ? colors.ember : colors.textFaint} />
                 </PressableScale>
               );
             })}
+            {autonomy === "full" ? (
+              <T kind="caption" color={colors.textFaint}>Allowing this asks for the household PIN.</T>
+            ) : null}
+            {/* Quiet, one line, and only when it's true: what this helper will ACTUALLY do is
+                less than what its own setting says, because the household's stance is stricter. */}
+            {helper?.autonomyDowngraded ? (
+              <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 6 }}>
+                <Sym name="info.circle" size={12} color={colors.amber} style={{ marginTop: 2 }} />
+                <T kind="caption" color={colors.amber} style={{ flex: 1 }}>
+                  Your household&apos;s settings are stricter than this, so it still asks first. Change it in Settings → Household.
+                </T>
+              </View>
+            ) : null}
           </Card>
-          <T kind="caption" color={colors.textFaint}>
-            {agent.visibility === "nest"
-              ? `Only the people in ${myNests.find((n) => n.id === agent.nestId)?.label ?? "this nest"} can see and use it — not even the household's owner.`
-              : (agent.visibility ?? "household") === "personal" ? "Only you can see and use this agent."
-              : "Everyone in the household can see and use this agent."}
-          </T>
         </Rise>
-      )}
 
-      <AgentEditSheet visible={editing} agent={agent} saving={saving} onClose={() => setEditing(false)} onSave={saveEdits} />
-      {/* The raise, and only the raise, asks who you are — same sheet the risk-override list
-          uses, so the two switches that let something happen to this family without anyone
-          being asked first feel like the same deliberate act. */}
+        {!canWrite ? (
+          <T kind="caption" center color={colors.textFaint}>
+            You can see what this helper does, but changing it needs an adult account.
+          </T>
+        ) : null}
+
+        {/* ---- run / pause / delete ---- */}
+        {helper ? (
+          <Rise index={4}>
+            <Card style={{ gap: spacing.sm }}>
+              <Button
+                title={running ? "Working…" : "Run now"}
+                icon="play.fill"
+                variant="ember"
+                full
+                loading={running}
+                disabled={running || !canWrite}
+                onPress={() => void runNow()}
+              />
+              <View style={{ flexDirection: "row", gap: spacing.sm }}>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    title={helper.status === "Active" ? "Pause" : "Resume"}
+                    icon={helper.status === "Active" ? "pause.fill" : "play.circle"}
+                    variant="neutral"
+                    full
+                    disabled={!canWrite}
+                    onPress={() => void togglePause()}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button title="Delete" icon="trash" variant="danger" full disabled={!canWrite} onPress={confirmDelete} />
+                </View>
+              </View>
+              {/* Thirty seconds of nothing is indistinguishable from a broken button, so the
+                  pending state is a real card that says what is happening — not a spinner. */}
+              {running ? (
+                <Well style={{ gap: 4 }}>
+                  <T kind="subMedium" color={colors.ember}>Working on it…</T>
+                  <T kind="caption" color={colors.textFaint}>
+                    It&apos;s reading, thinking and doing. This can take up to a minute. Whatever it does
+                    is written into its history below, so nothing is lost if you look away.
+                  </T>
+                </Well>
+              ) : null}
+              {result && !running ? (
+                <View style={{ gap: spacing.sm }}>
+                  <Card padded={false} style={{ padding: spacing.md, gap: 6 }}>
+                    {result.ok
+                      ? <MarkdownText text={result.text} />
+                      : <T kind="sub" color={colors.coral} selectable>{result.text}</T>}
+                  </Card>
+                  {result.toolCalls?.length ? <ToolReceipts calls={result.toolCalls} /> : null}
+                </View>
+              ) : null}
+              {!running && !result && lastRun ? (
+                <T kind="caption" color={colors.textFaint}>
+                  {lastRun.ok
+                    ? `Last ran ${runClock(lastRun.at)} — ${lastRun.summary || "nothing needed doing"}.`
+                    : `Last tried ${runClock(lastRun.at)} — ${lastRun.error || lastRun.summary || "it didn't finish"}.`}
+                </T>
+              ) : null}
+            </Card>
+          </Rise>
+        ) : (
+          <Rise index={4}>
+            <Well>
+              <T kind="detail">
+                Nothing is saved yet. Read what it does above, change anything you&apos;d say differently, then save — it can be run straight away.
+              </T>
+            </Well>
+          </Rise>
+        )}
+
+        {/* ---- the thread ---- */}
+        {helper ? (
+          <Rise index={5}>
+            <SectionHeader title="What it's been doing" />
+            {history.length === 0 ? (
+              <Card><T kind="sub">Nothing yet. Run it, and what it says and does shows up here.</T></Card>
+            ) : (
+              <View style={{ gap: spacing.sm }}>
+                {history.map((m, i) => <ThreadMessage key={`${m.at}-${i}`} message={m} />)}
+              </View>
+            )}
+          </Rise>
+        ) : null}
+      </HScreen>
+
+      {canWrite ? (
+        <ActionBar>
+          <Button
+            title={saving ? "Saving…" : isNew ? "Save helper" : "Save changes"}
+            variant="ember"
+            full
+            loading={saving}
+            disabled={!canSave}
+            onPress={() => void save()}
+          />
+        </ActionBar>
+      ) : null}
+
       <PinPrompt
         visible={pinOpen}
-        title="Let it send and spend on its own?"
-        warning="It will email, text and pay without stopping to ask you. Steps you've marked “always ask me”, and the household's external-actions switch, still override this."
+        title="Household PIN"
+        warning="Allowing a helper to send and spend on its own is the strongest permission here. Enter the household PIN to confirm it's you."
         busy={pinBusy}
         error={pinErr}
         onCancel={() => { setPinOpen(false); setPinErr(null); }}
-        onConfirm={(pin) => void submitHighRisk(pin)}
+        onConfirm={(pin) => void submitPin(pin)}
       />
       {flash}
-    </HScreen>
+    </>
   );
 }
 
-/* ------------------------------ pieces ------------------------------ */
-
-/** A switch row that reads as a sentence. Deliberately not RN's Switch: the danger tier needs
- *  a confirmation before it flips, and a Switch that snaps back after a cancelled Alert looks
- *  broken. */
-function UnattendedRow({ label, detail, on, disabled, danger, onToggle }: {
-  label: string; detail: string; on: boolean; disabled?: boolean; danger?: boolean; onToggle: () => void;
-}) {
-  const { colors, spacing, radii } = useTheme();
-  const tint = danger ? colors.coral : colors.sage;
-  return (
-    <PressableScale
-      onPress={disabled ? undefined : onToggle}
-      disabled={disabled}
-      haptic="select"
-      accessibilityRole="switch"
-      accessibilityState={{ checked: on, disabled: !!disabled }}
-      accessibilityLabel={label}
-      accessibilityHint={detail}
-      style={{
-        flexDirection: "row", alignItems: "center", gap: spacing.md,
-        backgroundColor: colors.surfaceSunken, borderRadius: radii.sm, borderCurve: "continuous",
-        padding: spacing.sm + 2, opacity: disabled ? 0.45 : 1,
-      }}
-    >
-      <View style={{
-        width: 26, height: 26, borderRadius: 13,
-        alignItems: "center", justifyContent: "center",
-        backgroundColor: on ? tint : "transparent",
-        borderWidth: on ? 0 : 1.5, borderColor: colors.border,
-      }}>
-        {on ? <Sym name="checkmark" size={13} color={colors.surface} /> : null}
-      </View>
-      <View style={{ flex: 1 }}>
-        <T kind="subMedium" color={colors.text}>{label}</T>
-        <T kind="caption" color={colors.textFaint}>{detail}</T>
-      </View>
-    </PressableScale>
-  );
-}
-
-/** Each capability with the RULE that decided its gate — WP-105's effective-policy view, so
- *  the screen explains WHY rather than just asserting a state. */
-function PolicyList({ rows }: {
-  rows: { key: string; name: string; where: string; available: boolean; policy: { decision: string; reason: string; requiresApproval: boolean } }[];
-}) {
+/** Hour and minute, on the household's clock. Chips rather than a wheel: no new dependency,
+ *  and the same control vocabulary as everything else on this screen. */
+function TimePicker({ value, editable, onChange }: { value: string; editable: boolean; onChange: (t: string) => void }) {
   const { colors, spacing } = useTheme();
-  const [showAll, setShowAll] = useState(false);
-  if (rows.length === 0) return <T kind="sub">Nothing is permitted yet.</T>;
-  const shown = showAll ? rows : rows.slice(0, 8);
+  const { h, m } = splitTime(value);
   return (
-    <View style={{ gap: spacing.sm }}>
-      {shown.map((r) => {
-        const blocked = r.policy?.decision === "blocked";
-        const gate = r.policy?.requiresApproval;
-        const tint = blocked ? colors.coral : gate ? colors.amber : r.available ? colors.sage : colors.textMuted;
-        return (
-          <View key={r.key} style={{ flexDirection: "row", gap: spacing.sm }}>
-            <Sym
-              name={blocked ? "xmark.circle" : gate ? "hand.raised" : r.available ? "checkmark.circle" : "circle.dashed"}
-              size={13} color={tint} style={{ marginTop: 2 }}
-            />
-            <View style={{ flex: 1 }}>
-              <T kind="subMedium" color={colors.text}>{r.name}</T>
-              <T kind="caption" color={colors.textFaint}>
-                {r.where}{r.available ? "" : " · not connected"} — {r.policy?.reason ?? "No rule recorded."}
-              </T>
-            </View>
-          </View>
-        );
+    <View style={{ gap: 6 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+        <T kind="eyebrow">At</T>
+        <T kind="subMedium" color={colors.ember}>{clockLabel(joinTime(h, m))}</T>
+        <T kind="caption" color={colors.textFaint}>· your household&apos;s time</T>
+      </View>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ gap: 8, paddingRight: spacing.md }}
+        keyboardShouldPersistTaps="handled"
+      >
+        {HOURS.map((hour) => (
+          <Chip
+            key={hour}
+            label={clockLabel(joinTime(hour, "00")).replace(":00", "")}
+            selected={hour === h}
+            onPress={() => editable && onChange(joinTime(hour, m))}
+          />
+        ))}
+      </ScrollView>
+      <ChipRow>
+        {MINUTES.map((min) => (
+          <Chip key={min} label={`:${min}`} selected={min === m} onPress={() => editable && onChange(joinTime(h, min))} />
+        ))}
+      </ChipRow>
+    </View>
+  );
+}
+
+/** What the helper actually called, as a quiet receipt. Never the answer itself. */
+function ToolReceipts({ calls }: { calls: AssistantToolCall[] }) {
+  const { colors } = useTheme();
+  const tone = (s: AssistantToolCall["status"]) =>
+    s === "failed" ? { fg: colors.coral, bg: colors.coralBg, icon: "xmark" }
+      : s === "blocked" ? { fg: colors.textMuted, bg: colors.surfaceSunken, icon: "hand.raised" }
+      : s === "awaiting_approval" ? { fg: colors.amber, bg: colors.amberBg, icon: "clock" }
+      : { fg: colors.sage, bg: colors.sageBg, icon: "checkmark" };
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+      {calls.map((c, i) => {
+        const t = tone(c.status);
+        return <Badge key={`${c.tool}-${i}`} label={c.summary || c.label || c.tool} icon={t.icon} fg={t.fg} bg={t.bg} />;
       })}
-      {rows.length > shown.length ? (
-        <PressableScale onPress={() => setShowAll(true)} haptic="select" accessibilityRole="button" accessibilityLabel="Show all capabilities">
-          <T kind="subMedium" color={colors.ember}>Show all {rows.length}</T>
-        </PressableScale>
-      ) : null}
+    </View>
+  );
+}
+
+/** One turn in the helper's thread. Deliberately plainer than the Ask screen's chat: this is
+ *  a record of what happened, not a conversation you're in the middle of. */
+function ThreadMessage({ message }: { message: ConversationMessage }) {
+  const { colors, spacing } = useTheme();
+  const failed = message.kind === "error" || (message.kind === "run_result" && message.status === "failed");
+  const when = message.at ? new Date(message.at) : null;
+  const stamp = when && !Number.isNaN(when.getTime())
+    ? when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    : null;
+
+  if (message.role === "user") {
+    return (
+      <View style={{ gap: 3 }}>
+        {stamp ? <T kind="caption" color={colors.textFaint}>{stamp}</T> : null}
+        <Well><T kind="sub" selectable>{message.text}</T></Well>
+      </View>
+    );
+  }
+  return (
+    <View style={{ gap: 3 }}>
+      {stamp ? <T kind="caption" color={colors.textFaint}>{stamp}</T> : null}
+      <Card padded={false} style={{ padding: spacing.md, gap: 6 }}>
+        {failed
+          ? <T kind="sub" color={colors.coral} selectable>{message.text}</T>
+          : <MarkdownText text={message.textWithoutRows ?? message.text} />}
+        {message.toolCalls?.length ? <ToolReceipts calls={message.toolCalls} /> : null}
+      </Card>
     </View>
   );
 }

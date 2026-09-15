@@ -1,7 +1,7 @@
 // "Prove it's you" — the pause before a change that lets things run unsupervised.
 //
 // "The advanced mode should come with a warning saying that if you do choose to use this,
-//  you risk screwing up agent configuration — possibly a pin input. And the same here on the
+//  you risk screwing up how a helper behaves — possibly a pin input. And the same here on the
 //  advanced builders: this should require a pin input."
 //
 // Two things happen here and both matter. The WARNING says what could go wrong in plain

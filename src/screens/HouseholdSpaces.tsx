@@ -121,7 +121,7 @@ function SpaceDrawer({ space, onClose }: { space: Space; onClose: () => void }) 
             </div>
           ))}</div>
         </div>
-        {agents.length > 0 && <div><p className="section-title mb-2">Agents</p><div className="flex flex-wrap gap-2">{agents.map((a) => <button key={a.id} onClick={() => navigate("agents", { id: a.id })} className="chip bg-surface-sunken text-ink-600 transition-colors hover:bg-ink-900/[0.06]"><Icon name={a.icon} size={12} /> {a.name}</button>)}</div></div>}
+        {agents.length > 0 && <div><p className="section-title mb-2">Agents</p><div className="flex flex-wrap gap-2">{agents.map((a) => <button key={a.id} onClick={() => navigate("helpers", { id: a.id })} className="chip bg-surface-sunken text-ink-600 transition-colors hover:bg-ink-900/[0.06]"><Icon name={a.icon} size={12} /> {a.name}</button>)}</div></div>}
         {connections.length > 0 && <div><p className="section-title mb-2">Connections</p><div className="flex flex-wrap gap-2">{connections.map((c) => <span key={c.id} className="chip bg-surface-sunken text-ink-600"><Icon name="Plug" size={12} /> {c.name}</span>)}</div></div>}
       </div>
     </Drawer>

@@ -19,8 +19,7 @@ import {
   createSession, deleteSession, deleteSessionsForActor, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
   getPushTokens, addPushToken, removePushToken,
-  getRun, listRuns, getSkill, listSkills,
-  listEvolutions, getEvolution, patchEvolution, putEvolution,
+  getRun, listRuns,
   getMember, listMembers, putMember, canApprove, isAdultRole,
   listEvents, getEvent, putEvent, patchEvent, deleteEventRec,
   listTasks, getTask, putTask, patchTask, deleteTaskRec, listTaskLists, addTaskList, markTaskListDeleted,
@@ -34,30 +33,27 @@ import {
   listContactMethods, getContactMethod, putContactMethod, patchContactMethod, deleteContactMethodRec,
   getContactVerification, putContactVerification, patchContactVerification, deleteContactVerification,
   listFiles, getFileRec, putFileRec, patchFileRec, writeFileBlob, readFileBlob, deleteFileRec,
-  listPlaybooks, getPlaybook, putPlaybook, deletePlaybookRec,
   listHelpRequests, getHelpRequest, putHelpRequest, patchHelpRequest,
   addNotification, getAccountRaw,
   clearCollection,
 } from "./store.mjs";
-import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases, applyEvolutionToTarget } from "./engine.mjs";
-import { revertEvolution, resolveEvolutionBefore, canRevertEvolution, listEvolutionArchive } from "./evolution-revert.mjs";
+import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases } from "./engine.mjs";
 import { createBackup, listBackups, readBackup, restoreBackup, backupTick, deleteBackupsFor, listLegacyBackups, readLegacyBackup, restoreLegacyBundle } from "./backup.mjs";
 import { exportHouseholdWithAudit } from "./export.mjs";
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { platformMailReady, sendPlatformEmail, platformMailStatus } from "./mailer.mjs";
 import { closeBrowser } from "./browser.mjs";
-import { orchestrate, ensureOpenDefaultAgent } from "./orchestrator.mjs";
+import { orchestrate, ensureDefaultHelper } from "./orchestrator.mjs";
 import { sandboxEnabled, seedSandboxAccounts, listSandboxEffects } from "./sandbox-connectors.mjs";
-import { seedDefaults, ensureSystemSkills } from "./seed.mjs";
+import { seedDefaults } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
 import { twilioAuthToken, twilioSignatureValid, handleInboundSms, twiml } from "./sms.mjs";
 import {
-  createAgent, replaceAgent, partialUpdateAgent, deleteAgent, duplicateAgent,
-  rollbackAgent, listAgentVersions, agentContext, selectAgent, publicAgent, listPublicAgents,
-  deriveCapabilitiesFromSteps, agentVisibleTo,
-} from "./agents.mjs";
-import { agentTemplateSections } from "./agent-templates.mjs";
-import { nameConversation } from "./planner.mjs";
+  createHelper, updateHelper, deleteHelper, listHelpers, getHelper, publicHelper,
+  runHelper, mayWriteHelper, helperTemplates, reanchorHelperSchedules,
+} from "./helpers.mjs";
+import { AUTONOMY, SCHEDULE_KINDS } from "./helper-shape.mjs";
+import { nameConversation } from "./context.mjs";
 import { suggestAddresses, placesProvider } from "./places.mjs";
 import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
 import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel, listNests } from "./nests.mjs";
@@ -68,19 +64,9 @@ import { addEventTombstone } from "./store.mjs";
 import { getAgent, getViewerNote, putViewerNote } from "./store.mjs";
 import { captureMemoryFromExchange } from "./memory-capture.mjs";
 import {
-  createSkill, replaceSkill, partialUpdateSkill, deleteSkill, duplicateSkill,
-  promoteSkill, rollbackSkill, inferFunctions, testSkill, listSkillVersions, skillReadiness,
-} from "./skills.mjs";
-import {
-  createFunction, replaceFunction, partialUpdateFunction, deleteFunction, duplicateFunction,
-  promoteFunction, deprecateFunction, rollbackFunction, testFunction,
-  listPublicFunctions, publicFunction, FUNCTION_TYPES, FUNCTION_STATES, draftFunction,
-} from "./functions.mjs";
-import { getFunction, listFunctionVersions } from "./store.mjs";
-import {
   createTrigger, updateTrigger, deleteTrigger, fireTrigger, fireWebhookTrigger, fireConnectorEvent,
   publicTrigger, listPublicTriggers, getTriggerSecret, tick, TRIGGER_TYPES, registerTriggerRunHooks, scheduleTextFor,
-  reanchorTriggersForHousehold,
+  reanchorTriggersForHousehold, setHelperRunner,
 } from "./triggers.mjs";
 import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, sendRecoveryCode, pushToMember } from "./notify.mjs";
@@ -95,16 +81,8 @@ import { listProviders as listAIProviders, aiProviderById, setProviderConfig, re
 import { listProviders as listConnectorProviders, providerById as connectorProviderById, providerConfigured, publicProvider as publicConnectorProvider, findToolGlobal } from "./providers.mjs";
 import { buildAuthUrl, exchangeCode, apiForAccount } from "./oauth.mjs";
 import { listAccountsFor, getOwnedAccount, upsertAccount, revokeAccount, checkAccountHealth, sweepAccountHealth, publicAccount, accountStatusById } from "./accounts.mjs";
-import { planFromGoal, generateMiniApp, generatePlaybook, assistantRespond, assistantStream, proposeEvolution, toolCatalog } from "./planner.mjs";
+import { generateMiniApp, toolCatalog } from "./context.mjs";
 import { runAssistantAgent } from "./assistant-agent.mjs";
-// Ask Famili engine selector. Default "agent" — the AI SDK ToolLoopAgent in
-// assistant-agent.mjs (tools called in a loop, results observed, approvals via durable
-// runs). HOMEOPS_ASSISTANT_ENGINE=legacy restores the previous single-shot planner
-// (assistantRespond/assistantStream) byte-for-byte. Read live so a spawned test server
-// can pick per instance, like every other rollback flag in this codebase.
-function assistantEngine() {
-  return String(process.env.HOMEOPS_ASSISTANT_ENGINE ?? "agent").trim().toLowerCase() === "legacy" ? "legacy" : "agent";
-}
 // The assistant message the durable thread keeps for one turn — shared by both routes so
 // the streaming and non-streaming paths can never persist different shapes.
 function assistantTurnMessage(out, at) {
@@ -112,7 +90,7 @@ function assistantTurnMessage(out, at) {
     return { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at };
   }
   return {
-    role: "assistant", kind: out.kind, text: out.answer ?? "", plan: out.plan ?? null, build: out.build ?? null,
+    role: "assistant", kind: "answer", text: out.answer ?? "",
     runId: out.run?.id ?? out.runId ?? null, model: out.model ?? null, at,
     ...(Array.isArray(out.toolCalls) && out.toolCalls.length ? { toolCalls: out.toolCalls } : {}),
     ...(Array.isArray(out.runIds) && out.runIds.length ? { runIds: out.runIds } : {}),
@@ -127,7 +105,6 @@ function attachAgentRun(out) {
     if (r) out.run = publicRun(r);
   }
 }
-import { preflightAutomation } from "./automation-preflight.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const VERSION = "1.2.0";
@@ -1395,12 +1372,6 @@ const handleRequest = async (req, res) => {
       // the pre-built use cases the agent templates reference. Outside the block above
       // because it enters the resident tenant to read the template set. Non-fatal: an empty
       // catalogue is a poorer first run, not a broken one.
-      if (!invite) {
-        try {
-          const skills = ensureSystemSkills(householdId);
-          if (skills.length) await runWithTenant(householdId, () => appendAudit({ type: "household.skills_seeded", count: skills.length }));
-        } catch { /* the assistant still plans from the live tool catalog */ }
-      }
       const s = createSession({ actorId, actorName: ownerName, role, householdId });
       maybeSeedSandbox(s);
       const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
@@ -1903,14 +1874,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       if (body.confirm !== "RESET") return json(res, 400, { error: "confirm_required", message: "Pass confirm:\"RESET\" — this bulk-clears the assistant's operational data (a backup is taken first)." }, req);
       const backup = createBackup(); // backup-first, ALWAYS
-      const CLEAR = ["evolution.json", "memory.json", "conversations.json", "notifications.json", "help-requests.json", "approvals.json", "runs.json", "artifacts.json"];
+      const CLEAR = ["memory.json", "conversations.json", "notifications.json", "help-requests.json", "approvals.json", "runs.json", "artifacts.json"];
       const cleared = {};
       for (const file of CLEAR) { const r = clearCollection(file); cleared[file] = r.ok ? r.cleared : (r.error || "err"); }
-      const deletedAgents = [], deletedSkills = [], skippedAgents = [], skippedSkills = [];
-      for (const id of (Array.isArray(body.deleteAgentIds) ? body.deleteAgentIds : [])) { const r = deleteAgent(String(id)); if (r?.ok) deletedAgents.push(id); else skippedAgents.push({ id, error: r?.error || "err" }); }
-      for (const id of (Array.isArray(body.deleteSkillIds) ? body.deleteSkillIds : [])) { const r = deleteSkill(String(id)); if (r?.ok) deletedSkills.push(id); else skippedSkills.push({ id, error: r?.error || "err" }); }
-      audit({ type: "household.reset_assistant", backup, clearedCounts: cleared, deletedAgents, deletedSkills, ok: true }, req, g.session);
-      return json(res, 200, { ok: true, backup, cleared, deletedAgents, deletedSkills, skippedAgents, skippedSkills }, req);
+      const deletedAgents = [], skippedAgents = [];
+      for (const id of (Array.isArray(body.deleteAgentIds) ? body.deleteAgentIds : [])) { const r = deleteHelper(String(id)); if (r?.ok) deletedAgents.push(id); else skippedAgents.push({ id, error: r?.error || "err" }); }
+      audit({ type: "household.reset_assistant", backup, clearedCounts: cleared, deletedAgents, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, backup, cleared, deletedAgents, skippedAgents, deletedSkills: [], skippedSkills: [] }, req);
     }
     if (path === "/api/store/quarantine/ack" && method === "POST") {
       const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -4286,42 +4256,6 @@ function mayWriteAgent(session, agent, nextVisibility) {
       return json(res, 200, { ok: true }, req);
     }
 
-    /* ---- Playbooks (Phase 6): server-owned household workflow library ---- */
-    if (path === "/api/playbooks" && method === "GET") {
-      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const all = listPlaybooks((p) => p.householdId === g.session.householdId || p.householdId === "local")
-        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
-      return json(res, 200, { playbooks: all }, req);
-    }
-    if (path === "/api/playbooks" && method === "POST") {
-      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!String(body.name ?? "").trim()) return json(res, 400, { error: "name_required" }, req);
-      const steps = (Array.isArray(body.steps) ? body.steps : []).map(String).filter(Boolean);
-      if (steps.length === 0) return json(res, 400, { error: "steps_required" }, req);
-      const pb = putPlaybook({
-        id: "pb_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        name: String(body.name).trim(), description: String(body.description ?? ""),
-        whenToUse: String(body.whenToUse ?? ""), category: String(body.category ?? "Custom"),
-        steps, requiredConnections: (Array.isArray(body.requiredConnections) ? body.requiredConnections : []).map(String),
-        outputFormat: String(body.outputFormat ?? ""), approvalRules: (Array.isArray(body.approvalRules) ? body.approvalRules : []).map(String),
-        archived: false, system: false, createdBy: g.session.actorId,
-        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      });
-      audit({ type: "playbook.create", playbookId: pb.id, ok: true }, req, g.session);
-      return json(res, 200, { playbook: pb }, req);
-    }
-    const playbookOne = path.match(/^\/api\/playbooks\/([^/]+)$/);
-    if (playbookOne && method === "DELETE") {
-      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const pb = getPlaybook(playbookOne[1]);
-      if (!pb || (pb.householdId !== g.session.householdId && pb.householdId !== "local")) return json(res, 404, { error: "not_found" }, req);
-      if (!isAdultRole(g.session.role) && pb.createdBy !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
-      deletePlaybookRec(pb.id);
-      audit({ type: "playbook.delete", playbookId: pb.id, ok: true }, req, g.session);
-      return json(res, 200, { ok: true }, req);
-    }
 
     /* ---- Household files (Phase 5): server-owned file library ----
      * Metadata + bytes live server-side so every client (web/mobile) sees the same
@@ -4539,227 +4473,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       return json(res, 200, { ok: true }, req);
     }
 
-    /* ---- Skill registry ---- */
-    if (path === "/api/skills" && method === "GET") {
-      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const all = listSkills((s) => s.householdId === g.session.householdId || s.householdId === "local");
-      const domain = url.searchParams.get("domain") || undefined;
-      const status = url.searchParams.get("status") || undefined;
-      const out = all
-        .filter((s) => (!domain || s.domain === domain) && (!status || s.status === status))
-        .sort((a, b) => (b.updatedAt ?? 0) > (a.updatedAt ?? 0) ? 1 : -1);
-      return json(res, 200, { skills: out.map(publicSkill) }, req);
-    }
-    if (path === "/api/skills" && method === "POST") {
-      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!body.name?.trim()) return json(res, 400, { error: "name_required" }, req);
-      const skill = createSkill(body, g.session);
-      audit({ type: "skill.create", skillId: skill.id, name: skill.name, ok: true }, req, g.session);
-      return json(res, 200, { skill: publicSkill(skill) }, req);
-    }
-    // infer-functions must come before the /:id match
-    if (path === "/api/skills/infer-functions" && method === "POST") {
-      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!body.description?.trim()) return json(res, 400, { error: "description_required" }, req);
-      const out = await inferFunctions({ description: body.description, session: g.session, providerId: body.providerId });
-      audit({ type: "skill.infer", ok: out.ok, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
-      return json(res, out.ok ? 200 : 422, out, req);
-    }
-    const skillBase = path.match(/^\/api\/skills\/([^/]+)$/);
-    if (skillBase) {
-      const id = skillBase[1];
-      if (method === "GET") {
-        const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-        const s = getSkill(id);
-        if (!s || (s.householdId !== "local" && s.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-        return json(res, 200, { skill: publicSkill(s) }, req);
-      }
-      if (method === "PUT") {
-        const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-        const s = getSkill(id);
-        if (!s || (s.householdId !== "local" && s.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-        const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-        const updated = replaceSkill(id, body);
-        if (!updated) return json(res, 404, { error: "not_found" }, req);
-        audit({ type: "skill.update", skillId: id, ok: true }, req, g.session);
-        return json(res, 200, { skill: publicSkill(updated) }, req);
-      }
-      if (method === "PATCH") {
-        const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-        const s = getSkill(id);
-        if (!s || (s.householdId !== "local" && s.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-        const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-        const updated = partialUpdateSkill(id, body);
-        audit({ type: "skill.patch", skillId: id, ok: true }, req, g.session);
-        return json(res, 200, { skill: publicSkill(updated) }, req);
-      }
-      if (method === "DELETE") {
-        const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-        const s = getSkill(id);
-        if (!s || (s.householdId !== "local" && s.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-        const r = deleteSkill(id);
-        if (r.error) return json(res, r.error === "not_found" ? 404 : 422, { error: r.error }, req);
-        audit({ type: "skill.delete", skillId: id, ok: true }, req, g.session);
-        return json(res, 200, { ok: true }, req);
-      }
-    }
-    const skillAction = path.match(/^\/api\/skills\/([^/]+)\/(run|test|duplicate|promote|rollback|versions|readiness)$/);
-    if (skillAction) {
-      const [, id, action] = skillAction;
-      // readiness is a READ, like versions — it reports what's unfinished, it changes nothing.
-      const isRead = action === "versions" || action === "readiness";
-      const g = gate(req, isRead ? { requireSession: true } : { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const s = getSkill(id);
-      if (!s || (s.householdId !== "local" && s.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-      if (action === "versions" && method === "GET") {
-        return json(res, 200, { versions: listSkillVersions(id) }, req);
-      }
-      // ISS-117: the builder asks for readiness BEFORE offering a real test, so the
-      // unresolved list can be shown while it's still fixable — rather than discovered
-      // by running the thing and reading the wreckage.
-      if (action === "readiness" && method === "GET") {
-        return json(res, 200, { readiness: skillReadiness(s, g.session) }, req);
-      }
-      if (method !== "POST") return json(res, 405, { error: "method_not_allowed" }, req);
-      if (action === "run") {
-        const body = await readBody(req);
-        const out = await testSkill({ skillId: id, params: body?.params ?? {}, session: g.session });
-        // Forward message/unresolved: flattening this to a bare error code is what made a
-        // half-built skill fail with nothing a family could act on (ISS-117).
-        if (out.error) return json(res, out.error === "unknown_skill" ? 404 : 422, { error: out.error, ...(out.message ? { message: out.message } : {}), ...(out.unresolved ? { unresolved: out.unresolved } : {}) }, req);
-        audit({ type: "skill.run", skillId: id, runId: out.run?.id, ok: true }, req, g.session);
-        return json(res, 200, { run: out.run }, req);
-      }
-      if (action === "test") {
-        const body = await readBody(req);
-        const params = body?.params ?? (s.test_cases?.[0]?.params ?? {});
-        const out = await testSkill({ skillId: id, params, session: g.session });
-        if (out.error) return json(res, out.error === "unknown_skill" ? 404 : 422, { error: out.error, ...(out.message ? { message: out.message } : {}), ...(out.unresolved ? { unresolved: out.unresolved } : {}) }, req);
-        audit({ type: "skill.test", skillId: id, runId: out.run?.id, ok: true }, req, g.session);
-        return json(res, 200, { run: out.run }, req);
-      }
-      if (action === "duplicate") {
-        const copy = duplicateSkill(id, g.session);
-        if (!copy) return json(res, 404, { error: "not_found" }, req);
-        audit({ type: "skill.duplicate", skillId: id, newId: copy.id, ok: true }, req, g.session);
-        return json(res, 200, { skill: publicSkill(copy) }, req);
-      }
-      if (action === "promote") {
-        const r = promoteSkill(id);
-        if (r?.error) return json(res, 422, { error: r.error }, req);
-        audit({ type: "skill.promote", skillId: id, ok: true }, req, g.session);
-        return json(res, 200, { skill: publicSkill(r) }, req);
-      }
-      if (action === "rollback") {
-        const body = await readBody(req);
-        const r = rollbackSkill(id, body?.targetVersion ?? null);
-        if (r?.error) return json(res, r.error === "not_found" ? 404 : 422, { error: r.error }, req);
-        audit({ type: "skill.rollback", skillId: id, targetVersion: body?.targetVersion ?? null, ok: true }, req, g.session);
-        return json(res, 200, { skill: publicSkill(r) }, req);
-      }
-    }
 
-    /* ---- Function registry (Slice 4) ---- */
-    // Draft a candidate function definition from a capability description (item 13) —
-    // must precede the /:id match. Drafting only; the human reviews + saves via POST.
-    if (path === "/api/functions/draft" && method === "POST") {
-      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const out = await draftFunction({ description: body.description, session: g.session, providerId: body.providerId });
-      audit({ type: "function.draft", ok: out.ok, fallback: !!out.fallback }, req, g.session);
-      return json(res, out.ok ? 200 : 400, out, req);
-    }
-    if (path === "/api/functions" && method === "GET") {
-      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const out = listPublicFunctions(g.session, { type: url.searchParams.get("type") || undefined, state: url.searchParams.get("state") || undefined });
-      return json(res, 200, { functions: out }, req);
-    }
-    if (path === "/api/functions" && method === "POST") {
-      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!body.name?.trim()) return json(res, 400, { error: "name_required" }, req);
-      if (body.type && !FUNCTION_TYPES.includes(body.type)) return json(res, 400, { error: "unknown_type" }, req);
-      const fn = createFunction(body, g.session);
-      audit({ type: "function.create", functionId: fn.id, name: fn.name, fnType: fn.type, ok: true }, req, g.session);
-      return json(res, 200, { function: publicFunction(fn, g.session) }, req);
-    }
-    // Metadata endpoints must precede the /:id match.
-    if (path === "/api/functions/tool-catalog" && method === "GET") {
-      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      return json(res, 200, { tools: toolCatalog(g.session), types: FUNCTION_TYPES, states: FUNCTION_STATES }, req);
-    }
-    const fnBase = path.match(/^\/api\/functions\/([^/]+)$/);
-    if (fnBase) {
-      const id = fnBase[1];
-      if (method === "GET") {
-        const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-        const f = getFunction(id);
-        if (!f || (f.householdId !== "local" && f.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-        return json(res, 200, { function: publicFunction(f, g.session) }, req);
-      }
-      if (method === "PUT" || method === "PATCH") {
-        const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-        const f = getFunction(id);
-        if (!f || (f.householdId !== "local" && f.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-        const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-        const updated = method === "PUT" ? replaceFunction(id, body) : partialUpdateFunction(id, body);
-        if (!updated) return json(res, 404, { error: "not_found" }, req);
-        audit({ type: "function.update", functionId: id, ok: true }, req, g.session);
-        return json(res, 200, { function: publicFunction(updated, g.session) }, req);
-      }
-      if (method === "DELETE") {
-        const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-        const f = getFunction(id);
-        if (!f || (f.householdId !== "local" && f.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-        const r = deleteFunction(id);
-        if (r.error) return json(res, r.error === "not_found" ? 404 : 422, { error: r.error }, req);
-        audit({ type: "function.delete", functionId: id, ok: true }, req, g.session);
-        return json(res, 200, { ok: true }, req);
-      }
-    }
-    const fnAction = path.match(/^\/api\/functions\/([^/]+)\/(test|duplicate|promote|deprecate|rollback|versions)$/);
-    if (fnAction) {
-      const [, id, action] = fnAction;
-      const g = gate(req, action === "versions" ? { requireSession: true } : { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const f = getFunction(id);
-      if (!f || (f.householdId !== "local" && f.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-      if (action === "versions" && method === "GET") return json(res, 200, { versions: listFunctionVersions(id) }, req);
-      if (method !== "POST") return json(res, 405, { error: "method_not_allowed" }, req);
-      if (action === "test") {
-        const body = await readBody(req);
-        const out = await testFunction({ id, input: body?.input, confirm: !!body?.confirm, session: g.session });
-        if (out.error === "not_found") return json(res, 404, { error: "not_found" }, req);
-        audit({ type: "function.test", functionId: id, ok: !!out.ok, error: out.ok ? undefined : out.error }, req, g.session);
-        return json(res, 200, out, req);
-      }
-      if (action === "duplicate") {
-        const copy = duplicateFunction(id, g.session);
-        if (!copy) return json(res, 404, { error: "not_found" }, req);
-        audit({ type: "function.duplicate", functionId: id, newId: copy.id, ok: true }, req, g.session);
-        return json(res, 200, { function: publicFunction(copy, g.session) }, req);
-      }
-      if (action === "promote") {
-        const r = promoteFunction(id, { householdId: g.session.householdId, actorId: g.session.actorId });
-        if (r?.error) return json(res, 422, { error: r.error, state: r.state, message: r.message }, req);
-        audit({ type: "function.promote", functionId: id, ok: true }, req, g.session);
-        return json(res, 200, { function: publicFunction(r, g.session) }, req);
-      }
-      if (action === "deprecate") {
-        const r = deprecateFunction(id);
-        if (r?.error) return json(res, 422, { error: r.error }, req);
-        audit({ type: "function.deprecate", functionId: id, ok: true }, req, g.session);
-        return json(res, 200, { function: publicFunction(r, g.session) }, req);
-      }
-      if (action === "rollback") {
-        const body = await readBody(req);
-        const r = rollbackFunction(id, body?.targetVersion ?? null);
-        if (r?.error) return json(res, r.error === "not_found" ? 404 : 422, { error: r.error }, req);
-        audit({ type: "function.rollback", functionId: id, targetVersion: body?.targetVersion ?? null, ok: true }, req, g.session);
-        return json(res, 200, { function: publicFunction(r, g.session) }, req);
-      }
-    }
 
     // E1 [10:55] — "It's just raw text. It needs address autocomplete, smart sorting like
     // most web apps." Fires on keystrokes from the event location field, so it stays cheap:
@@ -4774,134 +4488,111 @@ function mayWriteAgent(session, agent, nextVisibility) {
       return json(res, 200, out, req);
     }
 
-    // G6 — the starter-helper catalog, grouped. Mobile carried four hand-written entries
-    // while the web read thirteen from its own file; this is the one list both can ask for.
-    // Static and household-independent, so any signed-in member may read it.
-    if (path === "/api/agent-templates" && method === "GET") {
-      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      return json(res, 200, { sections: agentTemplateSections() }, req);
-    }
 
-    /* ---- Agent registry (Slice 5) ---- */
-    if (path === "/api/agents" && method === "GET") {
+
+    /* ======================== Helpers ========================================
+     * One concept, one set of routes. A helper is a name, what it should do in plain
+     * English, when it runs, and one autonomy dial — so there is no second screen where
+     * a schedule lives, no third where a recipe lives, and no fourth that decides what
+     * gets approved. Running one is the same tool loop that answers a chat message.
+     * ======================================================================== */
+    if (path === "/api/helper-templates" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      return json(res, 200, { agents: listPublicAgents(g.session, { status: url.searchParams.get("status") || undefined }) }, req);
+      return json(res, 200, { sections: helperTemplates() }, req);
     }
-    if (path === "/api/agents" && method === "POST") {
-      // Adult Member may create helpers — PERSONAL ones only (see the silo note above).
+    if (path === "/api/helpers" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      return json(res, 200, { helpers: listHelpers(g.session).map((h) => publicHelper(h, g.session)) }, req);
+    }
+    if (path === "/api/helpers" && method === "POST") {
       const g = gate(req, { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!body.name?.trim()) return json(res, 400, { error: "name_required" }, req);
-      const may = mayWriteAgent(g.session, null, body.visibility);
-      if (!may.ok) return json(res, 403, { error: may.error, ...(may.message ? { message: may.message } : {}) }, req);
-      const agent = createAgent(body, g.session);
-      audit({ type: "agent.create", agentId: agent.id, name: agent.name, ok: true }, req, g.session);
-      return json(res, 200, { agent: publicAgent(agent) }, req);
+      if (!String(body.name ?? "").trim()) return json(res, 400, { error: "name_required", message: "Give the helper a name." }, req);
+      if (!String(body.instructions ?? "").trim()) return json(res, 400, { error: "instructions_required", message: "Say what this helper should do." }, req);
+      const may = mayWriteHelper(g.session, null);
+      if (!may.ok) return json(res, 403, { error: may.error, message: may.message }, req);
+      // An Adult Member’s helper is their own — the same silo their chats live in.
+      const visibility = isAdultMemberOnly(g.session) ? "personal" : body.visibility;
+      // The top tier is the one setting that lets a helper send and spend with nobody
+      // watching. It is the only thing here behind the household PIN, and turning it OFF
+      // never is: making someone prove themselves in order to become more careful is how
+      // you teach them to leave it on.
+      if (body.autonomy === "full") {
+        const gated = await requireHouseholdPin(g.session, body.pin);
+        if (gated) return json(res, 403, gated, req);
+      }
+      if (body && "pin" in body) delete body.pin;   // consumed here; never persisted
+      const helper = createHelper({ ...body, visibility }, g.session);
+      audit({ type: "helper.create", agentId: helper.id, name: helper.name, ok: true }, req, g.session);
+      return json(res, 200, { helper: publicHelper(helper, g.session) }, req);
     }
-    const agentBase = path.match(/^\/api\/agents\/([^/]+)$/);
-    if (agentBase) {
-      const id = agentBase[1];
+    const helperOne = path.match(/^\/api\/helpers\/([^/]+)$/);
+    if (helperOne) {
+      const id = helperOne[1];
       if (method === "GET") {
         const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-        const a = getAgent(id);
-        if (!a || (a.householdId !== "local" && a.householdId !== g.session.householdId) || !agentVisibleTo(a, g.session)) return json(res, 404, { error: "not_found" }, req);
-        return json(res, 200, { agent: publicAgent(a) }, req);
+        const h = getHelper(id, g.session);
+        if (!h) return json(res, 404, { error: "not_found" }, req);
+        return json(res, 200, { helper: publicHelper(h, g.session) }, req);
       }
-      if (method === "PUT" || method === "PATCH") {
+      if (method === "PATCH" || method === "PUT") {
         const g = gate(req, { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-        const a = getAgent(id);
-        if (!a || (a.householdId !== "local" && a.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-        {
-          // An Adult Member edits their own personal helper. They cannot reach a household
-          // helper, and cannot promote their own into one — that's a household-level act.
-          const may = mayWriteAgent(g.session, a, undefined);
-          if (!may.ok) return json(res, 403, { error: may.error, ...(may.message ? { message: may.message } : {}) }, req);
-          const bodyPeek = await readBody(req);
-          if (!bodyPeek) return json(res, 400, { error: "malformed_json" }, req);
-          const promoting = mayWriteAgent(g.session, a, bodyPeek.visibility);
-          if (!promoting.ok) return json(res, 403, { error: promoting.error, ...(promoting.message ? { message: promoting.message } : {}) }, req);
-          req.__prereadBody = bodyPeek;
-        }
-        const body = req.__prereadBody ?? await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-        // THE PIN, for the one switch that most deserved it and had it least.
-        //
-        // requireHouseholdPin appeared in exactly three places in this server: its own
-        // definition, the risk-override write, and the three "runs unsupervised" settings.
-        // It did NOT appear here — so re-classing a single tool demanded the household PIN,
-        // while `unattended.includeHighRisk` ("emails, texts and payments go out without
-        // asking", for every capability that helper can reach) needed only an Adult Admin
-        // session. The most powerful autonomy grant in the product had the weakest gate.
-        //
-        // Only the RAISE is gated, and deliberately so: the same asymmetry the rest of this
-        // policy runs on (see policy.mjs). Turning a waiver OFF, or setting the low-risk
-        // tier, goes straight through — making someone prove themselves in order to become
-        // MORE careful is how you teach them to leave it on.
-        if (body?.approvalPolicy?.unattended?.enabled === true && body.approvalPolicy.unattended.includeHighRisk === true) {
+        const h = getHelper(id, g.session);
+        if (!h) return json(res, 404, { error: "not_found" }, req);
+        const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+        // The requested visibility is checked alongside the stored one: editing a helper you
+        // own must not be a way to hand it to the whole family.
+        const may = mayWriteHelper(g.session, h, body.visibility);
+        if (!may.ok) return json(res, 403, { error: may.error, message: may.message }, req);
+        if (body.autonomy === "full") {
           const gated = await requireHouseholdPin(g.session, body.pin);
           if (gated) return json(res, 403, gated, req);
         }
-        // …and the PIN does NOT travel any further than the check.
-        //
-        // Both writers spread the patch verbatim over the existing record, and publicAgent
-        // returns the whole agent with the comment "all fields non-secret". Leaving `pin` on
-        // the body would persist the household PIN as plaintext on the agent and hand it to
-        // every member who can list helpers. Deleted here rather than filtered downstream:
-        // the credential should stop existing at the point it was consumed.
         if (body && "pin" in body) delete body.pin;
-        // The session travels so approvalPolicy.unattended can be attributed to a real
-        // person with real standing (agents.mjs sanitizeApprovalPolicy) — its high-risk tier
-        // is only honoured for an Owner/Adult Admin, and a request body can't claim that.
-        const updated = method === "PUT" ? replaceAgent(id, body, g.session) : partialUpdateAgent(id, body, g.session);
-        audit({ type: "agent.update", agentId: id, ok: true }, req, g.session);
-        return json(res, 200, { agent: publicAgent(updated) }, req);
+        const updated = updateHelper(id, body, g.session);
+        audit({ type: "helper.update", agentId: id, ok: true }, req, g.session);
+        return json(res, 200, { helper: publicHelper(updated, g.session) }, req);
       }
       if (method === "DELETE") {
         const g = gate(req, { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-        const a = getAgent(id);
-        if (!a || (a.householdId !== "local" && a.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-        const mayDel = mayWriteAgent(g.session, a, undefined);
-        if (!mayDel.ok) return json(res, 403, { error: mayDel.error, ...(mayDel.message ? { message: mayDel.message } : {}) }, req);
-        const r = deleteAgent(id);
-        if (r.error) return json(res, r.error === "not_found" ? 404 : 422, { error: r.error }, req);
-        audit({ type: "agent.delete", agentId: id, ok: true }, req, g.session);
+        const h = getHelper(id, g.session);
+        if (!h) return json(res, 404, { error: "not_found" }, req);
+        const may = mayWriteHelper(g.session, h);
+        if (!may.ok) return json(res, 403, { error: may.error, message: may.message }, req);
+        const r = deleteHelper(id);
+        if (r.error) return json(res, 404, { error: r.error }, req);
+        audit({ type: "helper.delete", agentId: id, ok: true }, req, g.session);
         return json(res, 200, { ok: true }, req);
       }
     }
-    const agentAction = path.match(/^\/api\/agents\/([^/]+)\/(run|duplicate|rollback|versions|context)$/);
-    if (agentAction) {
-      const [, id, action] = agentAction;
-      const g = gate(req, (action === "versions" || action === "context") ? { requireSession: true } : { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const a = getAgent(id);
-      if (!a || (a.householdId !== "local" && a.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
-      // Running or copying a helper is a write in every way that matters — it can reach
-      // tools and send things — so it obeys the same rule as editing one.
-      if (action === "run" || action === "duplicate" || action === "rollback") {
-        const mayRun = mayWriteAgent(g.session, a, undefined);
-        if (!mayRun.ok) return json(res, 403, { error: mayRun.error, ...(mayRun.message ? { message: mayRun.message } : {}) }, req);
+    const helperAction = path.match(/^\/api\/helpers\/([^/]+)\/(run|history)$/);
+    if (helperAction) {
+      const [, id, action] = helperAction;
+      const g = gate(req, action === "history" ? { requireSession: true } : { minRole: "Adult Member" });
+      if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const h = getHelper(id, g.session);
+      if (!h) return json(res, 404, { error: "not_found" }, req);
+      if (action === "history") {
+        // A helper’s history IS its thread: every run wrote what it actually did there.
+        const conv = h.conversationId ? getConversation(h.conversationId) : null;
+        return json(res, 200, { conversationId: h.conversationId ?? null, messages: conv?.messages ?? [], lastRun: h.lastRun ?? null }, req);
       }
-      if (action === "versions" && method === "GET") return json(res, 200, { versions: listAgentVersions(id) }, req);
-      if (action === "context" && method === "GET") return json(res, 200, { context: agentContext(a, g.session) }, req);
       if (method !== "POST") return json(res, 405, { error: "method_not_allowed" }, req);
-      if (action === "run") {
-        const body = await readBody(req);
-        const out = await orchestrate({ source: body?.source ?? "agent", via: "agent", agentId: id, goal: body?.goal, skillId: body?.skillId, params: body?.params ?? {}, session: g.session });
-        if (out.error) return json(res, out.error === "unknown_agent" ? 404 : 422, { error: out.error, message: out.message }, req);
-        audit({ type: "agent.run", agentId: id, runId: out.run?.id, droppedSteps: out.droppedSteps, ok: true }, req, g.session);
-        return json(res, 200, { run: out.run, droppedSteps: out.droppedSteps }, req);
-      }
-      if (action === "duplicate") {
-        const copy = duplicateAgent(id, g.session);
-        if (!copy) return json(res, 404, { error: "not_found" }, req);
-        audit({ type: "agent.duplicate", agentId: id, newId: copy.id, ok: true }, req, g.session);
-        return json(res, 200, { agent: publicAgent(copy) }, req);
-      }
-      if (action === "rollback") {
-        const body = await readBody(req);
-        const r = rollbackAgent(id, body?.targetVersion ?? null);
-        if (r?.error) return json(res, r.error === "not_found" ? 404 : 422, { error: r.error }, req);
-        audit({ type: "agent.rollback", agentId: id, targetVersion: body?.targetVersion ?? null, ok: true }, req, g.session);
-        return json(res, 200, { agent: publicAgent(r) }, req);
-      }
+      // Running a helper can reach tools and send things, so it obeys the same rule as
+      // editing one.
+      const may = mayWriteHelper(g.session, h);
+      if (!may.ok) return json(res, 403, { error: may.error, message: may.message }, req);
+      const out = await runHelper({ helperId: id, session: g.session, reason: "manual" });
+      audit({ type: "helper.run", agentId: id, ok: !!out.ok, error: out.ok ? undefined : out.error }, req, g.session);
+      return json(res, out.ok ? 200 : 422, out, req);
+    }
+
+    /* A TestFlight build already on someone’s phone still asks for /api/agents. Answer it
+     * with the same rows rather than a 404, so an un-updated app degrades to a read-only
+     * list instead of an error screen. */
+    if (path === "/api/agents" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      return json(res, 200, { agents: listHelpers(g.session).map((h) => publicHelper(h, g.session)) }, req);
     }
 
     /* ---- Trigger registry (Slice 6) — real server-side triggers ---- */
@@ -4957,23 +4648,6 @@ function mayWriteAgent(session, agent, nextVisibility) {
       return json(res, out.ok ? 200 : 422, out, req);
     }
 
-    // WP-101 slice 4 — the "compile step" template instantiation never had: validate a
-    // candidate automation's acting agent / tool steps / integrations / multi-agent role
-    // assignments against the REAL registries before the client lets it go "Active".
-    // Read-only (see automation-preflight.mjs) — any session member may check.
-    if (path === "/api/automations/validate" && method === "POST") {
-      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!body.plan || typeof body.plan !== "object") return json(res, 400, { error: "plan_required" }, req);
-      const result = preflightAutomation({
-        templateId: typeof body.templateId === "string" ? body.templateId : undefined,
-        plan: body.plan,
-        agentId: typeof body.agentId === "string" ? body.agentId : undefined,
-        multiAgentRoles: Array.isArray(body.multiAgentRoles) ? body.multiAgentRoles : undefined,
-        session: g.session,
-      });
-      return json(res, 200, result, req);
-    }
 
     /* ---- OAuth start (PKCE; state bound to actor + household + provider) ---- */
     const oauthStartMatch = path.match(/^\/api\/oauth\/([^/]+)\/start$/);
@@ -5113,7 +4787,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // "Every day at 7 AM" was resolved on the OLD clock; the next fire would land at the
       // wrong hour (and a one-shot schedule at the wrong hour forever).
       let reanchored = 0;
-      if ("timezone" in patch && patch.timezone !== prev.timezone) reanchored = reanchorTriggersForHousehold(g.session.householdId);
+      if ("timezone" in patch && patch.timezone !== prev.timezone) reanchored = reanchorHelperSchedules(g.session.householdId) + reanchorTriggersForHousehold(g.session.householdId);
       audit({ type: "settings.update", ok: true, changed: Object.keys(patch), ...(reanchored ? { reanchoredTriggers: reanchored } : {}), prevExternalActions: prev.externalActionsEnabled, nextExternalActions: next.externalActionsEnabled }, req, g.session);
       return json(res, 200, { settings: settingsView(next, g.session) }, req);
     }
@@ -5170,15 +4844,6 @@ function mayWriteAgent(session, agent, nextVisibility) {
       return json(res, out.ok ? 200 : 422, out, req);
     }
 
-    /* ---- Planner brain: plain English → plan / mini app / playbook ---- */
-    if (path === "/api/agent/plan" && method === "POST") {
-      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const gated = planGate(g, res, req); if (gated) return gated;
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const out = await planFromGoal({ goal: body.goal, session: g.session, providerId: body.providerId });
-      audit({ type: "agent.plan", ok: out.ok, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
-      return json(res, out.ok ? 200 : 422, out, req);
-    }
     if (path === "/api/assistant" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const aiGated = childAiGate(g, res, req); if (aiGated) return aiGated;
@@ -5200,54 +4865,36 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // Prior turns from the durable conversation ride into the model call —
       // otherwise the assistant forgets facts stated one message earlier.
       const histConv = body.conversationId ? getConversation(body.conversationId) : null;
-      const history = histConv && canSeeConversation(histConv, g.session) ? histConv.messages : [];
+      const history = histConv && canSeeConversation(histConv, g.session) ? [...(histConv.messages ?? [])] : [];
+        /* THREAD ORDER (ISS-005/009/011/016) — the user's turn is written BEFORE the model
+         * runs, not after. A durable run is now created INSIDE the turn (an approval-gated
+         * tool becomes a parked run), and the run's own reaction posts back to this same
+         * conversation from a background hook. Persisting afterwards let that reaction land
+         * above the question that caused it.
+         *
+         * History is read first, so the message being answered is not also handed back to
+         * the model as something it already said. */
+        const convForTurn = histConv && canSeeConversation(histConv, g.session) ? histConv : null;
+      if (convForTurn) appendConversationMessage(convForTurn.id, { role: "user", text: String(body.message), at: new Date().toISOString() });
       // WP-006 slice 2 — plan chat against the acting agent's (agt_household, effective)
       // PERMITTED catalog. ensureOpenDefaultAgent neutralizes the seeded-narrow allow-list
       // (the same widening the chat run itself applies), so ordinary chat capability is
       // never shrunk — only a household's explicit DENY reaches the model's menu, and a
       // local provider additionally gets the relevance-ranked, budget-capped catalog.
-      const actingAgent = ensureOpenDefaultAgent("agt_household");
-      const out = assistantEngine() === "agent"
-        ? await runAssistantAgent({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) })
-        : await assistantRespond({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent });
-      demoteBuildForRole(out, g.session);
+      const actingAgent = ensureDefaultHelper();
+      const out = await runAssistantAgent({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) });
       attachAgentRun(out);
-      // Do-requests EXECUTE immediately (C-intel): a plan from chat auto-starts as a
-      // durable server run — no "Run plan" click. Approval-gated steps still pause
-      // for human sign-off inside the run, and results append back to this thread.
-      // Only BUILD proposals (agent creation) wait for explicit confirmation.
-      if (out.ok && out.kind === "plan" && out.plan && roleAtLeast(g.session.role, "Limited Member")) {
-        try {
-          // WP-006 slice 1 — routed through the single orchestrate() choke point (which
-          // delegates to runAssistantPlan). The chat run still carries the attributed
-          // agent identity so per-agent-gated tools (notably homeops.notify_contact) run
-          // from a plain ask with the WP-003 visible-skip clamp. Rollbacks: env
-          // HOMEOPS_CHAT_AGENT_ATTRIBUTION=off (attribution) / HOMEOPS_ORCHESTRATE_ENTRY=off.
-          const { run } = await orchestrate({ source: "assistant", via: "chat", plan: out.plan, session: g.session, conversationId: body.conversationId ?? null, goal: body.message, visibility: chatRunVisibility(body.conversationId) });
-          out.run = publicRun(run);
-          audit({ type: "run.start", runId: run.id, source: "assistant", ok: true }, req, g.session);
-        } catch (e) {
-          out.answer = `${out.answer}\n\n(I couldn't start it: ${String(e?.message ?? e)})`;
-        }
-      }
       // Server-durable thread: if a conversation is named, persist the turn so history
       // survives refresh and is owned by the server, not the client. Failed turns are
       // persisted too — the user saw their question and the honest error, so a refresh
       // must not erase the exchange (that was the "history gone after refresh" bug).
-      if (body.conversationId) {
-        const conv = getConversation(body.conversationId);
-        if (conv && canSeeConversation(conv, g.session)) {
-          const at = new Date().toISOString();
-          appendConversationMessage(conv.id, { role: "user", text: String(body.message), at });
-          // `build` persisted too — otherwise a build-proposal card vanished on refresh
-          // and the user had no durable evidence the assistant ever offered to build.
-          appendConversationMessage(conv.id, assistantTurnMessage(out, at));
-          // I1 — name the thread from the first exchange (see maybeNameConversation).
-          if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? out.plan?.summary ?? out.build?.summary ?? "", session: g.session });
-          // BUG-06 — the writer memory never had. Scoped to the room it was said in.
-          if (out.ok && out.kind === "answer") {
-            void captureMemoryFromExchange({ householdId: g.session.householdId, actorId: g.session.actorId, visibility: conv.visibility, nestId: conv.nestId, message: body.message, answer: out.answer });
-          }
+      if (convForTurn) {
+        appendConversationMessage(convForTurn.id, assistantTurnMessage(out, new Date().toISOString()));
+        // I1 — name the thread from the first exchange (see maybeNameConversation).
+        if (out.ok) maybeNameConversation(convForTurn.id, { question: String(body.message), answer: out.answer ?? "", session: g.session });
+        // BUG-06 — the writer memory never had. Scoped to the room it was said in.
+        if (out.ok) {
+          void captureMemoryFromExchange({ householdId: g.session.householdId, actorId: g.session.actorId, visibility: convForTurn.visibility, nestId: convForTurn.nestId, message: body.message, answer: out.answer });
         }
       }
       audit({ type: "assistant.respond", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
@@ -5271,80 +4918,43 @@ function mayWriteAgent(session, agent, nextVisibility) {
       let tokenCount = 0;
       try {
         const histConv = body.conversationId ? getConversation(body.conversationId) : null;
-        const history = histConv && canSeeConversation(histConv, g.session) ? histConv.messages : [];
+        const history = histConv && canSeeConversation(histConv, g.session) ? [...(histConv.messages ?? [])] : [];
+        /* THREAD ORDER (ISS-005/009/011/016) — the user's turn is written BEFORE the model
+         * runs, not after. A durable run is now created INSIDE the turn (an approval-gated
+         * tool becomes a parked run), and the run's own reaction posts back to this same
+         * conversation from a background hook. Persisting afterwards let that reaction land
+         * above the question that caused it.
+         *
+         * History is read first, so the message being answered is not also handed back to
+         * the model as something it already said. */
+        const conv = histConv && canSeeConversation(histConv, g.session) ? histConv : null;
+        if (conv) appendConversationMessage(conv.id, { role: "user", text: String(body.message), at: new Date().toISOString() });
         // WP-006 slice 2 — same acting-agent catalog pruning as POST /api/assistant.
-        const actingAgent = ensureOpenDefaultAgent("agt_household");
+        const actingAgent = ensureDefaultHelper();
         const sse = (ev) => { try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch { /* client hung up */ } };
         const onToken = (tok) => {
           tokenCount++;
           if (tokenCount % 4 === 0) sse({ type: "progress", tokens: tokenCount });
-          // The answer text itself, for clients that render it live (the legacy engine's
-          // JSON tokens were meaningless mid-stream; the agent's are the real reply).
-          if (assistantEngine() === "agent" && typeof tok === "string" && tok) sse({ type: "delta", text: tok });
+          // The answer text itself, live, as the model writes it.
+          if (typeof tok === "string" && tok) sse({ type: "delta", text: tok });
         };
         // What it's actually doing, as opposed to what the token counter implies. A web
         // lookup used to spend its whole (long) life claiming to be writing.
         const onPhase = (phase) => sse({ type: "phase", phase });
-        const out = assistantEngine() === "agent"
-          ? await runAssistantAgent(
-              { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) },
-              { onToken, onPhase, onEvent: (ev) => sse(ev) },
-            )
-          : await assistantStream({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent }, onToken, onPhase);
-        demoteBuildForRole(out, g.session); // ISS-011 — the streaming path gates identically
+        const out = await runAssistantAgent(
+          { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) },
+          { onToken, onPhase, onEvent: (ev) => sse(ev) },
+        );
         attachAgentRun(out);
 
-        // WP-003 slice 4 (thread order, ISS-005/009/011/016) — persist the user's OWN
-        // turn BEFORE the run below is ever started. startRun (engine.mjs) does not
-        // await execution — driveRun runs in the background — so a fast, real,
-        // no-approval step can finish and have onRunFinished (assistant-runs.mjs)
-        // append a run_result to this SAME conversation before this handler got
-        // around to recording what the user actually asked. That produced threads
-        // where the run's own reaction to a message appeared ABOVE the message
-        // itself. Moving this append here guarantees the user's turn's position in
-        // the durable array can never be at the mercy of how fast the run resolves.
-        //
-        // Rejected alternative: sort by the `at` timestamp at render time instead.
-        // Rejected because the race is a WRITE-time problem, not a display one — the
-        // user-turn message used to be timestamped only AFTER the run had already
-        // returned, so its `at` was genuinely later in wall-clock terms than the
-        // run_result's; no render-side sort can un-invert a timestamp captured too
-        // late, and every other reader of this durable array (another device, a
-        // future admin tool) would still see the wrong order in the stored data.
-        let conv = null;
-        if (body.conversationId) {
-          const c = getConversation(body.conversationId);
-          if (c && canSeeConversation(c, g.session)) {
-            conv = c;
-            appendConversationMessage(conv.id, { role: "user", text: String(body.message), at: new Date().toISOString() });
-          }
-        }
-        // Do-requests auto-execute here too (see POST /api/assistant): the run starts
-        // before the "done" event so the client can attach to it immediately.
-        if (out.ok && out.kind === "plan" && out.plan && roleAtLeast(g.session.role, "Limited Member")) {
-          try {
-            // WP-006 slice 1 — same single orchestrate() choke point as POST /api/assistant
-            // (see the comment there); the streaming route must attribute identically.
-            const { run } = await orchestrate({ source: "assistant", via: "chat", plan: out.plan, session: g.session, conversationId: body.conversationId ?? null, goal: body.message, visibility: chatRunVisibility(body.conversationId) });
-            out.run = publicRun(run);
-            audit({ type: "run.start", runId: run.id, source: "assistant", ok: true }, req, g.session);
-          } catch (e) {
-            out.answer = `${out.answer}\n\n(I couldn't start it: ${String(e?.message ?? e)})`;
-          }
-        }
-        // Same server-durable persistence as POST /api/assistant — this was previously
-        // MISSING here, which is why every conversation created through the real chat UI
-        // (which always streams) stayed empty (messages: []) server-side forever: history
-        // never survived a refresh because it was never written past the client's memory.
-        // Failed turns persist as well (see POST /api/assistant).
         if (conv) {
           appendConversationMessage(conv.id, assistantTurnMessage(out, new Date().toISOString()));
           // I1 — the streaming path is the one the real chat UI uses, so naming has to happen
           // here too or it would never fire in practice.
-          if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? out.plan?.summary ?? out.build?.summary ?? "", session: g.session });
+          if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? "", session: g.session });
           // BUG-06 — same as POST /api/assistant, and this is the path the app actually
           // uses, so leaving it out here would be leaving the bug in.
-          if (out.ok && out.kind === "answer") {
+          if (out.ok) {
             void captureMemoryFromExchange({ householdId: g.session.householdId, actorId: g.session.actorId, visibility: conv.visibility, nestId: conv.nestId, message: body.message, answer: out.answer });
           }
         }
@@ -5356,169 +4966,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
       res.end();
       return;
     }
-    // Unified chat-builder (UC.1): materialize a build spec proposed in chat into durable
-    // entities through the SAME registry create paths the builder screens use — so a
-    // conversation can stand up a skill + agent + automation in one approved step. Nothing
-    // is auto-activated: skills land as drafts (available only after their tools are
-    // available + a passing test), automations are created enabled but their gated steps
-    // still pause for approval at run time. Adult Admin only (creating agents/automations).
-    if (path === "/api/assistant/build" && method === "POST") {
-      const g = gate(req, { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const aiGated = childAiGate(g, res, req); if (aiGated) return aiGated;
-      const gated = planGate(g, res, req); if (gated) return gated;
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const spec = body.build ?? body;
-      // The same scoping the chat proposal got, applied to whatever actually arrives here —
-      // the client is not the enforcement point.
-      if (isAdultMemberOnly(g.session)) {
-        if (spec?.agent) spec.agent.visibility = "personal";
-        if (spec?.automation) delete spec.automation;
-        if (Array.isArray(spec?.edits)) spec.edits = [];
-      }
-      const hasEdits = Array.isArray(spec?.edits) && spec.edits.length > 0;
-      if (!spec || (typeof spec !== "object") || (!spec.skill && !spec.agent && !spec.automation && !hasEdits)) {
-        return json(res, 400, { error: "empty_build", message: "Describe at least a skill, agent, automation, or edit to make." }, req);
-      }
-      try {
-        const out = materializeBuild(spec, { session: g.session, req });
-        persistBuildOutcome(body.conversationId, g.session, out);
-        return json(res, 200, { ok: true, ...out }, req);
-      } catch (e) {
-        // WP-001 slice 3 — the refusal must reach the FAMILY, not just the HTTP client.
-        // A build that cannot run is reported in the thread in plain language, so the
-        // user never walks away believing an automation was set up.
-        const code = e?.code ?? "build_failed";
-        const message = String(e?.message ?? e).replace(/^unrunnable_automation:\s*/, "");
-        persistBuildFailure(body.conversationId, g.session, code, message);
-        return json(res, 422, { ok: false, error: code, message }, req);
-      }
-    }
-    // Streaming variant (UC.6): same materialize, but emits an SSE event per entity as it's
-    // created/updated, then a "done" event — so the chat can show the build happening live.
-    if (path === "/api/assistant/build/stream" && method === "POST") {
-      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const gated = planGate(g, res, req); if (gated) return gated;
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const spec = body.build ?? body;
-      const hasEdits = Array.isArray(spec?.edits) && spec.edits.length > 0;
-      if (!spec || (typeof spec !== "object") || (!spec.skill && !spec.agent && !spec.automation && !hasEdits)) {
-        return json(res, 400, { error: "empty_build", message: "Describe at least a skill, agent, automation, or edit to make." }, req);
-      }
-      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", ...corsHeaders(req) });
-      try {
-        const out = materializeBuild(spec, { session: g.session, req, emit: (ev) => { try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch { /* client gone */ } } });
-        persistBuildOutcome(body.conversationId, g.session, out);
-        res.write(`data: ${JSON.stringify({ type: "done", result: { ok: true, ...out } })}\n\n`);
-      } catch (e) {
-        const code = e?.code ?? "build_failed";
-        const message = String(e?.message ?? e).replace(/^unrunnable_automation:\s*/, "");
-        persistBuildFailure(body.conversationId, g.session, code, message);
-        res.write(`data: ${JSON.stringify({ type: "done", result: { ok: false, error: code, message } })}\n\n`);
-      }
-      res.end();
-      return;
-    }
-    if (path === "/api/evolution/propose" && method === "POST") {
-      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const out = await proposeEvolution({ trace: body.trace, session: g.session, providerId: body.providerId });
-      audit({ type: "evolution.propose", ok: out.ok, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
-      return json(res, out.ok ? 200 : 422, out, req);
-    }
-    // Manual evolution proposal — an Adult Admin proposes an improvement to an agent/
-    // skill that then flows through the same review → version → rollback lifecycle as
-    // auto-generated (failure-trace) proposals. Persists a reviewable pending record.
-    if (path === "/api/evolution" && method === "POST") {
-      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!["agent", "skill"].includes(body.kind)) return json(res, 400, { error: "invalid_kind" }, req);
-      if (body.kind === "agent" && !body.agentId) return json(res, 400, { error: "agentId_required" }, req);
-      if (body.kind === "skill" && !body.skillId) return json(res, 400, { error: "skillId_required" }, req);
-      if (!String(body.after ?? "").trim()) return json(res, 400, { error: "after_required" }, req);
-      const evo = putEvolution({
-        id: "evo_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        kind: body.kind, agentId: body.agentId ?? null, skillId: body.skillId ?? null,
-        title: body.title ?? "Manual improvement", reason: body.reason ?? "Proposed by an admin.",
-        summary: body.summary ?? "", after: String(body.after), risk: body.risk ?? "Low",
-        status: "pending", source: "manual", createdBy: g.session.actorId,
-        createdAt: Date.now(), updatedAt: new Date().toISOString(),
-      });
-      audit({ type: "evolution.manual_propose", evolutionId: evo.id, kind: evo.kind, ok: true }, req, g.session);
-      return json(res, 200, { evolution: evo }, req);
-    }
-    // Evolution registry — server-persisted improvement proposals generated from
-    // real run traces. Accepting an agent proposal versions the agent server-side.
-    if (path === "/api/evolution" && method === "GET") {
-      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      // Project a stable review shape so clients can show/act on proposals: always carry
-      // `after` (the concrete change), the resolved `agentName`, and the auto-approval
-      // verdict (`autoApproved`/`autoReason`) even for legacy rows that predate them.
-      const project = (e, archived) => ({
-        ...e,
-        source: e.source ?? "trace",
-        after: e.after ?? null,
-        before: resolveEvolutionBefore(e),
-        risk: e.risk ?? null,
-        agentId: e.agentId ?? null,
-        agentName: e.agentId ? (getAgent(e.agentId)?.name ?? null) : null,
-        autoApproved: e.autoApproved === true,
-        autoReason: e.autoReason ?? null,
-        revertible: archived ? false : canRevertEvolution(e),
-        archived: !!archived,
-      });
-      const active = listEvolutions((e) => !e.householdId || e.householdId === g.session.householdId).map((e) => project(e, false));
-      const archivedRows = listEvolutionArchive(g.session.householdId).map((e) => project(e, true));
-      return json(res, 200, { evolutions: [...active, ...archivedRows] }, req);
-    }
-    const evoReviewMatch = path.match(/^\/api\/evolution\/([^/]+)\/review$/);
-    if (evoReviewMatch && method === "POST") {
-      // Accepting an evolution versions a skill/agent — an Adult Admin+ decision,
-      // consistent with the skill/agent patch routes. Children/guests cannot promote.
-      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const id = evoReviewMatch[1];
-      const e = getEvolution(id);
-      if (!e) return json(res, 404, { error: "not_found" }, req);
-      if (e.householdId && e.householdId !== g.session.householdId) return json(res, 403, { error: "forbidden" }, req);
-      if (e.status !== "pending") return json(res, 409, { error: "already_reviewed", evolution: e }, req);
-      const accept = !!body.accept;
-      let applied = false; let applyError = null;
-      if (accept && e.after) {
-        // Shared with the engine's auto-accept path — also stamps beforeVersionId on
-        // the evolution row at apply time (WP-008a), so reverts never need timestamp
-        // correlation again.
-        const r = applyEvolutionToTarget(e);
-        applied = r.applied; applyError = r.applyError;
-      }
-      patchEvolution(id, { status: accept ? "accepted" : "rejected", reviewedAt: Date.now(), reviewedBy: g.session.actorId });
-      audit({ type: "evolution.review", id, accept, applied, applyError, kind: e.kind, agentId: e.agentId }, req, g.session);
-      return json(res, 200, { ok: true, applied, applyError, evolution: getEvolution(id) }, req);
-    }
-    const evoRevertMatch = path.match(/^\/api\/evolutions\/([^/]+)\/revert$/);
-    if (evoRevertMatch && method === "POST") {
-      // WP-008a: reverting an applied improvement restores the target's prior version
-      // (self-snapshotting — the revert is itself reversible) and is audited.
-      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const out = revertEvolution(evoRevertMatch[1], g.session);
-      audit({ type: "evolution.revert_request", id: evoRevertMatch[1], ok: out.ok, error: out.ok ? undefined : out.error }, req, g.session);
-      if (!out.ok) {
-        const status = out.error === "not_found" ? 404 : out.error === "forbidden" ? 403 : 409;
-        return json(res, status, out, req);
-      }
-      return json(res, 200, out, req);
-    }
     if (path === "/api/miniapps/generate" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const out = await generateMiniApp({ goal: body.goal, type: body.type, session: g.session, providerId: body.providerId });
       audit({ type: "miniapp.generate", ok: out.ok, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
-      return json(res, out.ok ? 200 : 422, out, req);
-    }
-    if (path === "/api/playbooks/generate" && method === "POST") {
-      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const out = await generatePlaybook({ goal: body.goal, session: g.session, providerId: body.providerId });
-      audit({ type: "playbook.generate", ok: out.ok, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
       return json(res, out.ok ? 200 : 422, out, req);
     }
 
@@ -5616,152 +5068,7 @@ function clientSourceRef(raw) {
   return out;
 }
 
-function publicSkill(s) {
-  // All fields are non-secret — expose the full skill record to authenticated same-household clients.
-  return s;
-}
-// Shared by the unified chat-builder's JSON + SSE routes: create/edit durable entities
-// from a build spec via the real registry paths, calling emit(event) per entity so the
-// streaming route can surface live progress. Throws on a hard failure (caller maps to 422).
-function materializeBuild(spec, { session, req, emit = () => {} }) {
-  const created = {};
-  const updated = [];
-  if (spec.skill && typeof spec.skill === "object") {
-    const skill = createSkill(spec.skill, session);
-    created.skill = { id: skill.id, name: skill.name, status: skill.status };
-    audit({ type: "assistant.build", entity: "skill", skillId: skill.id, ok: true }, req, session);
-    emit({ type: "progress", entity: "skill", action: "created", id: skill.id, name: skill.name, status: skill.status });
-  }
-  if (spec.agent && typeof spec.agent === "object") {
-    const skillIds = [...(Array.isArray(spec.agent.skillIds) ? spec.agent.skillIds : []), ...(created.skill ? [created.skill.id] : [])];
-    // Intelligent preselection (item 8): the agent inherits the tools/functions its
-    // skill's steps reference — previously chat-built agents got empty allow-lists and
-    // permitted∩available rendered them inert despite the chat saying "created".
-    const stepToolIds = (spec.skill?.steps ?? []).map((s) => s?.tool_id).filter(Boolean);
-    const derived = deriveCapabilitiesFromSteps(stepToolIds, session);
-    // WP-001 slice 5 — ONE lifecycle, decided (DEC-I01). An agent that the same build
-    // is about to put on a SCHEDULE lands Active. A Draft agent behind an enabled
-    // trigger is the false-success shape in miniature: the chat says it's set up, the
-    // schedule is real, and a status field nobody surfaced quietly says otherwise.
-    // Safety still lives where it always did — the per-step approval gate — not in a
-    // Draft flag that never blocked a run anyway. Builds with NO automation keep Draft:
-    // nothing fires unattended, so there is nothing to misrepresent.
-    const landsActive = !!(spec.automation && typeof spec.automation === "object");
-    const agent = createAgent({
-      ...spec.agent, skillIds,
-      status: spec.agent.status ?? (landsActive ? "Active" : "Draft"),
-      allowedToolIds: [...new Set([...(Array.isArray(spec.agent.allowedToolIds) ? spec.agent.allowedToolIds : []), ...derived.allowedToolIds])],
-      allowedFunctionIds: [...new Set([...(Array.isArray(spec.agent.allowedFunctionIds) ? spec.agent.allowedFunctionIds : []), ...derived.allowedFunctionIds])],
-    }, session);
-    created.agent = { id: agent.id, name: agent.name, status: agent.status, allowedToolIds: agent.allowedToolIds, allowedFunctionIds: agent.allowedFunctionIds };
-    audit({ type: "assistant.build", entity: "agent", agentId: agent.id, ok: true, tools: agent.allowedToolIds.length }, req, session);
-    emit({ type: "progress", entity: "agent", action: "created", id: agent.id, name: agent.name, status: agent.status });
-  }
-  if (spec.automation && typeof spec.automation === "object") {
-    const a = spec.automation;
-    // WP-001 slice 1 — TARGET LINKAGE. The automation must carry what it should RUN,
-    // not merely who should run it. Previously an agent target was `{kind:"agent",
-    // agentId}` with no skillId and no goal, so every scheduled fire fell through
-    // runAgent's third branch into buildReadonlyPlan — a zero-effect "status pass"
-    // that reported success while delivering nothing (ISS-001, EV-011/EV-015).
-    // Now the built skill (or, failing that, the agent's own instructions) rides on
-    // the target so the fire executes the recipe the chat actually built.
-    const goalFromSpec = String(spec.agent?.instructions ?? spec.summary ?? "").trim() || null;
-    const target = a.target ?? (created.agent
-      ? { kind: "agent", agentId: created.agent.id, skillId: created.skill?.id ?? null, goal: created.skill ? null : goalFromSpec, params: a.params ?? {} }
-      : created.skill
-        ? { kind: "skill", skillId: created.skill.id, params: a.params ?? {} }
-        : a.target);
-    // WP-001 slice 3 — REFUSE THE UNRUNNABLE. An automation whose resolved target can
-    // neither run a skill nor plan from a goal has nothing to execute; creating it
-    // would manufacture exactly the silent no-op this work package exists to kill.
-    // Fail loudly at build time (caller maps the throw to 422) instead.
-    const resolvedTarget = target ?? {};
-    const runnable = !!(resolvedTarget.skillId || String(resolvedTarget.goal ?? "").trim());
-    if (!runnable) {
-      const err = new Error("unrunnable_automation: this automation has nothing to run — it needs a skill to execute or instructions to work from.");
-      err.code = "unrunnable_automation";
-      throw err;
-    }
-    const trig = createTrigger({ ...a, target }, session, Date.now());
-    created.automation = { id: trig.id, name: trig.name, type: trig.type, enabled: trig.enabled, anchor: trig.anchor ?? null, nextRunAt: trig.nextRunAt ?? null, scheduleText: scheduleTextFor(trig) };
-    audit({ type: "assistant.build", entity: "automation", triggerId: trig.id, ok: true }, req, session);
-    emit({ type: "progress", entity: "automation", action: "created", id: trig.id, name: trig.name });
-  }
-  // Edits to EXISTING entities — versioned via partialUpdate (snapshots + rollback, P3).
-  // Household-scoped; unknown/foreign ids are reported, never fatal.
-  if (Array.isArray(spec.edits)) {
-    for (const e of spec.edits) {
-      if (e.kind === "skill") {
-        const s = getSkill(e.id);
-        if (!s || (s.householdId !== "local" && s.householdId !== session.householdId)) { updated.push({ kind: "skill", id: e.id, ok: false, error: "not_found" }); emit({ type: "progress", entity: "skill", action: "edit_skipped", id: e.id, ok: false }); continue; }
-        const r = partialUpdateSkill(e.id, e.patch ?? {});
-        updated.push({ kind: "skill", id: e.id, name: r?.name, version: r?.version, ok: !!r && !r.error });
-        audit({ type: "assistant.build", entity: "skill_edit", skillId: e.id, ok: !!r, version: r?.version }, req, session);
-        emit({ type: "progress", entity: "skill", action: "updated", id: e.id, name: r?.name, version: r?.version, ok: !!r });
-      } else if (e.kind === "agent") {
-        const a = getAgent(e.id);
-        if (!a || (a.householdId !== "local" && a.householdId !== session.householdId)) { updated.push({ kind: "agent", id: e.id, ok: false, error: "not_found" }); emit({ type: "progress", entity: "agent", action: "edit_skipped", id: e.id, ok: false }); continue; }
-        const r = partialUpdateAgent(e.id, e.patch ?? {});
-        updated.push({ kind: "agent", id: e.id, name: r?.name, version: r?.version, ok: !!r && !r.error });
-        audit({ type: "assistant.build", entity: "agent_edit", agentId: e.id, ok: !!r, version: r?.version }, req, session);
-        emit({ type: "progress", entity: "agent", action: "updated", id: e.id, name: r?.name, version: r?.version, ok: !!r });
-      }
-    }
-  }
-  const notes = [];
-  // Copy must not point users at builder dashboards hidden behind Advanced Mode —
-  // everything needed should be doable from the default surface (chat + Helper Agents).
-  if (created.agent && (created.agent.allowedToolIds?.length || created.agent.allowedFunctionIds?.length)) {
-    const n = (created.agent.allowedToolIds?.length ?? 0) + (created.agent.allowedFunctionIds?.length ?? 0);
-    notes.push(`I preselected ${n} capabilit${n === 1 ? "y" : "ies"} for the new helper from its skill steps — no manual tool wiring needed.`);
-  } else if (created.agent) {
-    // Honest build success: "created" but tool-less is inert (permitted∩available = ∅) —
-    // say so instead of letting the family rely on a helper that can't execute anything.
-    notes.push("Heads up: this helper has no usable tools yet — connect the services it needs or edit it before relying on it.");
-  }
-  if (created.skill && created.skill.status !== "available") notes.push("The new skill starts as a draft — it becomes available automatically once its connected services are ready and a first run succeeds.");
-  if (created.agent && created.agent.status === "Draft") notes.push("The new helper is a draft — open Helper Agents to activate it. Nothing runs on its own until you do.");
-  // WP-001 slice 1 + WP-002 — say what will run, and when, in the family's words.
-  // The build card previously announced a schedule without ever naming the recipe
-  // behind it, which is how "created" and "does nothing" coexisted for so long.
-  if (created.automation) {
-    const runs = created.skill ? `“${created.skill.name}”` : (created.agent ? `“${created.agent.name}”` : "this automation");
-    const when = created.automation.scheduleText ?? "on its schedule";
-    notes.push(`${when === "on its schedule" ? "On its schedule" : when} it will run ${runs}${created.agent && created.skill ? ` as “${created.agent.name}”` : ""}.`);
-    const gated = (spec.skill?.steps ?? []).filter((s) => s?.approval_required).map((s) => s?.name).filter(Boolean);
-    if (gated.length) notes.push(`${gated.length === 1 ? `The “${gated[0]}” step` : `These steps — ${gated.join(", ")} —`} will ask for your approval each time, so nothing goes out unattended until you allow it.`);
-  }
-  if (updated.some((u) => !u.ok)) notes.push("Some edits couldn't be applied (the target wasn't found in your household).");
-  return { created, updated, notes };
-}
 
-// After a chat build materializes, make the OUTCOME durable on the conversation:
-// mark the originating build-proposal message built (so the card survives refresh)
-// and append the confirmation as a real message. Ownership-checked like every other
-// conversation write; silently a no-op if the conversation isn't the caller's.
-function persistBuildOutcome(conversationId, session, out) {
-  if (!conversationId) return;
-  const conv = getConversation(conversationId);
-  if (!canSeeConversation(conv, session)) return;
-  const builtIds = { skillId: out.created?.skill?.id, agentId: out.created?.agent?.id, triggerId: out.created?.automation?.id };
-  const msgs = [...(conv.messages ?? [])];
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].kind === "build" && !msgs[i].built) { msgs[i] = { ...msgs[i], built: true, builtIds }; break; }
-  }
-  putConversation({ ...conv, messages: msgs, updatedAt: new Date().toISOString() });
-  const parts = [
-    out.created?.skill && `skill “${out.created.skill.name}”`,
-    out.created?.agent && `helper “${out.created.agent.name}”`,
-    out.created?.automation && `automation “${out.created.automation.name}”`,
-    ...(out.updated ?? []).filter((u) => u.ok).map((u) => `updated ${u.kind} “${u.name ?? u.id}”`),
-  ].filter(Boolean);
-  appendConversationMessage(conv.id, {
-    role: "assistant", kind: "build_result", builtIds,
-    text: `Done — I set up ${parts.join(", ")}.${out.notes?.length ? "\n\n" + out.notes.map((n) => `• ${n}`).join("\n") : ""}`,
-    at: new Date().toISOString(),
-  });
-}
 // WP-001 slice 3 — the other half of persistBuildOutcome: when a build is REFUSED,
 // the conversation says so. Silence here is what let a family believe an automation
 // existed when the server had declined to create one.
@@ -5797,37 +5104,7 @@ async function attachFileContext(body, session) {
   }
 }
 
-function demoteBuildForRole(out, session) {
-  if (!out?.ok || out.kind !== "build" || roleAtLeast(session.role, "Adult Admin")) return;
-  /* An Adult Member CAN build — for themselves. Rather than refusing the proposal, scope it:
-   * the helper becomes personal, and any automation is dropped, because an automation is by
-   * definition something that runs on the household's schedule without them present. What
-   * they get is a helper they can run; what they don't get is one that acts on its own. */
-  if (isAdultMemberOnly(session)) {
-    if (out.build?.agent) out.build.agent.visibility = "personal";
-    if (out.build?.automation) {
-      delete out.build.automation;
-      out.build.summary = `${String(out.build.summary ?? "").trim()} (Set up for you to run — an automation that fires on its own needs an Owner or Adult Admin.)`.trim();
-    }
-    // Editing EXISTING household items is still out of scope for them.
-    if (Array.isArray(out.build?.edits)) out.build.edits = [];
-    return;
-  }
-  const what = String(out.build?.summary ?? out.build?.agent?.name ?? "that helper").slice(0, 160);
-  out.kind = "answer";
-  out.answer = `I can see what you're after — ${what}. Setting up a helper that runs on its own needs an adult admin on this household, so I can't create it from your account. Ask one of them to say the same thing to me and I'll build it, or I can just do it manually for you right now if you'd like.`;
-  delete out.build;
-}
 
-function persistBuildFailure(conversationId, session, code, message) {
-  if (!conversationId) return;
-  const conv = getConversation(conversationId);
-  if (!canSeeConversation(conv, session)) return;
-  const text = code === "unrunnable_automation"
-    ? `I couldn't set that automation up: ${message} Tell me what it should actually do on each run — the steps to take, or the skill it should use — and I'll build it properly.`
-    : `I couldn't finish setting that up: ${message} Nothing was created.`;
-  appendConversationMessage(conv.id, { role: "assistant", kind: "status", buildError: code, text, at: new Date().toISOString() });
-}
 function publicApproval(a) {
   // NOTE: the approval record deliberately never stores the raw input — only
   // `inputHash` (the consume-once integrity check against whatever input is supplied
@@ -5891,6 +5168,9 @@ server.listen(PORT, () => {
     try { const boot = bootstrapAIFromEnv(t); if (boot.length) console.log(`[ai] bootstrapped ${t} from env: ${boot.join(", ")}`); } catch { /* one household must not break the rest */ }
   });
   registerAssistantRunHooks(); // inline chat results + one-shot self-repair for conversation runs
+  // A scheduled helper fires through the trigger tick; registering the runner here (rather
+  // than importing it there) is what keeps triggers and helpers out of an import cycle.
+  setHelperRunner(runHelper);
   registerTriggerRunHooks();   // WP-001: write each run's TERMINAL status back to its trigger
   // Recovery + sweeps + trigger tick run once PER HOUSEHOLD, each inside that
   // household's tenant context — one family's broken state never blocks another's.

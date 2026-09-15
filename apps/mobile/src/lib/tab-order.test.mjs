@@ -26,7 +26,7 @@ test("THE ROLE TRAP: a child has one tab, so a swipe goes nowhere rather than so
 
 test("a child with AI enabled gains Ask, and only Ask", () => {
   assert.deepEqual(tabsFor(childWithAI), ["/(home)", "/(ask)"]);
-  assert.equal(neighbourTab(tabsFor(childWithAI), "/(ask)", 1), null, "no Agents tab means no Agents stop");
+  assert.equal(neighbourTab(tabsFor(childWithAI), "/(ask)", 1), null, "no Helpers tab means no Helpers stop");
 });
 
 test("no wrap-around at either end", () => {

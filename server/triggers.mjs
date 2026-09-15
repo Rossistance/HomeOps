@@ -11,14 +11,19 @@
 import crypto from "node:crypto";
 import {
   listTriggers, getTrigger, putTrigger, patchTrigger, deleteTriggerRec,
-  setConnectorConfig, getSecret, revokeConnector, appendAudit, getAgent, getMember, getSettings,
+  setConnectorConfig, getSecret, revokeConnector, appendAudit, getSettings,
 } from "./store.mjs";
-import { orchestrate } from "./orchestrator.mjs";
 import { onRunFinished, onRunParked } from "./engine.mjs";
+
+/* The helper runner is REGISTERED at boot (index.mjs) rather than imported, so triggers
+ * and helpers never import each other in a cycle. */
+let helperRunner = null;
+export function setHelperRunner(fn) { helperRunner = fn; }
 import { runWithTenant } from "./tenant-context.mjs";
 import { tzOffsetAt, wallClockToUtc, localParts, formatForHousehold } from "./household-time.mjs";
 
 export const TRIGGER_TYPES = ["schedule", "recurring", "webhook", "connector_event", "manual"];
+const WEEKDAY_NAMES = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"];
 const TICKABLE = ["schedule", "recurring"];
 
 /* -------------------------------- secrets ------------------------------- */
@@ -76,24 +81,37 @@ export function parseAnchor(v) {
  * and reports which basis it used, so the caller can disclose a fallback rather
  * than silently scheduling in the wrong zone.
  */
-export function nextAnchorOccurrence(anchor, tz, now = Date.now()) {
+export function nextAnchorOccurrence(anchor, tz, now = Date.now(), weekday = null) {
   const a = parseAnchor(anchor);
   if (!a) return null;
+  // Day-of-week is a pure function of the calendar DATE, so it is derived from the
+  // household's Y/M/D rather than from the instant — reading getDay() off a UTC
+  // timestamp answers for the wrong day either side of midnight.
+  const wantDay = Number.isInteger(weekday) && weekday >= 0 && weekday <= 6 ? weekday : null;
+  const dayOf = (y, m, d) => new Date(Date.UTC(y, m - 1, d)).getUTCDay();
   const zone = tz && tzOffsetAt(now, tz) != null ? tz : null;
   if (!zone) {
     // Server-local fallback (disclosed by the caller via `tzSource`).
-    const d = new Date(now);
-    const cand = new Date(d.getFullYear(), d.getMonth(), d.getDate(), a.hour, a.minute, 0, 0).getTime();
-    const at = cand > now ? cand : new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, a.hour, a.minute, 0, 0).getTime();
+    const d0 = new Date(now);
+    let at = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate(), a.hour, a.minute, 0, 0).getTime();
+    for (let i = 0; i < 8 && (at <= now || (wantDay != null && new Date(at).getDay() !== wantDay)); i++) {
+      const n = new Date(at);
+      at = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1, a.hour, a.minute, 0, 0).getTime();
+    }
     return { at, tzSource: "server", tz: Intl.DateTimeFormat().resolvedOptions().timeZone ?? "server-local" };
   }
   const today = localParts(now, zone);
   let at = wallClockToUtc({ ...today, hour: a.hour, minute: a.minute }, zone);
-  if (at == null || at <= now) {
-    // Advance by one CALENDAR day in the household's zone, then re-resolve. Adding
-    // 24h of milliseconds instead would drift by an hour across a DST boundary.
-    const tomorrow = localParts((at ?? now) + 26 * 3600_000, zone);
-    at = wallClockToUtc({ ...tomorrow, hour: a.hour, minute: a.minute }, zone);
+  // Advance by whole CALENDAR days in the household's zone, re-resolving each time. Adding
+  // 24h of milliseconds would drift by an hour across a DST boundary. A weekly anchor
+  // walks at most seven days to reach its weekday.
+  for (let i = 0; i < 8; i++) {
+    if (at != null && at > now) {
+      const p2 = localParts(at, zone);
+      if (wantDay == null || dayOf(p2.year, p2.month, p2.day) === wantDay) break;
+    }
+    const next = localParts((at ?? now) + 26 * 3600_000, zone);
+    at = wallClockToUtc({ ...next, hour: a.hour, minute: a.minute }, zone);
   }
   return at == null ? null : { at, tzSource: "household", tz: zone };
 }
@@ -105,7 +123,11 @@ export function scheduleTextFor(trigger) {
     const h12 = a.hour % 12 === 0 ? 12 : a.hour % 12;
     const ampm = a.hour < 12 ? "AM" : "PM";
     const clock = `${h12}:${String(a.minute).padStart(2, "0")} ${ampm}`;
-    if (trigger.type === "recurring") return `Daily · ${clock}`;
+    if (trigger.type === "recurring") {
+      const wd = trigger.weekday;
+      if (Number.isInteger(wd) && wd >= 0 && wd <= 6) return `${WEEKDAY_NAMES[wd]} · ${clock}`;
+      return `Daily · ${clock}`;
+    }
     return `Once · ${clock}`;
   }
   if (trigger?.type === "recurring" && trigger.intervalMs) {
@@ -128,7 +150,7 @@ export function reanchorTriggersForHousehold(householdId, now = Date.now()) {
   let changed = 0;
   const tz = householdTimezone(householdId);
   for (const t of listTriggers((x) => x.householdId === householdId && x.enabled && TICKABLE.includes(x.type) && x.anchor)) {
-    const occ = nextAnchorOccurrence(t.anchor, tz, now);
+    const occ = nextAnchorOccurrence(t.anchor, tz, now, t.weekday);
     if (!occ) continue;
     patchTrigger(t.id, { nextRunAt: occ.at, tzSource: occ.tzSource });
     changed++;
@@ -148,7 +170,7 @@ export function createTrigger(body, session, now) {
   if (TICKABLE.includes(type)) {
     // WP-002: an anchor beats interval arithmetic — "every day at 7 AM" resolves to
     // the next 07:00 on the household's clock, not to creation-time + 24h.
-    const occ = anchor ? nextAnchorOccurrence(anchor, householdTimezone(householdId), now ?? Date.now()) : null;
+    const occ = anchor ? nextAnchorOccurrence(anchor, householdTimezone(householdId), now ?? Date.now(), body.weekday) : null;
     if (occ) { nextRunAt = occ.at; tzSource = occ.tzSource; }
     else nextRunAt = toMs(body.runAt) ?? (type === "recurring" ? (now ?? 0) + (intervalMs ?? 0) : (now ?? 0));
   }
@@ -165,6 +187,7 @@ export function createTrigger(body, session, now) {
     nextRunAt,
     connectorId: body.connectorId ?? null,
     event: body.event ?? null,
+    weekday: Number.isInteger(body.weekday) ? body.weekday : null,
     lastFiredAt: null, lastRunId: null, lastStatus: null, lastTriggerType: null, fireCount: 0,
     system: false,
     createdAt: now ?? 0,
@@ -177,14 +200,9 @@ export function createTrigger(body, session, now) {
 
 function sanitizeTarget(target) {
   const t = target ?? {};
-  const kind = t.kind === "skill" ? "skill" : "agent";
-  return {
-    kind,
-    agentId: t.agentId ?? null,
-    skillId: t.skillId ?? null,
-    goal: t.goal ?? null,
-    params: t.params && typeof t.params === "object" ? t.params : {},
-  };
+  // One target shape left: a trigger runs a HELPER. `agentId` is still read because
+  // helpers live in the agents collection and older trigger rows spell it that way.
+  return { kind: "helper", helperId: t.helperId ?? t.agentId ?? null, params: t.params && typeof t.params === "object" ? t.params : {} };
 }
 
 export function updateTrigger(id, patch, now) {
@@ -201,7 +219,7 @@ export function updateTrigger(id, patch, now) {
   const anchorChanged = patch.anchor !== undefined && anchor !== (existing.anchor ?? null);
   const reEnabled = TICKABLE.includes(type) && patch.enabled === true && !existing.enabled;
   if (TICKABLE.includes(type) && anchor && (anchorChanged || (reEnabled && !nextRunAt))) {
-    const occ = nextAnchorOccurrence(anchor, householdTimezone(existing.householdId), now ?? Date.now());
+    const occ = nextAnchorOccurrence(anchor, householdTimezone(existing.householdId), now ?? Date.now(), patch.weekday ?? existing.weekday);
     if (occ) { nextRunAt = occ.at; tzSource = occ.tzSource; }
   } else if (reEnabled && !nextRunAt) {
     nextRunAt = type === "recurring" ? (now ?? 0) + (intervalMs ?? 0) : (now ?? 0);
@@ -264,56 +282,39 @@ export async function fireTrigger(trigger, opts = {}) {
 }
 async function fireTriggerInner(trigger, { triggerType = trigger.type, payload, now = Date.now() } = {}) {
   const tgt = trigger.target ?? {};
-  // Attribute the run to a real owner when the target is a PERSONAL agent, so its
-  // approvals notify that person only — a scheduled personal briefing must not ping the
-  // whole household. Otherwise runs are attributed to the "scheduler" system actor.
-  let actorId = "scheduler";
-  let role = "Owner";
-  if (tgt.kind === "agent" && tgt.agentId) {
-    const agent = getAgent(tgt.agentId);
-    if (agent?.visibility === "personal" && agent.createdBy) {
-      const owner = getMember(agent.createdBy);
-      if (owner && !owner.archived) { actorId = owner.actorId; role = owner.role; }
-    }
-  }
-  const session = { householdId: trigger.householdId ?? "local", actorId, role };
-  const params = { ...(tgt.params ?? {}), ...(payload ? { trigger_payload: payload } : {}) };
-
-  // WP-001 slice 2 — PREFER THE SKILL. Whatever the target's `kind` says, a skillId is
-  // the most specific thing to run: it is the deterministic recipe the chat actually
-  // built. An agent target that carries one runs it AS that agent (the engine still
-  // re-validates every step against the agent's policy). Only a target with neither a
-  // skill nor a goal has nothing to execute — and that now says so instead of quietly
-  // degrading into a read-only status pass.
-  // WP-006 slice 1 — every trigger fire creates its run through the single orchestrate()
-  // entry (which derives sourceRef.via = schedule|webhook|connector_event from triggerType
-  // and delegates to the same runSkill/runAgent machinery). Target-shape decisions (prefer
-  // skill; an agent target needs a skill or a goal to be runnable) stay here.
-  const ref = { triggerId: trigger.id, triggerType };
+  const helperId = tgt.helperId ?? tgt.agentId ?? trigger.helperId ?? null;
   let out;
-  try {
-    if (tgt.skillId && tgt.kind === "skill") {
-      out = await orchestrate({ source: "trigger", triggerType, skillId: tgt.skillId, params, session, sourceRef: ref });
-    } else if (tgt.kind === "agent" && tgt.agentId) {
-      if (!tgt.skillId && !String(tgt.goal ?? "").trim()) {
-        out = { error: "unrunnable_target", message: "This automation has no skill to run and no instructions to work from, so firing it would do nothing. Edit it to say what each run should do." };
-      } else {
-        out = await orchestrate({ source: "trigger", triggerType, agentId: tgt.agentId, goal: tgt.goal ?? undefined, skillId: tgt.skillId ?? undefined, params, session, sourceRef: ref });
-      }
-    } else if (tgt.skillId) {
-      out = await orchestrate({ source: "trigger", triggerType, skillId: tgt.skillId, params, session, sourceRef: ref });
-    } else {
-      out = { error: "invalid_target" };
+  if (!helperId) {
+    out = { ok: false, error: "invalid_target", message: "This schedule has no helper to run." };
+  } else if (!helperRunner) {
+    out = { ok: false, error: "runner_unavailable", message: "The helper runtime is not ready yet." };
+  } else {
+    try {
+      out = await helperRunner({
+        helperId,
+        reason: triggerType === "webhook" ? "webhook" : "schedule",
+        payload: payload ?? (Object.keys(tgt.params ?? {}).length ? tgt.params : null),
+        now,
+      });
+    } catch (e) {
+      out = { ok: false, error: "fire_failed", message: String(e?.message ?? e) };
     }
-  } catch (e) {
-    out = { error: "fire_failed", message: String(e?.message ?? e) };
   }
 
-  const runId = out?.run?.id ?? null;
-  const status = out?.error ? `error:${out.error}` : (out?.run?.status ?? "started");
-  patchTrigger(trigger.id, { lastFiredAt: now, lastRunId: runId, lastStatus: status, lastTriggerType: triggerType, fireCount: (trigger.fireCount ?? 0) + 1 });
-  appendAudit({ type: "trigger.fire", triggerId: trigger.id, triggerType, runId, ok: !out?.error, error: out?.error, householdId: trigger.householdId });
-  return out?.error ? { ok: false, error: out.error, message: out.message } : { ok: true, runId };
+  /* A helper run finishes INSIDE this call, so its real outcome is known here. The old
+   * fire-and-forget plan runs recorded "started" and needed a second mechanism (a
+   * run-finished hook) to come back later and correct the status — which is why the
+   * Automations list sat on a permanent "started" whenever that hook missed. */
+  const runId = out?.runIds?.[0] ?? null;
+  patchTrigger(trigger.id, {
+    lastFiredAt: now, lastRunId: runId,
+    lastStatus: out?.ok ? "completed" : `error:${out?.error ?? "failed"}`,
+    lastSummary: out?.lastRun?.summary ?? out?.message ?? null,
+    lastTriggerType: triggerType,
+    fireCount: (trigger.fireCount ?? 0) + 1,
+  });
+  appendAudit({ type: "trigger.fire", triggerId: trigger.id, helperId, triggerType, ok: !!out?.ok, error: out?.ok ? undefined : out?.error, householdId: trigger.householdId });
+  return out?.ok ? { ok: true, runId } : { ok: false, error: out?.error, message: out?.message };
 }
 
 /* ---- WP-001 slice 4: TERMINAL lastStatus writeback (ISS-009) ----
@@ -383,7 +384,7 @@ export async function tick(now = Date.now()) {
     // `now + intervalMs` drifts a little later every time a fire runs late, and slips
     // by a full hour at each DST transition; re-resolving the anchor does neither.
     if (t.type === "recurring" && t.anchor) {
-      const occ = nextAnchorOccurrence(t.anchor, householdTimezone(t.householdId), now);
+      const occ = nextAnchorOccurrence(t.anchor, householdTimezone(t.householdId), now, t.weekday);
       patchTrigger(t.id, occ ? { nextRunAt: occ.at, tzSource: occ.tzSource } : { nextRunAt: now + (t.intervalMs ?? 86_400_000) });
     } else if (t.type === "recurring" && t.intervalMs) patchTrigger(t.id, { nextRunAt: now + t.intervalMs });
     else patchTrigger(t.id, { enabled: false, nextRunAt: null }); // one-shot schedule completes

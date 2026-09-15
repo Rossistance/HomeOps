@@ -9,7 +9,7 @@ import { Alert, Platform, ScrollView, StyleSheet, TextInput, View } from "react-
 import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { api, type ApprovalRec, type EventRec, type EvolutionRec, type HelpRequestRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
+import { api, type ApprovalRec, type EventRec, type HelpRequestRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
 import { coversDay, effectiveEndMs, eventTimeLabel } from "@/lib/event-days";
 import { fade, memberColor } from "@/lib/member-colors";
 import { isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
@@ -149,6 +149,14 @@ function EventChip({ event, members, showDay }: { event: EventRec; members: Memb
   );
 }
 
+/** One record per id, first occurrence wins. A list keyed by id must never render an id
+ *  twice: React would warn about the duplicate key, and the reader sees the same card twice
+ *  with no way to tell it is one thing. */
+function byId<T extends { id: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  return rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+}
+
 function approvalIcon(a: ApprovalRec): string {
   const k = `${a.toolId} ${a.category}`.toLowerCase();
   if (k.includes("mail") || k.includes("email")) return "envelope";
@@ -200,7 +208,6 @@ function AdminToday() {
   const [tasks, setTasks] = useState<TaskRec[]>([]);
   const [members, setMembers] = useState<MemberRec[]>([]);
   const [memory, setMemory] = useState<MemoryRec[]>([]);
-  const [evolutions, setEvolutions] = useState<EvolutionRec[]>([]);
   const [runs, setRuns] = useState<RunRec[]>([]);
   const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
   const [openApproval, setOpenApproval] = useState<ApprovalRec | null>(null);
@@ -227,14 +234,14 @@ function AdminToday() {
     // api.household() went with the invite sheet — Today never showed the household's name,
     // it only needed it to caption an invite that now lives in Settings. One fewer request
     // on the first screen after login.
-    const [h, aps, evts, tks, mem, memries, evos, rns, hrs] = await Promise.all([
+    const [h, aps, evts, tks, mem, memries, rns, hrs] = await Promise.all([
       api.health(), api.approvals(), api.events(), api.tasks(), api.members(),
-      api.memory(), api.evolutions(), api.runs(), api.helpRequests(),
+      api.memory(), api.runs(), api.helpRequests(),
     ]);
     setOffline(!h);
     if (h) {
       setApprovals(aps); setEvents(evts); setTasks(tks); setMembers(mem);
-      setMemory(memries); setEvolutions(evos); setRuns(rns); setHelpRequests(hrs);
+      setMemory(memries); setRuns(rns); setHelpRequests(hrs);
     }
     setLoading(false);
   }, []);
@@ -352,13 +359,21 @@ function AdminToday() {
   }, [tasks, now, session?.actorId]);
   const bills = tasks.filter((t) => t.type === "bill" && t.status !== "done").slice(0, 4);
 
-  // Help requests to/from me — the "needs your attention" companions.
+  /* Help requests to/from me — the "needs your attention" companions.
+   *
+   * Deduplicated by REQUEST ID, because a TestFlight screenshot showed the same request
+   * rendered twice as two byte-identical cards. Two cards with the same id are one request
+   * that reached the list twice — a refresh landing while a load was in flight, the same
+   * record arriving from two paths — and there is no reading of that which means anything to
+   * the family. (Contrast the runs ledger below, which groups by title and shows a COUNT:
+   * two runs with different ids really are two things that happened, and collapsing those
+   * would hide a double-execution.) */
   const helpToMe = useMemo(
-    () => helpRequests.filter((h) => h.status === "pending" && h.toActorId === session?.actorId),
+    () => byId(helpRequests.filter((h) => h.status === "pending" && h.toActorId === session?.actorId)),
     [helpRequests, session?.actorId],
   );
   const helpFromMe = useMemo(
-    () => helpRequests.filter((h) => h.status === "pending" && h.fromActorId === session?.actorId),
+    () => byId(helpRequests.filter((h) => h.status === "pending" && h.fromActorId === session?.actorId)),
     [helpRequests, session?.actorId],
   );
   // The linked plan/task title, for wording help requests ("…help with {item}").
@@ -398,18 +413,23 @@ function AdminToday() {
     void load();
   }, [load]);
 
-  // Two honest ledgers, split so activities and learnings never blur into one list.
-  // "What I learned" — new memories + improvement proposals waiting on review. Newest, capped at 4.
-  const learned = useMemo(() => {
-    const out: { key: string; icon: string; fg: string; bg: string; title: string; subtitle: string }[] = [];
-    for (const m of [...memory].sort((a, b) => b.createdAt - a.createdAt).slice(0, 2)) {
-      out.push({ key: `m-${m.id}`, icon: "lightbulb.fill", fg: colors.amber, bg: colors.amberBg, title: m.text, subtitle: `New memory · ${new Date(m.createdAt).toLocaleDateString()}` });
-    }
-    for (const e of evolutions.filter((e) => e.status === "pending").slice(0, 2)) {
-      out.push({ key: `e-${e.id}`, icon: "wand.and.stars", fg: colors.lavender, bg: colors.lavenderBg, title: e.title || "Improvement proposal", subtitle: `Improvement proposal${e.risk ? ` · ${e.risk} risk` : ""}` });
-    }
-    return out.slice(0, 4);
-  }, [memory, evolutions, colors]);
+  /* Two honest ledgers, split so activities and learnings never blur into one list.
+   * "What I learned" — the newest memories, capped at four.
+   *
+   * Improvement proposals used to share this list: a separate registry mined from run traces
+   * that asked an adult to accept a change to an agent's configuration. It went with the
+   * seven-concept model. A helper's behaviour is now one editable paragraph on its own
+   * screen, so the honest way to change one is to open it and change the words. */
+  const learned = useMemo(
+    () => [...memory]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 4)
+      .map((m) => ({
+        key: `m-${m.id}`, icon: "lightbulb.fill", fg: colors.amber, bg: colors.amberBg,
+        title: m.text, subtitle: `New memory · ${new Date(m.createdAt).toLocaleDateString()}`,
+      })),
+    [memory, colors],
+  );
   // "What I did" — freshly completed runs (the activity ledger). Read-only on Home; only
   // Advanced Mode links it through to the full Activity log, which is hidden by default.
   const did = useMemo(() => {
@@ -421,11 +441,11 @@ function AdminToday() {
     for (const r of runs.filter((r) => ["completed", "succeeded"].includes(r.status))) {
       const title = r.title || "Run completed";
       const done = r.steps.filter((s) => ["done", "completed", "succeeded"].includes(s.status)).length;
-      /* Cluster T — "is this what I did? Is this what the agent did? What really happened?"
-       * WHO: the agent's name when an agent ran it, "You asked" when it came from chat.
+      /* Cluster T — "is this what I did? Is this what the helper did? What really happened?"
+       * WHO: the helper's name when a helper ran it, "You asked" when it came from chat.
        * WHAT: the last completed step's own title — the closest thing a run has to an
        * outcome sentence without inventing one. */
-      const who = r.agentName ? r.agentName : r.actorId === session?.actorId ? "You asked" : r.agentId ? "An agent" : "Famili";
+      const who = r.agentName ? r.agentName : r.actorId === session?.actorId ? "You asked" : r.agentId ? "A helper" : "Famili";
       const lastStep = [...r.steps].reverse().find((st) => ["done", "completed", "succeeded"].includes(st.status));
       const what = (lastStep?.title ?? "").slice(0, 60);
       const prev = byTitle.get(title);
@@ -448,12 +468,12 @@ function AdminToday() {
    * data — running a transform over a constant hides the intent from whoever edits it next.
    *
    * Their colours come from the category table too, so the Meals tile here is the same teal as
-   * a Meals agent and a Meals playbook. */
+   * a Meals helper and a Meals section in the Library. */
   const quickActions = [
     { title: "Meals", ...categoryStyle(colors, "Meals"), go: () => router.push("/meals") },
     { title: "Tasks & Lists", ...categoryStyle(colors, "Tasks"), go: () => router.push("/tasks") },
     { title: "Assign Chore", ...categoryStyle(colors, "Chores"), go: () => setChoreOpen(true) },
-    { title: "New Agent", icon: "sparkle", fg: colors.ember, bg: colors.emberBg, go: () => router.push("/(agents)?create=1") },
+    { title: "New Helper", icon: "sparkle", fg: colors.ember, bg: colors.emberBg, go: () => router.push("/(agents)?create=1") },
     { title: "Upload", ...categoryStyle(colors, "Documents"), go: () => router.push("/(library)?upload=1") },
     { title: "Connect", icon: "link", fg: colors.textMuted, bg: colors.surfaceSunken, go: () => router.push("/connections") },
   ];

@@ -1,6 +1,6 @@
 // Library — the household's document home. Spaces grid (real file groupings),
 // recent documents with badges, search, inline preview, plus the read-only
-// knowledge the agents have accumulated. Uploads run through the Upload sheet.
+// knowledge the helpers have accumulated. Uploads run through the Upload sheet.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, ScrollView, Switch, TextInput, View } from "react-native";
 import { Image } from "expo-image";
@@ -191,7 +191,7 @@ export default function LibraryScreen() {
 
   const spaceLabel = (k: SpaceKey) => SPACE_DEFS.find((s) => s.key === k)?.label ?? "Home";
   /* A space's colour comes from the same table everything else uses, so School is the same blue
-   * here, on an agent, and on a playbook. */
+   * here and on a helper. */
   const spaceTone = (c: typeof colors, k: SpaceKey) => categoryStyle(c, SPACE_DEFS.find((s) => s.key === k)?.label ?? "Home");
 
   return (
@@ -440,7 +440,7 @@ export default function LibraryScreen() {
             <T kind="sub">What Famili has learned from real runs. Remove anything it got wrong.</T>
           </Rise>
           {memory.length === 0 ? (
-            <EmptyState icon="brain" title="No memory yet" hint="Entries appear as your agents complete runs." />
+            <EmptyState icon="brain" title="No memory yet" hint="Entries appear as your helpers complete runs." />
           ) : (
             memory.map((m, i) => {
               /* A11 [20:35] — "the Notes and Approved-decisions cards need more context —

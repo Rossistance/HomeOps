@@ -21,7 +21,7 @@
 // A fact volunteered in a private chat surfacing in the family view would be the artifacts
 // bug all over again, one layer down.
 import { providerChat } from "./ai.mjs";
-import { activeProviderId } from "./planner.mjs";
+import { activeProviderId } from "./context.mjs";
 import { addMemory, listMemory, appendAudit, recordAiUsage, aiBudgetExhausted } from "./store.mjs";
 
 const CAPTURE_SYS = `You watch one exchange between a family member and their household assistant. Decide if it revealed something DURABLE about the household worth remembering for future conversations: a stable preference, a fact about a person or the home, a recurring routine, a rule. Ephemeral logistics (one-off times, single tasks, weather, greetings) are NOT memories. Respond with ONLY a JSON object: {"remember": boolean, "type": "fact"|"preference"|"routine"|"rule"|"insight", "text": "one plain sentence, third person, self-contained"}`;

@@ -15,11 +15,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// planner.mjs transitively imports store.mjs, which (correctly) refuses to open the live
+// context.mjs (planner.mjs renamed, and reduced to the tool catalog + household context)
+// transitively imports store.mjs, which (correctly) refuses to open the live
 // server/.data from a test process. These tests only exercise a PURE predicate, but the
 // import graph still has to be satisfied — so point it at a throwaway dir first.
 process.env.HOMEOPS_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "familios-ctx-test-"));
-const { isUpcomingForContext, startOfLocalDay } = await import("../planner.mjs");
+const { isUpcomingForContext, startOfLocalDay } = await import("../context.mjs");
 
 /** An ISO stamp for a local time today, so tests read in the timezone they run in. */
 const todayAt = (h, m = 0) => { const d = new Date(); d.setHours(h, m, 0, 0); return d.toISOString(); };

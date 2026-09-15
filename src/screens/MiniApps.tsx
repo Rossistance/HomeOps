@@ -59,7 +59,6 @@ export function MiniApps() {
   const agentName = (id?: string) => data.agents.find((a) => a.id === id)?.name;
 
   if (app) {
-    const autos = data.automations.filter((a) => app.linkedAutomationIds.includes(a.id));
     return (
       <div className="animate-fade-in">
         <button onClick={() => { setOpenId(null); navigate("miniapps"); }} className="mb-3 flex items-center gap-1 text-sm font-medium text-ink-500 hover:text-ink-800"><Icon name="ChevronLeft" size={16} /> Back to mini apps</button>
@@ -69,7 +68,6 @@ export function MiniApps() {
           <Badge color="lavender">{app.type}</Badge>
           <span>v{app.version}</span>
           {app.createdByAgentId && <span className="flex items-center gap-1"><Icon name="Bot" size={12} /> built by {agentName(app.createdByAgentId)}</span>}
-          {autos.length > 0 && <span className="flex items-center gap-1"><Icon name="Workflow" size={12} /> linked: {autos.map((a) => a.name).join(", ")}</span>}
           <span className="ml-auto">updated {relativeTime(app.updatedAt)} · synced to live household data</span>
         </div>
         <MiniAppRenderer app={app} />

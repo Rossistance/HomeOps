@@ -26,7 +26,7 @@
 // should be able to swipe to go back"), and they'd have been fighting over the same drag —
 // worst case leaving you a tab across AND a screen back from one flick.
 //
-// The order it walks is the order of the tabs THIS person has. A child with no Agents tab swipes
+// The order it walks is the order of the tabs THIS person has. A child with no Helpers tab swipes
 // from Today straight to whatever is actually next to it, because the list is derived from the
 // same capabilities the tab bar is built from rather than hard-coded.
 import { useMemo, type ReactNode } from "react";
@@ -60,7 +60,7 @@ export function TabSwipe({ current, children }: { current: string; children: Rea
   const caps = useMemo(() => capabilitiesFor(session ? { role: session.role } : null), [session]);
 
   // Mirrors TabsNav's trigger list. Derived from the same capabilities, so a role that has no
-  // Agents tab has no Agents stop on the swipe either — the alternative is swiping into a screen
+  // Helpers tab has no Helpers stop on the swipe either — the alternative is swiping into a screen
   // the tab bar says you don't have.
   const tabs = useMemo(() => tabsFor(caps), [caps.canUseAI, caps.viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 

@@ -3,7 +3,8 @@
 //
 // The nest itself already existed (see nests.test.mjs); this is what you can put IN one.
 // Grocery items are tasks (type:"list", listName:"Groceries"), so scoping tasks covers both
-// lists he named, and agents get the same treatment.
+// lists he named, and helpers get the same treatment. ("Agents" are helpers now — one
+// concept where there were seven — and they live behind /api/helpers.)
 //
 // The load-bearing test in this file is the OWNER one, repeated per thing: the household's
 // administrator can read everything else in the app, and if he can read this too then a nest
@@ -33,7 +34,8 @@ after(async () => { await stopServer(ctx); });
 
 const mkTask = (as, body) => as.req("/api/tasks", { method: "POST", body: JSON.stringify(body) });
 const tasksFor = async (as) => (await as.req("/api/tasks")).data.tasks;
-const agentsFor = async (as) => (await as.req("/api/agents")).data.agents ?? [];
+const helpersFor = async (as) => (await as.req("/api/helpers")).data.helpers ?? [];
+const NEST_INSTRUCTIONS = "Plan the anniversary dinner for the two of us, and keep every word of it between us.";
 
 /* ------------------------------- task list ------------------------------- */
 
@@ -109,43 +111,61 @@ test("the grocery list is the same mechanism — a nest gets its own", async () 
   assert.ok(theirs.some((t) => t.id === r.data.task.id), "on theirs");
 });
 
-/* -------------------------------- agents --------------------------------- */
+/* -------------------------------- helpers -------------------------------- */
 
 test("a helper can belong to a nest", async () => {
-  const r = await morgan.req("/api/agents", {
-    method: "POST", body: JSON.stringify({ name: "Anniversary planner", visibility: "nest", nestId: nest.id }),
+  const r = await morgan.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "Anniversary planner", visibility: "nest", nestId: nest.id, instructions: NEST_INSTRUCTIONS }),
   });
   assert.equal(r.status, 200, JSON.stringify(r.data));
-  assert.equal(r.data.agent.visibility, "nest");
-  assert.equal(r.data.agent.nestId, nest.id);
+  assert.equal(r.data.helper.visibility, "nest");
+  assert.equal(r.data.helper.nestId, nest.id);
 });
 
 test("ISOLATION: the OWNER cannot list, read, or edit a nest helper", async () => {
-  const made = await morgan.req("/api/agents", {
-    method: "POST", body: JSON.stringify({ name: "Just theirs", visibility: "nest", nestId: nest.id }),
+  const made = await morgan.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "Just theirs", visibility: "nest", nestId: nest.id, instructions: NEST_INSTRUCTIONS }),
   });
-  const id = made.data.agent.id;
-  assert.ok(!(await agentsFor(alex)).some((a) => a.id === id), "not in the list");
-  assert.equal((await alex.req(`/api/agents/${id}`)).status, 404, "not readable by id either");
-  const edit = await alex.req(`/api/agents/${id}`, { method: "PATCH", body: JSON.stringify({ name: "Renamed by the owner" }) });
-  assert.equal(edit.status, 403, "and not editable — being the Owner is not membership");
+  const id = made.data.helper.id;
+  assert.ok(!(await helpersFor(alex)).some((a) => a.id === id), "not in the list");
+  assert.equal((await alex.req("/api/helpers/" + id)).status, 404, "not readable by id either");
+  const edit = await alex.req("/api/helpers/" + id, { method: "PATCH", body: JSON.stringify({ name: "Renamed by the owner" }) });
+  /* CHANGED: 404 where this used to assert 403. A nest helper is not visible to the Owner at
+   * all, so the write is refused by the same rule the read is — the refusal cannot even
+   * confirm that the helper exists, which is the stronger answer. Being the Owner is still
+   * not membership, which is the claim under test, so it is also checked on the record. */
+  assert.equal(edit.status, 404, "and not editable — being the Owner is not membership");
+  assert.equal((await morgan.req("/api/helpers/" + id)).data.helper.name, "Just theirs", "nothing was renamed");
 });
 
 test("both people in the nest can use and edit the shared helper", async () => {
-  const made = await morgan.req("/api/agents", {
-    method: "POST", body: JSON.stringify({ name: "Ours together", visibility: "nest", nestId: nest.id }),
+  /* T1, in his words: "keep their own agents ... available between the two of them". A nest
+   * helper is theirs JOINTLY, not its author's with an audience — Beannie is an ordinary
+   * Adult Member, and a nest is not an admin feature. That is why this is asserted with the
+   * non-admin doing the editing. */
+  const made = await morgan.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "Ours together", visibility: "nest", nestId: nest.id, instructions: NEST_INSTRUCTIONS }),
   });
-  const id = made.data.agent.id;
-  assert.ok((await agentsFor(beannie)).some((a) => a.id === id), "the other member sees it");
-  const edit = await beannie.req(`/api/agents/${id}`, { method: "PATCH", body: JSON.stringify({ name: "Ours, renamed" }) });
-  assert.equal(edit.status, 200, "a nest helper is theirs jointly, not just its author's");
-  assert.equal(edit.data.agent.name, "Ours, renamed");
+  const id = made.data.helper.id;
+  assert.ok((await helpersFor(beannie)).some((a) => a.id === id), "the other member sees it");
+  const edit = await beannie.req("/api/helpers/" + id, { method: "PATCH", body: JSON.stringify({ name: "Ours, renamed" }) });
+  assert.equal(edit.status, 200, "a nest helper is theirs jointly, not just its author's: " + JSON.stringify(edit.data));
+  assert.equal(edit.data.helper.name, "Ours, renamed");
+  // "Use", not only "edit": running it is the thing the nest actually wants from it. No AI
+  // provider is configured here, so an honest 422 is a pass — only 403 is ruled out.
+  const ran = await beannie.req("/api/helpers/" + id + "/run", { method: "POST", body: "{}" });
+  assert.notEqual(ran.status, 403, "and it is theirs to run: " + JSON.stringify(ran.data));
 });
 
 test("NEGATIVE: naming a nest you're not in leaves the helper personal, not shared", async () => {
-  const r = await alex.req("/api/agents", {
-    method: "POST", body: JSON.stringify({ name: "Trojan helper", visibility: "nest", nestId: nest.id }),
+  const r = await alex.req("/api/helpers", {
+    method: "POST",
+    body: JSON.stringify({ name: "Trojan helper", visibility: "nest", nestId: nest.id, instructions: NEST_INSTRUCTIONS }),
   });
-  assert.equal(r.data.agent.visibility, "personal");
-  assert.ok(!(await agentsFor(beannie)).some((a) => a.id === r.data.agent.id));
+  assert.equal(r.data.helper.visibility, "personal");
+  assert.equal(r.data.helper.nestId, null, "the pointer is cleared, not left dangling at a nest they cannot reach");
+  assert.ok(!(await helpersFor(beannie)).some((a) => a.id === r.data.helper.id));
 });

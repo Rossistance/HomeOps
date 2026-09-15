@@ -4,7 +4,7 @@ import { Card, Button, Badge, StatusDot, EmptyState, Modal, Field, TextInput, Re
 import { Icon } from "@/components/Icon";
 import { generateBriefing, suggestNextActions } from "@/lib/ai";
 import { fmtDateFull, dayName, relativeTime, isOverdue, isLive, isTodayEvent, eventTimeLabel } from "@/lib/dates";
-import { backend, type ServerEvolution, type HelpRequest } from "@/connectors/api";
+import { backend, type HelpRequest } from "@/connectors/api";
 import type { Member, CalendarEvent, Task } from "@/types";
 import { capabilitiesFor } from "@/lib/roles";
 import { useAdvancedMode } from "@/lib/prefs";
@@ -17,8 +17,8 @@ import { SitterView } from "@/screens/scoped/SitterView";
 import { BOARD_TASK_TYPES } from "@/miniapps";
 import { surfaceForTask } from "@/lib/taskSurfaces";
 
-// "What I learned" feed accents — includes the signature ember for improvement ideas,
-// which isn't in the shared ACCENT_BG map (that one has no ember entry).
+// "What I did & learned" feed accents — kept separate from the shared ACCENT_BG map,
+// which has no ember entry.
 const FEED_ACCENT: Record<string, string> = {
   sage: "bg-sage-100 text-sage-600",
   lavender: "bg-lavender-100 text-lavender-600",
@@ -26,18 +26,15 @@ const FEED_ACCENT: Record<string, string> = {
 };
 import type { ScreenId } from "@/types";
 
-// One normalized row for the "What I did & learned" ledger. `auto`/`note` carry the
-// server's low-risk auto-approval label + reason for improvements applied without a human.
+// One normalized row for the "What I did & learned" ledger.
 interface LearnedItem {
   id: string;
-  kind: "did" | "learned" | "improve";
+  kind: "did" | "learned";
   icon: string;
   accent: keyof typeof FEED_ACCENT;
   title: string;
   at: string;
   route: { screen: string; params?: Record<string, string> };
-  auto?: boolean;
-  note?: string;
 }
 
 export function Dashboard() {
@@ -64,11 +61,6 @@ export function Dashboard() {
   // instead of the adult Hearth. Capabilities also gate the admin quick actions below.
   const caps = capabilitiesFor(me ? { role: me.role, relationship: me.relationship, aiEnabled: me.aiEnabled } : null);
   const [advanced] = useAdvancedMode(); // the raw activity log lives behind Advanced Mode
-  // Evolution proposals are generated server-side (on run failures) and are NOT hydrated into
-  // the local store — so, like the Improvements tab, pull them here and merge with any local
-  // ones, or the "What I learned" card would miss the main source of improvements.
-  const [serverEvos, setServerEvos] = useState<ServerEvolution[]>([]);
-  useEffect(() => { void backend.evolutions().then(setServerEvos); }, []);
 
   useEffect(() => { if (params?.new === "reminder") setReminderOpen(true); }, [params?.new]);
 
@@ -128,7 +120,7 @@ export function Dashboard() {
     });
     navigate("miniapps", { id });
   };
-  const activeAgents = inSpace(data.agents.filter((a) => a.status === "Active" || a.status === "Needs Attention"));
+  const activeAgents = inSpace(data.agents.filter((a) => a.status === "Active"));
   const recentFiles = useMemo(() => inSpace([...data.files]).sort((a, b) => +new Date(b.uploadedAt) - +new Date(a.uploadedAt)).slice(0, 4), [data.files, spaceFilter]);
   const recentThreads = useMemo(() => inSpace([...data.threads]).sort((a, b) => +new Date(b.updatedAt) - +new Date(a.updatedAt)).slice(0, 4), [data.threads, spaceFilter]);
   const liveConnectors = connectors.filter((c) => c.live);
@@ -141,11 +133,9 @@ export function Dashboard() {
   const memberById = useMemo(() => new Map(data.members.map((m) => [m.id, m])), [data.members]);
 
   // "What I did & learned" (WS3): one honest, glanceable ledger of what the household's
-  // helpers just did (recent completed runs), what FamiliOS remembered (new memories),
-  // and how it proposes to improve (evolution proposals) — surfaced on Home instead of
-  // buried in a separate tab you have to go hunting for.
+  // helpers just did (recent completed runs) and what FamiliOS remembered (new memories) —
+  // surfaced on Home instead of buried in a tab you have to go hunting for.
   const feeds = useMemo<{ did: LearnedItem[]; learned: LearnedItem[] }>(() => {
-    const evoAt = (e: { createdAt: string | number }) => (typeof e.createdAt === "number" ? new Date(e.createdAt).toISOString() : e.createdAt);
     const runItems: LearnedItem[] = [...data.runs]
       .filter((r) => r.status === "Completed" && r.completedAt)
       .sort((a, b) => +new Date(b.completedAt!) - +new Date(a.completedAt!))
@@ -155,27 +145,13 @@ export function Dashboard() {
       .sort((a, b) => +new Date(b.updatedAt) - +new Date(a.updatedAt))
       .slice(0, 4)
       .map((m) => ({ id: m.id, kind: "learned", icon: "Brain", accent: "lavender", title: `Remembered: ${m.title || m.content}`, at: m.updatedAt, route: { screen: "activity", params: { tab: "memory" } } }));
-    const evoIds = new Set(serverEvos.map((e) => e.id));
-    const allEvos = [...serverEvos, ...(data.evolutions ?? []).filter((e) => !evoIds.has(e.id))];
-    const impItems: LearnedItem[] = allEvos
-      .filter((e) => e.status === "pending")
-      .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
-      .slice(0, 3)
-      .map((e) => ({ id: e.id, kind: "improve", icon: "Sparkles", accent: "ember", title: `Idea: ${e.title}`, at: evoAt(e), route: { screen: "activity", params: { tab: "improvements" } } }));
-    // Low-risk improvements the server applied automatically (household opted in) — shown
-    // in the ledger with an "Auto-applied by AI" label + the reason it was safe to apply.
-    const autoItems: LearnedItem[] = allEvos
-      .filter((e) => e.status === "accepted" && (e as ServerEvolution).autoApproved === true)
-      .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
-      .slice(0, 3)
-      .map((e) => ({ id: e.id, kind: "improve", icon: "Sparkles", accent: "ember", title: `Applied: ${e.title}`, at: evoAt(e), route: { screen: "activity", params: { tab: "improvements" } }, auto: true, note: (e as ServerEvolution).autoReason }));
     // Two honest, separate ledgers: "What I did" (runs — activities) vs "What I learned"
     // (memories + improvement ideas). The activity items intentionally carry no live route
     // here; the render decides clickability by Advanced Mode (the activity log is hidden off it).
     const did = runItems.slice(0, 5);
-    const learned = [...impItems, ...autoItems, ...memItems].sort((a, b) => +new Date(b.at) - +new Date(a.at)).slice(0, 5);
+    const learned = memItems.slice(0, 5);
     return { did, learned };
-  }, [data.runs, data.memories, data.evolutions, serverEvos, spaceFilter]);
+  }, [data.runs, data.memories, spaceFilter]);
 
   const saveReminder = () => { if (rTitle.trim()) { createTask({ title: rTitle.trim(), type: "reminder", priority: "medium" }); setRTitle(""); setReminderOpen(false); } };
   const runAsk = () => {
@@ -185,14 +161,12 @@ export function Dashboard() {
   };
 
   const quick: { label: string; icon: string; accent: keyof typeof ACCENT_BG; run: () => void; show: boolean }[] = [
-    { label: "New agent", icon: "Bot", accent: "ink", run: () => navigate("agents", { new: "1" }), show: caps.canCreateAgents },
-    { label: "New automation", icon: "Workflow", accent: "sage", run: () => navigate("automations", { tab: "builder" }), show: caps.canCreateAgents },
+    { label: "New helper", icon: "Bot", accent: "ink", run: () => navigate("helpers", { new: "1" }), show: caps.canCreateAgents },
     // Same predicate the route guard uses — an Adult Member used to be offered the tile and
     // bounced straight back with "Not available for your profile".
     { label: "Connect", icon: "Plug", accent: "lavender", run: () => navigate("connections"), show: canAccess("connections") },
     { label: "Upload", icon: "Upload", accent: "amber", run: () => navigate("files", { new: "1" }), show: caps.canUpload },
     { label: "Reminder", icon: "BellPlus", accent: "coral", run: () => setReminderOpen(true), show: true },
-    { label: "Template", icon: "Sparkles", accent: "sky", run: () => navigate("automations", { tab: "templates" }), show: caps.canCreateAgents },
   ].filter((q) => q.show);
 
   // Purpose-built views for children, grandparents, and sitters/helpers (all hooks
@@ -409,7 +383,7 @@ export function Dashboard() {
           )}
         </Card>
 
-        {/* What I learned — memories + improvement ideas. Clickable to Memory / Improvements. */}
+        {/* What I learned — the memories a run actually wrote. Clickable through to Memory. */}
         <Card className="card-pad lg:col-span-1">
           <Header icon="Brain" title="What I learned" action={<button onClick={() => navigate("activity", { tab: "memory" })} className="text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">All</button>} />
           {feeds.learned.length === 0 ? <EmptyState icon="Brain" title="Nothing yet" message="What FamiliOS remembers and learns shows up here." /> : (
@@ -419,11 +393,8 @@ export function Dashboard() {
                   <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] ${FEED_ACCENT[it.accent]}`}><Icon name={it.icon} size={14} /></span>
                   <div className="min-w-0 flex-1">
                     <p className="line-clamp-2 text-sm text-ink-700">{it.title}</p>
-                    {it.auto && it.note && <p className="line-clamp-2 text-[11px] text-ink-500">{it.note}</p>}
                     <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-400">
-                      {it.auto
-                        ? <Badge color="lavender"><Icon name="Sparkles" size={9} /> Auto-applied by AI</Badge>
-                        : <span>{it.kind === "learned" ? "Remembered" : "Suggestion"}</span>}
+                      <span>Remembered</span>
                       <span>· {relativeTime(it.at)}</span>
                     </div>
                   </div>
@@ -438,7 +409,7 @@ export function Dashboard() {
       <div className="stagger grid grid-cols-1 gap-4 lg:grid-cols-6">
         {/* Active agents */}
         <Card className="card-pad lg:col-span-3">
-          <Header icon="Bot" title="Helper agents" action={<button onClick={() => navigate("agents")} className="text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">All</button>} />
+          <Header icon="Bot" title="Helper agents" action={<button onClick={() => navigate("helpers")} className="text-xs font-semibold text-ink-500 transition-colors hover:text-ember-600">All</button>} />
           {/* Backend-owned agents can't be confirmed while offline — say so plainly instead
               of showing the same "no active agents" empty state a genuinely-fresh household
               would see (T-02: distinguish "unreachable" from "genuinely empty"). */}
@@ -448,7 +419,7 @@ export function Dashboard() {
           {activeAgents.length === 0 ? <EmptyState icon="Bot" title="No active agents" message="Create your first helper." /> : (
             <ul className="space-y-2">
               {activeAgents.slice(0, 4).map((a) => (
-                <li key={a.id} onClick={() => navigate("agents", { id: a.id })} className="data-row cursor-pointer">
+                <li key={a.id} onClick={() => navigate("helpers", { id: a.id })} className="data-row cursor-pointer">
                   <span className="flex items-center gap-2.5"><span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-ink-700 to-ink-900 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"><Icon name={a.icon} size={16} /></span><span className="text-sm font-medium text-ink-800">{a.name}</span></span>
                   <StatusDot color={a.status === "Active" ? "sage" : "coral"} pulse={a.status === "Active"} label={a.status} />
                 </li>

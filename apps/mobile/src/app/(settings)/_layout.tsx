@@ -7,8 +7,8 @@ export default function SettingsLayout() {
     <TabSwipe current="/(settings)">
       <Stack screenOptions={useHearthStackOptions()}>
         <Stack.Screen name="index" options={{ title: "Settings", gestureEnabled: false }} />
-        <Stack.Screen name="automations" options={{ title: "Automations" }} />
-        <Stack.Screen name="playbooks" options={{ title: "Playbooks" }} />
+        {/* Automations and Playbooks are gone: a schedule is a field on a Helper now, and a
+            playbook was a helper with a different name. Both live on the Helpers tab. */}
         <Stack.Screen name="household" options={{ title: "Household" }} />
         <Stack.Screen name="contacts" options={{ title: "Contacts" }} />
         <Stack.Screen name="connections" options={{ title: "Connections" }} />

@@ -161,6 +161,13 @@ export function writeStoreRecord(ctx, coll, id, doc, tenant = "local") {
   const eng = createEngine(ctx.dataDir);
   try { eng.putRecord(tenant, coll, id, doc); } finally { eng.closeAll(); }
 }
+/** Read a row-backed record (runs, events, …) out of a SPAWNED server's data dir.
+ * The mirror of writeStoreRecord, and the only way to inspect a field the public route
+ * deliberately does not echo — publicRun omits `goal`, for instance. */
+export function readStoreRecord(ctx, coll, id, tenant = "local") {
+  const eng = createEngine(ctx.dataDir);
+  try { return eng.getRecord(tenant, coll, id); } finally { eng.closeAll(); }
+}
 export function writeStoreDoc(ctx, file, value, tenant = "local") {
   const eng = createEngine(ctx.dataDir);
   try { eng.putDoc(tenant, file, value); } finally { eng.closeAll(); }

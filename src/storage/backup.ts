@@ -29,8 +29,8 @@ export interface ImportResult {
 
 // Every collection AppData must carry; all must be arrays in a valid backup.
 const REQUIRED_ARRAYS: (keyof AppData)[] = [
-  "members", "contactMethods", "spaces", "agents", "automations", "runs", "subagentRuns",
-  "threads", "messages", "files", "knowledge", "playbooks", "miniApps", "memories",
+  "members", "contactMethods", "spaces", "agents", "runs",
+  "threads", "messages", "files", "knowledge", "miniApps", "memories",
   "approvals", "activity", "events", "tasks",
 ];
 

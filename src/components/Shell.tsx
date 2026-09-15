@@ -4,7 +4,7 @@ import { brand } from "@/brand";
 import { Icon } from "./Icon";
 import { cn } from "@/lib/cn";
 import { Avatar } from "./ui";
-import { useCalmMode, useAdvancedMode, useUnifiedNav } from "@/lib/prefs";
+import { useCalmMode, useAdvancedMode } from "@/lib/prefs";
 import type { ScreenId } from "@/types";
 
 /** Calm Mode — stills motion, flattens depth, softens color for lower sensory load. */
@@ -33,21 +33,17 @@ function CalmToggle() {
 interface NavItem { id: ScreenId; label: string; icon: string; advanced?: boolean }
 interface NavGroup { label: string; items: NavItem[] }
 
-// Skills/Functions are the low-level building blocks agents & automations compile down
-// to. They're hidden by default (Advanced Mode, off in Settings) so new households see
-// only Ask FamiliOS, Agents, Automations, and Mini Apps. Playbooks folded into Skills as
-// a read-only "Recipes" tab rather than staying a separate top-level concept.
+// One entry for the whole agent system. Helpers, Skills, Functions, Playbooks,
+// Automations and Triggers used to be six nav entries for one idea, and that split was
+// the part nobody could hold in their head — so there is exactly one now.
 export const NAV_GROUPS: NavGroup[] = [
   { label: "Command Center", items: [
     { id: "dashboard", label: "Home", icon: "LayoutDashboard" },
     { id: "assistant", label: "Ask FamiliOS", icon: "Sparkles" },
     { id: "calendar", label: "Calendar", icon: "CalendarDays" },
   ] },
-  { label: "Agents & Workflows", items: [
-    { id: "agents", label: "Helper Agents", icon: "Bot" },
-    { id: "automations", label: "Automations", icon: "Workflow" },
-    { id: "skills", label: "Skills", icon: "Layers", advanced: true },
-    { id: "functions", label: "Functions", icon: "FunctionSquare", advanced: true },
+  { label: "Helpers", items: [
+    { id: "helpers", label: "Helpers", icon: "Bot" },
   ] },
   { label: "Family Systems", items: [
     { id: "messages", label: "Messages & Approvals", icon: "MessageSquare" },
@@ -65,7 +61,7 @@ export const NAV_GROUPS: NavGroup[] = [
   ] },
 ];
 export const NAV: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
-const MOBILE_PRIMARY: ScreenId[] = ["dashboard", "agents", "automations", "messages"];
+const MOBILE_PRIMARY: ScreenId[] = ["dashboard", "helpers", "calendar", "messages"];
 
 // WP-001: server truth, not the local `data.approvals`/local-only mirror — a run parked
 // by a scheduled trigger or another device must show up here too, not just one this
@@ -86,23 +82,10 @@ function NavList({ onNavigate, grouped = true }: { onNavigate?: () => void; grou
   const canAccess = useStore((s) => s.canAccess);
   const badges = useBadges();
   const [advanced] = useAdvancedMode();
-  const [unified] = useUnifiedNav();
-  // WP-005: with the unified flag ON, "Automations" stops being a top-level entry —
-  // Helper Agents absorbs the concept (its triggers list and in-drawer scheduler), and
-  // the screen stays routable, so nothing is stranded by folding the nav entry.
-  //
-  // ISS-108: this used to end `&& !advanced`, i.e. Advanced Mode was ALSO the reveal for
-  // Automations. So with both toggles on, the entry came back and the fragmented nav
-  // returned — silently undoing the "one entry" the user explicitly asked for. Advanced
-  // Mode is no longer that reveal: unified nav wins on nav composition.
-  //
-  // Skills/Functions are deliberately untouched. They were never part of the unified-nav
-  // promise, and Advanced Mode stays their legitimate reveal — the Skills screen has no
-  // other entry point, so folding it here would remove access rather than tidy it.
-  const visible = (it: NavItem) =>
-    canAccess(it.id) &&
-    (!it.advanced || advanced) &&
-    !(unified && it.id === "automations");
+  // Advanced Mode no longer reveals a nav ENTRY — the screens it used to unhide are gone.
+  // It still gates detail inside Activity & Memory and Settings, so the flag stays here
+  // rather than being silently ignored by a predicate that pretends to honour it.
+  const visible = (it: NavItem) => canAccess(it.id) && (!it.advanced || advanced);
   const item = (it: NavItem) => {
     const active = route.screen === it.id;
     return (
@@ -283,13 +266,7 @@ function MobileBottomNav() {
   const navigate = useStore((s) => s.navigate);
   const canAccess = useStore((s) => s.canAccess);
   const badges = useBadges();
-  const [advanced] = useAdvancedMode();
-  const [unified] = useUnifiedNav();
-  // WP-005: keep the folded-away "Automations" out of the mobile bottom nav too,
-  // so the collapsed IA is consistent across desktop and mobile.
-  // ISS-108: same rule as the sidebar above — Advanced Mode must not re-fragment a nav
-  // the user unified. (Kept in lockstep; the two diverging is how the bug hid.)
-  const bottomVisible = (id: ScreenId) => canAccess(id) && !(unified && id === "automations");
+  const bottomVisible = (id: ScreenId) => canAccess(id);
   const primary = [...MOBILE_PRIMARY.filter(bottomVisible), ...NAV.map((n) => n.id).filter((id) => bottomVisible(id) && !MOBILE_PRIMARY.includes(id))].slice(0, 4);
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around border-t border-ink-900/[0.06] bg-surface-base/90 px-1 py-1.5 shadow-[0_-1px_0_rgba(255,255,255,0.5)] backdrop-blur-xl lg:hidden">

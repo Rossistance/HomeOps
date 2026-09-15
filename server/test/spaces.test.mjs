@@ -1,5 +1,5 @@
-// Spaces — personal vs family scoping for chats and agents.
-// Personal chats/agents are invisible to other household members; family
+// Spaces — personal vs family scoping for chats and helpers.
+// Personal chats/helpers are invisible to other household members; family
 // (household-visibility) chats are shared and continuable by anyone in the house.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -35,19 +35,27 @@ test("personal chats stay private; family chats are shared and continuable", asy
   assert.equal(badAppend.status, 404);
 });
 
-test("personal agents are invisible to other members; family agents are shared", async () => {
-  const personalAgent = (await ross.req("/api/agents", { method: "POST", body: JSON.stringify({ name: "Ross's private helper", visibility: "personal" }) })).data.agent;
-  assert.equal(personalAgent.visibility, "personal");
-  assert.equal(personalAgent.createdBy, ross.actorId ?? personalAgent.createdBy, "creator recorded");
-  const familyAgent = (await ross.req("/api/agents", { method: "POST", body: JSON.stringify({ name: "Family helper" }) })).data.agent;
-  assert.equal(familyAgent.visibility, "household", "default agent space is family");
+test("personal helpers are invisible to other members; family helpers are shared", async () => {
+  // The seven concepts (Agent, Skill, Function, Playbook, Automation, Trigger, Evolution)
+  // are now one Helper behind /api/helpers, but the SPACE it lives in is unchanged: a
+  // personal helper belongs to the member who made it, a household one to everyone.
+  const personalHelper = (await ross.req("/api/helpers", { method: "POST", body: JSON.stringify({
+    name: "Ross's private helper", visibility: "personal",
+    instructions: "Summarise my own reading list for me each week, and tell nobody else.",
+  }) })).data.helper;
+  assert.equal(personalHelper.visibility, "personal");
+  assert.equal(personalHelper.createdBy, ross.actorId ?? personalHelper.createdBy, "creator recorded");
+  const familyHelper = (await ross.req("/api/helpers", { method: "POST", body: JSON.stringify({
+    name: "Family helper", instructions: "Keep the family's shared board tidy each evening.",
+  }) })).data.helper;
+  assert.equal(familyHelper.visibility, "household", "default helper space is family");
 
-  const theirs = (await other.req("/api/agents")).data.agents;
-  assert.ok(!theirs.some((a) => a.id === personalAgent.id), "personal agent hidden");
-  assert.ok(theirs.some((a) => a.id === familyAgent.id), "family agent shared");
-  assert.equal((await other.req(`/api/agents/${personalAgent.id}`)).status, 404, "direct fetch hidden too");
+  const theirs = (await other.req("/api/helpers")).data.helpers;
+  assert.ok(!theirs.some((a) => a.id === personalHelper.id), "personal helper hidden");
+  assert.ok(theirs.some((a) => a.id === familyHelper.id), "family helper shared");
+  assert.equal((await other.req(`/api/helpers/${personalHelper.id}`)).status, 404, "direct fetch hidden too");
 
   // The creator still sees both.
-  const mine = (await ross.req("/api/agents")).data.agents;
-  assert.ok(mine.some((a) => a.id === personalAgent.id));
+  const mine = (await ross.req("/api/helpers")).data.helpers;
+  assert.ok(mine.some((a) => a.id === personalHelper.id));
 });

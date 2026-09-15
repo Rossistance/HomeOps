@@ -1,15 +1,12 @@
-// The signature approval flow (88% sheet). Risk pill, what the agent wants to
+// The signature approval flow (88% sheet). Risk pill, what the helper wants to
 // do, why it needs you, the exact preview — then Deny / Ask for changes /
 // Approve. Decisions hit the real API and confirm with a flash. "Ask for
-// changes" runs a real re-plan loop: it pulls the gated run's original steps,
-// asks the assistant for a revised plan, stops the stale run, and dispatches the
-// revision (mirrors the web's askAgentForChanges).
+// changes" stops the gated run and carries your words into Ask, unsent.
 import { useMemo, useState } from "react";
 import { Alert, ScrollView, TextInput, View } from "react-native";
 import { router } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { api, type ApprovalRec } from "@/lib/api";
-import { useRun } from "@/lib/run-context";
 import { useTheme, riskColor } from "@/theme";
 import { T, Badge, Button, Well, SymTile, PressableScale, HSheet, useConfirmFlash } from "@/components/ui";
 
@@ -45,7 +42,6 @@ export function ApprovalSheet({ approval, visible, onClose, onDecided }: {
 }) {
   const { colors, spacing, type } = useTheme();
   const { flash, show } = useConfirmFlash();
-  const { startRun } = useRun();
   const [busy, setBusy] = useState(false);
   const [asking, setAsking] = useState(false);
   const [feedback, setFeedback] = useState("");
@@ -87,68 +83,44 @@ export function ApprovalSheet({ approval, visible, onClose, onDecided }: {
     await api.cancelRun(runId);
   }
 
-  // Real "ask for changes": re-invoke the planner with the ORIGINAL plan + the user's
-  // feedback to produce a REVISED plan, stop the stale run, dispatch the revision, and
-  // jump to the live run monitor. Falls back to drafting the change in Ask when the
-  // approval isn't tied to a server run (client-orchestrated), and to stop-and-tell when
-  // re-planning can't produce a plan (no AI provider, etc.).
+  /* "Ask for changes": stop what was about to happen, and take the conversation to Ask
+   * with your words already in it.
+   *
+   * This used to re-invoke the planner with the original steps as JSON and dispatch whatever
+   * plan came back — a second, invisible run started on your behalf from a "this isn't quite
+   * right" note. That whole shape is gone: the engine returns prose, not plans, and the
+   * assistant acts for itself rather than handing back a machine-readable proposal for the
+   * phone to execute.
+   *
+   * What replaces it is smaller and more honest. The stale approval is denied (so it can
+   * never fire) and its run cancelled, then your feedback opens in Ask as a message you can
+   * still edit before sending. Nothing runs until you say so, which is the point of an
+   * approval sheet in the first place. */
   async function reworkPlan() {
     if (!approval || working) return;
     const a = approval;
     const note = feedback.trim();
     if (!note) return;
     setWorking(true);
-    // The approval gates a server run step (step carries approvalId) — find it.
+    // The approval gates a server run step (the step carries approvalId) — find and stop it.
     const runs = await api.runs();
     const run = runs.find((r) => r.steps.some((s) => s.approvalId === a.id));
-    if (!run) {
-      // No linked server run — draft the requested change in Ask instead.
-      setWorking(false);
-      closeAndReset();
-      router.push({ pathname: "/(ask)", params: { prefill: `About the pending approval "${firstLine}": please change it so that ${note}` } });
-      return;
-    }
-    // Pull the ORIGINAL plan (full steps incl. toolId + input) from the server run.
-    const full = await api.getRun(run.id);
-    const steps = (full.run?.steps ?? run.steps).map((s) => ({ toolId: s.toolId, title: s.title, detail: s.detail, input: s.input ?? {} }));
-    if (!steps.length) {
-      await stopStale(run.id);
-      setWorking(false);
-      onDecided();
-      closeAndReset();
-      Alert.alert("Run stopped", "Start a new run with your changes.");
-      return;
-    }
-    const msg = `Revise the following plan based on my feedback, keeping everything that still applies and changing only what my feedback asks for. Return a revised plan (kind:"plan").\n\nOriginal plan "${run.title || "Plan"}" steps (JSON): ${JSON.stringify(steps).slice(0, 3000)}\n\nMy feedback: ${note}`;
-    const out = await api.assistant(msg);
-    if (out.ok && out.kind === "plan" && out.plan) {
-      await stopStale(run.id);
-      await startRun({ ...out.plan, title: out.plan.title || `Revised: ${run.title || "plan"}` });
-      setWorking(false);
-      onDecided();
-      closeAndReset();
-      // Jump to the live run so the user sees the revision executing.
-      router.push("/activity");
-      return;
-    }
-    // Re-planning didn't yield a plan — honest fallback: stop the stale run.
-    await stopStale(run.id);
+    if (run) await stopStale(run.id);
     setWorking(false);
-    onDecided();
+    if (run) onDecided();
     closeAndReset();
-    Alert.alert(
-      "Run stopped",
-      out.ok
-        ? "I couldn't draft a revision automatically — start a new run with your changes."
-        : "Couldn't reach the planner — start a new run with your changes.",
-    );
+    // Prefilled, NOT sent: "prefill" fills the composer and waits for you (see (ask)/index).
+    router.push({
+      pathname: "/(ask)",
+      params: { prefill: `About "${firstLine}" — I stopped it. Please do it this way instead: ${note}` },
+    });
   }
 
   return (
     <>
       <HSheet visible={visible} onClose={closeAndReset} title="Approval" heightPct={0.88}>
         <ScrollView contentContainerStyle={{ paddingHorizontal: spacing.xl, paddingBottom: spacing.xl, gap: spacing.lg }}>
-          {/* agent / tool identity + risk pill */}
+          {/* helper / tool identity + risk pill */}
           <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
             <SymTile name={iconFor(approval)} color={risk.fg} bg={risk.bg} size={44} iconSize={20} />
             <View style={{ flex: 1, gap: 2 }}>
@@ -193,14 +165,14 @@ export function ApprovalSheet({ approval, visible, onClose, onDecided }: {
                 />
               </Well>
               <T kind="detail">
-                I'll rework the plan with your feedback, stop this pending step, and start the revised run.
+                I'll stop this step and open Ask with your note — nothing is sent until you press send.
               </T>
               <View style={{ flexDirection: "row", gap: spacing.sm }}>
                 <View style={{ flex: 1 }}>
                   <Button title="Cancel" small variant="ghost" disabled={working} onPress={() => { setAsking(false); setFeedback(""); }} />
                 </View>
                 <View style={{ flex: 1.4 }}>
-                  <Button title={working ? "Reworking…" : "Rework the plan"} small variant="ember" icon="wand.and.stars" loading={working} disabled={!feedback.trim()} onPress={() => void reworkPlan()} />
+                  <Button title={working ? "Stopping…" : "Stop and rewrite"} small variant="ember" icon="wand.and.stars" loading={working} disabled={!feedback.trim()} onPress={() => void reworkPlan()} />
                 </View>
               </View>
             </View>

@@ -206,8 +206,7 @@ function runSourceLabel(source?: string | null): string {
   switch (source) {
     case "assistant": return "From chat";
     case "trigger": return "Scheduled";
-    case "agent": return "Agent";
-    case "skill": return "Skill";
+    case "agent": case "helper": return "Helper";
     case "manual": return "Manual";
     default: return source ? `${source.charAt(0).toUpperCase()}${source.slice(1)}` : "Run";
   }

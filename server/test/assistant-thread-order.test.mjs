@@ -1,82 +1,38 @@
-// LEGACY ENGINE: this suite pins the previous single-shot assistant brain (JSON envelope
-// answer|lookup|plan|build). The default Ask Famili engine is now the AI SDK agent loop
-// (server/assistant-agent.mjs, server/test/assistant-agent.test.mjs); every server here is
-// spawned with HOMEOPS_ASSISTANT_ENGINE=legacy so the rollback path stays proven.
-// WP-003 slice 4 (ISS-005/009/011/016 — "one run world") — THREAD ORDER.
+// THREAD ORDER (ISS-005/009/011/016 — "one run world").
 //
-// Bug: POST /api/assistant/stream started the plan's run (runAssistantPlan → engine
-// startRun) and only THEN persisted the user's own turn + the assistant's "plan" reply
-// (see server/index.mjs, the streaming route). startRun's execution is NOT awaited —
-// driveRun runs in the background (server/engine.mjs) — and a fast, real, no-approval
-// step (e.g. homeops.write_memory) can finish and fire onRunFinished (server/
-// assistant-runs.mjs), which appends a run_result message to the SAME conversation,
-// before this request handler ever got around to recording what the user asked. A
-// refresh (or a second device) then read the durable array in that wrong order: the
-// run's own reaction appearing ABOVE the question that caused it.
+// Bug: the streaming assistant route started the turn's durable run and only THEN persisted
+// the user's own message. A run's execution is not awaited — it proceeds in the background
+// — so a fast step could finish and fire onRunFinished (server/assistant-runs.mjs), which
+// appends a run_result to the SAME conversation, before the handler had recorded what the
+// user asked. A refresh, or a second device, then read the durable array in that wrong
+// order: the run's reaction sitting ABOVE the question that caused it.
 //
-// Fix (chosen over sorting messages by `at` at render time — see rationale in the
-// index.mjs comment at the turn-persistence region): persist the user's turn FIRST,
-// before the run is ever started, so its position in the durable array is never at the
-// mercy of how fast the background run happens to resolve. Sorting by `at` was rejected
-// because the racing message's timestamp is genuinely captured EARLIER in wall-clock
-// terms than the user turn's (which used to be stamped only after the run had already
-// returned) — no client-side sort can un-invert a timestamp that was recorded too late.
+// Fix (chosen over sorting by `at` at render time): persist the user's turn FIRST, before
+// any run is started, so its position is never at the mercy of how fast a background run
+// resolves. Sorting was rejected because the racing message's timestamp is genuinely
+// captured earlier in wall-clock terms — no client-side sort can un-invert a timestamp
+// that was recorded too late.
 //
-// No AI provider is real: a local scripted HTTP server stands in for Ollama (same
-// pattern as chat-agent-attribution.test.mjs), so the "assistant" deterministically
-// returns a plan with one fast, real, non-approval step — no network, no LLM.
+// Under the agent engine a durable run is created for exactly one reason: a tool the policy
+// says a person must approve. So that is what this drives — the approval parks the run, the
+// test approves it, and the resulting run_result must land after the question.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import http from "node:http";
 import { startServer, stopServer, makeSession } from "./harness.mjs";
+import { useFakeModel } from "./fake-model.mjs";
 
-let ctx, owner, fakeProvider;
-
-function fastPlan(suffix) {
-  return {
-    title: `TG-thread-order ${suffix}`, summary: "one fast, real, no-approval step",
-    icon: "Bot", spaceType: "Personal", instructions: "", trigger: { type: "Manual", detail: "" },
-    steps: [
-      { toolId: "homeops.write_memory", title: "Remember", detail: "", input: { text: `TG thread-order fact ${suffix}`, scope: "household" }, requiresApproval: false },
-    ],
-    approvalGates: [], risk: "Low",
-  };
-}
+let ctx, owner, fake;
 
 before(async () => {
-  ctx = await startServer({ env: { HOMEOPS_ASSISTANT_ENGINE: "legacy" } });
+  ctx = await startServer();
   owner = await makeSession(ctx, "m-alex");
-  fakeProvider = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", (c) => (body += c));
-    req.on("end", () => {
-      if (req.url === "/api/tags") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ models: [{ name: "tg-fake" }] })); return; }
-      let messages = [];
-      try { messages = JSON.parse(body).messages ?? []; } catch { /* ignore */ }
-      const sys = String(messages?.[0]?.content ?? "");
-      const reply = sys.includes("You are FamiliOS, a warm, capable assistant")
-        ? JSON.stringify({ kind: "plan", answer: "On it — doing it now.", plan: fastPlan(Date.now()) })
-        : JSON.stringify({ kind: "answer", answer: "ok" });
-      res.writeHead(200, { "content-type": "application/x-ndjson" });
-      res.end(JSON.stringify({ message: { content: reply } }) + "\n");
-    });
-  });
-  await new Promise((resolve) => fakeProvider.listen(0, resolve));
-  const port = fakeProvider.address().port;
-  await owner.req("/api/ai/providers/ollama/config", { method: "POST", body: JSON.stringify({ baseUrl: `http://localhost:${port}`, model: "tg-fake" }) });
-  await owner.req("/api/ai/active", { method: "POST", body: JSON.stringify({ providerId: "ollama" }) });
+  fake = await useFakeModel(owner);
 });
-after(async () => { await stopServer(ctx); await new Promise((r) => fakeProvider.close(r)); });
+after(async () => { await stopServer(ctx); await new Promise((r) => fake.server.close(r)); });
 
-async function newConversation(title) {
-  const r = await owner.req("/api/conversations", { method: "POST", body: JSON.stringify({ title }) });
-  return r.data.conversation;
-}
-async function messagesOf(id) {
-  const r = await owner.req(`/api/conversations/${id}`);
-  return r.data.conversation?.messages ?? [];
-}
-const waitFor = async (fn, ms = 8000) => {
+const messagesOf = async (id) => (await owner.req(`/api/conversations/${id}`)).data.conversation?.messages ?? [];
+
+const waitFor = async (fn, ms = 10000) => {
   const t0 = Date.now();
   for (;;) {
     const v = await fn();
@@ -87,8 +43,12 @@ const waitFor = async (fn, ms = 8000) => {
 };
 
 test("the user's own turn is always FIRST in a run-triggering chat thread, no matter how fast the run resolves", async () => {
-  const conv = await newConversation("thread order");
-  const message = "TG: remember this quickly";
+  const conv = (await owner.req("/api/conversations", { method: "POST", body: JSON.stringify({ title: "thread order" }) })).data.conversation;
+  const message = "ask everyone to sign off on the meal plan";
+  fake.state.script = [
+    { toolCalls: [{ name: "homeops__create_approval", args: { subject: "Sign off on the meal plan", detail: "Tacos Tue, Chili Wed" } }] },
+    { text: "Queued for your approval — nothing has gone out yet." },
+  ];
 
   const streamRes = await ctx.fetch("/api/assistant/stream", {
     method: "POST",
@@ -101,18 +61,25 @@ test("the user's own turn is always FIRST in a run-triggering chat thread, no ma
   assert.ok(doneLine, "stream produced a done event");
   const result = JSON.parse(doneLine.slice(6)).result;
   assert.equal(result.ok, true);
-  assert.ok(result.run?.id, "the plan auto-started a run");
+  const runId = result.run?.id ?? result.runId;
+  assert.ok(runId, "the approval-gated step became a durable run");
 
   // Immediately after the request completes — the tightest possible window for the
   // background run to have raced ahead of this handler's own persistence — the user's
   // question must already be msgs[0]. This is the exact invariant the fix guarantees.
-  const right_after = await messagesOf(conv.id);
-  assert.ok(right_after.length >= 1, "at least the user turn landed");
-  assert.equal(right_after[0].role, "user");
-  assert.equal(right_after[0].text, message);
+  const rightAfter = await messagesOf(conv.id);
+  assert.ok(rightAfter.length >= 1, "at least the user turn landed");
+  assert.equal(rightAfter[0].role, "user");
+  assert.equal(rightAfter[0].text, message);
 
-  // Once the run finishes and its result lands (server/assistant-runs.mjs onRunFinished),
-  // the run_result must appear AFTER the user's turn — never displace it from the top.
+  // Approve it, so the run reaches a terminal state and posts its own reaction back.
+  const pending = await waitFor(async () => {
+    const r = await owner.req("/api/approvals");
+    return (r.data.approvals ?? []).find((a) => a.status === "pending" && a.toolId === "homeops.create_approval") ?? null;
+  });
+  const decided = await owner.req(`/api/approvals/${pending.id}/decide`, { method: "POST", body: JSON.stringify({ decision: "approved" }) });
+  assert.equal(decided.status, 200, JSON.stringify(decided.data));
+
   const withResult = await waitFor(async () => {
     const msgs = await messagesOf(conv.id);
     return msgs.some((m) => m.kind === "run_result") ? msgs : null;

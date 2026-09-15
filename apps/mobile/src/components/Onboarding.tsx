@@ -1,6 +1,14 @@
 // First-run onboarding (5 steps, per handoff). Runs after sign-in, once.
-// Steps 3 and 4 are wired to the real household: members come from the API and
-// the starter-agent picker activates/pauses the household's real agents.
+//
+// NOTHING HERE CREATES A HELPER. There used to be a "Pick your starting agents" step, and it
+// was untrue in two directions at once: the app seeds no helpers for a new family, so on a
+// real first run the list was empty and the step silently disappeared — and anywhere it did
+// appear, a toggle activated something whose instructions the family had never read. Both
+// are the same mistake: acting as if a decision had been made on their behalf.
+//
+// What replaces it shows a few real ready-made helpers, says plainly that none of them exist
+// yet, and points at the Helpers tab. Members and the profile step still write through the
+// same APIs the Settings screens use.
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, TextInput, View } from "react-native";
 import * as ImagePicker from "expo-image-picker";
@@ -11,7 +19,7 @@ import { useTheme, tapHaptic } from "@/theme";
 import { useOnboarding } from "@/lib/prefs";
 import { useSession } from "@/lib/session";
 import { ColorPicker } from "@/components/ui/color-picker";
-import { api, type AgentRec, type MemberRec } from "@/lib/api";
+import { api, type HelperTemplate, type MemberRec } from "@/lib/api";
 import { HuddleMark, Wordmark, SPLASH_BG } from "@/components/brand";
 import { memberAccent } from "@/lib/member-colors";
 import { MemberAvatar } from "@/app/(home)/profile";
@@ -23,10 +31,11 @@ const ADMIN_ROLES = new Set(["Owner", "Adult Admin"]);
  * picture, pick an icon, pick a color, basic info — plus the starting agents, and some
  * preferences, facts, knowledge."
  *
- * The agents step already existed. These two are the rest of it: a real profile (photo or
- * emoji, and the colour every other screen then identifies you by), and a first pass at what
- * the household wants the assistant to know. Both write through the same APIs the Settings
- * screens use, so nothing here is a special onboarding-only shortcut that drifts later. */
+ * A real profile (photo or emoji, and the colour every other screen then identifies you by),
+ * and a first pass at what the household wants the assistant to know. Both write through the
+ * same APIs the Settings screens use, so nothing here is a special onboarding-only shortcut
+ * that drifts later. "The starting agents" is the one part answered differently — see the
+ * note at the top of this file. */
 // ACCENTS lives in lib/member-colors now — one list for the whole app.
 const EMOJIS = ["🦊", "🐻", "🦉", "🐙", "🌻", "🍀", "⭐️", "🌈", "🐝", "🦋", "🍕", "⚽️"] as const;
 const MAX_PHOTO_BYTES = 25 * 1024 * 1024;  // matches the server cap
@@ -40,7 +49,7 @@ const KNOWLEDGE_PROMPTS = [
 ] as const;
 
 const TRUST_ROWS = [
-  { icon: "cpu", title: "Agents watch and draft", desc: "Briefings, forms and bills — prepared quietly in the background" },
+  { icon: "wand.and.stars", title: "Helpers watch and draft", desc: "Briefings, forms and bills — prepared quietly in the background" },
   { icon: "checkmark.shield", title: "You approve what leaves home", desc: "Emails, texts, payments — nothing goes out without your OK" },
   { icon: "clock", title: "Everything is logged", desc: "Every action lands in Activity, in plain language" },
 ] as const;
@@ -55,8 +64,8 @@ export function Onboarding() {
 
   const [step, setStep] = useState(0);
   const [members, setMembers] = useState<MemberRec[]>([]);
-  const [agents, setAgents] = useState<AgentRec[]>([]);
-  const [picked, setPicked] = useState<Record<string, boolean>>({});
+  // Read-only: a taste of what a helper is. Nothing on this screen saves one.
+  const [templates, setTemplates] = useState<HelperTemplate[]>([]);
   const [saving, setSaving] = useState(false);
   const [householdName, setHouseholdName] = useState("");
   const isOwner = session?.role === "Owner";
@@ -71,32 +80,33 @@ export function Onboarding() {
 
   useEffect(() => {
     void (async () => {
-      const [m, a, hh] = await Promise.all([api.members(), api.agents(), api.household()]);
+      const [m, sections, hh] = await Promise.all([
+        api.members(),
+        api.helperTemplates().catch(() => []),
+        api.household(),
+      ]);
       setMembers(m);
-      setAgents(a);
+      setTemplates(sections.flatMap((sec) => sec.templates).slice(0, 3));
       setHouseholdName(hh?.name ?? "");
       const me = m.find((x) => x.isCurrentUser);
       if (me) { setMyName(me.displayName); setColor(me.color ?? null); setPhotoFileId(me.photoFileId ?? null); }
-      const initial: Record<string, boolean> = {};
-      for (const ag of a) initial[ag.id] = ag.status === "Active";
-      setPicked(initial);
     })();
   }, []);
 
-  // Non-admins can't manage agents; they skip the picker.
   // D7 — the walkthrough he described, in his order: who you are, then the household, then
-  // what it should know, then which helpers start out running. Non-admins skip the two
-  // household-wide steps they can't act on rather than being shown dead controls.
+  // what it should know, then where the helpers live. Non-admins skip the two household-wide
+  // steps they can't act on rather than being shown dead controls.
+  //
+  // The helpers step no longer depends on there BEING any: it exists precisely to say there
+  // aren't yet, which is the fact the old conditional step hid by quietly disappearing.
   const steps = useMemo(() => {
     const out = ["welcome", "trust", "profile"];
     out.push("household");
-    if (isAdmin) out.push("knowledge");
-    if (isAdmin && agents.length > 0) out.push("agents");
+    if (isAdmin) out.push("knowledge", "helpers");
     out.push("ready");
     return out;
-  }, [isAdmin, agents.length]);
+  }, [isAdmin]);
   const kind = steps[Math.min(step, steps.length - 1)];
-  const pickedCount = Object.values(picked).filter(Boolean).length;
 
   async function finish() {
     if (saving) return;
@@ -121,15 +131,8 @@ export function Onboarding() {
     if (isOwner && householdName.trim()) {
       await api.renameHousehold(householdName.trim()).catch(() => null);
     }
-    // Handoff rule: unpicked starter agents launch as Paused. Only touch agents
-    // whose status actually changes; failures are non-fatal (Agents tab can fix).
-    if (isAdmin) {
-      await Promise.all(agents.map((ag) => {
-        const want = picked[ag.id] ? "Active" : "Paused";
-        if (ag.status === want || (!picked[ag.id] && ag.status !== "Active")) return Promise.resolve(null);
-        return api.patchAgent(ag.id, { status: want }).catch(() => null);
-      }));
-    }
+    // No helper is created, activated or paused by finishing setup. A household arrives with
+    // exactly what it asked for, which is nothing yet.
     tapHaptic("success");
     setOnboarded(true);
   }
@@ -144,7 +147,7 @@ export function Onboarding() {
   const ctaLabel =
     kind === "welcome" ? "Get started"
     : kind === "ready" ? "Enter FamiliOS"
-    : kind === "agents" ? `Start with ${pickedCount} agent${pickedCount === 1 ? "" : "s"}`
+    : kind === "helpers" ? "Got it"
     // Naming what happens next, so skipping is a choice rather than an accident.
     : kind === "knowledge" ? (filledFacts === 0 ? "Skip for now" : `Save ${filledFacts} note${filledFacts === 1 ? "" : "s"}`)
     : "Continue";
@@ -181,7 +184,7 @@ export function Onboarding() {
               <T kind="sub" color="rgba(245,241,233,0.65)">Your family's operating system.</T>
             </LinearGradient>
             <T kind="h1" style={{ fontSize: 26, lineHeight: 32 }}>The mental load, off your mind</T>
-            <T kind="body">A team of careful agents for the calendar, school papers, bills and care — run by your family, approved by you.</T>
+            <T kind="body">Careful helpers for the calendar, school papers, bills and care — written by your family, approved by you.</T>
           </Animated.View>
         )}
 
@@ -368,35 +371,39 @@ export function Onboarding() {
           </Animated.View>
         )}
 
-        {kind === "agents" && (
+        {kind === "helpers" && (
           <Animated.View entering={FadeInDown.duration(320)} style={{ gap: spacing.lg }}>
-            <T kind="h1" style={{ fontSize: 26, lineHeight: 32 }}>Pick your starting agents</T>
-            <T kind="body">These are your household's agents — turn on the ones you want running. Add or pause anytime.</T>
-            <View style={{ gap: spacing.sm }}>
-              {agents.map((ag) => {
-                const on = !!picked[ag.id];
-                return (
-                  <PressableScale
-                    key={ag.id}
-                    onPress={() => { tapHaptic("select"); setPicked((p) => ({ ...p, [ag.id]: !p[ag.id] })); }}
-                    style={[st.agentRow, {
-                      backgroundColor: colors.surface,
-                      borderColor: on ? colors.ember : colors.border,
-                      borderWidth: on ? 1.5 : 1,
-                    }]}
-                  >
-                    <SymTile name="cpu" color={on ? colors.ember : colors.textMuted} bg={on ? colors.emberBg : colors.surfaceSunken} size={40} iconSize={19} />
+            <T kind="h1" style={{ fontSize: 26, lineHeight: 32 }}>Helpers, when you want one</T>
+            {/* The honest sentence. Nothing has been set up, and nothing on this screen will
+                set anything up — the old version implied a team was already waiting. */}
+            <T kind="body">
+              You don&apos;t have any yet, and we haven&apos;t made any for you. A helper is one job
+              you&apos;d rather not remember — you tell it what to do in your own words, when to do
+              it, and how much it may do without asking.
+            </T>
+            {templates.length > 0 ? (
+              <View style={{ gap: spacing.sm }}>
+                <T kind="eyebrow">Ready-made ones you can start from</T>
+                {templates.map((t) => (
+                  // Not tappable. This is a preview, and a tap that did nothing would be a
+                  // worse promise than no tap at all.
+                  <View key={t.id} style={[st.agentRow, { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1 }]}>
+                    <SymTile name={t.icon || "sparkle"} color={colors.ember} bg={colors.emberBg} size={40} iconSize={19} />
                     <View style={{ flex: 1, gap: 2 }}>
-                      <T kind="rowTitle">{ag.name}</T>
-                      {!!ag.purpose && <T kind="detail" numberOfLines={1}>{ag.purpose}</T>}
+                      <T kind="rowTitle">{t.name}</T>
+                      <T kind="detail" numberOfLines={2}>{t.purpose}</T>
                     </View>
-                    <View style={[st.radio, { borderColor: on ? colors.ember : colors.textFaint, backgroundColor: on ? colors.ember : "transparent" }]}>
-                      {on && <Sym name="checkmark" size={13} color={colors.onEmber} />}
-                    </View>
-                  </PressableScale>
-                );
-              })}
-            </View>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+            <Card style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+              <SymTile name="wand.and.stars" color={colors.ember} bg={colors.emberBg} size={38} iconSize={18} />
+              <View style={{ flex: 1, gap: 2 }}>
+                <T kind="rowTitle">Find them on the Helpers tab</T>
+                <T kind="detail">New helper → pick one of these or start from scratch. You read and edit what it does before it&apos;s saved.</T>
+              </View>
+            </Card>
           </Animated.View>
         )}
 
@@ -414,12 +421,13 @@ export function Onboarding() {
                   <T kind="detail">Your household</T>
                 </View>
               </View>
-              {agents.length > 0 && (
+              {isAdmin && (
                 <View style={st.trustRow}>
-                  <SymTile name="cpu" color={colors.sky} bg={colors.skyBg} size={38} iconSize={18} />
+                  <SymTile name="wand.and.stars" color={colors.sky} bg={colors.skyBg} size={38} iconSize={18} />
                   <View style={{ flex: 1 }}>
-                    <T kind="rowTitle">{pickedCount} agent{pickedCount === 1 ? "" : "s"} ready</T>
-                    <T kind="detail">Add more anytime in Agents</T>
+                    {/* Says what is true — no helpers — rather than counting ones nobody made. */}
+                    <T kind="rowTitle">No helpers yet</T>
+                    <T kind="detail">Make your first one on the Helpers tab</T>
                   </View>
                 </View>
               )}

@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { startServer, stopServer, makeSession, writeStoreDoc, readStoreDoc } from "./harness.mjs";
 import "../loadEnv.mjs"; // match the spawned child's env exactly (it loads the same .env)
 import { providerById, providerConfigured } from "../providers.mjs";
+import { useFakeModel } from "./fake-model.mjs";
 
 let ctx, alex, morgan;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -131,56 +132,72 @@ describe("sandbox mode, once an account IS seeded — provider tools resolve and
   });
 });
 
-// homeops.notify_contact's registry gates (verified / opted-in / per-agent allowlist),
+// homeops.notify_contact's registry gates (verified / opted-in / per-helper allowlist),
 // run through the SAME full path as WP-005's adversarial suite (notify-contact-delivery
 // .test.mjs) — but this time with a sandbox Google account connected for the owner, so
 // the only thing standing between "gate refuses" and "delivers" is the gate itself.
+//
+// The path changed shape with the collapse to Helpers: a send is no longer a skill step in a
+// durable plan but a tool call the model makes during a helper's turn, so this drives it with
+// the shared scripted model. The claim is untouched — sandbox mode swaps the TRANSPORT and
+// nothing else, so a gate that refuses without a Google account must still refuse with one.
 describe("sandbox mode does not relax homeops.notify_contact's consent gates", () => {
-  let agent;
+  let helper, fake;
   before(async () => {
-    const a = await alex.req("/api/agents", { method: "POST", body: JSON.stringify({ name: "TG-Sandbox Agent", purpose: "TG sandbox e2e", instructions: "test", status: "Active", allowedFunctionIds: ["homeops.notify_contact"] }) });
-    agent = a.data.agent;
+    fake = await useFakeModel(alex);
+    const h = await alex.req("/api/helpers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "TG-Sandbox Helper", purpose: "TG sandbox e2e",
+        instructions: "Send the family's note to whichever contact method they name, and to nobody else.",
+      }),
+    });
+    assert.equal(h.status, 200, JSON.stringify(h.data));
+    helper = h.data.helper;
   });
+  after(async () => { await new Promise((r) => fake.server.close(r)); });
 
   async function notifyStep(input) {
-    const skill = await alex.req("/api/skills", {
-      method: "POST",
-      body: JSON.stringify({ name: `TG-sbx-${Math.random().toString(16).slice(2, 8)}`, description: "TG sandbox e2e", domain: "Family", steps: [{ step_id: "s1", name: "Send", tool_id: "homeops.notify_contact", approval_required: false, input_mapping: input }] }),
-    });
-    const skillId = skill.data?.skill?.id;
-    const tr = await alex.req("/api/triggers", { method: "POST", body: JSON.stringify({ name: "TG-sbx trigger", type: "manual", target: { kind: "agent", agentId: agent.id, skillId } }) });
-    const fire = await alex.req(`/api/triggers/${tr.data.trigger.id}/fire`, { method: "POST", body: JSON.stringify({}) });
-    const run = await waitTerminal(alex, fire.data.runId, ["waiting_for_approval", "waiting_for_connector"]);
-    return run?.steps?.[0];
+    fake.state.script = [
+      { toolCalls: [{ name: "homeops__notify_contact", args: input }] },
+      { text: "That's what I did." },
+    ];
+    const r = await alex.req(`/api/helpers/${helper.id}/run`, { method: "POST" });
+    const step = (r.data?.toolCalls ?? []).find((c) => c.tool === "homeops.notify_contact");
+    assert.ok(step, `the delivery tool was never reached: ${JSON.stringify(r.data).slice(0, 400)}`);
+    return step;
   }
   async function makeMethod(fields) {
-    const r = await alex.req("/api/contact-methods", { method: "POST", body: JSON.stringify({ label: "TG-sbx", type: "Email", allowedAgentIds: [agent.id], ...fields }) });
+    const r = await alex.req("/api/contact-methods", { method: "POST", body: JSON.stringify({ label: "TG-sbx", type: "Email", allowedAgentIds: [helper.id], ...fields }) });
     return r.data.contactMethod;
   }
 
   test("an UNVERIFIED contact is still refused, even though the transport would succeed", async () => {
     const m = await makeMethod({ value: "tg-sbx-unverified@example.invalid", verified: false, optInStatus: "Opted In" });
     const step = await notifyStep({ methodId: m.id, subject: "TG", body: "TG sandbox unverified body long enough." });
-    assert.equal(step.status, "failed");
-    assert.match(String(step.detail), /verif/i);
+    assert.equal(step.ok, false);
+    assert.match(String(step.summary), /verif/i);
   });
 
   test("a contact that has NOT opted in is still refused, even though the transport would succeed", async () => {
     const m = await makeMethod({ value: "tg-sbx-nooptin@example.invalid", verified: true, optInStatus: "Pending" });
     const step = await notifyStep({ methodId: m.id, subject: "TG", body: "TG sandbox opt-in body long enough." });
-    assert.equal(step.status, "failed");
-    assert.match(String(step.detail), /opted in/i);
+    assert.equal(step.ok, false);
+    assert.match(String(step.summary), /opted in/i);
   });
 
   test("with every registry gate satisfied, the sandboxed Google account actually delivers and records the effect", async () => {
     const m = await makeMethod({ value: "tg-sbx-ready@example.invalid", verified: true, optInStatus: "Opted In" });
     const step = await notifyStep({ methodId: m.id, subject: "TG sandbox briefing", body: "TG sandbox all-gates-pass body long enough." });
-    assert.equal(step.status, "succeeded", "with a sandbox Google account connected, this must now actually deliver — not park on 'connect Google'");
-    assert.equal(step.result?.delivered, true);
-    assert.equal(step.result?.channel, "email");
+    assert.equal(step.status, "done", "with a sandbox Google account connected, this must now actually deliver — not park on 'connect Google'");
+    assert.equal(step.ok, true);
+    /* Asserted on the recorded EFFECT rather than on the tool's return value: the turn keeps a
+     * card-sized summary of each call, not the raw result, and the effect row is the stronger
+     * evidence anyway — it is what a sandbox exists to produce. */
     const effects = readStoreDoc(ctx, "sandbox_effects.json", []);
     const mine = effects.filter((e) => e.recipient === "tg-sbx-ready@example.invalid");
     assert.equal(mine.length, 1);
+    assert.equal(mine[0].channel, "email");
     assert.equal(mine[0].subject, "TG sandbox briefing");
   });
 });

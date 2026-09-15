@@ -191,10 +191,10 @@ export function HSheet({ visible, onClose, title, leftLabel = "Close", heightPct
   );
 }
 
-export type FlashKind = "approve" | "deny" | "run" | "agent" | "upload" | "send" | "connect" | "chore" | null;
+export type FlashKind = "approve" | "deny" | "run" | "helper" | "upload" | "send" | "connect" | "chore" | null;
 
 const FLASH_ICON: Record<Exclude<FlashKind, null>, string> = {
-  approve: "checkmark", deny: "xmark", run: "play.fill", agent: "cpu",
+  approve: "checkmark", deny: "xmark", run: "play.fill", helper: "wand.and.stars",
   upload: "square.and.arrow.up", send: "paperplane.fill", connect: "link", chore: "checkmark",
 };
 

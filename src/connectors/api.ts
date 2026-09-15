@@ -89,8 +89,7 @@ export interface AuditEvent {
   id: string; at: string; type: string; ok: boolean;
   actorId?: string; actorName?: string; connectorId?: string; toolId?: string;
   error?: string; origin?: string;
-  runId?: string; agentId?: string; skillId?: string; functionId?: string;
-  automationId?: string; triggerId?: string; approvalId?: string; eventId?: string;
+  runId?: string; agentId?: string; triggerId?: string; approvalId?: string; eventId?: string;
   taskId?: string; fileId?: string; memoryId?: string; memberId?: string; subscriptionId?: string;
 }
 export interface Session { actorId: string; actorName: string; role: string; csrf: string; householdId: string }
@@ -154,7 +153,7 @@ export interface AIProvider {
 export interface AIHealth { ok: boolean; status?: string; message?: string; hint?: string; models?: string[]; modelCount?: number; latencyMs?: number }
 export interface AIChatResult { ok: boolean; model?: string; text?: string; error?: string; message?: string }
 
-/* ---- Planner brain (plain English → plan / mini app / playbook) ---- */
+/* ---- Planner brain (plain English → an executable plan, or a mini app) ---- */
 export interface PlanStep {
   toolId: string | null;
   title: string;
@@ -183,11 +182,8 @@ export interface AgentPlan {
   risk: "Low" | "Medium" | "High" | "Sensitive";
   approvalRequired: boolean;
 }
-export interface PlanResult { ok: boolean; plan?: AgentPlan; model?: string; error?: string; message?: string }
 export interface GeneratedMiniApp { type: string; name: string; description: string; data: Record<string, unknown> }
 export interface MiniAppGenResult { ok: boolean; app?: GeneratedMiniApp; model?: string; error?: string; message?: string }
-export interface GeneratedPlaybook { name: string; description: string; whenToUse: string; category: string; steps: string[]; requiredConnections: string[]; outputFormat: string; approvalRules: string[] }
-export interface PlaybookGenResult { ok: boolean; playbook?: GeneratedPlaybook; model?: string; error?: string; message?: string }
 /* ---- Durable server-side runs (the canonical runtime; browser observes only) ---- */
 export interface RunToolCall { at: string; ok: boolean; error: string | null; durationMs: number; approvalId: string | null; resultSummary: string }
 export interface RunStepView {
@@ -204,139 +200,100 @@ export interface ServerRun {
 }
 export interface StartRunInput {
   plan?: { title?: string; summary?: string; steps: { toolId: string | null; title: string; detail?: string; input?: Record<string, unknown> }[] };
-  skillId?: string; params?: Record<string, unknown>; source?: string; sourceRef?: Record<string, unknown>;
+  params?: Record<string, unknown>; source?: string; sourceRef?: Record<string, unknown>;
 }
-/* ---- Server-side skill registry ---- */
-export interface SkillInputField { key: string; label: string; type: string; required: boolean; default?: string }
-/** WP-108/ISS-117 — one thing standing between a draft skill and a real test. Server-
- *  derived (server/skills.mjs skillReadiness) so the button, the API and the run path
- *  all give the same answer; a disabled button alone would be decorative. */
-export interface SkillUnresolved {
-  stepId: string | null;
-  name: string;
-  toolId?: string;
-  reason: "no_steps" | "no_handler" | "unknown_capability";
-  detail: string;
-}
-export interface SkillReadiness { ready: boolean; unresolved: SkillUnresolved[] }
+/* ---- Helpers ----------------------------------------------------------------
+ * ONE concept. A helper is a name, what it should do in plain English, when it runs,
+ * and a single autonomy dial — which is why the Agent / Skill / Function / Playbook /
+ * Automation / Trigger / Evolution types that used to live here are gone rather than
+ * renamed. Running one is the same tool loop that answers a chat message.
+ * -------------------------------------------------------------------------- */
+export type HelperSchedule =
+  | { kind: "manual" }
+  | { kind: "hourly" }
+  | { kind: "daily"; time: string }                    // "HH:MM", 24h, household clock
+  | { kind: "weekly"; time: string; weekday: number }; // 0 = Sunday .. 6 = Saturday
 
-export interface SkillStep {
-  step_id: string;
-  name: string;
-  description?: string;
-  tool_id: string | null;
-  input_mapping: Record<string, unknown>;
-  approval_required: boolean;
-  retry_policy?: { maxAttempts: number };
-  timeout_ms?: number;
-}
-export interface ServerSkill {
-  id: string;
-  householdId: string;
-  name: string;
-  description: string;
-  domain: string;
-  type: string;
-  mode: "deterministic" | "planner-assisted" | "hybrid";
-  defaultAgentId: string | null;
-  planner_guidance: string;
-  input_schema: SkillInputField[];
-  output_schema: { key: string; label: string; type: string }[];
-  required_connectors: string[];
-  required_tools: string[];
-  required_functions: string[];
-  optional_tools: string[];
-  optional_functions: string[];
-  steps: SkillStep[];
-  approval_policy: { gates?: string[] };
-  risk_level: "Low" | "Medium" | "High" | "Sensitive";
-  memory_policy: { scope?: string };
-  test_cases: { name?: string; params: Record<string, unknown> }[];
-  version: number;
-  status: "draft" | "available" | "needs_function" | "deprecated";
-  system?: boolean;
-  createdAt: number;
-  updatedAt: string;
-}
-export interface SkillVersion extends ServerSkill { snapshotAt: string }
+export type HelperAutonomy = "ask" | "act" | "full";
+export type HelperVisibility = "household" | "personal" | "nest";
 
-/* ---- Server-side function/tool registry (Slice 4) ---- */
-export type FunctionType =
-  | "connector_api" | "internal" | "custom_http" | "ai_local"
-  | "browser" | "sandbox_script" | "workflow_composed";
-export type FunctionState =
-  | "draft" | "needs_schema" | "needs_connector" | "needs_secret" | "needs_runtime"
-  | "untested" | "testing" | "test_failed" | "available" | "degraded" | "deprecated";
-export interface FunctionField { key: string; label: string; type: string; required?: boolean; default?: string }
-export interface ServerFunction {
-  id: string;
-  householdId: string;
-  name: string;
-  description: string;
-  type: FunctionType;
-  action: string;
-  risk: "Low" | "Medium" | "High" | "Sensitive";
-  approval_required: boolean;
-  input_schema: FunctionField[];
-  output_schema: FunctionField[];
-  config: Record<string, unknown>;
-  status: "draft" | "available" | "deprecated";
-  lastTest: { ok: boolean; at: number; summary?: string; error?: string; input?: unknown } | null;
-  system?: boolean;
-  version: number;
-  createdAt: number;
-  updatedAt: string;
-  // server-computed, redacted view fields
-  state: FunctionState;
-  stateReason: string;
-  requiresApproval: boolean;
-  effectiveAction: string;
-  effectiveRisk: string;
-  connectorId: string | null;
-  connectorName: string | null;
-  hasSecret: boolean;
-  executable: boolean;
-}
-export interface FunctionVersion extends Omit<ServerFunction, "state" | "stateReason" | "requiresApproval" | "effectiveAction" | "effectiveRisk" | "connectorId" | "connectorName" | "hasSecret" | "executable"> { snapshotAt: string }
-// Item 13: a drafted (not-yet-created) function definition for the builder to pre-fill.
-export interface DraftedFunction {
-  name: string; description: string; type: FunctionType; action: string;
-  risk: "Low" | "Medium" | "High" | "Sensitive"; approval_required: boolean;
-  input_schema: FunctionField[]; output_schema: FunctionField[];
-}
-export interface ToolCatalogEntry {
-  toolId: string; name: string; action: string; risk: string; requiresApproval: boolean;
-  connectorId: string; connectorName: string; source: "provider" | "connector"; connected: boolean;
-  readiness?: string; inputs: { key: string; label: string; type: string; required: boolean; default?: string }[];
-}
-export interface ToolCatalogResult { tools: ToolCatalogEntry[]; types: FunctionType[]; states: FunctionState[] }
-export interface FunctionTestResult {
-  ok: boolean; result?: unknown; error?: string; message?: string; needsConfirm?: boolean; function?: ServerFunction;
+/** The sentences a family actually reads. Every helper arrives with its own
+ *  `autonomyText`; this copy exists for the EDITOR, where there is no helper yet — and
+ *  it is the same wording the server sends, so the two can never describe the dial
+ *  differently. */
+export const AUTONOMY_TEXT: Record<HelperAutonomy, string> = {
+  ask: "Asks before it does anything",
+  act: "Does everyday things on its own, asks before sending or spending",
+  full: "Does everything on its own, including sending and spending",
+};
+
+export interface HelperLastRun {
+  at: number; finishedAt: number; ok: boolean; reason: string; summary: string;
+  runIds: string[]; error: string | null;
 }
 
-/* ---- Server-side agent registry (Slice 5) ---- */
-export interface ServerAgent {
-  id: string;
-  householdId: string;
-  name: string;
-  icon: string;
-  purpose: string;
-  instructions: string;
-  status: "Active" | "Paused" | "Draft" | "Needs Attention" | "Archived";
-  spaceType: string;
-  system?: boolean;
-  skillIds: string[];
-  allowedToolIds: string[];
-  allowedFunctionIds: string[];
-  deniedToolIds: string[];
-  deniedFunctionIds: string[];
-  approvalPolicy: { autoAllow: string[]; alwaysApprove: string[] };
-  triggers: unknown[];
-  version: number;
-  createdAt: number;
-  updatedAt: string;
+export interface PublicHelper {
+  id: string; name: string; icon: string; purpose: string; instructions: string;
+  visibility: HelperVisibility; nestId: string | null;
+  status: "Active" | "Paused"; enabled: boolean;
+  schedule: HelperSchedule;
+  /** Already human ("Every day at 7:00 AM"), on the HOUSEHOLD's clock — re-deriving it
+   *  from `schedule` in the browser would silently render it in the viewer's timezone. */
+  scheduleText: string;
+  autonomy: HelperAutonomy;
+  autonomyText: string;
+  /** Asked for "full" without the standing to grant it, so `act` is what actually
+   *  applies. The UI says so quietly rather than showing a promise policy won't keep. */
+  autonomyDowngraded: boolean;
+  conversationId: string | null;
+  lastRun: HelperLastRun | null;
+  createdBy: string | null; isMine: boolean; system: boolean;
+  version: number; updatedAt: string;
 }
-export interface AgentVersion extends ServerAgent { snapshotAt: string }
+
+/** POST/PATCH body. All optional on PATCH; name + instructions are required on POST. */
+export interface HelperInput {
+  name?: string;
+  purpose?: string;
+  instructions?: string;
+  schedule?: HelperSchedule;
+  autonomy?: HelperAutonomy;
+  visibility?: HelperVisibility;
+  status?: "Active" | "Paused";
+  enabled?: boolean;
+  icon?: string;
+  /** Household PIN. Required ONLY to set autonomy "full" (403 pin_required / pin_invalid
+   *  otherwise). Passed per call and never held in client state — the server consumes it
+   *  and never persists it. */
+  pin?: string;
+}
+
+export interface HelperTemplate {
+  id: string; name: string; icon: string; category: string; purpose: string;
+  instructions: string; schedule: HelperSchedule; autonomy: HelperAutonomy;
+  scheduleText: string; autonomyText: string;
+}
+export interface HelperTemplateSection { key: string; title: string; templates: HelperTemplate[] }
+
+/** What a run produced. A failure (HTTP 422) uses the SAME envelope with ok:false plus a
+ *  plain-language `message`, so one call site renders both outcomes. */
+export interface HelperRunResult {
+  ok: boolean;
+  answer?: string;
+  toolCalls?: AssistantToolCall[];
+  runIds?: string[];
+  conversationId?: string | null;
+  lastRun?: HelperLastRun | null;
+  error?: string;
+  message?: string;
+}
+
+/** A helper's history IS its chat thread — every run appended the ask and what it did. */
+export interface HelperHistory {
+  conversationId: string | null;
+  messages: ServerConversationMessage[];
+  lastRun: HelperLastRun | null;
+}
 
 /** WP-105/ISS-107 — the effective approval policy for one capability, resolved
  *  server-side in a single place (server/policy.mjs) and delivered with the rule that
@@ -384,82 +341,7 @@ export interface BackendSettings {
   hasIdentity?: boolean;
 }
 
-export interface AgentContext {
-  agentId: string;
-  openAllowList: boolean;
-  tools: { toolId: string; name: string; connectorName: string; action: string; requiresApproval: boolean; available: boolean; permitted: boolean; denied: boolean; policy: EffectivePolicy }[];
-  functions: { id: string; name: string; type: string; requiresApproval: boolean; available: boolean; state: string; permitted: boolean; denied: boolean; policy: EffectivePolicy }[];
-  executable: string[];
-  /** ISS-124 — all three derive from ONE server computation (agentContext):
-   *  available = could run now (connected/ready), ignoring policy;
-   *  permitted = allowed by this agent's policy (open allow-list ⇒ everything not denied);
-   *  executable = permitted ∩ available, i.e. what can actually run right now. */
-  availableCount: number;
-  permittedCount: number;
-  executableCount: number;
-  /** Tools and functions have INDEPENDENT allow-lists, so `openAllowList` (both open)
-   *  can't describe a half-restricted agent honestly. These say which is which. */
-  openToolAllowList: boolean;
-  openFunctionAllowList: boolean;
-}
-
-/* ---- Server-side triggers (Slice 6) ---- */
-export type TriggerType = "schedule" | "recurring" | "webhook" | "connector_event" | "manual";
-export interface TriggerTarget { kind: "agent" | "skill"; agentId?: string | null; skillId?: string | null; goal?: string | null; params?: Record<string, unknown> }
-export interface ServerTrigger {
-  id: string;
-  householdId: string;
-  name: string;
-  type: TriggerType;
-  enabled: boolean;
-  target: TriggerTarget;
-  intervalMs: number | null;
-  nextRunAt: number | null;
-  connectorId: string | null;
-  event: string | null;
-  lastFiredAt: number | null;
-  lastRunId: string | null;
-  lastStatus: string | null;
-  lastTriggerType: string | null;
-  fireCount: number;
-  webhookPath: string | null;
-  hasSecret: boolean;
-  createdAt: number;
-  updatedAt: string;
-}
-
-export interface InferFunctionsResult {
-  ok: boolean;
-  model?: string;
-  suggestedToolIds?: string[];
-  missingCapabilities?: string[];
-  suggestedSteps?: SkillStep[];
-  error?: string;
-  message?: string;
-}
-
 /* ---- Assistant (conversational NL → answer | plan, executed via a server run) ---- */
-// Unified chat-builder: a proposed set of durable entities to stand up from one chat turn.
-export interface ChatBuildStep { step_id?: string; name: string; tool_id: string | null; approval_required: boolean }
-export interface ChatBuildEdit { kind: "agent" | "skill"; id: string; summary?: string; patch: Record<string, unknown> }
-export interface ChatBuild {
-  summary: string;
-  skill?: { name: string; description?: string; domain?: string; planner_guidance?: string; risk_level?: string; steps?: ChatBuildStep[] };
-  agent?: { name: string; purpose?: string; instructions?: string } | null;
-  automation?: { name: string; type: string; intervalMs?: number | null; runAt?: string | null } | null;
-  edits?: ChatBuildEdit[];
-}
-export interface BuildProgress { type: "progress"; entity: "skill" | "agent" | "automation"; action: string; id: string; name?: string; status?: string; version?: number; ok?: boolean }
-export interface BuildResult {
-  ok: boolean;
-  created?: {
-    skill?: { id: string; name: string; status: string };
-    agent?: { id: string; name: string; status: string };
-    automation?: { id: string; name: string; type: string; enabled: boolean };
-  };
-  updated?: { kind: string; id: string; name?: string; version?: number; ok: boolean; error?: string }[];
-  notes?: string[]; error?: string; message?: string;
-}
 /** What the assistant engine actually DID this turn, one entry per tool call. A step that
  *  was approval-gated becomes a durable run (`runId`) parked on `approvalId`. `status:
  *  "running"` is client-only: a live `tool` stream frame mirrored into the message until
@@ -477,62 +359,16 @@ export interface AssistantToolCall {
 export interface AssistantToolEvent { tool: string; label?: string; status: "running" | "called" | "error"; message?: string }
 export interface AssistantResult {
   ok: boolean;
-  /** "plan" is no longer produced by the default engine; still accepted for persisted messages. */
-  kind?: "answer" | "plan" | "build";
-  answer?: string; plan?: AgentPlan; build?: ChatBuild;
+  /** Always "answer" from the current engine. "plan" is still accepted because older
+   *  conversations were persisted with it and are replayed from the server verbatim. */
+  kind?: "answer" | "plan";
+  answer?: string; plan?: AgentPlan;
   toolCalls?: AssistantToolCall[];
   /** Present when a step was approval-gated and became a durable run — with ANY kind. */
   runId?: string | null; run?: ServerRun | null; runIds?: string[];
   model?: string; degraded?: boolean; fellBackFrom?: string;
   error?: string; message?: string;
 }
-/* ---- Evolution (LLM enrichment of a run-trace improvement proposal) ---- */
-export interface EvolutionProposalResult { ok: boolean; proposal?: { title: string; reason: string; summary: string; after?: string; risk: "Low" | "Medium" | "High" }; model?: string; error?: string; message?: string }
-export interface ServerEvolution {
-  id: string;
-  kind: "skill" | "agent" | "tool" | "function";
-  householdId?: string;
-  agentId?: string | null;
-  agentName?: string | null;
-  skillId?: string | null;
-  functionId?: string | null;
-  toolId?: string | null;
-  runId: string;
-  status: "pending" | "accepted" | "rejected" | "reverted";
-  source: "trace" | "ai";
-  title: string;
-  reason: string;
-  summary: string;
-  before?: string;
-  after?: string;
-  risk?: "Low" | "Medium" | "High";
-  /** Auto-approval (server-side, when settings.autoApproveImprovements is on and the
-   *  proposal is low-risk): the change was applied without a human. `autoReason` explains why. */
-  autoApproved?: boolean;
-  autoReason?: string;
-  model?: string;
-  createdAt: number;
-  updatedAt: string;
-  reviewedAt?: number;
-  reviewedBy?: string;
-  /* ---- WP-008a: revert support ---- */
-  /** The target's version NUMBER immediately before this evolution's change was
-   *  applied — set at apply time so a revert restores the exact prior text instead of
-   *  guessing from timestamps. Absent on legacy rows applied before this existed. */
-  beforeVersionId?: number | string;
-  /** Whether the change was actually written to the target (vs. accepted-but-failed). */
-  applied?: boolean;
-  /** Server's own verdict on whether the Revert action should be offered right now
-   *  (accepted + applied + target still exists + a prior version is available). */
-  revertible?: boolean;
-  revertedAt?: number;
-  revertedBy?: string;
-  revertedFromVersion?: number;
-  /** Read-only history row moved out of the active registry (e.g. a household-approved
-   *  bulk archive) — never revertible; the client renders it as past record only. */
-  archived?: boolean;
-}
-
 /* ---- server-owned family data (P1/P4) ---- */
 export interface ServerEvent {
   id: string; householdId: string; title: string; startAt: string | null; endAt: string | null;
@@ -580,8 +416,7 @@ export interface HelpRequest {
 export interface MealIngredient { item: string; have?: boolean }
 export interface Meal { id: string; householdId: string; date: string | null; time?: string | null; slot: string; title: string; notes: string; ingredients: MealIngredient[]; instructions?: string[]; servings?: number | null; recipeUrl?: string; visibility: string; source: string; createdBy: string; createdAt: string; updatedAt: string }
 export interface ServerConversationMessage {
-  role: "user" | "assistant"; text: string; kind?: string; plan?: AgentPlan | null; build?: ChatBuild | null; built?: boolean;
-  builtIds?: { skillId?: string; agentId?: string; triggerId?: string }; model?: string | null; at: string;
+  role: "user" | "assistant"; text: string; kind?: string; plan?: AgentPlan | null; model?: string | null; at: string;
   /** New engine: what the turn did, and the durable run(s) an approval gate parked. */
   toolCalls?: AssistantToolCall[] | null; runIds?: string[] | null; runId?: string | null;
 }
@@ -618,43 +453,6 @@ export interface ServerContactMethod {
   type: "Email" | "Phone/Text" | "In-App" | "Family Dashboard"; value: string;
   verified: boolean; optInStatus: "Opted In" | "Pending" | "Not Set" | "Opted Out";
   allowedAgentIds: string[]; createdBy?: string; createdAt?: string; updatedAt?: string;
-}
-
-/* ---- WP-101 s5 (ISS-102/103/110): template/automation activation preflight ----
- * A compile-step check run BEFORE an automation is allowed to present as Active:
- * does every referenced agent/skill/handler/integration actually resolve? Contract
- * owned by the server team building this endpoint in parallel — coded against it
- * exactly; kept loosely typed (no @/types import) to preserve this file's existing
- * zero-domain-dependency shape. */
-export type AutomationLifecycleState = "ready" | "blocked_configuration";
-export interface AutomationValidationError {
-  node: string;
-  kind: string;
-  message: string;
-  repairSurface?: string;
-}
-export interface AutomationValidateRequest {
-  templateId?: string;
-  plan: unknown;
-  agentId?: string;
-  multiAgentRoles?: { name: string; role: string }[];
-}
-export interface AutomationValidateResponse {
-  ok: boolean;
-  lifecycleState: AutomationLifecycleState;
-  errors: AutomationValidationError[];
-  compiledManifestVersion?: string;
-}
-
-/* ---- WP-102 s1 (ISS-111): deterministic idempotency for template instantiation ----
- * Stable from templateId + household + a semantic key — NEVER a random uid — so
- * repeating the same instantiation is detectable instead of silently appending a
- * duplicate. Pure/local; no network call. */
-export function templateIdempotencyKey(templateId: string, householdId: string | null | undefined, semanticKey: string): string {
-  const raw = `${templateId}::${householdId || "local"}::${semanticKey.trim().toLowerCase()}`;
-  let h = 0;
-  for (let i = 0; i < raw.length; i++) h = (Math.imul(31, h) + raw.charCodeAt(i)) | 0;
-  return `tik_${(h >>> 0).toString(36)}`;
 }
 
 // CSRF token for the current session (set on login / session bootstrap). Never persisted.
@@ -870,46 +668,10 @@ export const backend = {
     try { return await req("/ai/chat", { method: "POST", body: JSON.stringify(input), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
   },
 
-  /* ---- planner brain ---- */
-  async plan(goal: string, providerId?: string): Promise<PlanResult> {
-    try { return await req("/agent/plan", { method: "POST", body: JSON.stringify({ goal, providerId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }; }
-  },
+  /* ---- mini-app generator (the one planner-brain route that survived) ---- */
   async generateMiniApp(input: { goal: string; type?: string; providerId?: string }): Promise<MiniAppGenResult> {
     try { return await req("/miniapps/generate", { method: "POST", body: JSON.stringify(input), mutation: true }); } catch { return { ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }; }
   },
-  async generatePlaybook(goal: string, providerId?: string): Promise<PlaybookGenResult> {
-    try { return await req("/playbooks/generate", { method: "POST", body: JSON.stringify({ goal, providerId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }; }
-  },
-  /* ---- WP-101 s5: automation activation preflight ---- */
-  async validateAutomation(input: AutomationValidateRequest): Promise<AutomationValidateResponse> {
-    const unreachable = (message: string): AutomationValidateResponse => ({
-      ok: false,
-      lifecycleState: "blocked_configuration",
-      errors: [{ node: "validator", kind: "unreachable", message }],
-    });
-    try {
-      // req() resolves on ANY response (it doesn't throw on 401/404/500 — every other
-      // call in this file treats that JSON body as the real result), so a non-2xx
-      // response — e.g. an expired session's {"error":"authentication_required"} —
-      // parses fine but isn't a validation result. Shape-check before trusting it:
-      // an unauthenticated/malformed response must fail safe exactly like a network
-      // failure, never be spread/read as if it were {ok, lifecycleState, errors}.
-      const r = await req<Partial<AutomationValidateResponse> & { error?: string }>("/automations/validate", { method: "POST", body: JSON.stringify(input), mutation: true });
-      if (r && Array.isArray(r.errors) && (r.lifecycleState === "ready" || r.lifecycleState === "blocked_configuration")) {
-        return { ok: !!r.ok, lifecycleState: r.lifecycleState, errors: r.errors as AutomationValidationError[], compiledManifestVersion: r.compiledManifestVersion };
-      }
-      return unreachable(
-        r?.error === "authentication_required"
-          ? "Sign in again to finish setting this up — it was created as blocked in the meantime."
-          : "The setup checker didn't return a usable result, so this was created as blocked instead of assumed working."
-      );
-    } catch {
-      // Fail safe: an unreachable validator must never silently fall back to
-      // "this is fine, mark it Active" — it comes back blocked with an honest reason.
-      return unreachable("Couldn't reach the setup checker, so this was created as blocked instead of assumed working.");
-    }
-  },
-
   /* ---- assistant (the conversational loop; a PLAN starts a durable server run) ---- */
   async assistant(message: string, context?: Record<string, unknown>, providerId?: string, conversationId?: string): Promise<AssistantResult> {
     try { return await req("/assistant", { method: "POST", body: JSON.stringify({ message, context, providerId, conversationId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }; }
@@ -971,22 +733,6 @@ export const backend = {
         .catch(() => resolve({ ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }));
     });
   },
-  /* ---- server evolution registry ---- */
-  async evolutions(): Promise<ServerEvolution[]> {
-    try { return (await req<{ evolutions: ServerEvolution[] }>("/evolution")).evolutions ?? []; } catch { return []; }
-  },
-  async reviewEvolution(id: string, accept: boolean): Promise<{ ok: boolean; applied?: boolean; applyError?: string | null; evolution?: ServerEvolution; error?: string }> {
-    try { return await req(`/evolution/${id}/review`, { method: "POST", body: JSON.stringify({ accept }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-  // WP-008a — undo an applied improvement (restores the agent/skill to the version it
-  // was at just before this evolution changed it). Pending the index.mjs route handoff
-  // (POST /api/evolutions/:id/revert) landing in the running server; until then this
-  // resolves "backend_unreachable" like any other unrouted call, which the Improvements
-  // tab treats as a failed revert rather than a silent no-op.
-  async revertEvolution(id: string): Promise<{ ok: boolean; evolution?: ServerEvolution; restoredToVersion?: number; error?: string; message?: string }> {
-    try { return await req(`/evolutions/${id}/revert`, { method: "POST", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-
   /* ---- family data: server-owned events & tasks (P1.2 / P4.1) ---- */
   async events(): Promise<ServerEvent[]> {
     try { return (await req<{ events: ServerEvent[] }>("/events")).events ?? []; } catch { return []; }
@@ -1025,44 +771,6 @@ export const backend = {
   },
   async deleteTaskRemote(id: string): Promise<{ ok: boolean; error?: string }> {
     try { return await req(`/tasks/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-  /* ---- unified chat-builder: materialize a proposed build into durable entities ---- */
-  // conversationId (optional) lets the server durably mark the originating build message
-  // built and append the confirmation — so the card's state survives a refresh.
-  async buildFromChat(build: ChatBuild, conversationId?: string): Promise<BuildResult> {
-    try { return await req("/assistant/build", { method: "POST", body: JSON.stringify({ build, conversationId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-  // Streaming build — fires onProgress per entity as it's created/updated, then resolves
-  // with the final BuildResult. Falls back to a non-streaming error shape on transport failure.
-  streamBuild(build: ChatBuild, onProgress?: (ev: BuildProgress) => void, conversationId?: string): Promise<BuildResult> {
-    return new Promise((resolve) => {
-      const headers: Record<string, string> = { "content-type": "application/json" };
-      if (csrfToken) headers["x-homeops-csrf"] = csrfToken;
-      fetch("/api/assistant/build/stream", { method: "POST", credentials: "same-origin", headers, body: JSON.stringify({ build, conversationId }) })
-        .then(async (res) => {
-          if (!res.ok || !res.body) { resolve({ ok: false, error: res.status === 403 ? "insufficient_role" : "backend_unreachable" }); return; }
-          const reader = res.body.getReader();
-          const dec = new TextDecoder();
-          let buf = "";
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += dec.decode(value, { stream: true });
-            const lines = buf.split("\n");
-            buf = lines.pop() ?? "";
-            for (const line of lines) {
-              if (!line.startsWith("data: ")) continue;
-              try {
-                const ev = JSON.parse(line.slice(6));
-                if (ev.type === "progress" && onProgress) onProgress(ev as BuildProgress);
-                if (ev.type === "done") { resolve(ev.result as BuildResult); return; }
-              } catch { /* partial line */ }
-            }
-          }
-          resolve({ ok: false, error: "stream_incomplete" });
-        })
-        .catch(() => resolve({ ok: false, error: "backend_unreachable" }));
-    });
   },
   /* ---- risk-class overrides (item 9) — admin-only; server enforces in the engine ---- */
   async riskOverrides(): Promise<{ overrides: RiskOverride[]; catalog: CatalogTool[] } | null> {
@@ -1292,159 +1000,44 @@ export const backend = {
     } catch { return () => {}; }
   },
 
-  /* ---- skill registry ---- */
-  async skills(query = ""): Promise<ServerSkill[]> {
-    try { return (await req<{ skills: ServerSkill[] }>(`/skills${query}`)).skills ?? []; } catch { return []; }
+  /* ---- helpers -----------------------------------------------------------
+   * The whole agent system. `scheduleText` / `autonomyText` arrive already written, so
+   * nothing here re-phrases them; `pin` is only ever sent on the call that raises
+   * autonomy to "full".
+   * ----------------------------------------------------------------------- */
+  async helpers(): Promise<PublicHelper[]> {
+    try { return (await req<{ helpers: PublicHelper[] }>("/helpers")).helpers ?? []; } catch { return []; }
   },
-  async getSkill(id: string): Promise<ServerSkill | null> {
-    try { return (await req<{ skill: ServerSkill }>(`/skills/${id}`)).skill ?? null; } catch { return null; }
+  async getHelper(id: string): Promise<PublicHelper | null> {
+    try { return (await req<{ helper: PublicHelper }>(`/helpers/${id}`)).helper ?? null; } catch { return null; }
   },
-  async createSkill(body: Partial<ServerSkill>): Promise<{ skill?: ServerSkill; error?: string }> {
-    try { return await req(`/skills`, { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  async createHelper(body: HelperInput): Promise<{ helper?: PublicHelper; error?: string; message?: string }> {
+    try { return await req(`/helpers`, { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
-  async updateSkill(id: string, body: Partial<ServerSkill>): Promise<{ skill?: ServerSkill; error?: string }> {
-    try { return await req(`/skills/${id}`, { method: "PUT", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  async updateHelper(id: string, patch: HelperInput): Promise<{ helper?: PublicHelper; error?: string; message?: string }> {
+    try { return await req(`/helpers/${id}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
-  async patchSkill(id: string, patch: Partial<ServerSkill>): Promise<{ skill?: ServerSkill; error?: string }> {
-    try { return await req(`/skills/${id}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
+  async deleteHelper(id: string): Promise<{ ok?: boolean; error?: string; message?: string }> {
+    try { return await req(`/helpers/${id}`, { method: "DELETE", mutation: true }); } catch { return { error: "backend_unreachable" }; }
   },
-  async deleteSkill(id: string): Promise<{ ok: boolean; error?: string }> {
-    try { return await req(`/skills/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  // A run IS a full tool loop and routinely takes 30s+. A 422 carries the real reason in
+  // `message`, and req() resolves (never throws) on it — so the refusal is returned as-is
+  // instead of being flattened into "unreachable", which is a different and untrue thing.
+  async runHelper(id: string): Promise<HelperRunResult> {
+    try { return await req<HelperRunResult>(`/helpers/${id}/run`, { method: "POST", mutation: true }); }
+    catch { return { ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }; }
   },
-  async runSkill(id: string, params: Record<string, unknown> = {}): Promise<{ run?: ServerRun; error?: string }> {
-    try { return await req(`/skills/${id}/run`, { method: "POST", body: JSON.stringify({ params }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async testSkill(id: string, params: Record<string, unknown> = {}): Promise<{ run?: ServerRun; error?: string; message?: string; unresolved?: SkillUnresolved[] }> {
-    try { return await req(`/skills/${id}/test`, { method: "POST", body: JSON.stringify({ params }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  /** ISS-117: what (if anything) still has no capability behind it. Asked BEFORE offering
-   *  a real test, so the gaps are shown while they're still fixable. */
-  async skillReadiness(id: string): Promise<SkillReadiness> {
+  async helperHistory(id: string): Promise<HelperHistory> {
+    const empty: HelperHistory = { conversationId: null, messages: [], lastRun: null };
     try {
-      const r = await req<{ readiness?: SkillReadiness }>(`/skills/${id}/readiness`);
-      return r.readiness ?? { ready: false, unresolved: [] };
-    } catch { return { ready: false, unresolved: [] }; }
+      const r = await req<Partial<HelperHistory>>(`/helpers/${id}/history`);
+      // req() resolves on 404/401 too, so an error envelope would otherwise be spread in
+      // as if it were a thread. Only an actual message list counts as history.
+      return Array.isArray(r?.messages) ? { conversationId: r.conversationId ?? null, messages: r.messages, lastRun: r.lastRun ?? null } : empty;
+    } catch { return empty; }
   },
-  async duplicateSkill(id: string): Promise<{ skill?: ServerSkill; error?: string }> {
-    try { return await req(`/skills/${id}/duplicate`, { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async promoteSkill(id: string): Promise<{ skill?: ServerSkill; error?: string }> {
-    try { return await req(`/skills/${id}/promote`, { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async rollbackSkill(id: string, targetVersion?: number): Promise<{ skill?: ServerSkill; error?: string }> {
-    try { return await req(`/skills/${id}/rollback`, { method: "POST", body: JSON.stringify({ targetVersion }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async skillVersions(id: string): Promise<SkillVersion[]> {
-    try { return (await req<{ versions: SkillVersion[] }>(`/skills/${id}/versions`)).versions ?? []; } catch { return []; }
-  },
-  async inferFunctions(description: string, providerId?: string): Promise<InferFunctionsResult> {
-    try { return await req(`/skills/infer-functions`, { method: "POST", body: JSON.stringify({ description, providerId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-  // Item 13: draft a candidate function definition from a capability description (shape
-  // only — nothing is created). Always returns a usable draft (skeleton fallback).
-  async draftFunction(description: string, providerId?: string): Promise<{ ok: boolean; draft?: DraftedFunction; fallback?: boolean; message?: string; error?: string }> {
-    try { return await req(`/functions/draft`, { method: "POST", body: JSON.stringify({ description, providerId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-
-  /* ---- function/tool registry ---- */
-  async functions(query = ""): Promise<ServerFunction[]> {
-    try { return (await req<{ functions: ServerFunction[] }>(`/functions${query}`)).functions ?? []; } catch { return []; }
-  },
-  async getFunction(id: string): Promise<ServerFunction | null> {
-    try { return (await req<{ function: ServerFunction }>(`/functions/${id}`)).function ?? null; } catch { return null; }
-  },
-  async toolCatalog(): Promise<ToolCatalogResult> {
-    try { return await req<ToolCatalogResult>(`/functions/tool-catalog`); } catch { return { tools: [], types: [], states: [] }; }
-  },
-  async createFunction(body: Partial<ServerFunction> & { config?: Record<string, unknown> }): Promise<{ function?: ServerFunction; error?: string }> {
-    try { return await req(`/functions`, { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async updateFunction(id: string, body: Partial<ServerFunction> & { config?: Record<string, unknown> }): Promise<{ function?: ServerFunction; error?: string }> {
-    try { return await req(`/functions/${id}`, { method: "PUT", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async patchFunction(id: string, patch: Partial<ServerFunction> & { config?: Record<string, unknown> }): Promise<{ function?: ServerFunction; error?: string }> {
-    try { return await req(`/functions/${id}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async deleteFunction(id: string): Promise<{ ok: boolean; error?: string }> {
-    try { return await req(`/functions/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-  async testFunction(id: string, input?: Record<string, unknown>, confirm = false): Promise<FunctionTestResult> {
-    try { return await req(`/functions/${id}/test`, { method: "POST", body: JSON.stringify({ input, confirm }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-  async duplicateFunction(id: string): Promise<{ function?: ServerFunction; error?: string }> {
-    try { return await req(`/functions/${id}/duplicate`, { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async promoteFunction(id: string): Promise<{ function?: ServerFunction; error?: string; state?: string; message?: string }> {
-    try { return await req(`/functions/${id}/promote`, { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async deprecateFunction(id: string): Promise<{ function?: ServerFunction; error?: string }> {
-    try { return await req(`/functions/${id}/deprecate`, { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async rollbackFunction(id: string, targetVersion?: number): Promise<{ function?: ServerFunction; error?: string }> {
-    try { return await req(`/functions/${id}/rollback`, { method: "POST", body: JSON.stringify({ targetVersion }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async functionVersions(id: string): Promise<FunctionVersion[]> {
-    try { return (await req<{ versions: FunctionVersion[] }>(`/functions/${id}/versions`)).versions ?? []; } catch { return []; }
-  },
-
-  /* ---- agent registry ---- */
-  async agents(query = ""): Promise<ServerAgent[]> {
-    try { return (await req<{ agents: ServerAgent[] }>(`/agents${query}`)).agents ?? []; } catch { return []; }
-  },
-  async getAgent(id: string): Promise<ServerAgent | null> {
-    try { return (await req<{ agent: ServerAgent }>(`/agents/${id}`)).agent ?? null; } catch { return null; }
-  },
-  async createAgent(body: Partial<ServerAgent>): Promise<{ agent?: ServerAgent; error?: string }> {
-    try { return await req(`/agents`, { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async updateAgent(id: string, body: Partial<ServerAgent>): Promise<{ agent?: ServerAgent; error?: string }> {
-    try { return await req(`/agents/${id}`, { method: "PUT", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async patchAgent(id: string, patch: Partial<ServerAgent>): Promise<{ agent?: ServerAgent; error?: string }> {
-    try { return await req(`/agents/${id}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async deleteAgent(id: string): Promise<{ ok: boolean; error?: string }> {
-    try { return await req(`/agents/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-  async runAgentServer(id: string, opts: { goal?: string; skillId?: string; params?: Record<string, unknown> } = {}): Promise<{ run?: ServerRun; droppedSteps?: number; error?: string; message?: string }> {
-    try { return await req(`/agents/${id}/run`, { method: "POST", body: JSON.stringify(opts), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async duplicateAgentServer(id: string): Promise<{ agent?: ServerAgent; error?: string }> {
-    try { return await req(`/agents/${id}/duplicate`, { method: "POST", mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async rollbackAgent(id: string, targetVersion?: number): Promise<{ agent?: ServerAgent; error?: string }> {
-    try { return await req(`/agents/${id}/rollback`, { method: "POST", body: JSON.stringify({ targetVersion }), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async agentVersions(id: string): Promise<AgentVersion[]> {
-    try { return (await req<{ versions: AgentVersion[] }>(`/agents/${id}/versions`)).versions ?? []; } catch { return []; }
-  },
-  async agentContext(id: string): Promise<AgentContext | null> {
-    try { return (await req<{ context: AgentContext }>(`/agents/${id}/context`)).context ?? null; } catch { return null; }
-  },
-
-  /* ---- trigger registry ---- */
-  async triggers(query = ""): Promise<ServerTrigger[]> {
-    try { return (await req<{ triggers: ServerTrigger[] }>(`/triggers${query}`)).triggers ?? []; } catch { return []; }
-  },
-  async getTrigger(id: string): Promise<ServerTrigger | null> {
-    try { return (await req<{ trigger: ServerTrigger }>(`/triggers/${id}`)).trigger ?? null; } catch { return null; }
-  },
-  async createTrigger(body: Partial<ServerTrigger> & { secret?: string; runAt?: number | string }): Promise<{ trigger?: ServerTrigger; error?: string }> {
-    try { return await req(`/triggers`, { method: "POST", body: JSON.stringify(body), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async updateTrigger(id: string, patch: Partial<ServerTrigger> & { secret?: string; runAt?: number | string }): Promise<{ trigger?: ServerTrigger; error?: string }> {
-    try { return await req(`/triggers/${id}`, { method: "PATCH", body: JSON.stringify(patch), mutation: true }); } catch { return { error: "backend_unreachable" }; }
-  },
-  async deleteTrigger(id: string): Promise<{ ok: boolean; error?: string }> {
-    try { return await req(`/triggers/${id}`, { method: "DELETE", mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-  async fireTrigger(id: string, payload?: Record<string, unknown>): Promise<{ ok: boolean; runId?: string; error?: string; message?: string }> {
-    try { return await req(`/triggers/${id}/fire`, { method: "POST", body: JSON.stringify({ payload }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
-  },
-
-  /* ---- evolution (optional LLM enrichment of a trace-derived proposal) ---- */
-  async proposeEvolution(trace: Record<string, unknown>, providerId?: string): Promise<EvolutionProposalResult> {
-    try { return await req("/evolution/propose", { method: "POST", body: JSON.stringify({ trace, providerId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable" }; }
+  async helperTemplates(): Promise<HelperTemplateSection[]> {
+    try { return (await req<{ sections: HelperTemplateSection[] }>("/helper-templates")).sections ?? []; } catch { return []; }
   },
 };
 

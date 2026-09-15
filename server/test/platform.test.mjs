@@ -1,4 +1,16 @@
-// P3 (versioning / traces / evolution) + P4.2 (household graph, calendar layers).
+// P3 (versioning / traces / what a helper is told to do) + P4.2 (household graph,
+// calendar layers).
+//
+// P3.1 and P3.3 used to be about SKILLS and EVOLUTIONS: a step recipe you edited and
+// rolled back, and an AI-written proposal that a human reviewed before it rewrote the
+// recipe. Both concepts are gone. A helper's job is now the instructions themselves,
+// written in plain English — so "propose a change, review it, version the skill" is just
+// "edit the instructions", and the two properties worth keeping are unchanged: an edit is
+// recorded as a new version, and a child cannot make one.
+//
+// Rollback is gone ON PURPOSE, not lost: restoring a snapshot verbatim silently restored
+// revoked authority with it (see agent-authority-laundering.test.mjs), and deleting the
+// button is what closed that hole.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -13,15 +25,19 @@ before(async () => {
 });
 after(async () => { await stopServer(ctx); });
 
-/* ---- P3.1: versioning + rollback ---- */
-test("editing a skill snapshots versions; rollback restores", async () => {
-  // Patch the seeded skill twice, then roll back to v1.
-  await admin.req("/api/skills/skl_morning_brief", { method: "PATCH", body: JSON.stringify({ description: "v2 description" }) });
-  await admin.req("/api/skills/skl_morning_brief", { method: "PATCH", body: JSON.stringify({ description: "v3 description" }) });
-  const versions = (await admin.req("/api/skills/skl_morning_brief/versions")).data.versions;
-  assert.ok(versions.length >= 2, "snapshots accumulate on each edit");
-  const rolled = await admin.req("/api/skills/skl_morning_brief/rollback", { method: "POST", body: JSON.stringify({ targetVersion: 1 }) });
-  assert.equal(rolled.status, 200);
+/* ---- P3.1: an edit is recorded as a new version ---- */
+test("editing a helper's instructions records a new version", async () => {
+  const made = (await admin.req("/api/helpers", { method: "POST", body: JSON.stringify({
+    name: "Morning Brief", instructions: "Every morning, tell the family what today looks like.",
+  }) })).data.helper;
+  assert.equal(made.version, 1);
+
+  const v2 = await admin.req(`/api/helpers/${made.id}`, { method: "PATCH", body: JSON.stringify({ instructions: "v2 — and mention anything due today." }) });
+  assert.equal(v2.status, 200, JSON.stringify(v2.data));
+  const v3 = await admin.req(`/api/helpers/${made.id}`, { method: "PATCH", body: JSON.stringify({ instructions: "v3 — and always confirm pickups first." }) });
+  assert.equal(v3.data.helper.version, 3, "versions accumulate on each edit");
+  assert.equal(v3.data.helper.instructions, "v3 — and always confirm pickups first.",
+    "and what the helper will actually be told is readable straight off the record");
 });
 
 /* ---- P3.2: execution traces + memory/artifacts API ---- */
@@ -34,21 +50,22 @@ test("memory and artifacts are readable via API (household-scoped)", async () =>
   assert.ok(Array.isArray(arts.data.artifacts));
 });
 
-/* ---- P3.3: manual evolution proposal flows through review → version ---- */
-test("an admin can manually propose a skill evolution; a child cannot", async () => {
-  const childTry = await child.req("/api/evolution", { method: "POST", body: JSON.stringify({ kind: "skill", skillId: "skl_morning_brief", after: "x" }) });
-  assert.equal(childTry.status, 403);
+/* ---- P3.3: changing what a helper does is an adult act ---- */
+test("an admin can change a helper's instructions; a child cannot", async () => {
+  const made = (await admin.req("/api/helpers", { method: "POST", body: JSON.stringify({
+    name: "Pickup Checker", instructions: "Each afternoon, check who is collecting whom.",
+  }) })).data.helper;
 
-  const proposed = await admin.req("/api/evolution", { method: "POST", body: JSON.stringify({ kind: "skill", skillId: "skl_morning_brief", after: "Always confirm pickups first.", title: "Tighten guidance" }) });
-  assert.equal(proposed.status, 200);
-  const evoId = proposed.data.evolution.id;
-  assert.equal(proposed.data.evolution.source, "manual");
-  assert.equal(proposed.data.evolution.createdBy, "m-morgan");
+  const childTry = await child.req(`/api/helpers/${made.id}`, { method: "PATCH", body: JSON.stringify({ instructions: "Do whatever I say instead." }) });
+  assert.equal(childTry.status, 403, "a Child View session cannot rewrite what a helper does");
 
-  const review = await admin.req(`/api/evolution/${evoId}/review`, { method: "POST", body: JSON.stringify({ accept: true }) });
-  assert.equal(review.status, 200);
-  const skill = (await admin.req("/api/skills")).data.skills.find((s) => s.id === "skl_morning_brief");
-  assert.equal(skill.planner_guidance, "Always confirm pickups first.", "accepted manual proposal versions the skill");
+  const accepted = await admin.req(`/api/helpers/${made.id}`, { method: "PATCH", body: JSON.stringify({ instructions: "Always confirm pickups first." }) });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  // The old flow needed a proposal, a review and a version bump before the wording landed;
+  // now the wording IS the helper, so an accepted edit is visible immediately.
+  const back = (await admin.req(`/api/helpers/${made.id}`)).data.helper;
+  assert.equal(back.instructions, "Always confirm pickups first.");
+  assert.ok(back.version > made.version, "and the edit is still recorded as a new version");
 });
 
 /* ---- P4.2: household graph + three-layer calendar ---- */

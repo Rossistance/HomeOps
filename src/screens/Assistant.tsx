@@ -3,11 +3,12 @@ import { useStore, runStatusView, runViewFromServer, isErrorOnlyThread } from "@
 import { Card, Button, Badge, RiskBadge, IconButton } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { InlineApprovals } from "@/components/InlineApprovals";
+import { ToolCallStrip } from "@/components/ToolCallStrip";
 import { MarkdownContent } from "@/lib/markdown";
 import { suggestAskPrompts, answerLocally } from "@/lib/ai";
 import { surfaceForTask } from "@/lib/taskSurfaces";
-import type { AssistantConversation, AssistantMessage, AssistantToolCall, AutomationRun, RunStatusView } from "@/types";
-import { backend, type AgentPlan, type ChatBuild, type EmailReviewMessage, type EmailReviewLabel } from "@/connectors/api";
+import type { AssistantConversation, AssistantMessage, HelperRun, RunStatusView } from "@/types";
+import { backend, type AgentPlan, type EmailReviewMessage, type EmailReviewLabel } from "@/connectors/api";
 
 /**
  * WP-003 slice 3 (double-run guard) — a plan's runId is durable (persisted server-side
@@ -20,9 +21,9 @@ import { backend, type AgentPlan, type ChatBuild, type EmailReviewMessage, type 
  * the server run directly so the caller NEVER has to fall back to "no runId → show Run
  * button" reasoning.
  */
-function useAttachedRun(runId?: string): { run?: AutomationRun; loading: boolean } {
+function useAttachedRun(runId?: string): { run?: HelperRun; loading: boolean } {
   const localRun = useStore((s) => (runId ? s.data.runs.find((r) => r.id === runId) : undefined));
-  const [fetched, setFetched] = useState<AutomationRun | undefined>(undefined);
+  const [fetched, setFetched] = useState<HelperRun | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   useEffect(() => {
     if (!runId || localRun) { setFetched(undefined); return; }
@@ -353,33 +354,6 @@ function RunResultLinks({ links }: { links: AssistantMessage["links"] }) {
 }
 
 /** What the assistant actually did this turn — one calm chip per tool call. */
-function ToolCallStrip({ calls }: { calls?: AssistantToolCall[] }) {
-  const navigate = useStore((s) => s.navigate);
-  if (!calls?.length) return null;
-  return (
-    <div className="flex flex-wrap items-center gap-1.5" aria-label="What the assistant did">
-      {calls.map((c, i) => {
-        const key = `${c.tool}-${i}`;
-        if (c.status === "awaiting_approval") {
-          return (
-            <button key={key} onClick={() => navigate("messages", { tab: "approvals", ...(c.approvalId ? { approval: c.approvalId } : {}) })}
-              className="chip bg-amber-50 text-[11px] text-amber-700 transition-colors hover:bg-amber-100" title={c.label}>
-              ⏳ Waiting for approval · {c.label}
-            </button>
-          );
-        }
-        if (c.status === "failed" || c.status === "blocked") {
-          return <span key={key} className="chip bg-coral-50 text-[11px] text-coral-700" title={c.summary}>⚠ {c.label}{c.summary ? ` — ${c.summary}` : ""}</span>;
-        }
-        if (c.status === "running") {
-          return <span key={key} className="chip bg-surface-sunken text-[11px] text-ink-500"><Icon name="Loader2" size={10} className="animate-spin" /> {c.label}</span>;
-        }
-        return <span key={key} className="chip bg-surface-sunken text-[11px] text-ink-500" title={c.summary}>✓ {c.label}</span>;
-      })}
-    </div>
-  );
-}
-
 function MessageRow({ conversationId, m, precedingUserText }: { conversationId: string; m: AssistantMessage; precedingUserText?: string }) {
   const { run } = useAttachedRun(m.runId);
   const runView = run ? runStatusView(run.serverStatus ?? run.status) : undefined;
@@ -424,7 +398,6 @@ function MessageRow({ conversationId, m, precedingUserText }: { conversationId: 
         {/* Phase strip for an active/parked dispatched run */}
         {runView && !runView.terminal && <PhaseStrip runView={runView} />}
         {m.plan && <PlanCard conversationId={conversationId} messageId={m.id} plan={m.plan} runId={m.runId} run={run} />}
-        {m.build && <BuildCard conversationId={conversationId} messageId={m.id} build={m.build} status={m.status} progress={m.buildProgress} builtIds={m.builtIds} />}
         {/* Item 3: after a completed run that touched Gmail labels, an inline review card. */}
         {m.runId && run && run.status === "Completed" && <EmailReviewCard runId={m.runId} />}
       </div>
@@ -433,67 +406,26 @@ function MessageRow({ conversationId, m, precedingUserText }: { conversationId: 
 }
 
 /* --------------------------- Local engine fallback ----------------------- *
- * Shown in place of the "no AI provider" wall. Classifies the original
- * request with the local deterministic engine (answerLocally, src/lib/ai.ts)
- * and renders whatever it can genuinely deliver: a real household-data
- * answer, a capability summary, or an approvable automation plan — the same
- * local rules engine that already powers the Workflow Builder's fallback.
- * Anything truly open-ended gets an honest, scoped nudge to connect a
- * provider instead of a dead-end wall. */
+ * Shown in place of the "no AI provider" wall. Classifies the original request with the
+ * local deterministic engine (answerLocally, src/lib/ai.ts) and renders whatever it can
+ * genuinely deliver: a real answer about the household's own data, or a capability
+ * summary. Anything open-ended gets an honest, scoped nudge to connect a provider
+ * instead of a dead-end wall — and a standing job gets pointed at Helpers, where the
+ * family writes and reads the instructions themselves. */
 function LocalFallbackCard({ originalText }: { originalText: string }) {
   const data = useStore((s) => s.data);
   const member = useStore((s) => s.currentMember());
-  const createAutomation = useStore((s) => s.createAutomation);
   const navigate = useStore((s) => s.navigate);
-  const [created, setCreated] = useState(false);
   const answer = useMemo(() => answerLocally(originalText, data, member), [originalText, data, member]);
-
-  const approve = () => {
-    if (!answer.plan) return;
-    createAutomation({
-      name: originalText.slice(0, 48) || answer.plan.agentName,
-      description: originalText,
-      agentId: answer.plan.agentId,
-      plan: answer.plan.plan,
-      approvalRequired: answer.plan.approvalRequired,
-      // T-05: the trigger the local engine actually detected (e.g. "Every morning
-      // at 7am…" → Schedule), never hardcoded to Manual.
-      triggerType: answer.plan.triggerType,
-      status: "active",
-      enabled: true,
-    });
-    setCreated(true);
-  };
 
   return (
     <div className="space-y-2.5">
       <MarkdownContent text={answer.text} />
-      {answer.kind === "plan" && answer.plan && (
-        <div className="rounded-2xl border border-ink-900/[0.06] bg-surface-sunken/50 p-3">
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <Badge color="sky"><Icon name="Zap" size={10} /> {answer.plan.triggerType}</Badge>
-            {answer.plan.approvalRequired && <Badge color="coral"><Icon name="ShieldAlert" size={10} /> approval</Badge>}
-          </div>
-          <ol className="space-y-1">
-            {answer.plan.plan.steps.map((s) => (
-              <li key={s.id} className="text-xs text-ink-600">
-                {s.order}. {s.label}
-                {s.needsApproval && <Icon name="ShieldAlert" size={11} className="ml-1 inline text-coral-500" />}
-              </li>
-            ))}
-          </ol>
-          {created ? (
-            <p className="mt-2.5 flex items-center gap-1.5 text-xs text-sage-600"><Icon name="CheckCircle2" size={13} /> Added to Automations — approve any gated steps when it runs.</p>
-          ) : (
-            <div className="mt-2.5 flex flex-wrap items-center gap-2">
-              <Button size="sm" variant="ember" onClick={approve}><Icon name="Check" size={13} /> Approve & create automation</Button>
-              <span className="text-xs text-ink-400">Creates a draft — gated steps still ask for approval.</span>
-            </div>
-          )}
-        </div>
-      )}
       {answer.kind === "unsupported" && (
-        <Button size="sm" variant="secondary" onClick={() => navigate("settings")}><Icon name="Plug" size={13} /> Connect an AI provider</Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="secondary" onClick={() => navigate("settings")}><Icon name="Plug" size={13} /> Connect an AI provider</Button>
+          <Button size="sm" variant="ghost" onClick={() => navigate("helpers", { new: "1" })}><Icon name="Bot" size={13} /> New helper</Button>
+        </div>
       )}
       <p className="flex items-center gap-1 text-[11px] text-ink-400"><Icon name="Cpu" size={11} /> Answered by the local rules engine{answer.kind === "unsupported" ? " — no provider connected" : "."}</p>
     </div>
@@ -603,108 +535,8 @@ function EmailReviewCard({ runId }: { runId: string }) {
   );
 }
 
-/* -------------------------------- Build card ---------------------------- *
- * The unified chat-builder surface: previews the durable agent/skill/automation the
- * assistant proposes (each row expands to inspect details), then "Approve & build"
- * materializes them server-side (role-gated) with live per-entity progress — so you
- * build by talking, watch it happen, in the same thread. */
-type RowState = "idle" | "building" | "done";
-function BuildRow({ icon, kind, title, subtitle, detail, state, accent }: { icon: string; kind: string; title: string; subtitle?: string; detail?: React.ReactNode; state: RowState; accent?: boolean }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <li className={`rounded-xl border px-3 py-2 ${accent ? "border-amber-200/60 bg-amber-50/60" : "border-ink-900/[0.05] bg-surface-sunken/50"}`}>
-      <div className="flex items-start gap-2.5">
-        {state === "building" ? <Icon name="Loader2" size={15} className="mt-0.5 shrink-0 animate-spin text-sky-500" />
-          : state === "done" ? <Icon name="CheckCircle2" size={15} className="mt-0.5 shrink-0 text-sage-500" />
-          : <Icon name={icon} size={15} className={`mt-0.5 shrink-0 ${accent ? "text-amber-600" : "text-ink-500"}`} />}
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-ink-800">{kind} · {title}</p>
-          {subtitle && <p className="text-xs text-ink-500">{subtitle}</p>}
-        </div>
-        {detail && (
-          <button onClick={() => setOpen((v) => !v)} className="shrink-0 text-ink-400 transition-colors hover:text-ink-700" aria-label={open ? "Hide details" : "Show details"} aria-expanded={open}>
-            <Icon name={open ? "ChevronUp" : "ChevronDown"} size={15} />
-          </button>
-        )}
-      </div>
-      {open && detail && <div className="mt-2 border-t border-ink-900/[0.06] pt-2 text-xs text-ink-600">{detail}</div>}
-    </li>
-  );
-}
-function BuildCard({ conversationId, messageId, build, status, progress, builtIds }: { conversationId: string; messageId: string; build: ChatBuild; status?: string; progress?: string[]; builtIds?: { skillId?: string; agentId?: string; triggerId?: string } }) {
-  const buildFromChat = useStore((s) => s.buildFromChat);
-  const navigate = useStore((s) => s.navigate);
-  const [busy, setBusy] = useState(false);
-  const built = status === "built";
-  const running = status === "running";
-  const done = new Set(progress ?? []);
-  // A row's state: done once its entity arrived in the progress stream (or the whole
-  // build finished); building while the build is running but this row hasn't arrived yet.
-  const rowState = (key: string): RowState => built ? "done" : running ? (done.has(key) ? "done" : "building") : "idle";
-  const go = async () => { setBusy(true); try { await buildFromChat(conversationId, messageId); } finally { setBusy(false); } };
-  const editOnly = !build.skill && !build.agent && !build.automation && (build.edits ?? []).length > 0;
-  return (
-    <Card className="card-pad">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-sky-400 to-sky-600 text-white"><Icon name="Wand2" size={16} /></span>
-        <div>
-          <p className="font-display text-sm font-semibold text-ink-900">{built ? "Built" : editOnly ? "I'll update this" : "I'll set this up"}</p>
-          <p className="text-xs text-ink-500">{build.summary}</p>
-        </div>
-      </div>
-      <ul className="space-y-1.5">
-        {build.skill && (
-          <BuildRow icon="ListChecks" kind="Skill" title={build.skill.name} state={rowState("skill")}
-            subtitle={build.skill.description || (build.skill.steps?.length ? `${build.skill.steps.length} step${build.skill.steps.length === 1 ? "" : "s"}` : undefined)}
-            detail={
-              <div className="space-y-1">
-                {build.skill.planner_guidance && <p><span className="text-ink-400">Guidance:</span> {build.skill.planner_guidance}</p>}
-                {build.skill.risk_level && <p><span className="text-ink-400">Risk:</span> {build.skill.risk_level}</p>}
-                {build.skill.steps && build.skill.steps.length > 0 && (
-                  <ol className="ml-3 list-decimal space-y-0.5">
-                    {build.skill.steps.map((s, i) => <li key={i}>{s.name}{s.tool_id ? <span className="text-ink-400"> · {s.tool_id}</span> : <span className="text-ink-400"> · reasoning</span>}{s.approval_required && <span className="text-coral-600"> · approval</span>}</li>)}
-                  </ol>
-                )}
-              </div>
-            } />
-        )}
-        {build.agent && (
-          <BuildRow icon="Bot" kind="Agent" title={build.agent.name} state={rowState("agent")} subtitle={build.agent.purpose}
-            detail={build.agent.instructions ? <p><span className="text-ink-400">Instructions:</span> {build.agent.instructions}</p> : undefined} />
-        )}
-        {build.automation && (
-          <BuildRow icon="Clock" kind="Automation" title={build.automation.name} state={rowState("automation")} subtitle={build.automation.type}
-            detail={
-              <p>{build.automation.type === "recurring" && build.automation.intervalMs ? `Runs every ${Math.round(build.automation.intervalMs / 3600000)}h` : build.automation.type === "schedule" && build.automation.runAt ? `Runs at ${build.automation.runAt}` : `Trigger: ${build.automation.type}`}. Gated steps still pause for approval.</p>
-            } />
-        )}
-        {(build.edits ?? []).map((e, i) => (
-          <BuildRow key={i} icon="Pencil" accent kind={`Update ${e.kind}`} title={e.id} state={rowState(e.kind)} subtitle={e.summary}
-            detail={<pre className="overflow-x-auto whitespace-pre-wrap break-words text-[11px] text-ink-600">{JSON.stringify(e.patch, null, 2)}</pre>} />
-        ))}
-      </ul>
-      {built ? (
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <p className="flex items-center gap-1.5 text-sm text-sage-600"><Icon name="CheckCircle2" size={15} /> Done.</p>
-          {builtIds?.agentId && <Button size="sm" variant="secondary" onClick={() => navigate("agents", { id: builtIds.agentId! })}><Icon name="Bot" size={13} /> Open helper</Button>}
-          {/* A chat-built automation is a SERVER trigger — send it to the Triggers tab,
-              not the client-local automations list where its id resolves to nothing. */}
-          {builtIds?.triggerId && <Button size="sm" variant="secondary" onClick={() => navigate("automations", { tab: "triggers", id: builtIds.triggerId! })}><Icon name="Workflow" size={13} /> Open automation</Button>}
-        </div>
-      ) : (
-        <div className="mt-3 flex items-center gap-2">
-          <Button variant="ember" disabled={busy || running} onClick={go}>
-            {busy || running ? <><Icon name="Loader2" size={15} className="animate-spin" /> {editOnly ? "Applying…" : "Building…"}</> : <><Icon name="Wand2" size={15} /> {editOnly ? "Approve & apply" : "Approve & build"}</>}
-          </Button>
-          <span className="text-xs text-ink-400">{editOnly ? "Changes are versioned and reversible." : "Creates a draft — gated steps still ask for approval when it runs."}</span>
-        </div>
-      )}
-    </Card>
-  );
-}
-
 /* -------------------------------- Plan card ----------------------------- */
-function PlanCard({ conversationId, messageId, plan, runId, run }: { conversationId: string; messageId: string; plan: AgentPlan; runId?: string; run?: AutomationRun }) {
+function PlanCard({ conversationId, messageId, plan, runId, run }: { conversationId: string; messageId: string; plan: AgentPlan; runId?: string; run?: HelperRun }) {
   const runConversationPlan = useStore((s) => s.runConversationPlan);
   const [busy, setBusy] = useState(false);
   const dispatch = async () => { setBusy(true); try { await runConversationPlan(conversationId, messageId); } finally { setBusy(false); } };
@@ -765,7 +597,7 @@ function PlanCard({ conversationId, messageId, plan, runId, run }: { conversatio
   );
 }
 
-function RunStatus({ run }: { run: AutomationRun }) {
+function RunStatus({ run }: { run: HelperRun }) {
   const navigate = useStore((s) => s.navigate);
   // WP-003 slice 1 — the ONE status vocabulary: cause-specific label + CTA from
   // runStatusView, never the collapsed `status` alone (a connector/provider wait used
@@ -814,7 +646,7 @@ function RunStatus({ run }: { run: AutomationRun }) {
         </Button>
       )}
       {view.terminal && (
-        <Button size="sm" variant="ghost" className="mt-2.5" onClick={() => navigate("automations", { tab: "history" })}><Icon name="History" size={13} /> View in history</Button>
+        <Button size="sm" variant="ghost" className="mt-2.5" onClick={() => navigate("activity")}><Icon name="History" size={13} /> View in activity</Button>
       )}
     </div>
   );
