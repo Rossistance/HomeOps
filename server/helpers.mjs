@@ -371,11 +371,16 @@ export async function runHelper({ helperId, session = null, reason = "manual", p
   const history = (conversation.messages ?? []).slice(-6);
 
   const when = formatForHousehold(new Date(now).toISOString(), helper.householdId);
+  // A manual run may carry a note from the person who pressed Run — "focus on Monday",
+  // "email it to me" — which becomes part of the ask rather than a second turn.
+  const note = reason === "manual" && typeof payload?.request === "string" && payload.request.trim()
+    ? `\n\nThe person who ran you added: ${payload.request.trim().slice(0, 2000)}`
+    : "";
   const ask = reason === "schedule"
     ? `Scheduled run — ${when}. Do your job now for the household as it stands right now.`
     : reason === "webhook"
       ? `Something came in — ${when}. Do your job now.${payload ? `\n\nWhat arrived:\n${JSON.stringify(payload).slice(0, 2000)}` : ""}`
-      : `Run now — ${when}. Do your job for the household as it stands right now.`;
+      : `Run now — ${when}. Do your job for the household as it stands right now.${note}`;
 
   const startedAt = Date.now();
   let out;

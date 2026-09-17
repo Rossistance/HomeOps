@@ -4581,8 +4581,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // editing one.
       const may = mayWriteHelper(g.session, h);
       if (!may.ok) return json(res, 403, { error: may.error, message: may.message }, req);
-      const out = await runHelper({ helperId: id, session: g.session, reason: "manual" });
-      audit({ type: "helper.run", agentId: id, ok: !!out.ok, error: out.ok ? undefined : out.error }, req, g.session);
+      // Optional note from the person pressing Run ("focus on Monday", "email it to me").
+      const body = (await readBody(req)) ?? {};
+      const request = typeof body?.request === "string" ? body.request.trim().slice(0, 2000) : "";
+      const out = await runHelper({ helperId: id, session: g.session, reason: "manual", payload: request ? { request } : null });
+      audit({ type: "helper.run", agentId: id, ok: !!out.ok, error: out.ok ? undefined : out.error, withRequest: !!request }, req, g.session);
       return json(res, out.ok ? 200 : 422, out, req);
     }
 
