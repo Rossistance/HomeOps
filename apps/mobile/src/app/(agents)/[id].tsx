@@ -562,7 +562,11 @@ export default function HelperScreen() {
         ) : null}
       </HScreen>
 
-      {canWrite ? (
+      {/* The bar exists only while there is something to commit. It is opaque and pinned, so
+          on an untouched helper a permanently-disabled "Save changes" sat over whatever had
+          scrolled beneath it — and on a cloud simulator the first tap on Delete landed on the
+          dead bar instead. A control that can't do anything must not be able to eat a tap. */}
+      {canWrite && (isNew || dirty) ? (
         <ActionBar>
           <Button
             title={saving ? "Saving…" : isNew ? "Save helper" : "Save changes"}

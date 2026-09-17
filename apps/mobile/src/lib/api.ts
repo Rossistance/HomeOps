@@ -385,6 +385,8 @@ export interface AppSettingsRec {
    *  only — no ratings, prices or opening hours). */
   placesProvider?: "google" | "nominatim";
   aiActiveProvider: string | null; calendarAutoSync: boolean;
+  /** IANA zone the household keeps its clock in — all-day events are dated in it. */
+  timezone?: string;
   autoApproveImprovements: boolean;
   /** The household's autonomy stance — one answer instead of a capability matrix. Enforced in
    *  server/policy.mjs rule 7, which is the only place that decides what it means. */

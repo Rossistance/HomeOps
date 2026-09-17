@@ -52,7 +52,13 @@ export function describeSchedule(s: HelperSchedule): string {
  */
 export function helperLook(c: HearthColors, h: { name?: string; purpose?: string; icon?: string | null }) {
   const look = categoryStyle(c, `${h.name ?? ""} ${h.purpose ?? ""}`.trim());
-  return { ...look, icon: h.icon || look.icon };
+  /* The server's `icon` is a web icon name — "Sun", "UtensilsCrossed", "Bot" — from a catalog
+   * the web client draws with. Fed straight to SymbolView it names no SF Symbol, and the card
+   * showed an empty tinted square (every helper on the cloud simulator, 2026-09-17). Only a
+   * value that is spelled like an SF Symbol ("sun.max", "fork.knife") is trusted; anything
+   * else falls back to the category's own symbol, which is always drawable. */
+  const sf = typeof h.icon === "string" && /^[a-z0-9]+(\.[a-z0-9]+)*$/.test(h.icon) ? h.icon : null;
+  return { ...look, icon: sf ?? look.icon };
 }
 
 /** Paused reads as paused. There are only two states now, and grey is the honest one. */

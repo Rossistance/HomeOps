@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type NestRec, type CalendarSubscription, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
-import { effectiveEndMs, weekStart } from "@/lib/event-days";
+import { allDayDateKey, effectiveEndMs, weekStart } from "@/lib/event-days";
 import { LinearGradient } from "expo-linear-gradient";
 import { fade, memberAccent, memberColor } from "@/lib/member-colors";
 import * as SecureStore from "expo-secure-store";
@@ -49,8 +49,25 @@ function fmtTime(iso: string | null): string | null {
 
 /** WP-003/ISS-004: every local day an event spans (start day → end day inclusive),
  * so multi-day events render on each spanned day. Capped defensively at 60 days. */
-function spanKeys(e: EventRec): string[] {
+function spanKeys(e: EventRec, householdTz?: string | null): string[] {
   if (!e.startAt || isNaN(+new Date(e.startAt))) return [];
+  if (e.allDay) {
+    // An all-day event lives on household DATES, whatever zone the phone is in.
+    const ks = allDayDateKey(e.startAt, householdTz);
+    if (!ks) return [];
+    const ke = e.endAt ? allDayDateKey(e.endAt, householdTz) : null;
+    const keys = [ks];
+    if (ke && ke > ks) {
+      const cur = new Date(`${ks}T12:00:00Z`);
+      for (let i = 0; i < 60; i++) {
+        cur.setUTCDate(cur.getUTCDate() + 1);
+        const k = cur.toISOString().slice(0, 10);
+        if (k > ke) break;
+        keys.push(k);
+      }
+    }
+    return keys;
+  }
   const start = new Date(e.startAt);
   const keys = [dayKey(start)];
   const end = e.endAt ? new Date(e.endAt) : null;
@@ -109,6 +126,9 @@ export default function CalendarScreen() {
   const [syncingAll, setSyncingAll] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
   const [nests, setNests] = useState<NestRec[]>([]);
+  // The household's zone, for placing all-day events on the right DATE on a phone that is
+  // somewhere else. Settings may be refused for a child session; the helper then falls back.
+  const [householdTz, setHouseholdTz] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
   // Guards the auto-sync interval against overlapping runs (a slow sync + a 60s tick).
   const syncBusyRef = useRef(false);
@@ -135,12 +155,14 @@ export default function CalendarScreen() {
     // should show up in a consolidated view." So dated tasks are fetched and shown under the
     // day they fall on, clearly as tasks — not converted into fake events, which is how a
     // checkbox ends up in an event editor that can't save it.
-    const [health, ev, mem, s, tks, ns] = await Promise.all([
+    const [health, ev, mem, s, tks, ns, st] = await Promise.all([
       api.health(), api.events(), api.members(), api.calendarSubscriptions(), api.tasks(),
       api.nests().catch(() => ({ nests: [] as NestRec[], invitations: [] as NestRec[] })),
+      api.settings().catch(() => null),
     ]);
     if (!health) { setPhase("error"); return; }
     setEvents(ev); setMembers(mem); setSubs(s); setTasks(tks); setNests(ns.nests);
+    if (st?.timezone) setHouseholdTz(st.timezone);
     setPhase("ready");
   }, []);
 
@@ -311,13 +333,13 @@ export default function CalendarScreen() {
   const byDay = useMemo(() => {
     const map: Record<string, EventRec[]> = {};
     for (const e of upcoming) {
-      const keys = spanKeys(e);
+      const keys = spanKeys(e, householdTz);
       if (keys.length === 0) { (map["undated"] ??= []).push(e); continue; }
       // A multi-day span that began before today shows under today, not under a past day.
       for (const k of [...new Set(keys.map((x) => (x < todayKey ? todayKey : x)))]) (map[k] ??= []).push(e);
     }
     return map;
-  }, [upcoming, todayKey]);
+  }, [upcoming, todayKey, householdTz]);
   const dayKeys = useMemo(() => Object.keys(byDay).filter((k) => k !== "undated").sort(), [byDay]);
   const strip = useMemo(() => Array.from({ length: STRIP_DAYS }, (_, i) => {
     const d = new Date(); d.setDate(d.getDate() + i); return d;
@@ -328,15 +350,18 @@ export default function CalendarScreen() {
   const nothingAtAll = dayKeys.length === 0 && !byDay["undated"];
 
   // Month grid wants EVERY dated event (including ones earlier in the shown month),
-  // not just the upcoming window the agenda uses.
+  // not just the upcoming window the agenda uses — but still only the events the chosen
+  // lens admits. This used to read `events`, so the dots, the day counts and the tapped
+  // day's list all ignored Family / My Nest / Just me while the agenda honoured it
+  // (cloud simulator, 2026-09-17: "Just me" still listed Melissa's day).
   const byDayAll = useMemo(() => {
     const map: Record<string, EventRec[]> = {};
-    for (const e of events) {
-      for (const k of spanKeys(e)) (map[k] ??= []).push(e);
+    for (const e of lensedEvents) {
+      for (const k of spanKeys(e, householdTz)) (map[k] ??= []).push(e);
     }
     for (const k of Object.keys(map)) map[k].sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
     return map;
-  }, [events]);
+  }, [lensedEvents, householdTz]);
   // 6 fixed weeks (42 cells) starting on Sunday — nulls pad days outside the month.
   const monthCells = useMemo(() => {
     const first = new Date(monthCursor);
@@ -985,6 +1010,30 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
             {bring.length > 2 ? <Badge label={`+${bring.length - 2}`} fg={colors.amber} bg={colors.amberBg} /> : null}
             {e.checklist.length > 0 ? (
               <Badge label={`${checklistDone}/${e.checklist.length}`} fg={colors.sage} bg={colors.sageBg} icon="checklist" />
+            ) : null}
+          </View>
+        ) : null}
+
+        {/* Our own events: the peek shows exactly what the chevron promised — the notes, the
+            whole bring list and the checklist. Until 2026-09-17 `expanded` only unclamped the
+            title and address, so an event whose only extra was a note opened to nothing
+            (cloud simulator: "Peek at details of TEST — delete me" → no change on screen). */}
+        {canonical && expanded ? (
+          <View style={{ marginTop: spacing.md, gap: spacing.sm, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: spacing.md }}>
+            {e.notes?.trim() ? (
+              <View style={{ flexDirection: "row", gap: 6 }}>
+                <Sym name="text.alignleft" size={12} color={colors.textFaint} />
+                <T kind="sub" style={{ flex: 1 }}>{e.notes.trim()}</T>
+              </View>
+            ) : null}
+            {e.participantIds.length > 0 ? (
+              <T kind="sub">With: {e.participantIds.map((id) => nameOf(id) ?? id).join(", ")}</T>
+            ) : null}
+            {bring.length > 0 ? (
+              <T kind="sub">Bring: {bring.map((w) => `${w.item}${w.memberId ? ` — ${nameOf(w.memberId) ?? ""}` : ""}`).join(", ")}</T>
+            ) : null}
+            {e.checklist.length > 0 ? (
+              <T kind="sub">{e.checklist.map((c) => `${c.done ? "☑" : "☐"} ${c.text}`).join("\n")}</T>
             ) : null}
           </View>
         ) : null}

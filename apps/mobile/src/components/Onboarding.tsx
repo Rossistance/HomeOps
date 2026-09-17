@@ -68,6 +68,12 @@ export function Onboarding() {
   const [templates, setTemplates] = useState<HelperTemplate[]>([]);
   const [saving, setSaving] = useState(false);
   const [householdName, setHouseholdName] = useState("");
+  // The closing summary describes THIS household, not a brand-new one: a parent signing in
+  // on a new phone has helpers and a Google connection already (2026-09-17: the page told
+  // Ross "No helpers yet" over a household with ten, and to connect a Google Calendar that
+  // was already syncing).
+  const [helperCount, setHelperCount] = useState<number | null>(null);
+  const [googleConnected, setGoogleConnected] = useState(false);
   const isOwner = session?.role === "Owner";
   // D7 — profile step
   const [myName, setMyName] = useState("");
@@ -80,12 +86,16 @@ export function Onboarding() {
 
   useEffect(() => {
     void (async () => {
-      const [m, sections, hh] = await Promise.all([
+      const [m, sections, hh, hs, subs] = await Promise.all([
         api.members(),
         api.helperTemplates().catch(() => []),
         api.household(),
+        api.helpers().catch(() => null),
+        api.calendarSubscriptions().catch(() => []),
       ]);
       setMembers(m);
+      if (hs) setHelperCount(hs.length);
+      setGoogleConnected(subs.some((x) => x.source === "google"));
       setTemplates(sections.flatMap((sec) => sec.templates).slice(0, 3));
       setHouseholdName(hh?.name ?? "");
       const me = m.find((x) => x.isCurrentUser);
@@ -425,9 +435,9 @@ export function Onboarding() {
                 <View style={st.trustRow}>
                   <SymTile name="wand.and.stars" color={colors.sky} bg={colors.skyBg} size={38} iconSize={18} />
                   <View style={{ flex: 1 }}>
-                    {/* Says what is true — no helpers — rather than counting ones nobody made. */}
-                    <T kind="rowTitle">No helpers yet</T>
-                    <T kind="detail">Make your first one on the Helpers tab</T>
+                    {/* Says what is true: the household's real count, or that there are none. */}
+                    <T kind="rowTitle">{helperCount ? `${helperCount} helper${helperCount === 1 ? "" : "s"}` : "No helpers yet"}</T>
+                    <T kind="detail">{helperCount ? "Waiting for you on the Helpers tab" : "Make your first one on the Helpers tab"}</T>
                   </View>
                 </View>
               )}
@@ -439,7 +449,9 @@ export function Onboarding() {
                 </View>
               </View>
             </Card>
-            <T kind="detail" center>Connect Gmail and Google Calendar in Settings when you're ready.</T>
+            <T kind="detail" center>
+              {googleConnected ? "Google Calendar is connected and syncing." : "Connect Gmail and Google Calendar in Settings when you're ready."}
+            </T>
           </Animated.View>
         )}
       </ScrollView>
