@@ -7,6 +7,7 @@ import { safeFetch, assertSafeUrl } from "./net.mjs";
 import { browserAvailable, probeBrowser, renderPage, browserUnavailableReason } from "./browser.mjs";
 import { searchWeb, readPage, extractRecipe, runtimeAuthHeader, browserRuntimeBase } from "./web.mjs";
 import { sandboxEnabled, SANDBOX_CONNECTOR_IDS, isSandboxConnectorTool, sandboxConnectorExecute } from "./sandbox-connectors.mjs";
+import { sendText as bluebubblesSend, ping as bluebubblesPing, rememberedChatGuid } from "./bluebubbles.mjs";
 
 /**
  * Readiness levels (per the no-mocks mandate):
@@ -128,21 +129,23 @@ export const CONNECTORS = [
     triggers: [],
   },
   {
+    // The id and tool id predate the bridge (engine, notify, sandbox and the activity copy
+    // all key on "sms" as the text channel); the transport behind them is BlueBubbles.
     id: "sms",
-    name: "Text Messaging",
-    provider: "Twilio",
+    name: "iMessage",
+    provider: "BlueBubbles",
     category: "Messaging",
     authType: "apiKey",
     runtime: "backend",
     risk: "High",
-    description: "Send text-style alerts to household contacts. Requires Twilio credentials.",
+    description: "Text the family from the household's own iMessage number — a BlueBubbles server on a cloud Mac. Family members can text it back and get the assistant.",
     configSchema: [
-      { key: "accountSid", label: "Account SID", type: "text", env: "TWILIO_ACCOUNT_SID", required: true },
-      { key: "authToken", label: "Auth Token", type: "secret", env: "TWILIO_AUTH_TOKEN", required: true },
-      { key: "fromNumber", label: "From number", type: "text", env: "TWILIO_FROM_NUMBER", required: true },
-      { key: "messagingServiceSid", label: "Messaging Service SID (A2P 10DLC)", type: "text", env: "TWILIO_MESSAGING_SERVICE_SID", required: false },
+      { key: "serverUrl", label: "BlueBubbles server URL", type: "text", env: "BLUEBUBBLES_URL", required: true, placeholder: "https://imessage.example.com" },
+      { key: "password", label: "Server password", type: "secret", env: "BLUEBUBBLES_PASSWORD", required: true },
+      { key: "webhookSecret", label: "Webhook secret", type: "secret", env: "BLUEBUBBLES_WEBHOOK_SECRET", required: false },
+      { key: "sendMethod", label: "Send method", type: "text", env: "BLUEBUBBLES_SEND_METHOD", required: false, default: "private-api" },
     ],
-    tools: [{ id: "sms.send", name: "Send text", action: "Send", risk: "High", requiresApproval: true, delivers: true, description: "Send a text message (requires approval).", inputs: [{ key: "to", label: "To number", type: "text", placeholder: "+15551234567", required: true }, { key: "body", label: "Message", type: "textarea", placeholder: "Your text…", required: true }] }],
+    tools: [{ id: "sms.send", name: "Send text", action: "Send", risk: "High", requiresApproval: true, delivers: true, description: "Send an iMessage / text (requires approval).", inputs: [{ key: "to", label: "To number", type: "text", placeholder: "+15551234567", required: true }, { key: "body", label: "Message", type: "textarea", placeholder: "Your text…", required: true }] }],
     triggers: [],
   },
 ];
@@ -152,7 +155,7 @@ export function connectorById(id) {
 }
 
 // WP-012: which household-utility connectors have a real-credential/re-enable setup
-// checklist in src/data/providerSetup.ts CONNECTOR_SETUP_GUIDES. Only sms (Twilio,
+// checklist in src/data/providerSetup.ts CONNECTOR_SETUP_GUIDES. Only sms (BlueBubbles,
 // deployment-credentialed) and http (household-revoked re-enable path) have one today —
 // server/test/provider-setup.test.mjs keeps this set in lockstep with that file so it
 // can't silently drift. Everything else already runs for real with no credential to
@@ -177,7 +180,7 @@ function hasTokens(c) {
 }
 
 export function readinessOf(c) {
-  // WP-006 SANDBOX. A credentialed connector (e.g. sms/Twilio) reports "connected"
+  // WP-006 SANDBOX. A credentialed connector (e.g. sms/BlueBubbles) reports "connected"
   // with its deterministic fake identity so runs don't park on not_configured — the
   // outbound call is later replaced by an in-process mock in executeTool. Gated on the
   // flag: real mode falls straight through to the identical logic below.
@@ -279,6 +282,12 @@ export async function healthCheck(id) {
       return persist({ ok: r.ok && r.httpOk, status: r.ok && r.httpOk ? "healthy" : "unreachable", latencyMs: Date.now() - t0, code: r.status, error: r.ok ? undefined : r.error });
     }
     if (c.id === "webhook") return persist({ ok: true, status: "healthy", latencyMs: 0 });
+    // The iMessage bridge: is the Mac reachable and is the password right? (The sandbox
+    // twin has no Mac to ping and keeps the readiness-based answer below.)
+    if (c.id === "sms" && !(sandboxEnabled() && SANDBOX_CONNECTOR_IDS.has("sms"))) {
+      const h = await bluebubblesPing();
+      return persist({ ok: h.ok, status: h.status, latencyMs: h.latencyMs, code: h.code, error: h.error });
+    }
     if (c.runtime === "browser-automation") {
       // A real handshake is required. Preferred: the in-process Playwright
       // Chromium (launched right here as proof). Fallback: probe an external
@@ -540,23 +549,13 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
       if (!r.ok) return { ok: false, error: "provider_error", message: j.error?.message ?? "Calendar create failed" };
       result = { created: true, id: j.id, htmlLink: j.htmlLink };
     } else if (toolId === "sms.send") {
-      const cfg = getConnectorConfig("sms");
-      const sid = process.env.TWILIO_ACCOUNT_SID || cfg.fields?.accountSid;
-      const token = process.env.TWILIO_AUTH_TOKEN || getSecret("sms", "authToken");
-      const from = cfg.fields?.fromNumber || process.env.TWILIO_FROM_NUMBER;
-      // US carriers require A2P 10DLC: sending via the Messaging Service (whose
-      // sender pool holds the campaign-registered number) instead of a bare From
-      // avoids error 30034 once the campaign is approved.
-      const msgService = cfg.fields?.messagingServiceSid || process.env.TWILIO_MESSAGING_SERVICE_SID;
       if (!input.to || !input.body) return { ok: false, error: "invalid_input", message: "Provide `to` and `body` to send a text." };
-      const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
-        method: "POST",
-        headers: { authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}`, "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams(msgService ? { MessagingServiceSid: msgService, To: input.to, Body: input.body } : { From: from, To: input.to, Body: input.body }),
-      });
-      const j = await r.json();
-      if (!r.ok) return { ok: false, error: "provider_error", message: j.message ?? "Twilio send failed" };
-      result = { sent: true, sid: j.sid, to: input.to };
+      // The thread the person already has with the household number, when one is known —
+      // agent deliverables (briefings, task lists) then arrive in the conversation they text.
+      const chatGuid = input.chatGuid || rememberedChatGuid(input.to);
+      const r = await bluebubblesSend({ to: input.to, chatGuid, text: input.body });
+      if (!r.ok) return { ok: false, error: r.error === "not_configured" ? "not_configured" : r.error === "unreachable" ? "provider_unreachable" : "provider_error", message: r.message ?? "iMessage send failed." };
+      result = { sent: true, guid: r.guid, chatGuid: r.chatGuid, to: r.to ?? input.to, action: r.action };
     } else if (toolId === "web.search") {
       if (!String(input.query ?? "").trim()) return { ok: false, error: "invalid_input", message: "Provide a search `query`." };
       const out = await searchWeb(input.query, { maxResults: Number(input.maxResults) || 8 });

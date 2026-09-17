@@ -1,12 +1,10 @@
-// Twilio retries. This handler didn't expect it to.
+// The bridge can deliver twice. This handler must not act twice.
 //
-// Twilio re-delivers a webhook it doesn't get a timely 200 from — and the inbound handler runs
-// the assistant, an LLM call, BEFORE it can answer. A slow model is enough to produce a retry,
-// and a retry ran the whole message again: a second conversation turn, a second plan, a second
-// approval sitting in the family's queue for something they asked for once.
-//
-// Every mutating path in this product is idempotent except the one an external service is
-// explicitly documented to repeat.
+// BlueBubbles Server re-posts on reconnects and the inbound handler runs the assistant, an
+// LLM call, before it answers — a duplicate delivery ran the whole message again: a second
+// conversation turn, a second plan, a second approval sitting in the family's queue for
+// something they asked for once. Every mutating path in this product is idempotent, and the
+// one an external service can repeat is no exception.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, stopServer, makeSession } from "./harness.mjs";
@@ -14,15 +12,15 @@ import { startServer, stopServer, makeSession } from "./harness.mjs";
 let ctx, owner;
 const NUM = "+15557654321";
 
-/** Post an inbound SMS the way Twilio does: form-encoded, with a MessageSid. */
-async function inbound(sid, body, from = NUM) {
-  const params = new URLSearchParams({ From: from, Body: body, To: "+15550001111", MessageSid: sid });
-  const r = await ctx.fetch("/api/webhooks/sms", {
+/** Post an inbound text the way BlueBubbles does: JSON, with the Mac's message GUID. */
+async function inbound(guid, text, from = NUM) {
+  const payload = { type: "new-message", data: { guid, text, isFromMe: false, handle: { address: from, service: "iMessage" }, chats: [{ guid: `iMessage;-;${from}` }] } };
+  const r = await ctx.fetch("/api/webhooks/bluebubbles", {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: params.toString(),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
   });
-  return { status: r.status, xml: await r.text() };
+  return { status: r.status, data: await r.json() };
 }
 
 /** Conversations come back whole from the list route; the messages live on the record. */
@@ -44,58 +42,61 @@ before(async () => {
 after(async () => { await stopServer(ctx); });
 
 test("a first delivery is handled and answered", async () => {
-  const r = await inbound("SM-first", "HELP");
+  const r = await inbound("p:0/first", "HELP");
   assert.equal(r.status, 200);
-  assert.match(r.xml, /<Message>/, "a known, opted-in number gets a reply");
-  assert.match(r.xml, /FamiliOS/i);
+  assert.equal(r.data.handled, true, "a known, opted-in number gets a reply");
+  assert.match(r.data.reply, /FamiliOS/i);
 });
 
-test("THE RETRY: the same MessageSid replays the same answer instead of re-running", async () => {
-  const first = await inbound("SM-retry", "HELP");
-  const again = await inbound("SM-retry", "HELP");
+test("THE DUPLICATE: the same message GUID is acknowledged as a replay instead of re-running", async () => {
+  const first = await inbound("p:0/retry", "HELP");
+  const again = await inbound("p:0/retry", "HELP");
   assert.equal(again.status, 200);
-  assert.equal(again.xml, first.xml,
-    "the retry exists because Twilio didn't hear the answer, so the answer is what it should get");
+  assert.equal(again.data.replayed, true, "the second delivery is recognised as the first one again");
+  assert.equal(again.data.replied, !!first.data.reply, "…and reports whether an answer existed");
+  assert.equal(again.data.reply, undefined, "nothing is composed a second time");
 });
 
-test("…and a retry does NOT add another turn to the family's conversation", async () => {
+test("…and a duplicate does NOT add another turn to the family's conversation", async () => {
   // The observable that matters. A duplicated turn is a duplicated plan and, for anything
   // gated, a duplicated approval for something asked once.
-  const sid = "SM-thread";
-  await inbound(sid, "STOP");
+  const guid = "p:0/thread";
+  await inbound(guid, "STOP");
   const convs = (await owner.req("/api/conversations")).data.conversations ?? [];
-  const sms = convs.find((c) => /sms/i.test(c.id) || /text/i.test(c.title ?? ""));
-  assert.ok(sms, `expected an SMS conversation to exist — otherwise this test proves nothing (saw ${convs.map((c) => c.id).join(", ")})`);
-  const before = await turnsFor(sms.id);
+  const thread = convs.find((c) => /sms/i.test(c.id) || /text/i.test(c.title ?? ""));
+  assert.ok(thread, `expected a text conversation to exist — otherwise this test proves nothing (saw ${convs.map((c) => c.id).join(", ")})`);
+  const before = await turnsFor(thread.id);
   assert.ok(before > 0, "…and to have the first delivery's turns in it");
 
-  await inbound(sid, "STOP");
-  assert.equal(await turnsFor(sms.id), before, "the second delivery wrote nothing");
+  await inbound(guid, "STOP");
+  assert.equal(await turnsFor(thread.id), before, "the second delivery wrote nothing");
 });
 
-test("a DIFFERENT MessageSid is a different message and is handled normally", async () => {
+test("a DIFFERENT GUID is a different message and is handled normally", async () => {
   // The guard must not swallow a genuine second text — someone really can send HELP twice.
-  const a = await inbound("SM-alpha", "START");
-  const b = await inbound("SM-beta", "START");
+  const a = await inbound("p:0/alpha", "START");
+  const b = await inbound("p:0/beta", "START");
   assert.equal(a.status, 200);
   assert.equal(b.status, 200);
-  assert.match(b.xml, /<Message>/, "the second one still gets its own answer");
+  assert.equal(b.data.handled, true, "the second one still gets its own answer");
+  assert.ok(b.data.reply);
 });
 
-test("a delivery with no MessageSid is still handled — the guard is not a gate", async () => {
-  const params = new URLSearchParams({ From: NUM, Body: "HELP", To: "+15550001111" });
-  const r = await ctx.fetch("/api/webhooks/sms", {
-    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: params.toString(),
-  });
+test("a delivery with no GUID is still handled — the guard is not a gate", async () => {
+  const payload = { type: "new-message", data: { text: "HELP", isFromMe: false, handle: { address: NUM } } };
+  const r = await ctx.fetch("/api/webhooks/bluebubbles", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
   assert.equal(r.status, 200);
-  assert.match(await r.text(), /<Message>/, "no sid means no dedupe, not no service");
+  const d = await r.json();
+  assert.equal(d.handled, true, "no guid means no dedupe, not no service");
+  assert.ok(d.reply);
 });
 
-test("an unknown sender still gets silence, retry or not", async () => {
-  const a = await inbound("SM-stranger", "hello?", "+15550009999");
-  const b = await inbound("SM-stranger", "hello?", "+15550009999");
+test("an unknown sender gets nothing back, duplicate or not", async () => {
+  const a = await inbound("p:0/stranger", "hello?", "+15550009999");
+  const b = await inbound("p:0/stranger", "hello?", "+15550009999");
   for (const r of [a, b]) {
     assert.equal(r.status, 200);
-    assert.ok(!/<Message>/.test(r.xml), "answering would confirm a number is registered");
+    assert.equal(r.data.reply, undefined, "answering would confirm a number is registered");
+    assert.notEqual(r.data.handled, true);
   }
 });

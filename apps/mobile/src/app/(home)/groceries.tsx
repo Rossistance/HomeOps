@@ -7,7 +7,7 @@ import { useFocusEffect } from "expo-router";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import { api, type MemberRec, type NestRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { isOpen } from "@/lib/task-state";
+import { isArchived, isOpen } from "@/lib/task-state";
 import { TaskSheet } from "@/components/sheets/task-sheet";
 import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic, motion } from "@/theme";
@@ -68,8 +68,11 @@ export default function GroceriesScreen() {
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
   // The family list deliberately does NOT include nest items — that's the whole promise.
+  // Archived items are filed away, not "this week": after a "clear the grocery list" run the
+  // header read "This week · 27 items · 0 of 27 in the cart" over a To-get list that said
+  // everything was in the cart (cloud simulator, 2026-09-17). Live = open or checked.
   const items = useMemo(
-    () => allItems.filter((t) => (nestId ? t.nestId === nestId : t.visibility !== "nest")),
+    () => allItems.filter((t) => !isArchived(t) && (nestId ? t.nestId === nestId : t.visibility !== "nest")),
     [allItems, nestId],
   );
   const done = useMemo(() => items.filter((t) => t.status === "done").length, [items]);

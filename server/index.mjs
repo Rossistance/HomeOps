@@ -47,7 +47,8 @@ import { orchestrate, ensureDefaultHelper } from "./orchestrator.mjs";
 import { sandboxEnabled, seedSandboxAccounts, listSandboxEffects } from "./sandbox-connectors.mjs";
 import { seedDefaults } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
-import { twilioAuthToken, twilioSignatureValid, handleInboundSms, twiml } from "./sms.mjs";
+import { handleInboundSms, replyToSender } from "./sms.mjs";
+import { bluebubblesConfig, parseInboundWebhook, webhookSecretPresented, secretMatches } from "./bluebubbles.mjs";
 import {
   createHelper, updateHelper, deleteHelper, listHelpers, getHelper, publicHelper,
   runHelper, mayWriteHelper, helperTemplates, reanchorHelperSchedules,
@@ -220,9 +221,10 @@ async function householdForTriggerId(id) {
   return found;
 }
 
-/** Inbound-SMS replay guard (see the /api/webhooks/sms route). Lives in the _system tenant:
- *  a text is deduplicated before we know whose it is, and a keyword now fans out across
- *  households, so the record cannot belong to any single one. */
+/** Inbound-text replay guard (see the /api/webhooks/bluebubbles route). Lives in the _system
+ *  tenant: a text is deduplicated before we know whose it is, and a keyword fans out across
+ *  households, so the record cannot belong to any single one. The file name predates the
+ *  bridge and is kept so an upgrade does not re-answer the last day's texts. */
 const SMS_SEEN_FILE = "sms-inbound-seen.json";
 const SMS_SEEN_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -882,59 +884,54 @@ const handleRequest = async (req, res) => {
       }
     }
 
-    /* ---- Two-way SMS gateway (Twilio inbound; signature-gated, not session) ----
-     * Family members text the household's Twilio number and the assistant answers
-     * in the SAME thread (TwiML reply). Only VERIFIED + OPTED-IN Phone/Text contact
-     * methods get a response — unknown senders receive empty TwiML (silence, so the
-     * endpoint never confirms a number exists). Twilio signs every webhook with the
-     * account auth token: configured token → signature required; no token → refused
-     * in production (fail closed), accepted in dev for local testing. */
-    if (path === "/api/webhooks/sms" && method === "POST") {
+    /* ---- Two-way texting (BlueBubbles webhook; secret-gated, not session) ----
+     * The cloud Mac posts every new message here. Only VERIFIED + OPTED-IN Phone/Text
+     * contact methods get an answer — an unknown sender gets nothing back over the bridge
+     * (and this endpoint answers 200 either way, so it never confirms a number exists).
+     * BlueBubbles does not sign its webhooks: the shared secret we register in the URL
+     * (or send as a header) is the whole gate — configured secret → required; no secret →
+     * refused in production (fail closed), accepted in dev for local testing. */
+    if (path === "/api/webhooks/bluebubbles" && method === "POST") {
       const raw = await readRaw(req);
-      const params = Object.fromEntries(new URLSearchParams(raw));
-      const token = twilioAuthToken();
-      const xml = (body) => { res.writeHead(200, { "content-type": "text/xml", ...corsHeaders(req) }); res.end(body); };
-      if (token) {
-        const base = (process.env.HOMEOPS_PUBLIC_URL || `http://localhost:${PORT}`).split(",")[0].trim().replace(/\/$/, "");
-        if (!twilioSignatureValid({ url: `${base}/api/webhooks/sms`, params, authToken: token, signature: req.headers["x-twilio-signature"] })) {
-          audit({ type: "sms.inbound", ok: false, error: "bad_signature" }, req);
-          return json(res, 403, { ok: false, error: "signature_failed" }, req);
+      let payload = null;
+      try { payload = raw ? JSON.parse(raw) : null; } catch { payload = null; }
+      const bb = bluebubblesConfig();
+      if (bb.webhookSecret) {
+        if (!secretMatches(webhookSecretPresented(req.headers, url), bb.webhookSecret)) {
+          audit({ type: "imessage.inbound", ok: false, error: "bad_secret" }, req);
+          return json(res, 403, { ok: false, error: "secret_failed" }, req);
         }
       } else if (IS_PROD) {
-        audit({ type: "sms.inbound", ok: false, error: "no_auth_token" }, req);
-        return json(res, 403, { ok: false, error: "sms_not_configured" }, req);
+        audit({ type: "imessage.inbound", ok: false, error: "no_webhook_secret" }, req);
+        return json(res, 403, { ok: false, error: "imessage_not_configured", message: "Set BLUEBUBBLES_WEBHOOK_SECRET and register the same value in the BlueBubbles webhook URL." }, req);
       }
-      const from = String(params.From ?? "");
-      const smsBody = String(params.Body ?? "").trim();
-      if (!from || !smsBody) { audit({ type: "sms.inbound", ok: false, error: "empty" }, req); return xml(twiml(null)); }
+      if (!payload) return json(res, 400, { ok: false, error: "malformed_json" }, req);
+      const msg = parseInboundWebhook(payload);
+      // Typing indicators, read receipts, server hellos: acknowledged, not acted on.
+      if (!msg || msg.ignored) return json(res, 200, { ok: true, ignored: msg?.type ?? "not_a_message" }, req);
+      // Our own outbound messages echo back through the same webhook.
+      if (msg.isFromMe) return json(res, 200, { ok: true, ignored: "from_me" }, req);
+      // The assistant never speaks into a group thread — it would be answering everyone.
+      if (msg.isGroup) return json(res, 200, { ok: true, ignored: "group_chat" }, req);
+      if (!msg.address || !msg.text) { audit({ type: "imessage.inbound", ok: false, error: "empty" }, req); return json(res, 200, { ok: true, ignored: "empty" }, req); }
 
-      /* IDEMPOTENCY, because Twilio retries.
-       *
-       * Twilio re-delivers a webhook it doesn't get a timely 200 from — and this handler runs
-       * the assistant, an LLM call, BEFORE it can answer. A slow model is therefore enough to
-       * produce a retry, and a retry ran the whole message again: a second conversation turn, a
-       * second plan, a second approval sitting in the family's queue for something they asked
-       * for once. Every mutating path in this product is idempotent except the one an external
-       * service is explicitly documented to repeat.
-       *
-       * Keyed on MessageSid, which is Twilio's own per-message id, and stored in the _system
-       * tenant because a text is deduplicated before we know whose it is — and because a
-       * keyword now fans out across households, so the record cannot live in any one of them.
-       * The cached reply is replayed verbatim: the retry exists because Twilio didn't hear the
-       * answer, so the answer is what it should get. */
-      const sid = String(params.MessageSid ?? params.SmsMessageSid ?? "").trim();
+      /* IDEMPOTENCY. The bridge can re-deliver after a reconnect, and this handler runs the
+       * assistant — an LLM call — before it answers. A duplicate must not become a second
+       * conversation turn, a second plan, a second approval in the family's queue. Keyed on
+       * the message GUID (the Mac's own per-message id) and stored in the _system tenant,
+       * because a text is deduplicated before we know whose it is. */
+      const sid = msg.guid;
       if (sid) {
         const seen = sysDoc(SMS_SEEN_FILE, {});
         const prior = seen[sid];
         if (prior) {
-          audit({ type: "sms.inbound", ok: true, replayed: true, messageSid: sid }, req);
-          return xml(twiml(prior.replyText ?? null));
+          audit({ type: "imessage.inbound", ok: true, replayed: true, messageGuid: sid }, req);
+          return json(res, 200, { ok: true, replayed: true, replied: !!prior.replyText }, req);
         }
       }
-      const r = await handleInboundSms({ from, body: smsBody });
+      const r = await handleInboundSms({ from: msg.address, body: msg.text, chatGuid: msg.chatGuid });
       if (sid) {
-        // Prune on write: a busy deployment must not accumulate every message id forever, and
-        // a retry that arrives a day later is a different conversation, not a duplicate.
+        // Prune on write: a busy deployment must not accumulate every message id forever.
         const seen = sysDoc(SMS_SEEN_FILE, {});
         const cutoff = Date.now() - SMS_SEEN_TTL_MS;
         for (const [k, v] of Object.entries(seen)) if (!v?.at || v.at < cutoff) delete seen[k];
@@ -942,11 +939,13 @@ const handleRequest = async (req, res) => {
         putSysDoc(SMS_SEEN_FILE, seen);
       }
       if (r.unknownSender) {
-        audit({ type: "sms.inbound", ok: false, error: "unknown_or_unverified_sender" }, req);
-        return xml(twiml(null));
+        audit({ type: "imessage.inbound", ok: false, error: "unknown_or_unverified_sender" }, req);
+        return json(res, 200, { ok: true, ignored: "unknown_sender" }, req);
       }
-      audit({ type: "sms.inbound", ok: true, actorId: r.actorId, conversationId: r.conversationId, kind: r.kind }, req);
-      return xml(twiml(r.replyText));
+      // The answer goes back over the same bridge, into the same thread.
+      const delivery = r.replyText ? await replyToSender({ from: msg.address, chatGuid: msg.chatGuid, text: r.replyText }) : { ok: false, error: "no_reply" };
+      audit({ type: "imessage.inbound", ok: true, actorId: r.actorId, conversationId: r.conversationId, kind: r.kind, replied: delivery.ok, replyError: delivery.ok ? undefined : delivery.error }, req);
+      return json(res, 200, { ok: true, handled: true, kind: r.kind, reply: r.replyText ?? null, replied: delivery.ok, replyError: delivery.ok ? undefined : delivery.error }, req);
     }
 
     // RevenueCat webhook (C1.5) — the ONLY writer of plan state. Fail closed:

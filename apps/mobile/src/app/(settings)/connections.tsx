@@ -82,13 +82,15 @@ export default function ConnectionsScreen() {
    * is necessary: whether or not a custom HTTP is set up, if a webhook receiver is set up. I'm
    * not even sure if that will be used often. And text messaging is currently, even though
    * there's credentials, not fully vetted and accurate and active, so it doesn't really even
-   * need to be there yet — Twilio has not approved my A2P verification."
+   * need to be there yet."
    *
    * Hidden rather than deleted. A connector that isn't ready is a row that answers a question
    * nobody asked and invites one that has no good answer ("why is this offline?"). They come
    * back on their own the moment they're genuinely usable — nothing to remember to re-enable,
-   * which is the failure mode of commenting a feature out. */
-  const NOT_YET = /webhook|custom http|text messag|twilio|sms/i;
+   * which is the failure mode of commenting a feature out. Texting left this list on
+   * 2026-09-17: the carrier gateway it was waiting on is gone, replaced by the household's
+   * own iMessage bridge (BlueBubbles), which is a real thing to set up and see. */
+  const NOT_YET = /webhook|custom http/i;
   const shownConnectors = connectors.filter((c) => !(NOT_YET.test(c.name) && !c.live));
 
   const cardY = useRef<Record<string, number>>({});

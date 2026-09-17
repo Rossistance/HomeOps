@@ -184,7 +184,8 @@ export default function MealsScreen() {
 
 
 
-  const openCount = groceries.filter((g) => g.status !== "done").length;
+  // Archived items are not "to get" — same rule as the Groceries screen.
+  const openCount = groceries.filter((g) => g.status !== "done" && g.status !== "archived").length;
   const visibleDayKeys = selectedDay ? week.map(dayKey).filter((k) => k === selectedDay) : week.map(dayKey);
   const anyVisibleMeals = visibleDayKeys.some((k) => mealsFor(k).length > 0);
   const unscheduled = slotFilter ? (byDay["unscheduled"] ?? []).filter((m) => m.slot === slotFilter) : byDay["unscheduled"] ?? [];

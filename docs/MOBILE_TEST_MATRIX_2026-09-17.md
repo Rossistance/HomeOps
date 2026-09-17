@@ -25,7 +25,7 @@ Result codes: ✅ pass · ⚠ pass with defect noted · ❌ fail · ⏭ verified
 | L5 | Lock | Correct PIN signs in; first run lands on onboarding | ✅ |
 | L6 | Onboarding | All pages advance; profile values round-trip unchanged; helpers page says none exist yet; Enter lands on Today | ⚠→fixed: the closing summary hard-coded “No helpers yet” and “Connect Gmail and Google Calendar” — false for this household (10 helpers, Google syncing). `Onboarding.tsx` now reads the real count and connection |
 | L7 | Session | Background then foreground keeps the session and screen | |
-| L8 | Deep link | `familios://` opens/foregrounds the app signed in | |
+| L8 | Deep link | `familios://` opens/foregrounds the app signed in | ✅ `familios://activity` and `familios://help` open the signed-in app on those screens |
 | L9 | Sign out | Settings → sign out returns to the lock screen; back cannot re-enter | |
 
 ## 1. Today (`(home)/index.tsx`)
@@ -127,48 +127,48 @@ Google → FamiliOS happens on Sync (`POST /api/calendar/sync-all`, the same cal
 
 | ID | Check | Result |
 |---|---|---|
-| K1 | Scope chips: Everyone / My Nest / Just me | |
-| K2 | Lists row; Create a new list `TEST list` → appears → hold-to-delete | |
-| K3 | New task `TEST — delete me` → appears with owner colour | |
-| K4 | Task sheet: title, notes, date/time, add/remove end, reminder, assignee, priority, On the calendar, Delete | |
-| K5 | Mark done → Completed section; reopen → back | |
-| K6 | Archived section lists archived count | |
+| K1 | Scope chips: Everyone / My Nest / Just me | ✅ Everyone / Me / Others, plus Family / Melissa + Ross / Just me and All / Groceries / Reminders / Tasks list chips |
+| K2 | Lists row; Create a new list `TEST list` → appears → hold-to-delete | ✅ New list prompt → “TEST List” chip appears selected with its own empty state; hold → “Delete "TEST List"? The empty list is removed.” → gone. (Sim note: the prompt's field must be tapped before typing or keystrokes land in the quick-add behind it.) |
+| K3 | New task `TEST — delete me` → appears with owner colour | ✅ quick-add expands to Due + Who-can-see chips; task listed under TASKS · 1 with owner dot. ⚠ the row's done-circle is not a separately labelled control (a11y). ⚠ during a Render redeploy the add surfaced “Something went wrong (bad_json)” — the raw client code, not the “Couldn't reach FamiliOS” state |
+| K4 | Task sheet: title, notes, date/time, add/remove end, reminder, assignee, priority, On the calendar, Delete | ✅ title, notes, assign-to chips, date/time switch → Starts date + time, Add end time, Remind chips, priority, who-can-see, “Add to the calendar” (enabled once dated), Delete task; Save changes persisted date + assignee |
+| K5 | Mark done → Completed section; reopen → back | ✅ done-circle → Completed (1), expandable, struck-through row; reopened → back on the list |
+| K6 | Archived section lists archived count | ✅ Archived, 51 tasks |
 | K7 | Assign Chore (from Today) opens the chore sheet | |
 
 ## 7. Meals & Groceries (`(home)/meals.tsx`, `groceries.tsx`)
 
 | ID | Check | Result |
 |---|---|---|
-| M1 | Week strip; day select | |
-| M2 | Add meal `TEST — delete me`: title, servings, ingredients, recipe URL, notes, clear time | |
-| M3 | Saved meal shows; ingredients reach Groceries; Open grocery list works | |
-| M4 | Edit / Remove meal → gone; grocery items unlinked | |
-| M5 | Groceries: add item, rename, save name, cancel; open item → task editor; Share list (not fired) | |
+| M1 | Week strip; day select | ✅ 7-day strip from today, meal-type chips, Grocery list card with count |
+| M2 | Add meal `TEST — delete me`: title, servings, ingredients, recipe URL, notes, clear time | ✅ inline composer: title, date chips (No date/Today/…), meal-type chips, ingredients textarea with live “2 ingredients — added to Groceries when you save.”; Add meal → “Meal added.” |
+| M3 | Saved meal shows; ingredients reach Groceries; Open grocery list works | ✅ card under TODAY with 6:00 PM usually · dinner, “2 ingredients · 2 needed”, Groceries / Calendar / Edit / Remove; Grocery list 27 → 29 items |
+| M4 | Edit / Remove meal → gone; grocery items unlinked | ✅ Edit sheet: title, day, slot, time (“Not set — uses the usual dinner time”), servings, ingredients, recipe link, notes, Save changes; Remove → “Keep ingredients / Remove ingredients too / Cancel” → meal gone, Grocery list back to 27 |
+| M5 | Groceries: add item, rename, save name, cancel; open item → task editor; Share list (not fired) | ✅ add item → To-get row with checkbox; long-press → Details… (task editor) / Rename (inline, Save name) / Remove (confirm); Share list sheet shows household access per member and an outside-number field with Review & send disabled until valid (not fired). ❌→fixed: header counted archived items (“This week · 28 items · 0 of 28 in the cart” over one live item); Meals card count had the same flaw |
 
 ## 8. Inbox (`(home)/inbox.tsx`, `approval-sheet.tsx`)
 
 | ID | Check | Result |
 |---|---|---|
-| I1 | Segments: Approvals / Updates / Chats | |
-| I2 | Updates: notifications list, mark read on tap | |
+| I1 | Segments: Approvals / Updates / Chats | ✅ Approvals / Updates / Chats (28). ⚠ “Recently decided” rows show raw tool ids (`sms.send`, `homeops.create_approval`) rather than plain language |
+| I2 | Updates: notifications list, mark read on tap | ✅ notifications list with relative times (none unread on this account, so mark-read not exercised); Delivery check “Send test” present (not fired) |
 | I3 | Approvals: pending rows open the sheet with real step input; Deny/Approve present (not fired on sends) | |
-| I4 | Chats: conversations open in Ask | |
+| I4 | Chats: conversations open in Ask | ✅ chat row opens the thread in Ask with its space chip |
 
 ## 9. Activity (`(home)/activity.tsx`)
 
 | ID | Check | Result |
 |---|---|---|
-| V1 | Runs list with status words; expand; Clear finished run | |
-| V2 | Memory list with delete (not fired) | |
-| V3 | Backend-unreachable empty state not shown when online | |
+| V1 | Runs list with status words; expand; Clear finished run | ⚠ no Runs section rendered for this account today (only Memory) — could not exercise expand / Clear finished run |
+| V2 | Memory list with delete (not fired) | ✅ memory list with per-item delete (not fired) |
+| V3 | Backend-unreachable empty state not shown when online | ✅ no offline state while online |
 
 ## 10. Help (`(home)/help.tsx`)
 
 | ID | Check | Result |
 |---|---|---|
-| P1 | Ask mode / Offer mode from Today buttons | |
-| P2 | Member picker, message field, Link task / Link event pickers | |
-| P3 | Send disabled until valid; send **not fired** | |
+| P1 | Ask mode / Offer mode from Today buttons | ✅ Ask for help / Offer help modes (also reachable from Today's buttons) |
+| P2 | Member picker, message field, Link task / Link event pickers | ✅ member picker, plan picker (Show all 9), task picker, message field. ❌→fixed: all-day events in the plan picker read as the evening before in device time (“Repatha Injection — Sat, Sep 19 · 11:00 PM”); now the household date + “All day” |
+| P3 | Send disabled until valid; send **not fired** | ⏭ button reads “Pick someone to ask” until a member is chosen, then “Ask Melissa” with the message — not fired |
 
 ## 11. Profile (`(home)/profile.tsx`)
 

@@ -295,27 +295,27 @@ export const PROVIDER_SETUP_GUIDES: Record<string, ProviderSetupGuide> = {
 export const CONNECTOR_SETUP_GUIDES: Record<string, ConnectorSetupGuide> = {
   sms: {
     id: "sms",
-    consoleName: "Twilio Console",
-    consoleUrl: "https://console.twilio.com",
+    consoleName: "BlueBubbles Server (on the household's cloud Mac)",
+    consoleUrl: "https://docs.bluebubbles.app/server/",
     steps: [
-      "Sign in to the Twilio Console → copy the Account SID and Auth Token from the dashboard home.",
-      "Buy or use an existing Twilio phone number (Phone Numbers → Manage → Buy a number) — this is the \"From number\".",
-      "US traffic: register an A2P 10DLC campaign and Messaging Service (required by US carriers, or sends fail with error 30034) — then copy the Messaging Service SID.",
-      "Enter the Account SID, Auth Token, From number, and (if applicable) Messaging Service SID in Connections → Text Messaging, or set the equivalent env vars below.",
-      "For two-way texting, point the number's inbound webhook at POST {deployment}/api/webhooks/sms — server/sms.mjs validates Twilio's request signature before responding.",
+      "On the cloud Mac (HostMyApple, 4 GB), sign in to iMessage with the household's shared Apple ID and install BlueBubbles Server; run it headless so it fits the machine.",
+      "In BlueBubbles Server, set a server password — that password is the API credential — and note the server URL your tunnel exposes (Cloudflare Tunnel or Tailscale).",
+      "Choose a webhook secret and register the webhook in BlueBubbles Server as POST {deployment}/api/webhooks/bluebubbles?secret=<secret> for the New Messages event.",
+      "Enter the server URL, password and webhook secret in Connections → iMessage, or set the env vars below on the deployment.",
+      "Run the health check: it pings the Mac with the password. Then have a verified family member text the number — server/sms.mjs matches the sender against every household's contact methods and answers in the same thread.",
     ],
     configFields: [
-      { key: "accountSid", label: "Account SID", env: "TWILIO_ACCOUNT_SID", required: true },
-      { key: "authToken", label: "Auth Token", env: "TWILIO_AUTH_TOKEN", required: true },
-      { key: "fromNumber", label: "From number", env: "TWILIO_FROM_NUMBER", required: true },
-      { key: "messagingServiceSid", label: "Messaging Service SID (A2P 10DLC)", env: "TWILIO_MESSAGING_SERVICE_SID", required: false },
+      { key: "serverUrl", label: "BlueBubbles server URL", env: "BLUEBUBBLES_URL", required: true },
+      { key: "password", label: "Server password", env: "BLUEBUBBLES_PASSWORD", required: true },
+      { key: "webhookSecret", label: "Webhook secret", env: "BLUEBUBBLES_WEBHOOK_SECRET", required: false },
+      { key: "sendMethod", label: "Send method", env: "BLUEBUBBLES_SEND_METHOD", required: false },
     ],
     unlocksUCs: [{ id: "UC-14", label: "Morning Status Text" }],
-    verify: "Connections → Text Messaging → Run health check, or approve a \"Send text\" tool run and confirm the message arrives on a real phone.",
+    verify: "Connections → iMessage → Run health check, or approve a \"Send text\" tool run and confirm the message arrives on a real phone.",
     sandboxNote:
-      "Until real Twilio credentials exist, sms.send runs against the WP-006 sandbox twin (HOMEOPS_CONNECTOR_SANDBOX=1) and " +
-      "logs the would-be text to sandbox_effects.json instead of calling Twilio — UC-14 verifies green in sandbox mode. A real " +
-      "SMS only ever goes out after real credentials AND explicit user go-ahead (external send authorization stays with the user).",
+      "Until a BlueBubbles server is configured, sms.send runs against the WP-006 sandbox twin (HOMEOPS_CONNECTOR_SANDBOX=1) and " +
+      "logs the would-be text to sandbox_effects.json instead of calling the Mac — UC-14 verifies green in sandbox mode. A real " +
+      "text only ever goes out after real credentials AND explicit user go-ahead (external send authorization stays with the user).",
   },
   http: {
     id: "http",

@@ -21,7 +21,7 @@ function serviceIcon(id: string, name: string): string {
   const k = `${id} ${name}`.toLowerCase();
   if (k.includes("gmail") || k.includes("mail")) return "envelope";
   if (k.includes("calendar")) return "calendar";
-  if (k.includes("sms") || k.includes("twilio") || k.includes("messag") || k.includes("text")) return "paperplane";
+  if (k.includes("sms") || k.includes("bluebubbles") || k.includes("imessage") || k.includes("messag") || k.includes("text")) return "paperplane";
   if (k.includes("weather")) return "sun.max";
   if (k.includes("webhook")) return "link";
   return "link";
@@ -37,7 +37,7 @@ function benefits(id: string, name: string): string[] {
     "Family events stay in sync",
     "Helpers plan around your real schedule",
   ];
-  if (k.includes("sms") || k.includes("twilio") || k.includes("messag")) return [
+  if (k.includes("sms") || k.includes("bluebubbles") || k.includes("imessage") || k.includes("messag")) return [
     "Family members add grocery items by text",
     "Updates reach family the way they prefer",
   ];

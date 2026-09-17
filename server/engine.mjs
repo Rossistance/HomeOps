@@ -1044,7 +1044,7 @@ function sweepLegacyParkedEnabled() {
 // What a family would call the thing a connector-parked run is stuck waiting on —
 // mirrors the ActivityMemory.tsx plain-language mapping (ISS-014) so the reason a
 // run shows in the Inbox/Activity matches the language used everywhere else.
-const PARK_CONNECTOR_LABEL = { gmail: "Google", gcal: "Google", google: "Google", calendar: "Google", sms: "text messaging", twilio: "text messaging" };
+const PARK_CONNECTOR_LABEL = { gmail: "Google", gcal: "Google", google: "Google", calendar: "Google", sms: "text messaging", bluebubbles: "text messaging", imessage: "text messaging" };
 function parkConnectorLabel(toolId) {
   const key = String(toolId ?? "").split(".")[0].toLowerCase();
   return PARK_CONNECTOR_LABEL[key] ?? (key || "needed");

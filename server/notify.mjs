@@ -102,7 +102,7 @@ export async function pushToMember({ householdId, actorId, title, body, data, ti
  * Real routing per channel, honest about what's actually available:
  *   • in_app / dashboard → always works (durable notification record the app shows)
  *   • email              → gmail.send via the household's connected Google account
- *   • sms  (Phone/Text)  → the sms.send connector, if configured/ready
+ *   • sms  (Phone/Text)  → the sms.send connector (iMessage over BlueBubbles), if configured/ready
  * Never throws. Returns { ok, channel, delivered, needsSetup?, message }.
  *
  * Callers pass EITHER a methodId (resolved from the server-owned contact-methods
@@ -316,7 +316,7 @@ async function deliverViaChannel({ session, channel, to, subject: rawSubject, bo
       if (!to) return { ok: false, channel, delivered: false, message: "No phone number on this contact method." };
       const sms = listConnectors().find((c) => c.id === "sms");
       if (!sms || !["configured", "connected", "ready", "healthy"].includes(readinessOf(sms))) {
-        return { ok: false, channel, delivered: false, needsSetup: "sms", message: "Configure the Text Messaging connector (Twilio) in Connections to deliver by text." };
+        return { ok: false, channel, delivered: false, needsSetup: "sms", message: "Connect the iMessage bridge (BlueBubbles) in Connections to deliver by text." };
       }
       const r = await executeTool("sms.send", { to, body: text }, { actorId: session.actorId, requestId: "notify", approvalConsumed: true });
       const ok = !!r?.ok;

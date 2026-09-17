@@ -19,7 +19,7 @@
 //
 // HONEST COVERAGE — see SANDBOX_COVERAGE below and server/test/README-sandbox.md.
 // Mocked: google (gmail, calendar, drive, google-home/SDM), microsoft365 (outlook,
-// calendar, onedrive), slack, dropbox, amazon-alexa, and the sms/Twilio connector.
+// calendar, onedrive), slack, dropbox, amazon-alexa, and the sms/BlueBubbles connector.
 // NOT mocked (fail closed / real path, honestly): notion, todoist, ticktick, and the
 // no-credential connectors (weather, rss, http, web, browser) which already run for
 // real without provisioned secrets.
@@ -389,8 +389,10 @@ export async function sandboxConnectorExecute(toolId, input = {}, ctx = {}) {
       recipient: input.to, content: String(input.body),
       actorId: ctx.actorId, householdId: ctx.householdId,
     });
-    // Real Twilio shape: { sent, sid, to }. Annotated sandbox:true at the step-result level.
-    return { ok: true, result: { sent: true, sid: nextId("SBX-SM"), to: input.to, sandbox: true }, sandbox: true };
+    // Real bridge shape: { sent, guid, chatGuid, to, action }. `sid` stays as the message id's
+    // older name so nothing reading a step result has to change. Annotated sandbox:true.
+    const guid = nextId("SBX-SM");
+    return { ok: true, result: { sent: true, guid, sid: guid, chatGuid: null, to: input.to, action: "sent", sandbox: true }, sandbox: true };
   }
   return { ok: false, error: "sandbox_unmocked_tool", message: `No sandbox mock for connector tool ${toolId}.`, sandbox: true };
 }

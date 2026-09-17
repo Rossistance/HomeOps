@@ -1,38 +1,35 @@
-// Two-way SMS gateway: family members TEXT FamiliOS and get the assistant's answer
-// back in the same message thread. Twilio delivers inbound texts to
-// POST /api/webhooks/sms; we validate Twilio's signature, match the sender against
-// the contact-methods registry (VERIFIED + OPTED-IN phone methods only — strangers
-// get silence), run the message through the same assistant brain as Ask FamiliOS,
-// persist the exchange to a durable per-member SMS conversation, and reply via
-// TwiML. Approval-gated actions never execute from a text: the reply says the plan
-// is drafted and waiting in the app — same approval-first model as everywhere else.
+// Two-way texting: family members text the household's iMessage number and get the
+// assistant's answer back in the same thread. The BlueBubbles server on the cloud Mac
+// posts every inbound message to POST /api/webhooks/bluebubbles (see bluebubbles.mjs for
+// the wire); this module decides WHOSE text it is — the sender is matched against every
+// household's contact-methods registry (VERIFIED + OPTED-IN phone methods only; strangers
+// get nothing back), the message runs through the same assistant brain as Ask FamiliOS in
+// that household's tenant, the exchange persists to a durable per-member text
+// conversation, and the reply goes back over the bridge into the same chat. Approval-gated
+// actions never execute from a text: the reply says the plan is drafted and waiting in the
+// app — the same approval-first model as everywhere else.
+//
+// One number, many families. That is the whole design: this deployment's Apple ID serves
+// every household, so nothing in the transport can tell two families apart. Adding a
+// family is adding a tenant; adding a person is adding a verified Phone/Text method. No
+// routing table to maintain — the registry IS the routing table.
 import crypto from "node:crypto";
 import {
   listContactMethods, getMember, listConversations, putConversation,
-  appendConversationMessage, getSecret, patchContactMethod, appendAudit,
+  appendConversationMessage, patchContactMethod, appendAudit,
   forEachTenant, runWithTenant,
 } from "./store.mjs";
 import { runAssistantAgent } from "./assistant-agent.mjs";
+import { sendText, rememberChatGuid, rememberedChatGuid } from "./bluebubbles.mjs";
 
-/* ---------------------------- carrier keyword handling ----------------------------
- * Every A2P 10DLC and toll-free campaign asserts that a recipient can text STOP to stop
- * and HELP for help. FamiliOS asserted exactly that in its campaign submission and did NOT
- * implement it: the inbound handler passed the whole body straight to the assistant, so
- * "STOP" was answered by an LLM and the contact method stayed "Opted In" forever. A
- * reviewer who tests the flow finds it broken, which is an independent rejection cause on
- * top of the entity classification — and a family who asks to be left alone keeps getting
- * texts. This is the fix.
- *
- * Keyword sets follow Twilio's Advanced Opt-Out standard keywords, which are what carriers
- * enforce. STOP, START and UNSTOP are reserved and non-removable on Twilio's side; on
- * toll-free senders only START/UNSTOP undo a block (YES does not), which is why YES is
- * accepted here as a courtesy but the HELP text names START.
- *
- * Division of labour: Twilio blocks the TRANSPORT (and, with Advanced Opt-Out enabled on
- * the Messaging Service, may answer before we ever see the message). This handler keeps
- * FamiliOS's OWN registry honest, so notify.mjs stops trying to reach someone who left and
- * the audit log can evidence that every opt-out was honoured the moment it arrived. Both
- * layers are wanted; neither substitutes for the other. */
+/* ---------------------------- STOP / START / HELP ----------------------------
+ * iMessage has no carrier in the loop, so no campaign rule forces these — but a person who
+ * texts STOP is asking to be left alone, and that request is honoured before any model
+ * sees the message, whatever the transport. (When the Mac falls back to green-bubble SMS
+ * for a non-Apple phone, the carrier expectation applies again, so the keyword set stays
+ * the industry one.) The handler keeps FamiliOS's OWN registry honest: notify.mjs stops
+ * trying to reach someone who left, and the audit log evidences that every opt-out was
+ * honoured the moment it arrived. YES is accepted as a courtesy; HELP names START. */
 const OPT_OUT_WORDS = new Set(["stop", "stopall", "unsubscribe", "cancel", "end", "quit", "revoke", "optout"]);
 const OPT_IN_WORDS = new Set(["start", "unstop", "yes"]);
 const HELP_WORDS = new Set(["help", "info"]);
@@ -74,8 +71,7 @@ export function smsHelpText() {
  * doesn't apply to this sender, so the caller can fall through to normal handling.
  *
  * Unknown numbers get null (silence), matching the stranger policy everywhere else in this
- * module: answering would confirm whether a number is registered to a household. Twilio's
- * own standard keyword handling covers the carrier obligation for numbers we don't know.
+ * module: answering would confirm whether a number is registered to a household.
  */
 export function applySmsKeyword({ kind, from }) {
   const methods = smsMethodsForNumber(from);
@@ -128,27 +124,8 @@ export function applySmsKeyword({ kind, from }) {
   return null;
 }
 
-/** The auth token also signs Twilio's webhooks (X-Twilio-Signature). */
-export function twilioAuthToken() {
-  return process.env.TWILIO_AUTH_TOKEN || getSecret("sms", "authToken") || null;
-}
-
-/** Twilio signature: HMAC-SHA1(base64) over the exact webhook URL + POST params
- *  concatenated as name+value in alphabetical name order. */
-export function twilioSignature(url, params, authToken) {
-  const data = url + Object.keys(params).sort().map((k) => k + params[k]).join("");
-  return crypto.createHmac("sha1", authToken).update(Buffer.from(data, "utf-8")).digest("base64");
-}
-
-export function twilioSignatureValid({ url, params, authToken, signature }) {
-  if (!authToken || !signature) return false;
-  const expected = twilioSignature(url, params, authToken);
-  const a = Buffer.from(expected), b = Buffer.from(String(signature));
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
 /** Compare phone numbers by their trailing 10 digits (US-centric but tolerant of
- *  +1 / formatting differences between Twilio's E.164 and hand-entered methods). */
+ *  +1 / formatting differences between the Mac's E.164 and hand-entered methods). */
 export function samePhone(a, b) {
   const da = String(a ?? "").replace(/\D/g, ""), db = String(b ?? "").replace(/\D/g, "");
   if (da.length < 7 || db.length < 7) return false;
@@ -167,8 +144,9 @@ export function resolveSmsSender(from) {
   return { method, member };
 }
 
-/** Find (or create) the member's durable SMS thread — the same server-owned
- *  conversation model the web/mobile chat uses, so the history shows up there too. */
+/** Find (or create) the member's durable text thread — the same server-owned
+ *  conversation model the web/mobile chat uses, so the history shows up there too.
+ *  The channel stays "sms" in storage: it predates the bridge and every reader keys on it. */
 export function smsConversationFor(member, householdId) {
   const existing = listConversations((c) =>
     c.householdId === householdId && c.actorId === member.actorId && c.channel === "sms",
@@ -182,7 +160,7 @@ export function smsConversationFor(member, householdId) {
   });
 }
 
-const SMS_MAX = 1500; // ~10 segments; Twilio splits long bodies automatically
+const SMS_MAX = 1500; // iMessage has no segment limit; this is the point past which an answer stops being a text
 
 /** Turn an assistant result into an SMS-sized, honest reply. */
 export function smsReplyText(out) {
@@ -203,9 +181,9 @@ export function smsReplyText(out) {
 }
 
 /**
- * Handle a validated inbound SMS. Returns { replyText, conversationId } — the
- * caller renders TwiML. The assistant runs AS the sender (their role gates the
- * tool catalog exactly like a signed-in session).
+ * Handle an authenticated inbound text. Returns { replyText, conversationId, … } — the
+ * caller sends the reply back over the bridge (replyToSender). The assistant runs AS the
+ * sender (their role gates the tool catalog exactly like a signed-in session).
  */
 /* WHOSE TEXT IS THIS?
  *
@@ -216,8 +194,8 @@ export function smsReplyText(out) {
  * Multi-tenant SMS was broken before it shipped, and it failed the quiet way: no error, no log,
  * just an assistant that never answers.
  *
- * Resolution is by SENDER, not by the `To` number, because a deployment shares one Twilio
- * number across every household — `To` cannot tell two families apart. So: ask every household
+ * Resolution is by SENDER, because a deployment shares one iMessage number across every
+ * household — the receiving side cannot tell two families apart. So: ask every household
  * whether it knows this number.
  */
 export async function householdsForNumber(from) {
@@ -229,9 +207,15 @@ export async function householdsForNumber(from) {
   return hits;
 }
 
-export async function handleInboundSms({ from, body }) {
+export async function handleInboundSms({ from, body, chatGuid = null }) {
   const matches = await householdsForNumber(from);
   if (matches.length === 0) return { replyText: null, unknownSender: true };
+
+  // The Mac told us which thread this came from; every household that knows the number
+  // remembers it, so its replies and notifications land in the same conversation.
+  if (chatGuid) {
+    for (const m of matches) await runWithTenant(m.householdId, () => rememberChatGuid(from, chatGuid));
+  }
 
   const keyword = classifySmsKeyword(body);
   if (keyword) {
@@ -309,11 +293,16 @@ async function respondInTenant({ from, body }) {
   return { replyText, conversationId: conv.id, actorId: member.actorId, kind: out.ok ? "answer" : "error" };
 }
 
-const escapeXml = (s) => String(s).replace(/[<>&'"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c]));
-
-/** TwiML: replying in the SAME thread is just answering the webhook with a Message. */
-export function twiml(replyText) {
-  return replyText
-    ? `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escapeXml(replyText)}</Message></Response>`
-    : `<?xml version="1.0" encoding="UTF-8"?><Response></Response>`;
+/**
+ * Send the reply back to whoever texted, in the thread they used. Unlike a carrier
+ * webhook there is no reply-in-the-response: the answer is its own outbound message
+ * over the bridge. Never throws — the audit log records a failed reply.
+ */
+export async function replyToSender({ from, chatGuid = null, text }) {
+  if (!text) return { ok: false, error: "no_reply" };
+  try {
+    return await sendText({ to: from, chatGuid: chatGuid ?? rememberedChatGuid(from), text });
+  } catch (e) {
+    return { ok: false, error: "send_failed", message: String(e?.message ?? e) };
+  }
 }

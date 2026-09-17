@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ScrollView, TextInput, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
 import { api, type CalendarSubscription, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
+import { allDayDateKey } from "@/lib/event-days";
 import { memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
@@ -21,9 +22,18 @@ import {
 import { MemberAvatar } from "./profile";
 
 const HOUR = 3600e3;
-const fmtWhen = (iso: string | null) => {
-  if (!iso) return "";
-  const d = new Date(iso);
+/** "Thu, Sep 17 · 4:30 PM" — or, for an all-day event, the household's DATE and "All day".
+ *  An all-day start is stored as household midnight; read as an instant on a phone in
+ *  another zone it becomes the evening before (cloud simulator, 2026-09-17: Sunday's
+ *  Repatha listed here as "Sat, Sep 19 · 11:00 PM"). */
+const fmtWhen = (e: Pick<EventRec, "startAt" | "allDay">) => {
+  if (!e.startAt) return "";
+  if (e.allDay) {
+    const k = allDayDateKey(e.startAt);
+    if (!k) return "";
+    return `${new Date(`${k}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })} · All day`;
+  }
+  const d = new Date(e.startAt);
   if (isNaN(+d)) return "";
   return `${d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })} · ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
 };
@@ -104,8 +114,8 @@ export default function HelpScreen() {
   // Prefill differs by direction: "Can you…?" when asking, "I can help…" when offering.
   const prefillForEvent = (e: EventRec) =>
     mode === "offer"
-      ? `I can help with ${e.title}${e.startAt ? ` (${fmtWhen(e.startAt)})` : ""}.`
-      : `Can you help with ${e.title}${e.startAt ? ` (${fmtWhen(e.startAt)})` : ""}?`;
+      ? `I can help with ${e.title}${e.startAt ? ` (${fmtWhen(e)})` : ""}.`
+      : `Can you help with ${e.title}${e.startAt ? ` (${fmtWhen(e)})` : ""}?`;
   const prefillForTask = (t: TaskRec) =>
     mode === "offer" ? `I can help with "${t.title}".` : `Can you take care of "${t.title}"?`;
 
@@ -297,7 +307,7 @@ export default function HelpScreen() {
                       <Sym name={selected ? "checkmark.circle.fill" : "calendar"} size={16} color={selected ? colors.ember : colors.textFaint} />
                       <View style={{ flex: 1, gap: 1 }}>
                         <T kind="subMedium" color={colors.text} numberOfLines={1}>{e.title}</T>
-                        <T kind="detail" numberOfLines={1}>{fmtWhen(e.startAt)}{e.location ? ` · ${e.location}` : ""}</T>
+                        <T kind="detail" numberOfLines={1}>{fmtWhen(e)}{e.location ? ` · ${e.location}` : ""}</T>
                       </View>
                     </PressableScale>
                   );

@@ -1,10 +1,9 @@
-// CARRIER KEYWORDS — STOP / START / HELP over inbound SMS.
+// KEYWORDS — STOP / START / HELP over inbound texts.
 //
-// FamiliOS's A2P campaign submission asserted "users opt out by replying STOP… HELP returns
-// help text". It did not: handleInboundSms passed the whole body to the assistant, so STOP
-// was answered by an LLM and the contact method stayed "Opted In" forever. A reviewer who
-// tests the flow finds it broken — an independent rejection cause on top of the entity
-// classification — and a family who asks to be left alone keeps getting texts.
+// A person who texts STOP is asking to be left alone, whatever the transport carries it.
+// Before this was honoured, handleInboundSms passed the whole body to the assistant, so STOP
+// was answered by an LLM and the contact method stayed "Opted In" forever — and a family
+// who asked to be left alone kept getting texts.
 //
 // The invariants that matter here are mostly about what must NOT happen: a keyword must not
 // reach the model, an opt-out must not depend on being opted in, and a texted START must
@@ -14,17 +13,15 @@ import assert from "node:assert/strict";
 import { startServer, stopServer, makeSession } from "./harness.mjs";
 import { classifySmsKeyword } from "../sms.mjs";
 
-const form = (params) => new URLSearchParams(params).toString();
-const post = (ctx, params) => ctx.fetch("/api/webhooks/sms", {
+let n = 0;
+/** Post an inbound text the way BlueBubbles Server does: JSON, one handle, one chat. */
+const post = (ctx, { From, Body }) => ctx.fetch("/api/webhooks/bluebubbles", {
   method: "POST",
-  headers: { "content-type": "application/x-www-form-urlencoded" },
-  body: form(params),
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ type: "new-message", data: { guid: `p:0/kw-${++n}`, text: Body, isFromMe: false, handle: { address: From, service: "iMessage" }, chats: [{ guid: `iMessage;-;${From}` }] } }),
 });
-const reply = async (r) => {
-  const xml = await r.text();
-  const m = xml.match(/<Message>([\s\S]*?)<\/Message>/);
-  return m ? m[1] : null;
-};
+/** The reply the handler composed for the sender, or null when it composed none. */
+const reply = async (r) => { const d = await r.json(); return d.reply ?? null; };
 
 const VERIFIED = "(555) 010-7711";
 const UNVERIFIED = "(555) 010-7722";
@@ -127,8 +124,6 @@ test("NEGATIVE: START on an UNVERIFIED number is refused, not granted", async ()
   // person completes, never something a single inbound text can conjure.
   const r = await post(ctx, { From: "+15550107722", Body: "start" });
   const text = await reply(r);
-  // TwiML is XML, so the apostrophe arrives as &apos; here (Twilio unescapes it before the
-  // recipient sees it). Assert on a fragment the escaping can't touch.
   assert.match(text, /verified yet/i);
   const m = await methodFor(UNVERIFIED);
   assert.notEqual(m.optInStatus, "Opted In", "no consent was created");
@@ -157,8 +152,7 @@ test("HELP returns programme name, opt-out instruction, rates notice and a conta
 /* ---- strangers ---- */
 
 test("NEGATIVE: a keyword from an unknown number gets silence, not a probe signal", async () => {
-  // Answering would confirm whether a number is registered to some household. Twilio's own
-  // standard keyword handling covers the carrier obligation for numbers we don't know.
+  // Answering would confirm whether a number is registered to some household.
   for (const body of ["STOP", "HELP", "START"]) {
     const r = await post(ctx, { From: "+15559998888", Body: body });
     assert.equal(r.status, 200);
