@@ -1062,7 +1062,7 @@ export default function AskScreen() {
                 Ask Famili{session?.actorName ? `, ${session.actorName.split(" ")[0]}` : ""}
               </T>
               <T kind="sub" center style={{ maxWidth: 300 }}>
-                Tell me what your family needs. I'll answer, or draft a plan you can approve and run.
+                Tell me what your family needs. I'll look things up, do them, and tell you what I did.
               </T>
               {activeRun ? (
                 <PressableScale

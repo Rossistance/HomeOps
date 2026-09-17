@@ -216,7 +216,11 @@ export function updateHelper(id, patch, session) {
 export function deleteHelper(id) {
   const h = getAgent(id);
   if (!h) return { error: "not_found" };
-  if (h.system) return { error: "system_helper_protected", message: "This is the household's own assistant — it can be edited, but not deleted." };
+  /* Only the household's own assistant is undeletable: it is the identity chat acts as. The
+   * old seed also flagged its use-case agents `system: true`, and a family must be able to
+   * clear those out — protecting the flag instead of the one record made the stale catalog
+   * impossible to empty from the app. */
+  if (h.id === "agt_household") return { error: "system_helper_protected", message: "This is the household's own assistant — it can be edited, but not deleted." };
   for (const t of listTriggers((t) => t.helperId === id)) deleteTriggerRec(t.id);
   deleteAgentRec(id);
   /* SECURITY (adversarial review, finding H1): deleting a helper is how a family expects to

@@ -111,7 +111,7 @@ function AssistantHome({ conversations, scope, onScope, onStart, onOpen, onDismi
           <Icon name="Sparkles" size={26} />
         </div>
         <h1 className="font-display text-3xl font-semibold tracking-tight text-ink-900">Ask FamiliOS, {first}</h1>
-        <p className="mt-1.5 text-sm text-ink-500">Tell me what you need. I'll answer, or draft a plan you can approve and run.</p>
+        <p className="mt-1.5 text-sm text-ink-500">Tell me what you need. I'll look things up, do them, and tell you what I did.</p>
         <div className="mt-3 flex justify-center"><ScopeToggle scope={scope} onScope={onScope} /></div>
       </div>
 
