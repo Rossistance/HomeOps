@@ -5,7 +5,7 @@
 // provider (server/ai.mjs — the same registry Settings → AI Providers edits, with the key
 // in the vault) into one, for every provider style the app supports:
 //
-//   openai      → @ai-sdk/openai (chat completions)
+//   openai      → @ai-sdk/openai (Responses API — the only one that takes function tools on current models)
 //   anthropic   → @ai-sdk/anthropic
 //   gemini      → @ai-sdk/google
 //   compatible  → @ai-sdk/openai-compatible (Together, Groq, OpenRouter, vLLM, …)
@@ -62,7 +62,13 @@ export async function languageModelFor(providerId, { model } = {}) {
       // Ollama's OpenAI-compatible surface (tool calling included) lives under /v1.
       lm = createOpenAICompatible({ name: "ollama", baseURL: /\/v1$/.test(base) ? base : `${base}/v1`, apiKey: c.apiKey || undefined, fetch: fetchFn })(modelId);
     } else if (p.id === "openai") {
-      lm = createOpenAI({ apiKey: c.apiKey, baseURL: base, fetch: fetchFn }).chat(modelId);
+      /* RESPONSES, not Chat Completions. Found on a real phone against the production
+       * household: every Ask turn came back with "Function tools with reasoning_effort are
+       * not supported for gpt-5.6-sol in /v1/chat/completions". OpenAI's current models only
+       * accept function tools on the Responses API, which is also the SDK's own default for
+       * this provider. `.chat()` remains the right call only for a third-party endpoint that
+       * speaks the legacy shape — and those are configured as "compatible", not "openai". */
+      lm = createOpenAI({ apiKey: c.apiKey, baseURL: base, fetch: fetchFn }).responses(modelId);
     } else {
       // "compatible" and "lmstudio" — any OpenAI-shaped chat endpoint.
       lm = createOpenAICompatible({ name: p.id, baseURL: base, apiKey: c.apiKey || undefined, fetch: fetchFn })(modelId);
