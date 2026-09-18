@@ -207,17 +207,54 @@ UI exposes it from Manage household in a later pass, the API rule ships now.
 - `pushToMember` gains `categoryId` and stops truncating the body for thread pushes.
 - Requires EAS build 71; verified on TestFlight, not the simulator.
 
+## Also in scope (added 2026-09-18 on review)
+
+- **Muting** — `reads[actorId]` becomes `members: { [actorId]: { lastReadAt, mutedUntil,
+  joinedAt, leftAt } }`. A muted participant still gets the in-app row and the unread
+  count, but no push and no "Needs your attention" entry. `POST /api/threads/:id/mute
+  { until: ISO | null }` (null = forever, 0 = unmute).
+- **Editing and deleting** — sender only, `PATCH /api/threads/:id/messages/:mid { text }`
+  sets `editedAt`; `DELETE` sets `deletedAt` and blanks text/attachments (tombstone line
+  "Message deleted"). Suggestions and reactions on a deleted message are dropped.
+- **Read receipts** — every read moves the cursor; the thread payload returns
+  `readBy: { [actorId]: lastReadAt }` and the client shows "Seen by …" under the last
+  message each reader has passed. Direct threads show a single "Seen" tick.
+- **Typing indicators** — `POST /api/threads/:id/typing` stamps
+  `typing[actorId] = now` in memory (not persisted, per-tenant map with a 6-second TTL);
+  the thread poll returns who is typing. The composer sends it at most every 3 s while
+  text changes.
+- **Reactions** — `POST /api/threads/:id/messages/:mid/reactions { emoji }` toggles
+  the caller's reaction; stored as `reactions: { [emoji]: [actorId] }`; shown as small
+  pills under the bubble; long-press opens a six-emoji picker.
+- **Removing a member** — `DELETE /api/threads/:id/members/:actorId`: Owner/Adult Admin,
+  or the thread creator; a parent may remove a child from any thread they can see. The
+  removed person keeps read access to messages up to `leftAt` and nothing after.
+- **Message search** — `GET /api/threads/search?q=` across my threads (SQLite `LIKE` on
+  text and attachment names, 50 hits, newest first); a search field above the thread
+  list and inside a thread (jump-to-message).
+- **Voice notes** — record with `expo-av` (added dependency), stored as an `.m4a` file
+  via `/api/files` (`kind: "message"`), attachment `{ kind: "file", fileId, audio:
+  { durationMs } }`, played inline with a scrubber; a server-side transcript via the
+  existing file understanding path when the provider supports audio, else none.
+
+## Delivery
+
+- One commit per phase; no simulator or TestFlight testing by me. When all five phases
+  are in, one EAS production build (72 or later) is submitted to TestFlight and the
+  review is yours.
+- Server tests run on every phase (`npm test`); mobile unit tests (`node --test
+  apps/mobile/src/lib/*.test.mjs`) and `tsc` on the app.
+
 ## Testing
 
 Server: `family-messages.test.mjs` (permissions matrix by role and nest, direct-thread
-uniqueness, growing a chat, read cursors and unread counts, notifications to others only,
-share previews and access, suggestion apply race and dedupe, ownership → request path).
-Mobile: `node --test` units for thread grouping/day separators and the member-picker
-filter. Manual: Limrun pass on the new screens plus a TestFlight check of the Reply
-action.
+uniqueness, growing and shrinking a group, read cursors, receipts and unread counts,
+mute suppressing push, edit/delete tombstones, reactions toggle, search scope,
+notifications to others only, share previews and access, suggestion apply race and
+dedupe, ownership → request path, typing TTL). Mobile: `node --test` units for thread
+grouping/day separators, the member-picker filter and audio duration formatting.
 
 ## Out of scope for now
 
-Web Messages screen, muting, editing/deleting sent messages, read receipts beyond the
-cursor, typing indicators, message search, reactions, removing a member from a group,
-voice notes.
+Web Messages screen, message forwarding between threads, pinned messages, scheduled
+sends.
