@@ -5,7 +5,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, ScrollView, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
-import { api, type ApprovalRec, type NotificationRec, type PublicHelper } from "@/lib/api";
+import { api, type ApprovalRec, type NotificationRec, type PublicHelper, type ThreadRec } from "@/lib/api";
+import { ThreadList } from "@/components/messages/thread-list";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
 import { notificationSources, sourceKeyOf, notificationTarget } from "@/lib/messages";
@@ -92,6 +93,9 @@ export default function InboxScreen() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [decisionMsg, setDecisionMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
+  // Messages
+  const [threads, setThreads] = useState<ThreadRec[]>([]);
+
   // Updates
   const [notices, setNotices] = useState<NotificationRec[]>([]);
   const [helpers, setHelpers] = useState<PublicHelper[]>([]);
@@ -104,8 +108,8 @@ export default function InboxScreen() {
     // list endpoints swallow transport errors into empty arrays, so probe
     // health alongside them to render an honest error state instead of a
     // false "all caught up".
-    const [health, approvals, delivered, helperList] = await Promise.all([
-      api.health(), api.approvals(), api.notifications(), api.helpers(),
+    const [health, approvals, delivered, helperList, threadList] = await Promise.all([
+      api.health(), api.approvals(), api.notifications(), api.helpers(), api.threads(),
     ]);
     if (!health?.ok) {
       setError("The FamiliOS backend didn't answer.");
@@ -116,6 +120,7 @@ export default function InboxScreen() {
     setApprovalItems(approvals);
     setNotices(delivered);
     setHelpers(helperList);
+    setThreads(threadList);
     // Enrich pending approvals with the gated run step's REAL resolved input.
     if (approvals.some((a) => a.status === "pending")) {
       const runs = await api.runs("waiting_for_approval");
@@ -201,7 +206,7 @@ export default function InboxScreen() {
   }, []);
 
   const segments: { key: Segment; label: string; count: number; countNoun: string }[] = [
-    { key: "messages", label: "Messages", count: 0, countNoun: "unread" },
+    { key: "messages", label: "Messages", count: threads.reduce((n, t) => n + (t.unreadCount > 0 ? 1 : 0), 0), countNoun: "unread" },
     { key: "approvals", label: "Approvals", count: pending.length, countNoun: "pending" },
     { key: "updates", label: "Updates", count: unreadCount, countNoun: "unread" },
   ];
@@ -246,9 +251,7 @@ export default function InboxScreen() {
       ) : error ? (
         <ErrorState message={error} onRetry={() => void load()} />
       ) : seg === "messages" ? (
-        <Rise index={1}>
-          <EmptyState icon="bubble.left.and.bubble.right" title="No messages yet" hint="Family messages arrive here: one-to-one, or a group you grow as you go." />
-        </Rise>
+        <ThreadList threads={threads} meActorId={session?.actorId} now={now} onChanged={() => void load()} />
       ) : seg === "approvals" ? (
         <>
           {decisionMsg ? <Rise index={1}><Notice text={decisionMsg.text} ok={decisionMsg.ok} /></Rise> : null}

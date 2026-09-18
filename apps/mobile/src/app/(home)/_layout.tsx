@@ -22,6 +22,9 @@ export default function HomeLayout() {
         <Stack.Screen name="help" options={{ title: "Ask or offer help" }} />
         <Stack.Screen name="calendar" options={{ title: "Calendar" }} />
         <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
+        {/* Family Messages: a thread, and the picker that starts one or grows one. */}
+        <Stack.Screen name="messages/[id]" options={{ title: "Messages", headerLargeTitle: false }} />
+        <Stack.Screen name="messages/new" options={{ title: "New message", presentation: "modal" }} />
         <Stack.Screen
           name="event-form"
           options={{

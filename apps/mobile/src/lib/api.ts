@@ -367,7 +367,7 @@ export interface FileRec {
   pageBlobIds?: string[]; pageCount?: number;
   /** O3 — the uploader's real name, resolved server-side. The record stores an actor id. */
   uploadedByName?: string | null;
-  kind?: "avatar" | "document";
+  kind?: "avatar" | "document" | "message";
 }
 // Server-durable knowledge items (household memory the user writes + curates).
 export interface KnowledgeRec {
@@ -946,7 +946,7 @@ export const api = {
   // the extra pages and returns pageBlobIds[]/pageCount on the record.
   /** `kind: "avatar"` keeps a profile picture out of the family document library — the blob
    *  is stored the same way, but the Library lists documents. Omitted means document. */
-  async uploadFile(body: { name: string; contentBase64: string; mime?: string; tags?: string[]; visibility?: string; kind?: "avatar" | "document"; pages?: { name?: string; base64: string }[]; autoFile?: boolean }): Promise<{ file?: FileRec; error?: string; message?: string; autoFiled?: string }> {
+  async uploadFile(body: { name: string; contentBase64: string; mime?: string; tags?: string[]; visibility?: string; kind?: "avatar" | "document" | "message"; participantIds?: string[]; pages?: { name?: string; base64: string }[]; autoFile?: boolean }): Promise<{ file?: FileRec; error?: string; message?: string; autoFiled?: string }> {
     const r = await req<{ file?: FileRec; error?: string; message?: string; autoFiled?: string }>("/files", { method: "POST", body: JSON.stringify(body) });
     if (r.status === 403) return { error: "insufficient_role" };
     if (r.status === 413) return { error: "too_large" };

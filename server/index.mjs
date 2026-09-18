@@ -4301,7 +4301,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const roster = new Map(listMembers((m) => m.householdId === g.session.householdId).map((m) => [m.actorId, m.displayName]));
       const includeAll = url.searchParams.get("include") === "all";
       const visible = listFiles((f) => f.householdId === g.session.householdId)
-        .filter((f) => includeAll || (f.kind ?? "document") !== "avatar")
+        // Avatars are chrome and chat attachments belong to their thread — the Library lists documents.
+        .filter((f) => includeAll || !["avatar", "message"].includes(f.kind ?? "document"))
         .filter((f) => canSeeEntity(f, g.session))
         .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
         .map((f) => ({ ...f, uploadedByName: roster.get(f.uploadedBy) ?? null }));
@@ -4383,7 +4384,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
          * but the record now says what it is, and the library lists DOCUMENTS. An avatar is
          * chrome, not a household file. Anything without a kind stays a document, so every
          * file uploaded before today is unaffected. */
-        kind: body.kind === "avatar" ? "avatar" : "document",
+        kind: body.kind === "avatar" ? "avatar" : body.kind === "message" ? "message" : "document",
+        // A chat attachment is private to the thread: the participants are its readers, and
+        // canSeeEntity honours participantIds on any record.
+        ...(body.kind === "message" && Array.isArray(body.participantIds) ? { participantIds: body.participantIds.map(String).slice(0, 50) } : {}),
         contentHash,
         createdAt: new Date().toISOString(),
       });

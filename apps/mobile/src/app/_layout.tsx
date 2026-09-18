@@ -25,6 +25,7 @@ import { markAppVisible } from "@/lib/app-visible";
 import { Onboarding } from "@/components/Onboarding";
 import { useTheme } from "@/theme";
 import { api } from "@/lib/api";
+import { routeForNotification, type PushData } from "@/lib/notification-routing";
 
 // Installed at module scope so a crash during the FIRST render is still reported —
 // a handler wired up inside a component is too late for exactly the worst case.
@@ -97,9 +98,49 @@ function TabsNav({ caps }: { caps: Capabilities }) {
   return <NativeTabs>{triggers}</NativeTabs>;
 }
 
+/** iOS notification categories: what a banner can do without opening the app. A family
+ *  message can be answered from the lock screen; "Mark read" clears it. Registered once per
+ *  launch; the server names the category on every thread push (categoryId). */
+const FAMILY_MESSAGE_CATEGORY = "family_message";
+async function registerCategories() {
+  try {
+    await Notifications.setNotificationCategoryAsync(FAMILY_MESSAGE_CATEGORY, [
+      { identifier: "reply", buttonTitle: "Reply", textInput: { submitButtonTitle: "Send", placeholder: "Message" }, options: { opensAppToForeground: false } },
+      { identifier: "mark_read", buttonTitle: "Mark read", options: { opensAppToForeground: false } },
+    ]);
+  } catch { /* categories are iOS/Android only */ }
+}
+
+/** A tap on a push goes to the thing it names; a Reply typed on the banner is sent without
+ *  opening the UI (and queued if the network is down). */
+async function handleResponse(response: Notifications.NotificationResponse) {
+  const data = (response.notification.request.content.data ?? null) as PushData;
+  if (response.actionIdentifier === "reply") {
+    const text = String(response.userText ?? "").trim();
+    if (data?.type === "thread" && data.id && text) await api.sendMessage(data.id, { text });
+    return;
+  }
+  if (response.actionIdentifier === "mark_read") {
+    if (data?.type === "thread" && data.id) await api.markThreadRead(data.id);
+    return;
+  }
+  const route = routeForNotification(data);
+  if (route) router.push({ pathname: route.pathname, params: route.params } as never);
+}
+
 function PushRegistrar() {
   const { session } = useSession();
   const registeredRef = useRef(false);
+
+  // Taps and banner actions, for the life of the session; plus the response that launched
+  // the app from cold, which arrives before any listener could be attached.
+  useEffect(() => {
+    if (!session) return;
+    void registerCategories();
+    const sub = Notifications.addNotificationResponseReceivedListener((r) => { void handleResponse(r); });
+    void Notifications.getLastNotificationResponseAsync().then((r) => { if (r) void handleResponse(r); }).catch(() => {});
+    return () => { sub.remove(); };
+  }, [session]);
 
   useEffect(() => {
     if (!session || registeredRef.current) return;

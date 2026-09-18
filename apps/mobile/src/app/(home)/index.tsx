@@ -9,7 +9,9 @@ import { Alert, Platform, ScrollView, StyleSheet, TextInput, View } from "react-
 import { router, useFocusEffect } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { api, type ApprovalRec, type EventRec, type HelpRequestRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec } from "@/lib/api";
+import { api, type ApprovalRec, type EventRec, type HelpRequestRec, type MemberRec, type MemoryRec, type RunRec, type TaskRec, type ThreadRec } from "@/lib/api";
+import { threadTitle } from "@/lib/messages";
+import { AvatarStack } from "@/components/messages/thread-list";
 import { coversDay, effectiveEndMs, eventTimeLabel } from "@/lib/event-days";
 import { fade, memberColor } from "@/lib/member-colors";
 import { isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
@@ -210,6 +212,7 @@ function AdminToday() {
   const [memory, setMemory] = useState<MemoryRec[]>([]);
   const [runs, setRuns] = useState<RunRec[]>([]);
   const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
+  const [threads, setThreads] = useState<ThreadRec[]>([]);
   const [openApproval, setOpenApproval] = useState<ApprovalRec | null>(null);
   const [choreOpen, setChoreOpen] = useState(false);
   /* One of twenty questions, a different one each time you open the app. The card is a text
@@ -234,14 +237,14 @@ function AdminToday() {
     // api.household() went with the invite sheet — Today never showed the household's name,
     // it only needed it to caption an invite that now lives in Settings. One fewer request
     // on the first screen after login.
-    const [h, aps, evts, tks, mem, memries, rns, hrs] = await Promise.all([
+    const [h, aps, evts, tks, mem, memries, rns, hrs, ths] = await Promise.all([
       api.health(), api.approvals(), api.events(), api.tasks(), api.members(),
-      api.memory(), api.runs(), api.helpRequests(),
+      api.memory(), api.runs(), api.helpRequests(), api.threads(),
     ]);
     setOffline(!h);
     if (h) {
       setApprovals(aps); setEvents(evts); setTasks(tks); setMembers(mem);
-      setMemory(memries); setRuns(rns); setHelpRequests(hrs);
+      setMemory(memries); setRuns(rns); setHelpRequests(hrs); setThreads(ths);
     }
     setLoading(false);
   }, []);
@@ -376,6 +379,8 @@ function AdminToday() {
     () => byId(helpRequests.filter((h) => h.status === "pending" && h.fromActorId === session?.actorId)),
     [helpRequests, session?.actorId],
   );
+  // Unread family messages — a muted chat stays quiet here too.
+  const unreadThreads = useMemo(() => threads.filter((t) => t.unreadCount > 0 && !t.muted && !t.archived), [threads]);
   // The linked plan/task title, for wording help requests ("…help with {item}").
   const itemName = useCallback((h: HelpRequestRec): string | null => {
     if (h.eventId) return events.find((e) => e.id === h.eventId)?.title ?? null;
@@ -773,16 +778,16 @@ function AdminToday() {
                 <View style={{ flex: 1, gap: 2 }}>
                   <T kind="h3" color={colors.text}>Needs your attention</T>
                   <T kind="detail">
-                    {pending.length + helpToMe.length + helpFromMe.length === 0
+                    {pending.length + helpToMe.length + helpFromMe.length + unreadThreads.length === 0
                       ? "Nothing waiting on you"
-                      : `${pending.length + helpToMe.length + helpFromMe.length} waiting`}
+                      : `${pending.length + helpToMe.length + helpFromMe.length + unreadThreads.length} waiting`}
                   </T>
                 </View>
                 {pending.length > 0
                   ? <Badge label={String(pending.length)} fg={colors.onEmber} bg={colors.ember} />
                   : <SeeAll onPress={() => router.push("/inbox")} />}
               </View>
-            {pending.length === 0 && helpToMe.length === 0 && helpFromMe.length === 0 && !justHelped ? null : (
+            {pending.length === 0 && helpToMe.length === 0 && helpFromMe.length === 0 && unreadThreads.length === 0 && !justHelped ? null : (
               <View style={{ gap: spacing.sm }}>
                 {/* confirmation: accepting moved the linked task to me (WP-001) */}
                 {justHelped && (
@@ -828,6 +833,33 @@ function AdminToday() {
                         <T kind="subMedium" color={colors.ember}>See all {pending.length}</T>
                       </PressableScale>
                     )}
+                  </Card>
+                )}
+
+                {/* unread family messages — one row per chat, straight into the thread */}
+                {unreadThreads.length > 0 && (
+                  <Card padded={false}>
+                    {unreadThreads.slice(0, 4).map((t, i) => (
+                      <PressableScale
+                        key={t.id}
+                        onPress={() => router.push({ pathname: "/messages/[id]", params: { id: t.id } } as never)}
+                        haptic="select"
+                        accessibilityRole="button"
+                        accessibilityLabel={`${t.unreadCount} unread from ${threadTitle(t, session?.actorId)}`}
+                        style={{
+                          flexDirection: "row", alignItems: "center", gap: spacing.md,
+                          paddingHorizontal: spacing.lg, paddingVertical: 12,
+                          borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator,
+                        }}
+                      >
+                        <AvatarStack t={t} meActorId={session?.actorId} size={36} />
+                        <View style={{ flex: 1, gap: 2 }}>
+                          <T kind="rowTitle">{threadTitle(t, session?.actorId)}</T>
+                          <T kind="detail" numberOfLines={1}>{t.lastPreview ? `${t.lastPreview.from.split(" ")[0]}: ${t.lastPreview.text}` : "New messages"}</T>
+                        </View>
+                        <Badge label={String(t.unreadCount)} fg={colors.onEmber} bg={colors.ember} />
+                      </PressableScale>
+                    ))}
                   </Card>
                 )}
 

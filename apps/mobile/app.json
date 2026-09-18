@@ -64,7 +64,8 @@
           }
         }
       ],
-      "expo-speech-recognition"
+      "expo-speech-recognition",
+      ["expo-audio", { "microphonePermission": "FamiliOS uses the microphone to record voice notes for your family." }]
     ],
     "experiments": {
       "typedRoutes": false,
