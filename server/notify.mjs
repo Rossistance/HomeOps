@@ -6,6 +6,7 @@ import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { executeTool, listConnectors, readinessOf } from "./connectors.mjs";
 import { sendPlatformEmail, platformMailReady } from "./mailer.mjs";
+import { buildRawEmail } from "./mime.mjs";
 
 // Who should be pinged for THIS approval. A personal action (or one the requester can
 // approve themselves) notifies only the requester — a scheduled personal briefing must
@@ -306,7 +307,7 @@ async function deliverViaChannel({ session, channel, to, subject: rawSubject, bo
       }
       if (!(account.scopes ?? []).some((s) => /gmail\.send|mail\.google/i.test(String(s)))) return { ok: false, channel, delivered: false, needsSetup: "gmail.send", message: "Reconnect Google and grant the Send email permission." };
       const api = apiForAccount(account);
-      const raw = Buffer.from(`To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${text}`, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      const raw = buildRawEmail({ to, subject, text });
       const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ raw }) });
       const ok = !!r.ok;
       appendAudit({ type: "notify.deliver", channel, ok, householdId: session.householdId });

@@ -122,23 +122,42 @@ function unmocked(host, path) {
   return res(501, { error: { message: `sandbox_unmocked:${host}${path}` } });
 }
 
-// base64url → utf8 (mirrors the encoder in providers.mjs gmail.send)
+// base64url → utf8 (mirrors the encoder in server/mime.mjs buildRawEmail)
 function decodeRaw(raw) {
   try {
     const b64 = String(raw || "").replace(/-/g, "+").replace(/_/g, "/");
     return Buffer.from(b64, "base64").toString("utf8");
   } catch { return ""; }
 }
-function parseRfc822(text) {
-  const headers = {};
+/** RFC 2047 encoded-words (what mime.mjs emits for non-ASCII subjects) back to text. */
+function decodeHeader(value) {
+  return String(value ?? "").replace(/\r?\n[ \t]/g, "").replace(/=\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=/gi, (_, b) => Buffer.from(b, "base64").toString("utf8"));
+}
+function splitHeadBody(text) {
   const idx = text.indexOf("\r\n\r\n") >= 0 ? text.indexOf("\r\n\r\n") : text.indexOf("\n\n");
   const head = idx >= 0 ? text.slice(0, idx) : text;
   const body = idx >= 0 ? text.slice(idx).replace(/^\s+/, "") : "";
+  const headers = {};
   for (const line of head.split(/\r?\n/)) {
     const m = line.match(/^([A-Za-z-]+):\s?(.*)$/);
-    if (m) headers[m[1].toLowerCase()] = m[2];
+    if (m) headers[m[1].toLowerCase()] = decodeHeader(m[2]);
   }
   return { headers, body };
+}
+/** Headers + the human text of the message: the text/plain part of a multipart/alternative
+ *  (base64-decoded, as mime.mjs writes it), or the whole body for a single-part message. */
+function parseRfc822(text) {
+  const { headers, body } = splitHeadBody(text);
+  const boundary = (headers["content-type"] ?? "").match(/boundary="?([^";]+)"?/)?.[1];
+  if (!boundary) return { headers, body };
+  const parts = body.split(`--${boundary}`).slice(1).filter((p) => !p.startsWith("--"));
+  const decodePart = (p) => {
+    const { headers: ph, body: pb } = splitHeadBody(p.replace(/^\r?\n/, ""));
+    const raw = pb.replace(/\r?\n--$/, "").trim();
+    return /base64/i.test(ph["content-transfer-encoding"] ?? "") ? Buffer.from(raw.replace(/\s+/g, ""), "base64").toString("utf8") : raw;
+  };
+  const plain = parts.find((p) => /content-type:\s*text\/plain/i.test(p)) ?? parts[0];
+  return { headers, body: plain ? decodePart(plain) : body };
 }
 function bodyJson(opts) {
   try { return typeof opts.body === "string" ? JSON.parse(opts.body) : (opts.body ?? {}); } catch { return {}; }

@@ -174,21 +174,21 @@ Google → FamiliOS happens on Sync (`POST /api/calendar/sync-all`, the same cal
 
 | ID | Check | Result |
 |---|---|---|
-| R1 | Display name, avatar emoji grid, photo, remove avatar, colour picker with taken colours dimmed | |
-| R2 | No two swatches identical (BUG-01 regression) | |
-| R3 | Nothing saved during the check | |
+| R1 | Display name, avatar emoji grid, photo, remove avatar, colour picker with taken colours dimmed | ✅ display name, colour grid (taken colours dimmed, disabled and labelled “taken by …”), avatar emoji grid, Change photo, Remove avatar, Save |
+| R2 | No two swatches identical (BUG-01 regression) | ✅ every swatch label distinct in the tree |
+| R3 | Nothing saved during the check | ✅ nothing saved |
 
 ## 12. Settings (`(settings)/*`)
 
 | ID | Screen | Check | Result |
 |---|---|---|---|
-| S1 | Index | Rows: profile, Household, Helpers, Contacts, Connections, AI Providers, Nests, Operator; sign out; delete account (not fired) | |
-| S2 | Household | Members with roles; edit matrix by role; PIN change fields (not fired); invite sheet opens (not sent) | |
-| S3 | Contacts | Methods per member; add form; verification fields (not sent) | |
-| S4 | Connections | Providers with state; OAuth start (not fired); Calendar feed URL field; .ics import | |
-| S5 | AI Providers | Providers, active one marked; key/base URL/model fields; health check on active; Advanced Mode; auto-approve toggle | |
+| S1 | Index | Rows: profile, Household, Helpers, Contacts, Connections, AI Providers, Nests, Operator; sign out; delete account (not fired) | ⚠ profile card (edit, light/dark), household members + Invite + Manage household, Connections (Google Connected, five “Setup required”, All connections), Show me around, Contacts, Nests, Helpers, Sign out, Delete my account (not fired). No AI Providers or Operator row on the index: AI providers lives under Connections; Operator is not on this build |
+| S2 | Household | Members with roles; edit matrix by role; PIN change fields (not fired); invite sheet opens (not sent) | ✅ autonomy dial (Balanced current), members with roles (Owner / Adult Member / Child View / Limited Member), sign-in PIN fields with “Change the PIN” disabled until filled (not fired), recovery-PIN warning shown, visibility rules, Spaces (Family · 223 items). Invite sheet ⏭ |
+| S3 | Contacts | Methods per member; add form; verification fields (not sent) | ✅ methods grouped per member with Verified / Pending badges, opt-in and “N helpers allowed”, Send test / Edit / Remove per method, Verify on the pending phone (not fired), Add contact method |
+| S4 | Connections | Providers with state; OAuth start (not fired); Calendar feed URL field; .ics import | ⚠ Check now; OAuth accounts (Google connected, others “Server-side setup required first”); subscribed calendars with Sync now / Remove and honest `needs_reconnect` for Melissa’s and Daniel’s Google; Connect calendar; Other calendar options; AI providers row; Connector status (Weather / Webhook / Web search Connected, Local files Local-only). iMessage shows “Coming soon” on this build (d228bc4); the Connections filter in build 70 exposes it |
+| S5 | AI Providers | Providers, active one marked; key/base URL/model fields; health check on active; Advanced Mode; auto-approve toggle | ✅ OpenAI Active · Reachable (gpt-5.6-sol); Anthropic / Gemini / OpenAI-compatible Not configured; Ollama / LM Studio Unreachable; Risk & approvals; Auto-approve low-risk improvements (on); Advanced Mode (off); Approvals PIN and Advanced builders point to the web; Sign out |
 | S6 | Nests | List / create (not fired) | |
-| S7 | Operator | Invite code generation (not fired); share (not fired) | |
+| S7 | Operator | Invite code generation (not fired); share (not fired) | 🚫 no Operator screen on this build |
 
 ## 13. Scoped views (`kid.tsx`, `grandparent.tsx`, `sitter.tsx`)
 

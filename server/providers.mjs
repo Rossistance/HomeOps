@@ -6,6 +6,8 @@
 // that calls the real provider with the connected account's token (auto-refresh).
 // Health/identity are real network calls — nothing here is seeded or simulated.
 
+import { buildRawEmail } from "./mime.mjs";
+
 const env = (name) => (name ? process.env[name] : undefined);
 // WP-006: local env check (NOT an import of sandbox-connectors.mjs, which would pull
 // in store.mjs and break the pure-registry tests that import providers.mjs with no
@@ -165,7 +167,7 @@ export const PROVIDERS = [
           // honest `invalid_input` instead of a generic provider_error).
           if (!input.to || !input.subject) throw Object.assign(new Error("Provide `to` and `subject`."), { code: "invalid_input" });
           if (!String(input.body ?? "").trim()) throw Object.assign(new Error("Refusing to send an email with an empty body — compose the message body first."), { code: "invalid_input" });
-          const raw = Buffer.from(`To: ${input.to}\r\nSubject: ${input.subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${input.body ?? ""}`, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+          const raw = buildRawEmail({ to: input.to, subject: input.subject, text: input.body ?? "" });
           const r = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ raw }) });
           if (!r.ok) throw new Error(r.json?.error?.message ?? "Gmail send failed");
           return { sent: true, id: r.json.id, to: input.to };
