@@ -69,7 +69,10 @@ export async function pushApprovalNotification(approval) {
  * Used by help requests (and anything else person-to-person): only tokens owned by
  * that actor in that household are sent to — never legacy/unattributed tokens, so a
  * personal ping can't reach a device we can't attribute. Fire-and-forget; never throws. */
-export async function pushToMember({ householdId, actorId, title, body, data, timeSensitive = false }) {
+/** Targeted push to one member's devices. `categoryId` names an iOS notification category
+ *  the app registered (e.g. "family_message" → inline Reply); `bodyLimit` lets a chat
+ *  message travel whole (the 160 default keeps reminders terse). */
+export async function pushToMember({ householdId, actorId, title, body, data, timeSensitive = false, categoryId = null, bodyLimit = 160 }) {
   try {
     const hh = householdId ?? "local";
     // A removed member's devices keep their tokens until they re-register; the archive
@@ -89,7 +92,8 @@ export async function pushToMember({ householdId, actorId, title, body, data, ti
        * capability is theirs to grant, so this is a request, not a promise to bypass
        * silence. Only reminders ask for it; ordinary chatter must not cry wolf. */
       body: JSON.stringify(tokens.map((to) => ({
-        to, title, body: String(body ?? "").slice(0, 160), data: data ?? {}, sound: "default", badge: 1,
+        to, title, body: String(body ?? "").slice(0, bodyLimit), data: data ?? {}, sound: "default", badge: 1,
+        ...(categoryId ? { categoryId } : {}),
         ...(timeSensitive ? { priority: "high", interruptionLevel: "timeSensitive" } : {}),
       }))),
     });
@@ -155,6 +159,7 @@ export async function deliverNotification({ session, methodId, methodType, to, t
     // by design, so the agent's OWNER is the honest sending identity — the person who
     // built the helper and granted it the allowlist in the first place.
     senderActorIds: [session.actorId, ...(agentId ? [getAgent(agentId)?.createdBy].filter(Boolean) : [])],
+    agentId: agentId ?? null,
   });
 }
 
@@ -253,7 +258,7 @@ export async function deliverInAppFallback({ session, title, body }) {
   return out;
 }
 
-async function deliverViaChannel({ session, channel, to, subject: rawSubject, body, recipientActorId, senderActorIds }) {
+async function deliverViaChannel({ session, channel, to, subject: rawSubject, body, recipientActorId, senderActorIds, agentId = null }) {
   const text = String(body ?? "").slice(0, 2000);
   const subject = String(rawSubject ?? "FamiliOS").slice(0, 140);
   try {
@@ -269,7 +274,17 @@ async function deliverViaChannel({ session, channel, to, subject: rawSubject, bo
       return { ok: false, channel, delivered: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch — nothing was sent. Turn them back on in Settings to allow this." };
     }
     if (channel === "in_app" || channel === "dashboard") {
-      const rec = addNotification({ householdId: session.householdId, actorId: recipientActorId ?? session.actorId, channel, title: subject, body: text, to: to ?? null });
+      // Who this came from, so the Updates screen can group by helper and open the helper's
+      // own thread without a second lookup. A person's send (the ad-hoc /api/notify path,
+      // help requests) is a "member" source; anything older simply has no source.
+      const agent = agentId ? getAgent(agentId) : null;
+      const source = agent
+        ? { kind: "helper", id: agent.id, name: agent.name ?? null }
+        : { kind: "member", id: session.actorId, name: getMember(session.actorId)?.displayName ?? null };
+      const rec = addNotification({
+        householdId: session.householdId, actorId: recipientActorId ?? session.actorId, channel, title: subject, body: text, to: to ?? null,
+        source, conversationId: agent?.conversationId ?? null,
+      });
       appendAudit({ type: "notify.deliver", channel, ok: true, householdId: session.householdId });
       return { ok: true, channel, delivered: true, notificationId: rec.id, message: "Shown in the app." };
     }
