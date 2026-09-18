@@ -1,6 +1,6 @@
 // Pure helpers for the Inbox and family Messages — no React, no network — so the rules
 // that decide what a person sees can be tested on their own.
-import type { NotificationRec } from "./api";
+import type { MemberRec, MessageRec, NestRec, NotificationRec, ThreadRec } from "./api";
 
 export interface SourceChip {
   /** Stable key: `all`, `helper:<id>`, `assistant`, `thread`, `system`. */
@@ -61,4 +61,89 @@ export function notificationTarget(n: NotificationRec): { pathname: string; para
   if (d?.type === "help_request") return { pathname: "/help" };
   if (d?.type === "approval") return { pathname: "/inbox", params: { seg: "approvals" } };
   return null;
+}
+
+/* ---- threads ------------------------------------------------------------------------- */
+
+const PARENT = new Set(["Owner", "Adult Admin"]);
+const ADULT = new Set(["Owner", "Adult Admin", "Adult Member"]);
+const CHILD = new Set(["Child View", "Limited Member"]);
+
+/**
+ * Mirror of the server's canMessage for the picker, so the list only offers people a
+ * request would succeed for. The server still decides.
+ */
+export function canStartWith(me: MemberRec | null | undefined, other: MemberRec, nests: NestRec[]): boolean {
+  if (!me || me.actorId === other.actorId) return false;
+  if (me.role === "Guest/Helper" || other.role === "Guest/Helper") return false;
+  if (CHILD.has(me.role)) return false;
+  if (ADULT.has(other.role)) return true;
+  if (PARENT.has(me.role)) return true;
+  if (me.role === "Adult Member") {
+    return nests.some((n) => {
+      const joined = n.members.filter((m) => m.status === "joined").map((m) => m.actorId);
+      return joined.includes(me.actorId) && joined.includes(other.actorId);
+    });
+  }
+  return false;
+}
+
+/** "Melissa" for a direct thread, the title or "Melissa, GPop" for a group — never my own name. */
+export function threadTitle(t: ThreadRec, meActorId: string | null | undefined): string {
+  if (t.title) return t.title;
+  const others = t.members.filter((m) => !m.leftAt && m.actorId !== meActorId).map((m) => m.displayName.split(" ")[0]);
+  if (others.length === 0) return "Just you";
+  if (others.length <= 3) return others.join(", ");
+  return `${others.slice(0, 2).join(", ")} +${others.length - 2}`;
+}
+
+/** Local calendar day for grouping; the phone's zone is the reader's zone. */
+export function dayKeyOf(iso: string): string {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Messages oldest → newest, split into days, each day oldest → newest. */
+export function groupByDay(messages: MessageRec[]): { day: string; items: MessageRec[] }[] {
+  const sorted = [...messages].sort((a, b) => a.at.localeCompare(b.at));
+  const out: { day: string; items: MessageRec[] }[] = [];
+  for (const m of sorted) {
+    const day = dayKeyOf(m.at);
+    const last = out[out.length - 1];
+    if (last && last.day === day) last.items.push(m); else out.push({ day, items: [m] });
+  }
+  return out;
+}
+
+/** "Today", "Yesterday", "Mon, Sep 14" — relative to `today` (a day key). */
+export function dayLabel(day: string, today: string = dayKeyOf(new Date().toISOString())): string {
+  if (day === today) return "Today";
+  const [y, mo, d] = day.split("-").map(Number);
+  const date = new Date(y, mo - 1, d);
+  const t = today.split("-").map(Number);
+  const yesterday = new Date(t[0], t[1] - 1, t[2] - 1);
+  if (date.getTime() === yesterday.getTime()) return "Yesterday";
+  return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", ...(date.getFullYear() !== t[0] ? { year: "numeric" } : {}) });
+}
+
+/** 0:07, 1:32 — voice-note lengths. */
+export function formatDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Receipts: for each reader other than me, the LAST message they have read past — keyed by
+ * message id. A direct thread shows one "Seen", a group shows "Seen by A, B".
+ */
+export function receiptsFor(messages: MessageRec[], readBy: Record<string, string | null>, meActorId: string | null | undefined): Record<string, string[]> {
+  const sorted = [...messages].filter((m) => !m.deletedAt).sort((a, b) => a.at.localeCompare(b.at));
+  const out: Record<string, string[]> = {};
+  for (const [actorId, at] of Object.entries(readBy)) {
+    if (!at || actorId === meActorId) continue;
+    let last: MessageRec | null = null;
+    for (const m of sorted) { if (m.at <= at && m.fromActorId !== actorId) last = m; }
+    if (last) (out[last.id] ??= []).push(actorId);
+  }
+  return out;
 }

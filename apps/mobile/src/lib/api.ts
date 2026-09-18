@@ -331,6 +331,35 @@ export interface NotificationRec {
   threadId?: string | null;
 }
 
+/* ---- Family Messages: threads between members (server/family-messages.mjs) ---- */
+export type ShareType = "event" | "task" | "file" | "meal" | "list_item" | "help_request" | "notification";
+export interface SharePreview {
+  hidden?: boolean; type?: ShareType; id?: string; title?: string; subtitle?: string | null; when?: string | null; allDay?: boolean;
+  where?: string | null; who?: string | null; to?: string | null; status?: string | null; mime?: string | null; sizeBytes?: number | null;
+  slot?: string | null; body?: string | null; conversationId?: string | null; route?: { pathname: string; params?: Record<string, string> } | null;
+}
+export type MessageAttachment =
+  | { kind: "file"; fileId: string; name?: string | null; mime?: string | null; audio?: { durationMs: number } | null; transcript?: string | null }
+  | { kind: "ref"; type: ShareType; id: string; preview?: SharePreview | null };
+export interface SuggestionRec {
+  id: string; kind: "create" | "update"; type: "event" | "task" | "help"; title: string; summary: string;
+  patch: Record<string, unknown>; targetId?: string | null; ownerActorId?: string | null;
+  status: "open" | "applied" | "dismissed"; by?: string | null; at?: string | null;
+  result?: { created?: { type: string; id: string }; requested?: { toActorId: string }; duplicateOf?: string; note?: string } | null;
+}
+export interface MessageRec {
+  id: string; threadId: string; fromActorId: string; at: string; kind: "text" | "system" | "share";
+  text: string; attachments: MessageAttachment[]; reactions: Record<string, string[]>; suggestions: SuggestionRec[];
+  editedAt: string | null; deletedAt: string | null;
+}
+export interface ThreadMemberRec { actorId: string; displayName: string; color?: string | null; role: string | null; joinedAt: string; leftAt: string | null; lastReadAt: string | null; mutedUntil: string | null }
+export interface ThreadRec {
+  id: string; kind: "direct" | "group"; title: string | null; participantIds: string[]; createdBy: string;
+  createdAt: string; updatedAt: string; lastMessageAt: string | null; lastPreview: { from: string; actorId?: string; text: string } | null;
+  members: ThreadMemberRec[]; unreadCount: number; muted: boolean; left: boolean; archived: boolean;
+}
+export interface ThreadView { thread: ThreadRec; messages: MessageRec[]; readBy: Record<string, string | null>; typing: string[] }
+
 export interface FileRec {
   id: string; householdId: string; name: string; mime: string; sizeBytes: number;
   tags: string[]; visibility: string; spaceId: string; uploadedBy: string; source: string; createdAt: string;
@@ -424,7 +453,9 @@ interface Res<T> { status: number; ok: boolean; data: T }
 // Mutations safe to queue offline and replay later: quick idempotent-ish
 // family writes where losing the tap is worse than a late apply.
 const OFFLINE_QUEUEABLE = (path: string, method?: string) =>
-  (method === "PATCH" && /^\/tasks\//.test(path)) || (method === "POST" && path === "/tasks");
+  (method === "PATCH" && /^\/tasks\//.test(path)) || (method === "POST" && path === "/tasks")
+  // A message typed from the lock screen or on a dead connection is kept, not lost.
+  || (method === "POST" && /^\/threads\/[^/]+\/messages$/.test(path));
 
 async function req<T = unknown>(path: string, init?: RequestInit): Promise<Res<T>> {
   const headers: Record<string, string> = { "content-type": "application/json", ...(init?.headers as Record<string, string> | undefined) };
@@ -586,6 +617,66 @@ export const api = {
   async assistant(message: string, opts?: { context?: Record<string, unknown>; conversationId?: string }): Promise<AssistantResult> {
     const r = await req<AssistantResult>("/assistant", { method: "POST", body: JSON.stringify({ message, context: opts?.context, conversationId: opts?.conversationId }) });
     return r.data ?? { ok: false, error: "network" };
+  },
+  /* ---- Family Messages ---- */
+  async threads(actorId?: string): Promise<ThreadRec[]> {
+    const r = await req<{ threads: ThreadRec[] }>(`/threads${actorId ? `?actorId=${encodeURIComponent(actorId)}` : ""}`);
+    return r.data?.threads ?? [];
+  },
+  async createThread(participantIds: string[], title?: string): Promise<{ thread?: ThreadRec; existed?: boolean; error?: string; reason?: string; whoName?: string }> {
+    const r = await req<{ thread?: ThreadRec; existed?: boolean; error?: string; reason?: string; whoName?: string }>("/threads", { method: "POST", body: JSON.stringify({ participantIds, title }) });
+    return r.data ?? { error: "network" };
+  },
+  async thread(id: string, before?: string): Promise<ThreadView | null> {
+    const r = await req<ThreadView>(`/threads/${encodeURIComponent(id)}${before ? `?before=${encodeURIComponent(before)}` : ""}`);
+    return r.ok && r.data?.thread ? r.data : null;
+  },
+  async sendMessage(id: string, body: { text?: string; attachments?: MessageAttachment[] }): Promise<{ message?: MessageRec; error?: string; message_?: string }> {
+    const r = await req<{ message?: MessageRec; error?: string }>(`/threads/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify(body) });
+    return r.data ?? { error: "network" };
+  },
+  async markThreadRead(id: string): Promise<void> { await req(`/threads/${encodeURIComponent(id)}/read`, { method: "POST", body: "{}" }); },
+  async typing(id: string): Promise<void> { await req(`/threads/${encodeURIComponent(id)}/typing`, { method: "POST", body: "{}" }); },
+  /** `until`: ISO string, "forever", or null to unmute. */
+  async muteThread(id: string, until: string | null): Promise<ThreadRec | null> {
+    const r = await req<{ thread?: ThreadRec }>(`/threads/${encodeURIComponent(id)}/mute`, { method: "POST", body: JSON.stringify({ until }) });
+    return r.data?.thread ?? null;
+  },
+  async addThreadMember(id: string, actorId: string): Promise<{ thread?: ThreadRec; error?: string; reason?: string; whoName?: string; message?: string }> {
+    const r = await req<{ thread?: ThreadRec; error?: string; reason?: string; whoName?: string; message?: string }>(`/threads/${encodeURIComponent(id)}/members`, { method: "POST", body: JSON.stringify({ actorId }) });
+    return r.data ?? { error: "network" };
+  },
+  async removeThreadMember(id: string, actorId: string): Promise<{ thread?: ThreadRec; error?: string; message?: string }> {
+    const r = await req<{ thread?: ThreadRec; error?: string; message?: string }>(`/threads/${encodeURIComponent(id)}/members/${encodeURIComponent(actorId)}`, { method: "DELETE" });
+    return r.data ?? { error: "network" };
+  },
+  async leaveThread(id: string): Promise<{ thread?: ThreadRec; error?: string }> {
+    const r = await req<{ thread?: ThreadRec; error?: string }>(`/threads/${encodeURIComponent(id)}/leave`, { method: "POST", body: "{}" });
+    return r.data ?? { error: "network" };
+  },
+  async renameThread(id: string, title: string): Promise<{ thread?: ThreadRec; error?: string }> {
+    const r = await req<{ thread?: ThreadRec; error?: string }>(`/threads/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ title }) });
+    return r.data ?? { error: "network" };
+  },
+  async editMessage(id: string, mid: string, text: string): Promise<{ message?: MessageRec; error?: string }> {
+    const r = await req<{ message?: MessageRec; error?: string }>(`/threads/${encodeURIComponent(id)}/messages/${encodeURIComponent(mid)}`, { method: "PATCH", body: JSON.stringify({ text }) });
+    return r.data ?? { error: "network" };
+  },
+  async deleteMessage(id: string, mid: string): Promise<{ message?: MessageRec; error?: string }> {
+    const r = await req<{ message?: MessageRec; error?: string }>(`/threads/${encodeURIComponent(id)}/messages/${encodeURIComponent(mid)}`, { method: "DELETE" });
+    return r.data ?? { error: "network" };
+  },
+  async reactToMessage(id: string, mid: string, emoji: string): Promise<{ message?: MessageRec; error?: string }> {
+    const r = await req<{ message?: MessageRec; error?: string }>(`/threads/${encodeURIComponent(id)}/messages/${encodeURIComponent(mid)}/reactions`, { method: "POST", body: JSON.stringify({ emoji }) });
+    return r.data ?? { error: "network" };
+  },
+  async searchMessages(q: string): Promise<{ hits: { threadId: string; message: MessageRec }[]; threads: Record<string, ThreadRec> }> {
+    const r = await req<{ hits: { threadId: string; message: MessageRec }[]; threads: Record<string, ThreadRec> }>(`/threads/search?q=${encodeURIComponent(q)}`);
+    return r.data?.hits ? r.data : { hits: [], threads: {} };
+  },
+  async actOnSuggestion(id: string, mid: string, sid: string, action: "apply" | "dismiss"): Promise<{ ok?: boolean; suggestion?: SuggestionRec; error?: string; message?: string }> {
+    const r = await req<{ ok?: boolean; suggestion?: SuggestionRec; error?: string; message?: string }>(`/threads/${encodeURIComponent(id)}/messages/${encodeURIComponent(mid)}/suggestions/${encodeURIComponent(sid)}`, { method: "POST", body: JSON.stringify({ action }) });
+    return r.data ?? { error: "network" };
   },
   /* ---- server-durable conversations (mirror of the web chat history) ---- */
   async conversations(): Promise<ConversationRec[]> {
