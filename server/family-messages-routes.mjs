@@ -80,6 +80,11 @@ export async function handleFamilyMessageRoutes({ req, res, path, method, url, g
     const out = await postMessage({ threadId, fromActorId: s.actorId, text: body.text, attachments: body.attachments });
     if (!out.ok) return err(json, res, req, 400, out.error), true;
     json(res, 200, { message: withPreviews([out.message], s)[0] }, req);
+    // Famili reads the message after it is answered, never before: suggestions land on
+    // the record a few seconds later and show up on the next poll.
+    if (out.message.kind === "text" && out.message.text) {
+      setImmediate(() => { void import("./message-suggestions.mjs").then((mod) => mod.suggestForMessage({ message: out.message, session: s })).catch(() => {}); });
+    }
     return true;
   }
   if (rest === "read" && method === "POST") { markRead(threadId, s.actorId); json(res, 200, { ok: true }, req); return true; }

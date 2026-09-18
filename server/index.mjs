@@ -72,6 +72,7 @@ import {
 import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, sendRecoveryCode, pushToMember } from "./notify.mjs";
 import { handleFamilyMessageRoutes } from "./family-messages-routes.mjs";
+import { createHelpRequest } from "./help-requests.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
 import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast, sessionFromReq } from "./auth.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
@@ -3170,43 +3171,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (path === "/api/help-requests" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const to = getMember(String(body.toActorId ?? ""));
-      if (!to || to.archived) return json(res, 400, { error: "bad_recipient", message: "Pick a current household member to ask." }, req);
-      const message = String(body.message ?? "").trim().slice(0, 500);
-      if (!message) return json(res, 400, { error: "message_required", message: "Say what you need help with." }, req);
-      // Direction: "ask" (default) = requester asking `to` to help with the requester's
-      // item; "offer" = requester offering to help with `to`'s item. Recipient is `to` either way.
-      const kind = body.kind === "offer" ? "offer" : "ask";
-      // WP-001 (ISS-009 root): refuse a duplicate PENDING request for the same
-      // (taskId, recipient) — re-asking piled up records that rendered as duplicate
-      // cards. 409 returns the existing record so clients can point at it.
-      if (body.taskId) {
-        const existing = listHelpRequests((h) =>
-          h.householdId === g.session.householdId && h.status === "pending" &&
-          h.taskId === body.taskId && h.toActorId === String(body.toActorId ?? ""));
-        if (existing.length) {
-          return json(res, 409, {
-            error: "duplicate_request",
-            message: `${to.displayName} was already asked about this — waiting on their answer.`,
-            helpRequest: existing[0],
-          }, req);
-        }
-      }
-      const fromName = getMember(g.session.actorId)?.displayName ?? g.session.actorId;
-      const hr = putHelpRequest({
-        id: "hr_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        fromActorId: g.session.actorId, fromName, toActorId: to.actorId, toName: to.displayName,
-        kind,
-        message, eventId: body.eventId ?? null, taskId: body.taskId ?? null,
-        status: "pending", responseNote: null,
-        createdAt: new Date().toISOString(), respondedAt: null,
-      });
-      const nTitle = kind === "offer" ? "Help offered" : "Can you help?";
-      const nBody = kind === "offer" ? `${fromName} offered to help: ${message}` : `${fromName}: ${message}`;
-      addNotification({ householdId: g.session.householdId, actorId: to.actorId, channel: "in_app", title: nTitle, body: nBody });
-      void pushToMember({ householdId: g.session.householdId, actorId: to.actorId, title: nTitle, body: nBody, data: { type: "help_request", id: hr.id } });
-      audit({ type: "help.request", helpRequestId: hr.id, toActorId: to.actorId, kind, ok: true }, req, g.session);
-      return json(res, 200, { helpRequest: hr }, req);
+      // One function for the route and for a chat suggestion (server/help-requests.mjs).
+      const out = createHelpRequest({ session: g.session, toActorId: body.toActorId, message: body.message, kind: body.kind, eventId: body.eventId ?? null, taskId: body.taskId ?? null });
+      if (!out.ok) return json(res, out.status, { error: out.error, message: out.message, ...(out.helpRequest ? { helpRequest: out.helpRequest } : {}) }, req);
+      audit({ type: "help.request", helpRequestId: out.helpRequest.id, toActorId: out.helpRequest.toActorId, kind: out.helpRequest.kind, ok: true }, req, g.session);
+      return json(res, 200, { helpRequest: out.helpRequest }, req);
     }
     const helpRespond = path.match(/^\/api\/help-requests\/([^/]+)\/respond$/);
     if (helpRespond && method === "POST") {
