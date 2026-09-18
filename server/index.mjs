@@ -71,6 +71,7 @@ import {
 } from "./triggers.mjs";
 import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, sendRecoveryCode, pushToMember } from "./notify.mjs";
+import { handleFamilyMessageRoutes } from "./family-messages-routes.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
 import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast, sessionFromReq } from "./auth.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
@@ -3151,6 +3152,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
      * help must never need a role); only the recipient can answer; the requester or
      * an adult can cancel while pending. Notifications go to the two people involved
      * (in-app record + targeted push), never the whole household. */
+    /* ---- Family messages: threads between members (server/family-messages.mjs) ---- */
+    if (path === "/api/threads" || path.startsWith("/api/threads/")) {
+      const handled = await handleFamilyMessageRoutes({ req, res, path, method, url, gate, json, readBody, audit });
+      if (handled) return;
+    }
     if (path === "/api/help-requests" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const mine = listHelpRequests((h) => h.householdId === g.session.householdId)

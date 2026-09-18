@@ -1301,4 +1301,20 @@ export function addNotification(n) {
 }
 export function markNotificationRead(id) { return _notifications.patch(id, { read: true }); }
 
+/* ---- Family messages (server/family-messages.mjs owns the rules) ----
+ * Thread = { id, householdId, kind:"direct"|"group", title, createdBy, createdAt, updatedAt,
+ *   lastMessageAt, lastPreview, members:{ [actorId]: { joinedAt, leftAt, lastReadAt, mutedUntil } }, archived }
+ * Message = { id, threadId, householdId, fromActorId, at, kind:"text"|"system"|"share", text,
+ *   attachments[], reactions{}, suggestions[], editedAt, deletedAt } */
+const _familyThreads = keyedCollection("family_threads.json");
+export const listFamilyThreads = (filter) => _familyThreads.list(filter);
+export const getFamilyThread = (id) => _familyThreads.get(id);
+export const putFamilyThread = (t) => _familyThreads.put(t);
+export const patchFamilyThread = (id, patch) => _familyThreads.patch(id, patch);
+const _familyMessages = keyedCollection("family_messages.json");
+export const listFamilyMessages = (filter) => _familyMessages.list(filter);
+export const getFamilyMessage = (id) => _familyMessages.get(id);
+export const putFamilyMessage = (m) => _familyMessages.put(m);
+export const patchFamilyMessage = (id, patch) => _familyMessages.patch(id, patch);
+
 export { DATA_DIR };
