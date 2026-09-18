@@ -1,31 +1,32 @@
-// Unified Inbox — everything waiting on you in one place. A chip-style
-// segmented bar switches between Approvals (decisions the helpers are blocked
-// on), Updates (the durable delivery inbox), and Chats (assistant
-// conversations). Counts stay live across all three segments.
+// Unified Inbox — everything waiting on you in one place, read left to right:
+// Messages (the family talking to each other), Approvals (decisions the helpers are
+// blocked on) and Updates (every deliverable, grouped by who sent it, each one openable
+// in full and one tap from the helper's own chat). Counts stay live across all three.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, View } from "react-native";
-import { router } from "expo-router";
-import { api, type ApprovalRec, type ConversationRec } from "@/lib/api";
+import { Alert, ScrollView, View } from "react-native";
+import { router, useLocalSearchParams } from "expo-router";
+import { api, type ApprovalRec, type NotificationRec, type PublicHelper } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
+import { notificationSources, sourceKeyOf, notificationTarget } from "@/lib/messages";
 import { useTheme, riskColor, statusColor, tapHaptic } from "@/theme";
 // NOTE: "/index" is deliberate — the legacy src/components/ui.tsx still exists
 // until the old screens are deleted, and it shadows the ui/ directory on the
 // bare "@/components/ui" specifier. This path resolves the new kit either way.
 import {
   T, Card, Well, Button, Badge, Row, SectionHeader, SkeletonCards,
-  EmptyState, ErrorState, Notice, Rise, HScreen, Sym, SymTile, PressableScale,
+  EmptyState, ErrorState, Notice, Rise, HScreen, Sym, SymTile, PressableScale, Chip,
 } from "@/components/ui";
 
-type Segment = "approvals" | "updates" | "chats";
-type NoticeRec = { id: string; channel: string; title: string; body: string; read: boolean; createdAt: number };
+type Segment = "messages" | "approvals" | "updates";
 
-// Channel → SF symbol for the delivery inbox rows.
-const CHANNEL_ICON: Record<string, string> = {
-  in_app: "app.badge",
-  email: "envelope",
-  sms: "message",
-  dashboard: "rectangle.on.rectangle",
+// Source → SF symbol for an update row's tile.
+const SOURCE_ICON: Record<string, string> = {
+  helper: "sparkles",
+  assistant: "sparkle",
+  thread: "bubble.left.and.bubble.right",
+  member: "person",
+  system: "app.badge",
 };
 
 // The approval record deliberately carries only a hash of its input — the REAL resolved
@@ -69,20 +70,17 @@ function expiryLabel(expiresAt: number, now: number): { text: string; urgent: bo
   return { text: `Expires in ${Math.floor(h / 24)}d`, urgent: false, expired: false };
 }
 
-// Last-message preview for a conversation row. An old thread's plan turn can carry no text
-// of its own, so its title stands in rather than leaving the row blank.
-function convoPreview(c: ConversationRec): string {
-  const last = c.messages[c.messages.length - 1];
-  if (!last) return "No messages yet";
-  const text = last.text || last.plan?.title || "";
-  return text.replace(/\s+/g, " ").trim() || "No messages yet";
-}
-
 export default function InboxScreen() {
   const { session } = useSession();
   const { colors, dark, spacing, radii } = useTheme();
 
-  const [seg, setSeg] = useState<Segment>("approvals");
+  const params = useLocalSearchParams<{ seg?: string }>();
+  const [seg, setSeg] = useState<Segment>(
+    params.seg === "approvals" || params.seg === "updates" || params.seg === "messages" ? params.seg : "messages",
+  );
+  useEffect(() => {
+    if (params.seg === "approvals" || params.seg === "updates" || params.seg === "messages") setSeg(params.seg);
+  }, [params.seg]);
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,19 +93,19 @@ export default function InboxScreen() {
   const [decisionMsg, setDecisionMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
   // Updates
-  const [notices, setNotices] = useState<NoticeRec[]>([]);
+  const [notices, setNotices] = useState<NotificationRec[]>([]);
+  const [helpers, setHelpers] = useState<PublicHelper[]>([]);
+  const [sourceKey, setSourceKey] = useState("all");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ text: string; ok: boolean } | null>(null);
-
-  // Chats
-  const [convos, setConvos] = useState<ConversationRec[]>([]);
 
   const load = useCallback(async () => {
     // list endpoints swallow transport errors into empty arrays, so probe
     // health alongside them to render an honest error state instead of a
     // false "all caught up".
-    const [health, approvals, delivered, conversations] = await Promise.all([
-      api.health(), api.approvals(), api.notifications(), api.conversations(),
+    const [health, approvals, delivered, helperList] = await Promise.all([
+      api.health(), api.approvals(), api.notifications(), api.helpers(),
     ]);
     if (!health?.ok) {
       setError("The FamiliOS backend didn't answer.");
@@ -117,7 +115,7 @@ export default function InboxScreen() {
     setError(null);
     setApprovalItems(approvals);
     setNotices(delivered);
-    setConvos(conversations);
+    setHelpers(helperList);
     // Enrich pending approvals with the gated run step's REAL resolved input.
     if (approvals.some((a) => a.status === "pending")) {
       const runs = await api.runs("waiting_for_approval");
@@ -167,7 +165,7 @@ export default function InboxScreen() {
     ]);
   }, [decide]);
 
-  const markRead = useCallback(async (n: NoticeRec) => {
+  const markRead = useCallback(async (n: NotificationRec) => {
     if (n.read) return;
     setNotices((list) => list.map((x) => (x.id === n.id ? { ...x, read: true } : x))); // optimistic
     const r = await api.markNotificationRead(n.id);
@@ -186,36 +184,26 @@ export default function InboxScreen() {
     await load();
   }, [load]);
 
-  const confirmDeleteConvo = useCallback((c: ConversationRec) => {
-    Alert.alert("Delete conversation?", `"${c.title || "Untitled chat"}" and its messages will be removed from every device.`, [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: () => {
-          setConvos((list) => list.filter((x) => x.id !== c.id)); // optimistic
-          void (async () => {
-            const r = await api.deleteConversation(c.id);
-            if (r.error) { tapHaptic("error"); await load(); }
-            else tapHaptic("success");
-          })();
-        },
-      },
-    ]);
-  }, [load]);
-
   const pending = useMemo(() => approvalItems.filter((a) => a.status === "pending"), [approvalItems]);
   const decided = useMemo(() => approvalItems.filter((a) => a.status !== "pending").slice(0, 10), [approvalItems]);
   const unreadCount = useMemo(() => notices.filter((n) => !n.read).length, [notices]);
-  const sortedConvos = useMemo(
-    () => [...convos].sort((a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0)),
-    [convos],
+  // Updates, grouped by who sent them. The chips are the "dropdown" on a phone: every helper
+  // is a source before its first delivery, and the selected helper's own thread is one tap away.
+  const sources = useMemo(() => notificationSources(notices, helpers), [notices, helpers]);
+  const selectedSource = useMemo(() => sources.find((c) => c.key === sourceKey) ?? sources[0], [sources, sourceKey]);
+  const visibleNotices = useMemo(
+    () => (sourceKey === "all" ? notices : notices.filter((n) => sourceKeyOf(n) === sourceKey)),
+    [notices, sourceKey],
   );
+  const openChat = useCallback((conversationId: string | null | undefined) => {
+    if (!conversationId) return;
+    router.push({ pathname: "/(ask)", params: { c: conversationId } });
+  }, []);
 
   const segments: { key: Segment; label: string; count: number; countNoun: string }[] = [
+    { key: "messages", label: "Messages", count: 0, countNoun: "unread" },
     { key: "approvals", label: "Approvals", count: pending.length, countNoun: "pending" },
     { key: "updates", label: "Updates", count: unreadCount, countNoun: "unread" },
-    { key: "chats", label: "Chats", count: sortedConvos.length, countNoun: "conversations" },
   ];
 
   return (
@@ -257,6 +245,10 @@ export default function InboxScreen() {
         <SkeletonCards count={4} />
       ) : error ? (
         <ErrorState message={error} onRetry={() => void load()} />
+      ) : seg === "messages" ? (
+        <Rise index={1}>
+          <EmptyState icon="bubble.left.and.bubble.right" title="No messages yet" hint="Family messages arrive here: one-to-one, or a group you grow as you go." />
+        </Rise>
       ) : seg === "approvals" ? (
         <>
           {decisionMsg ? <Rise index={1}><Notice text={decisionMsg.text} ok={decisionMsg.ok} /></Rise> : null}
@@ -330,54 +322,90 @@ export default function InboxScreen() {
             </Rise>
           ) : null}
         </>
-      ) : seg === "updates" ? (
+      ) : (
         <>
-          {notices.length === 0 ? (
-            <Rise index={1}>
-              <EmptyState icon="app.badge" title="No updates yet" hint="In-app deliveries from helpers and approvals land here. Send a test below to see the real path work." />
+          {/* Who sent it. Selecting a helper filters the list and arms "Open chat". */}
+          <Rise index={1}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ gap: 8, paddingRight: 4 }}>
+                {sources.map((c) => (
+                  <Chip key={c.key} label={c.label} selected={c.key === sourceKey} onPress={() => setSourceKey(c.key)} icon={c.kind === "helper" ? "sparkles" : undefined} />
+                ))}
+              </ScrollView>
+              <Button
+                title="Open chat"
+                small
+                icon="bubble.left"
+                disabled={!selectedSource?.conversationId}
+                onPress={() => openChat(selectedSource?.conversationId)}
+              />
+            </View>
+          </Rise>
+          {visibleNotices.length === 0 ? (
+            <Rise index={2}>
+              <EmptyState
+                icon="app.badge"
+                title={sourceKey === "all" ? "No updates yet" : `Nothing from ${selectedSource?.label ?? "this source"} yet`}
+                hint={sourceKey === "all" ? "Deliveries from helpers, Famili and the family land here. Send a test below to see the real path work." : "Run the helper, or wait for its next scheduled turn."}
+              />
             </Rise>
           ) : (
-            <Rise index={1}>
+            <Rise index={2}>
               <Card padded={false}>
-                {notices.map((n, i) => (
-                  <PressableScale
-                    key={n.id}
-                    scaleTo={0.99}
-                    haptic={n.read ? null : "select"}
-                    onPress={() => {
-                      /* Cluster I — "when I go to select one, I can't actually see any
-                       * context about it… if I click it, I can't see any more. It just
-                       * disappears." A notification that only knows how to vanish is a
-                       * dead end. If it names a thing, tapping goes TO the thing; marking
-                       * read rides along instead of being the whole event. */
-                      void markRead(n);
-                      const d = (n as { data?: { type?: string; id?: string } }).data;
-                      if (d?.type === "event" && d.id) router.push({ pathname: "/event-form", params: { id: d.id } });
-                    }}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${n.title}${n.read ? "" : ", unread"}`}
-                  >
-                    <View style={{ flexDirection: "row", alignItems: "flex-start", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: 13, borderBottomWidth: i === notices.length - 1 ? 0 : 1, borderBottomColor: colors.border }}>
-                      <SymTile
-                        name={CHANNEL_ICON[n.channel] ?? "app.badge"}
-                        color={n.read ? colors.textFaint : colors.ember}
-                        bg={n.read ? colors.surfaceSunken : colors.emberBg}
-                      />
-                      <View style={{ flex: 1, gap: 2 }}>
-                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                          {!n.read ? <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: colors.ember }} /> : null}
-                          <T kind={n.read ? "body" : "bodyMedium"} color={n.read ? colors.textSecondary : colors.text} style={{ flex: 1 }} numberOfLines={2}>{n.title}</T>
+                {visibleNotices.map((n, i) => {
+                  const expanded = expandedId === n.id;
+                  const kind = n.source?.kind ?? "system";
+                  const target = notificationTarget(n);
+                  return (
+                    <View key={n.id} style={{ borderBottomWidth: i === visibleNotices.length - 1 ? 0 : 1, borderBottomColor: colors.border }}>
+                      <PressableScale
+                        scaleTo={0.99}
+                        haptic={n.read ? null : "select"}
+                        onPress={() => {
+                          /* Tapping an update opens it in place — the whole deliverable, not two lines
+                           * of it — and marks it read on the way. Going to the thing it names is a
+                           * separate, visible button, so reading never navigates away by surprise. */
+                          void markRead(n);
+                          setExpandedId(expanded ? null : n.id);
+                        }}
+                        accessibilityRole="button"
+                        accessibilityState={{ expanded }}
+                        accessibilityLabel={`${n.title}${n.read ? "" : ", unread"}`}
+                      >
+                        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: 13 }}>
+                          <SymTile
+                            name={SOURCE_ICON[kind] ?? "app.badge"}
+                            color={n.read ? colors.textFaint : colors.ember}
+                            bg={n.read ? colors.surfaceSunken : colors.emberBg}
+                          />
+                          <View style={{ flex: 1, gap: 2 }}>
+                            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                              {!n.read ? <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: colors.ember }} /> : null}
+                              <T kind={n.read ? "body" : "bodyMedium"} color={n.read ? colors.textSecondary : colors.text} style={{ flex: 1 }} numberOfLines={expanded ? undefined : 2}>{n.title}</T>
+                            </View>
+                            {n.body ? (
+                              <T kind="sub" color={expanded ? colors.textSecondary : undefined} numberOfLines={expanded ? undefined : 2} selectable={expanded}>{n.body}</T>
+                            ) : null}
+                            <T kind="caption" color={colors.textFaint}>
+                              {n.source?.name ? `${n.source.name} · ` : ""}{ago(n.createdAt, now)}{expanded ? "" : " · tap to read"}
+                            </T>
+                          </View>
+                          <Sym name={expanded ? "chevron.up" : "chevron.down"} size={12} color={colors.textFaint} />
                         </View>
-                        {n.body ? <T kind="sub" numberOfLines={2}>{n.body}</T> : null}
-                        <T kind="caption" color={colors.textFaint}>{ago(n.createdAt, now)}{n.read ? "" : " · tap to mark read"}</T>
-                      </View>
+                      </PressableScale>
+                      {expanded && (n.conversationId || target) ? (
+                        <View style={{ flexDirection: "row", gap: spacing.sm, paddingHorizontal: spacing.lg, paddingBottom: spacing.md }}>
+                          {n.conversationId ? <Button title="Open chat" small icon="bubble.left" onPress={() => openChat(n.conversationId)} /> : null}
+                          {target ? <Button title="Open" small icon="arrow.up.right" onPress={() => router.push(target as never)} /> : null}
+                        </View>
+                      ) : null}
                     </View>
-                  </PressableScale>
-                ))}
+                  );
+                })}
               </Card>
             </Rise>
           )}
-          <Rise index={2}>
+          <Rise index={3}>
             <SectionHeader title="Delivery check" />
             <Card>
               <T kind="sub">Sends a real in-app notification through the same channel router helpers use.</T>
@@ -387,37 +415,6 @@ export default function InboxScreen() {
               {testResult ? <View style={{ marginTop: spacing.sm }}><Notice text={testResult.text} ok={testResult.ok} /></View> : null}
             </Card>
           </Rise>
-        </>
-      ) : (
-        <>
-          {sortedConvos.length === 0 ? (
-            <Rise index={1}>
-              <EmptyState
-                icon="bubble.left.and.bubble.right"
-                title="No conversations yet"
-                hint="Chats you start with Ask Famili appear here — on every device."
-                action={{ title: "Ask Famili", onPress: () => router.push("/(ask)") }}
-              />
-            </Rise>
-          ) : (
-            <Rise index={1}>
-              <Card padded={false}>
-                {sortedConvos.map((c, i) => (
-                  <Row
-                    key={c.id}
-                    icon="bubble.left"
-                    title={c.title || "Conversation"}
-                    subtitle={convoPreview(c)}
-                    trailing={<T kind="caption" color={colors.textFaint}>{agoIso(c.updatedAt, now)}</T>}
-                    chevron
-                    onPress={() => router.push(`/(ask)?c=${c.id}`)}
-                    onLongPress={() => confirmDeleteConvo(c)}
-                    last={i === sortedConvos.length - 1}
-                  />
-                ))}
-              </Card>
-            </Rise>
-          )}
         </>
       )}
     </HScreen>

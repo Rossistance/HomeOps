@@ -319,6 +319,18 @@ export interface CalendarSubscription {
 }
 export interface CalendarSync { ok: boolean; imported?: number; updated?: number; removed?: number; total?: number; error?: string }
 // Household files (server-owned library) + read-only knowledge (memory/artifacts).
+/** One in-app delivery. `source` says who sent it (a helper, a person, a family thread);
+ *  `conversationId` is the helper's own thread when the source is a helper, so the Inbox
+ *  can open the chat behind an update; `data` is the deep-link target. */
+export interface NotificationSource { kind: "helper" | "assistant" | "system" | "member" | "thread"; id?: string | null; name?: string | null }
+export interface NotificationRec {
+  id: string; channel: string; title: string; body: string; read: boolean; createdAt: number;
+  data?: { type?: string; id?: string; messageId?: string } | null;
+  source?: NotificationSource | null;
+  conversationId?: string | null;
+  threadId?: string | null;
+}
+
 export interface FileRec {
   id: string; householdId: string; name: string; mime: string; sizeBytes: number;
   tags: string[]; visibility: string; spaceId: string; uploadedBy: string; source: string; createdAt: string;
@@ -662,8 +674,8 @@ export const api = {
     if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
-  async notifications(): Promise<{ id: string; channel: string; title: string; body: string; read: boolean; createdAt: number; data?: { type?: string; id?: string } }[]> {
-    const r = await req<{ notifications: { id: string; channel: string; title: string; body: string; read: boolean; createdAt: number }[] }>("/notifications");
+  async notifications(): Promise<NotificationRec[]> {
+    const r = await req<{ notifications: NotificationRec[] }>("/notifications");
     return r.data?.notifications ?? [];
   },
   async markNotificationRead(id: string): Promise<{ ok?: boolean }> {
