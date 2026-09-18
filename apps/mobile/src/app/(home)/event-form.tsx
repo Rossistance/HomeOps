@@ -13,6 +13,7 @@ import { loadDraft, saveDraft, clearDraft, isEmptyDraft, type EventDraft } from 
 import { useTheme, tapHaptic } from "@/theme";
 import { depth, rimColor, rimGlow } from "@/theme/neumorph";
 import { AddressField } from "@/components/AddressField";
+import { useShareToThread, localPreview } from "@/components/sheets/share-to-thread-sheet";
 import { ActionBar, ACTION_BAR_HEIGHT } from "@/components/ui/action-bar";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
 // still shadows the ui/ directory until old screens are deleted centrally.
@@ -119,6 +120,7 @@ export default function EventFormScreen() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
+  const shareTo = useShareToThread();
   /* Cluster D — whose event this IS decides what this form is. The household Owner got a
    * full edit surface on his father-in-law's event; the server now refuses those writes,
    * and a form that offers what the server refuses is a lie with input fields. */
@@ -1121,6 +1123,15 @@ export default function EventFormScreen() {
           ) : null}
           {/* Save has left the scroll — see the ActionBar below. Delete stays down here on
               purpose: a destructive action should take a deliberate scroll to reach. */}
+          {isEdit && id ? (
+            <Button
+              title="Share to a chat"
+              icon="paperplane"
+              full
+              disabled={busy !== null}
+              onPress={() => shareTo.share(localPreview("event", id, { title: title.trim() || "Event", when: start.toISOString(), allDay, where: location.trim() || null }))}
+            />
+          ) : null}
           {isEdit ? (
             <Button
               title="Delete event"
@@ -1134,6 +1145,7 @@ export default function EventFormScreen() {
         </View>
       ) : null}
       </HScreen>
+      {shareTo.sheet}
 
       {/* C4/C5 — [15:03] "Save is not visible at all… that's crucial", and [13:48] "Save
           changes should be closer to the text entry." Both are answered by taking the commit

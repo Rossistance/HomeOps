@@ -14,6 +14,7 @@ import {
   SectionHeader, SheetCTA, SkeletonCards, Sym, SymTile, T, VisibilityPicker, normalizeVisibility, type Visibility, Well,
 } from "@/components/ui";
 import { UploadSheet } from "@/components/sheets/upload-sheet";
+import { useShareToThread, localPreview } from "@/components/sheets/share-to-thread-sheet";
 // Categorization is pure + unit-tested (WP-002/ISS-002): explicit space tags win,
 // heuristics use word boundaries — see lib/spaces.test.mjs.
 import { SPACE_DEFS, spaceOf, type SpaceKey } from "@/lib/spaces";
@@ -68,6 +69,7 @@ export default function LibraryScreen() {
   const [filter, setFilter] = useState("");
   const [spaceFilter, setSpaceFilter] = useState<SpaceKey | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const shareTo = useShareToThread();
   const [expandedArtifact, setExpandedArtifact] = useState<string | null>(null);
   // WP-002: persistent save confirmation — stays until dismissed, names the REAL
   // rendered category (computed by the same spaceOf the list uses).
@@ -360,6 +362,13 @@ export default function LibraryScreen() {
                           </T>
                         </View>
                         {b && <Badge label={b.label} fg={b.fg} bg={b.bg} />}
+                        <PressableScale
+                          onPress={() => shareTo.share(localPreview("file", f.id, { title: f.name, mime: f.mime, sizeBytes: f.sizeBytes, who: f.uploadedByName ?? null }))}
+                          haptic="select" hitSlop={10} accessibilityRole="button" accessibilityLabel={`Share ${f.name} to a chat`}
+                          style={{ padding: 6 }}
+                        >
+                          <Sym name="paperplane" size={15} color={colors.textMuted} />
+                        </PressableScale>
                         {busy === `open:${f.id}`
                           ? <ActivityIndicator size="small" color={colors.textFaint} />
                           : <Sym name={open ? "chevron.up" : "chevron.down"} size={13} color={colors.textFaint} />}
@@ -523,6 +532,7 @@ export default function LibraryScreen() {
         </>
       )}
 
+      {shareTo.sheet}
       <UploadSheet visible={uploadOpen} onClose={() => setUploadOpen(false)} onUploaded={(f) => { setJustUploaded(f); void load(); }} />
       <KnowledgeSheet
         item={editingK}

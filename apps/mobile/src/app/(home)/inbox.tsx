@@ -7,6 +7,7 @@ import { Alert, ScrollView, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
 import { api, type ApprovalRec, type NotificationRec, type PublicHelper, type ThreadRec } from "@/lib/api";
 import { ThreadList } from "@/components/messages/thread-list";
+import { useShareToThread, localPreview } from "@/components/sheets/share-to-thread-sheet";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
 import { notificationSources, sourceKeyOf, notificationTarget } from "@/lib/messages";
@@ -95,6 +96,7 @@ export default function InboxScreen() {
 
   // Messages
   const [threads, setThreads] = useState<ThreadRec[]>([]);
+  const shareTo = useShareToThread();
 
   // Updates
   const [notices, setNotices] = useState<NotificationRec[]>([]);
@@ -212,6 +214,7 @@ export default function InboxScreen() {
   ];
 
   return (
+    <>
     <HScreen refreshing={refreshing} onRefresh={onRefresh}>
       {/* Chip-style segmented bar with live count badges. */}
       <Rise index={0}>
@@ -396,10 +399,11 @@ export default function InboxScreen() {
                           <Sym name={expanded ? "chevron.up" : "chevron.down"} size={12} color={colors.textFaint} />
                         </View>
                       </PressableScale>
-                      {expanded && (n.conversationId || target) ? (
+                      {expanded ? (
                         <View style={{ flexDirection: "row", gap: spacing.sm, paddingHorizontal: spacing.lg, paddingBottom: spacing.md }}>
                           {n.conversationId ? <Button title="Open chat" small icon="bubble.left" onPress={() => openChat(n.conversationId)} /> : null}
                           {target ? <Button title="Open" small icon="arrow.up.right" onPress={() => router.push(target as never)} /> : null}
+                          <Button title="Share" small icon="paperplane" onPress={() => shareTo.share(localPreview("notification", n.id, { title: n.title, body: n.body, who: n.source?.name ?? null }))} />
                         </View>
                       ) : null}
                     </View>
@@ -421,5 +425,7 @@ export default function InboxScreen() {
         </>
       )}
     </HScreen>
+    {shareTo.sheet}
+    </>
   );
 }

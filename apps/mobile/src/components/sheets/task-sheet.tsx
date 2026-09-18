@@ -19,6 +19,7 @@ import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import { api, type MemberRec, type NestRec, type TaskRec } from "@/lib/api";
 import { useTheme, tapHaptic } from "@/theme";
 import { Chip, ChipRow, HSheet, SheetCTA, Sym, T, VisibilityPicker, normalizeVisibility, type Visibility, Well, PressableScale } from "@/components/ui";
+import { useShareToThread, localPreview } from "@/components/sheets/share-to-thread-sheet";
 
 /** The offsets the server will accept (server/reminders.mjs REMINDER_CHOICES). */
 const REMINDERS: { minutes: number | null; label: string }[] = [
@@ -60,6 +61,7 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
   onDeleted: (id: string) => void;
 }) {
   const { colors, spacing, radii, type } = useTheme();
+  const shareTo = useShareToThread();
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
   const [assignee, setAssignee] = useState<string | null>(null);
@@ -166,6 +168,7 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
   const inputStyle = useMemo(() => ([type.body, { color: colors.text, paddingVertical: 10 }]), [type, colors]);
 
   return (
+    <>
     <HSheet
       visible={visible}
       onClose={onClose}
@@ -356,6 +359,18 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
           </View>
         ) : null}
 
+        {task ? (
+          <PressableScale
+            onPress={() => { onClose(); shareTo.share(localPreview("task", task.id, { title: task.title, when: task.dueAt ?? null, status: task.status })); }}
+            haptic="select"
+            accessibilityRole="button"
+            accessibilityLabel="Share this task to a chat"
+            style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: spacing.md, marginTop: spacing.sm }}
+          >
+            <Sym name="paperplane" size={14} color={colors.ember} />
+            <T kind="subMedium" color={colors.ember}>Share to a chat</T>
+          </PressableScale>
+        ) : null}
         {canEdit ? (
           <PressableScale
             onPress={confirmDelete}
@@ -369,5 +384,7 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
         ) : null}
       </ScrollView>
     </HSheet>
+    {shareTo.sheet}
+    </>
   );
 }

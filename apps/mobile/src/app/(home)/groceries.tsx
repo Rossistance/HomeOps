@@ -9,6 +9,7 @@ import { api, type MemberRec, type NestRec, type TaskRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { isArchived, isOpen } from "@/lib/task-state";
 import { TaskSheet } from "@/components/sheets/task-sheet";
+import { useShareToThread, localPreview } from "@/components/sheets/share-to-thread-sheet";
 import { useRevSync } from "@/lib/rev-sync";
 import { useTheme, tapHaptic, motion } from "@/theme";
 import {
@@ -132,9 +133,11 @@ export default function GroceriesScreen() {
    * has the one true editor (dates, reminders, assignee, who can see it). Same sheet,
    * opened from here, instead of a second lesser editor drifting beside the first. */
   const [detailTask, setDetailTask] = useState<TaskRec | null>(null);
+  const shareTo = useShareToThread();
   const itemMenu = (t: TaskRec) => {
     Alert.alert(t.title, undefined, [
       { text: "Details…", onPress: () => setDetailTask(t) },
+      { text: "Share to a chat", onPress: () => shareTo.share(localPreview("list_item", t.id, { title: t.title, status: t.status })) },
       { text: "Rename", onPress: () => beginEdit(t) },
       { text: "Remove", style: "destructive", onPress: () => remove(t) },
       { text: "Cancel", style: "cancel" },
@@ -325,6 +328,7 @@ export default function GroceriesScreen() {
         </View>
       </HSheet>
       {flash}
+      {shareTo.sheet}
       <TaskSheet
         visible={!!detailTask}
         task={detailTask}

@@ -22,6 +22,7 @@ import { HScreen } from "@/components/ui/screen";
 import { HSheet, SheetCTA } from "@/components/ui/sheet";
 import { SkeletonCards } from "@/components/ui/skeleton";
 import { Rise } from "@/components/ui/stagger";
+import { useShareToThread, localPreview } from "@/components/sheets/share-to-thread-sheet";
 import { EmptyState, ErrorState, Notice } from "@/components/ui/states";
 import { Sym, SymTile } from "@/components/ui/symbol";
 import { T } from "@/components/ui/text";
@@ -154,6 +155,7 @@ export default function MealsScreen() {
     else setNotice({ text: r.error === "date_required" ? "Give the meal a date first." : `Couldn't add to calendar: ${r.message ?? r.error ?? "unknown error"}`, ok: false });
   };
 
+  const shareTo = useShareToThread();
   const removeMeal = (m: Meal) => {
     const doDelete = async (deleteGroceries: boolean) => {
       setBusy(`d:${m.id}`);
@@ -228,6 +230,7 @@ export default function MealsScreen() {
   }
 
   return (
+    <>
     <HScreen refreshing={refreshing} onRefresh={() => void onRefresh()} keyboardAware>
       {header}
 
@@ -388,6 +391,7 @@ export default function MealsScreen() {
                         onCalendar={() => void toCalendar(m)}
                         onEdit={() => setEditing(m)}
                         onRemove={() => removeMeal(m)}
+                        onShare={() => shareTo.share(localPreview("meal", m.id, { title: m.title, when: m.date ?? null, slot: m.slot ?? null }))}
                       />
                     ))}
                   </View>
@@ -410,6 +414,7 @@ export default function MealsScreen() {
                     onCalendar={() => void toCalendar(m)}
                     onEdit={() => setEditing(m)}
                     onRemove={() => removeMeal(m)}
+                        onShare={() => shareTo.share(localPreview("meal", m.id, { title: m.title, when: m.date ?? null, slot: m.slot ?? null }))}
                   />
                 ))}
               </View>
@@ -428,6 +433,8 @@ export default function MealsScreen() {
         onSaved={() => { setEditing(null); void load(); }}
       />
     </HScreen>
+    {shareTo.sheet}
+    </>
   );
 }
 
@@ -613,7 +620,7 @@ function MealEditSheet({ meal, visible, week, todayKey, onClose, onSaved }: {
 }
 
 /** One planned meal: slot badge, ingredient preview, and the action row. */
-function MealCard({ m, canManage, busy, onGrocery, onCalendar, onEdit, onRemove }: {
+function MealCard({ m, canManage, busy, onGrocery, onCalendar, onEdit, onRemove, onShare }: {
   m: Meal;
   canManage: boolean;
   busy: string | null;
@@ -621,6 +628,7 @@ function MealCard({ m, canManage, busy, onGrocery, onCalendar, onEdit, onRemove 
   onCalendar: () => void;
   onEdit: () => void;
   onRemove: () => void;
+  onShare: () => void;
 }) {
   const { colors, spacing } = useTheme();
   const tint = slotTint(colors, m.slot);
@@ -697,6 +705,16 @@ function MealCard({ m, canManage, busy, onGrocery, onCalendar, onEdit, onRemove 
             <Button small title="Calendar" icon="calendar.badge.plus" loading={busy === `c:${m.id}`} onPress={onCalendar} />
           ) : null}
           <View style={{ flex: 1 }} />
+          <PressableScale
+            haptic="select"
+            hitSlop={8}
+            onPress={onShare}
+            accessibilityRole="button"
+            accessibilityLabel={`Share ${m.title} to a chat`}
+            style={{ padding: 8 }}
+          >
+            <Sym name="paperplane" size={17} color={colors.textMuted} />
+          </PressableScale>
           <PressableScale
             haptic="select"
             hitSlop={8}
