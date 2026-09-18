@@ -198,6 +198,7 @@ export default function InboxScreen() {
   // is a source before its first delivery, and the selected helper's own thread is one tap away.
   const sources = useMemo(() => notificationSources(notices, helpers), [notices, helpers]);
   const selectedSource = useMemo(() => sources.find((c) => c.key === sourceKey) ?? sources[0], [sources, sourceKey]);
+  void selectedSource;
   const visibleNotices = useMemo(
     () => (sourceKey === "all" ? notices : notices.filter((n) => sourceKeyOf(n) === sourceKey)),
     [notices, sourceKey],
@@ -206,6 +207,13 @@ export default function InboxScreen() {
     if (!conversationId) return;
     router.push({ pathname: "/(ask)", params: { c: conversationId } });
   }, []);
+  // A row written before helpers stamped their thread on it still opens the helper's chat:
+  // the helpers list knows the thread even when the notification does not.
+  const chatFor = useCallback((n: NotificationRec): string | null => {
+    if (n.conversationId) return n.conversationId;
+    const hid = n.source?.kind === "helper" ? n.source.id : null;
+    return (hid && helpers.find((h) => h.id === hid)?.conversationId) || null;
+  }, [helpers]);
 
   const segments: { key: Segment; label: string; count: number; countNoun: string }[] = [
     { key: "messages", label: "Messages", count: threads.reduce((n, t) => n + (t.unreadCount > 0 ? 1 : 0), 0), countNoun: "unread" },
@@ -332,20 +340,11 @@ export default function InboxScreen() {
         <>
           {/* Who sent it. Selecting a helper filters the list and arms "Open chat". */}
           <Rise index={1}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ gap: 8, paddingRight: 4 }}>
-                {sources.map((c) => (
-                  <Chip key={c.key} label={c.label} selected={c.key === sourceKey} onPress={() => setSourceKey(c.key)} icon={c.kind === "helper" ? "sparkles" : undefined} />
-                ))}
-              </ScrollView>
-              <Button
-                title="Open chat"
-                small
-                icon="bubble.left"
-                disabled={!selectedSource?.conversationId}
-                onPress={() => openChat(selectedSource?.conversationId)}
-              />
-            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingRight: 4 }}>
+              {sources.map((c) => (
+                <Chip key={c.key} label={c.label} selected={c.key === sourceKey} onPress={() => setSourceKey(c.key)} icon={c.kind === "helper" ? "sparkles" : undefined} />
+              ))}
+            </ScrollView>
           </Rise>
           {visibleNotices.length === 0 ? (
             <Rise index={2}>
@@ -392,16 +391,20 @@ export default function InboxScreen() {
                             {n.body ? (
                               <T kind="sub" color={expanded ? colors.textSecondary : undefined} numberOfLines={expanded ? undefined : 2} selectable={expanded}>{n.body}</T>
                             ) : null}
-                            <T kind="caption" color={colors.textFaint}>
-                              {n.source?.name ? `${n.source.name} · ` : ""}{ago(n.createdAt, now)}{expanded ? "" : " · tap to read"}
-                            </T>
+                            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                              {/* The source as a title bubble, so a row says who wrote it at a glance. */}
+                              {n.source?.name ? (
+                                <Badge label={n.source.name} fg={kind === "helper" ? colors.ember : colors.textMuted} bg={kind === "helper" ? colors.emberBg : colors.surfaceSunken} icon={kind === "helper" ? "sparkles" : undefined} />
+                              ) : null}
+                              <T kind="caption" color={colors.textFaint}>{ago(n.createdAt, now)}{expanded ? "" : " · tap to read"}</T>
+                            </View>
                           </View>
                           <Sym name={expanded ? "chevron.up" : "chevron.down"} size={12} color={colors.textFaint} />
                         </View>
                       </PressableScale>
                       {expanded ? (
-                        <View style={{ flexDirection: "row", gap: spacing.sm, paddingHorizontal: spacing.lg, paddingBottom: spacing.md }}>
-                          {n.conversationId ? <Button title="Open chat" small icon="bubble.left" onPress={() => openChat(n.conversationId)} /> : null}
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, paddingHorizontal: spacing.lg, paddingBottom: spacing.md }}>
+                          {chatFor(n) ? <Button title="Open chat" small variant="ember" icon="bubble.left" onPress={() => openChat(chatFor(n))} /> : null}
                           {target ? <Button title="Open" small icon="arrow.up.right" onPress={() => router.push(target as never)} /> : null}
                           <Button title="Share" small icon="paperplane" onPress={() => shareTo.share(localPreview("notification", n.id, { title: n.title, body: n.body, who: n.source?.name ?? null }))} />
                         </View>

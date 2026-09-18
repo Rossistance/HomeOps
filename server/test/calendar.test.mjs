@@ -196,3 +196,32 @@ test("a child cannot push an event to Google", async () => {
   assert.equal(r.status, 403);
   await adult.req(`/api/events/${ev.id}`, { method: "DELETE" });
 });
+
+test("an adult can rename a feed and say whose it is; its events take the owner at once", async () => {
+  const imp = await adult.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Imported calendar", ics: uniqueIcs("owned") }) });
+  assert.equal(imp.status, 200);
+  const subId = imp.data.subscription.id;
+  const before = (await adult.req("/api/events")).data.events.filter((e) => e.provenance?.subscriptionId === subId);
+  assert.equal(before.length, 2);
+  assert.ok(before.every((e) => !e.ownerId), "an ICS feed has no owner until someone says");
+  const bad = await child.req(`/api/calendar/subscriptions/${subId}`, { method: "PATCH", body: JSON.stringify({ name: "x" }) });
+  assert.equal(bad.status, 403);
+  const r = await adult.req(`/api/calendar/subscriptions/${subId}`, { method: "PATCH", body: JSON.stringify({ name: "Lily's school", ownerActorId: "m-lily" }) });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.subscription.name, "Lily's school");
+  assert.equal(r.data.subscription.ownerActorId, "m-lily");
+  assert.equal(r.data.subscription.ownerName, "Lily Harper");
+  assert.equal(r.data.subscription.assigned, true);
+  assert.equal(r.data.restamped, 2);
+  const after = (await adult.req("/api/events")).data.events.filter((e) => e.provenance?.subscriptionId === subId);
+  assert.ok(after.every((e) => e.ownerId === "m-lily"), "existing events now belong to Lily");
+  // A re-sync keeps the assignment.
+  await adult.req(`/api/calendar/subscriptions/${subId}/sync`, { method: "POST" });
+  const resynced = (await adult.req("/api/events")).data.events.filter((e) => e.provenance?.subscriptionId === subId);
+  assert.ok(resynced.every((e) => e.ownerId === "m-lily"));
+  const listed = (await adult.req("/api/calendar/subscriptions")).data.subscriptions.find((s) => s.id === subId);
+  assert.equal(listed.name, "Lily's school");
+  assert.equal(listed.ownerName, "Lily Harper");
+  assert.equal((await adult.req(`/api/calendar/subscriptions/${subId}`, { method: "PATCH", body: JSON.stringify({ ownerActorId: "m-nobody" }) })).status, 400);
+  await adult.req(`/api/calendar/subscriptions/${subId}`, { method: "DELETE" });
+});

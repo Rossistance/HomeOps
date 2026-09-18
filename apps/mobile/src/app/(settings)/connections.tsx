@@ -11,13 +11,13 @@ import * as DocumentPicker from "expo-document-picker";
 // The legacy entry point is the one the rest of the app uses (see (ask)/index.tsx).
 import { readAsStringAsync } from "expo-file-system/legacy";
 import { Stack, router, useLocalSearchParams } from "expo-router";
-import { api, type CalendarSubscription, type ProviderRec } from "@/lib/api";
+import { api, type CalendarSubscription, type MemberRec, type ProviderRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { categoryStyle } from "@/theme/categories";
 import { useTheme, riskColor, tapHaptic, type HearthColors } from "@/theme";
 import {
-  Badge, BrandIcon, Button, Card, CollapsibleSection, EmptyState, Expander, HScreen, Notice, PressableScale, Rise, Row,
-  SectionHeader, SkeletonCards, Sym, SymTile, T,
+  Badge, BrandIcon, Button, Card, Chip, ChipRow, CollapsibleSection, EmptyState, Expander, HScreen, HSheet, Notice, PressableScale, Rise, Row,
+  SectionHeader, SheetCTA, SkeletonCards, Sym, SymTile, T,
 } from "@/components/ui";
 
 // Allow ASWebAuthenticationSession to complete and hand back to the app.
@@ -56,6 +56,11 @@ export default function ConnectionsScreen() {
   const [connectors, setConnectors] = useState<Array<{ id: string; name: string; readiness: string; live: boolean }>>([]);
   const [providers, setProviders] = useState<ProviderRec[]>([]);
   const [subs, setSubs] = useState<CalendarSubscription[]>([]);
+  const [members, setMembers] = useState<MemberRec[]>([]);
+  // Rename / assign a subscribed calendar ("Imported calendar" is nobody's name for anything).
+  const [editSub, setEditSub] = useState<CalendarSubscription | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editOwner, setEditOwner] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [connecting, setConnecting] = useState<string | null>(null);
@@ -99,10 +104,11 @@ export default function ConnectionsScreen() {
   const scrolledTo = useRef<string | null>(null);
 
   const load = useCallback(async () => {
-    const [c, p, s] = await Promise.all([api.connectors(), api.providers(), api.calendarSubscriptions()]);
+    const [c, p, s, m] = await Promise.all([api.connectors(), api.providers(), api.calendarSubscriptions(), api.members()]);
     setConnectors(c);
     setProviders(p);
     setSubs(s);
+    setMembers(m);
     setLoaded(true);
   }, []);
   useEffect(() => { if (session) void load(); }, [session, load]);
@@ -251,6 +257,25 @@ export default function ConnectionsScreen() {
     if (r.sync?.ok) setNotice({ text: `${s.name}: ${r.sync.imported ?? 0} new, ${r.sync.updated ?? 0} updated, ${r.sync.removed ?? 0} removed.`, ok: true });
     else setNotice({ text: `Sync failed: ${r.sync?.error ?? r.error ?? "unknown error"}`, ok: false });
     await load();
+  };
+
+  const openEditSub = (s: CalendarSubscription) => { setEditSub(s); setEditName(s.name); setEditOwner(s.ownerActorId ?? null); };
+  const saveEditSub = async () => {
+    if (!editSub) return;
+    const name = editName.trim();
+    if (!name) { setNotice({ text: "Give the calendar a name.", ok: false }); return; }
+    setSubBusy(`edit:${editSub.id}`); setNotice(null);
+    const r = await api.updateCalendarSubscription(editSub.id, { name, ownerActorId: editOwner });
+    setSubBusy(null);
+    if (r.subscription) {
+      tapHaptic("success");
+      setEditSub(null);
+      setNotice({ text: `${r.subscription.name}${r.subscription.ownerName ? ` · ${r.subscription.ownerName}'s` : ""}${r.restamped ? ` — ${r.restamped} event${r.restamped === 1 ? "" : "s"} now show as theirs` : ""}.`, ok: true });
+      await load();
+    } else {
+      tapHaptic("error");
+      setNotice({ text: r.error === "insufficient_role" ? "Renaming a calendar needs an adult member." : `Couldn't save: ${r.error ?? "unknown error"}`, ok: false });
+    }
   };
 
   const removeSub = async (s: CalendarSubscription) => {
@@ -451,13 +476,14 @@ export default function ConnectionsScreen() {
                     <View style={{ flex: 1, gap: 2 }}>
                       <T kind="bodyMedium" color={colors.text}>{s.name}</T>
                       <T kind="sub" numberOfLines={2}>
-                        {s.source === "google" ? "Google Calendar" : s.url ? "ICS feed" : "Imported .ics"} · {syncLabel(s)}
+                        {s.ownerName ? `${s.ownerName}'s · ` : ""}{s.source === "google" ? "Google Calendar" : s.url ? "ICS feed" : "Imported .ics"} · {syncLabel(s)}
                       </T>
                     </View>
                   </View>
                   {canManage ? (
                     <View style={{ flexDirection: "row", gap: spacing.sm }}>
                       <Button title="Sync now" variant="neutral" small icon="arrow.clockwise" loading={subBusy === `sync:${s.id}`} onPress={() => void syncSub(s)} />
+                      <Button title="Edit" variant="neutral" small icon="pencil" onPress={() => openEditSub(s)} />
                       <Button title="Remove" variant="ghost" small icon="trash" loading={subBusy === `del:${s.id}`} onPress={() => confirmRemoveSub(s)} />
                     </View>
                   ) : null}
@@ -522,6 +548,35 @@ export default function ConnectionsScreen() {
           {/* "This information down here is like a connector status — it's useful, but it can
               also benefit from a collapsed state." Folded by default: it answers a question
               you only ask when something's wrong. */}
+          <HSheet visible={!!editSub} onClose={() => setEditSub(null)} title="This calendar" heightPct={0.62}
+            footer={<SheetCTA title={subBusy?.startsWith("edit:") ? "Saving…" : "Save"} disabled={!editName.trim() || !!subBusy} onPress={() => void saveEditSub()} />}
+          >
+            <View style={{ gap: spacing.md }}>
+              <View style={{ gap: 6 }}>
+                <T kind="eyebrow">Name</T>
+                <TextInput
+                  value={editName}
+                  onChangeText={setEditName}
+                  placeholder="e.g. Amelia's school"
+                  placeholderTextColor={colors.textFaint}
+                  maxLength={80}
+                  accessibilityLabel="Calendar name"
+                  style={{ height: 44, paddingHorizontal: 14, borderRadius: 14, backgroundColor: colors.surfaceSunken, color: colors.text, fontSize: 16 }}
+                />
+              </View>
+              <View style={{ gap: 6 }}>
+                <T kind="eyebrow">Whose calendar is this?</T>
+                <T kind="sub">Its events take that person's colour on the calendar and count toward their day.</T>
+                <ChipRow>
+                  <Chip label="Nobody in particular" selected={editOwner === null} onPress={() => setEditOwner(null)} />
+                  {members.map((m) => (
+                    <Chip key={m.actorId} label={m.displayName} selected={editOwner === m.actorId} onPress={() => setEditOwner(m.actorId)} />
+                  ))}
+                </ChipRow>
+              </View>
+            </View>
+          </HSheet>
+
           <SectionHeader title="Connectors" />
           {shownConnectors.length === 0 ? (
             <EmptyState icon="bolt.slash" title="No connectors loaded" hint="Is the runtime online?" />

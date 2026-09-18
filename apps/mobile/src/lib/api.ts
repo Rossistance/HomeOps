@@ -313,6 +313,9 @@ export interface CalendarSubscription {
   accountEmail?: string | null;
   ownerActorId?: string | null;
   ownerName?: string | null;
+  /** True when a member assigned this calendar by hand (vs. inferred from the connecting account). */
+  assigned?: boolean;
+  createdBy?: string | null;
   lastSyncAt: number | null;
   lastResult: { imported?: number; updated?: number; removed?: number; error?: string } | null;
   eventCount: number; createdAt: number;
@@ -1019,6 +1022,12 @@ export const api = {
   },
   async syncCalendar(id: string): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string }> {
     const r = await req<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string }>(`/calendar/subscriptions/${encodeURIComponent(id)}/sync`, { method: "POST", body: "{}" });
+    return r.data ?? { error: "network" };
+  },
+  /** Rename a feed and/or say whose calendar it is; its imported events take the owner at once. */
+  async updateCalendarSubscription(id: string, patch: { name?: string; ownerActorId?: string | null }): Promise<{ subscription?: CalendarSubscription; restamped?: number; error?: string }> {
+    const r = await req<{ subscription?: CalendarSubscription; restamped?: number; error?: string }>(`/calendar/subscriptions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+    if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
   async deleteCalendarSubscription(id: string): Promise<{ ok?: boolean; removedEvents?: number; error?: string }> {

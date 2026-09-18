@@ -33,6 +33,7 @@ import {
 import { nextAnchorOccurrence } from "./triggers.mjs";
 import { AUTONOMY, AUTONOMY_TEXT, SCHEDULE_KINDS, normalizeSchedule, scheduleText, autonomyOf, helperVisibleTo } from "./helper-shape.mjs";
 import { runAssistantAgent } from "./assistant-agent.mjs";
+import { captureMemoryFromExchange } from "./memory-capture.mjs";
 import { formatForHousehold } from "./household-time.mjs";
 import { roleAtLeast } from "./auth.mjs";
 
@@ -423,6 +424,16 @@ export async function runHelper({ helperId, session = null, reason = "manual", p
     error: out.ok ? null : (out.error ?? "failed"),
   };
   patchAgent(helper.id, { lastRun });
+  // What a helper found out is household intelligence too — a briefing that discovers the
+  // family has a Nest thermostat, or that dance is every Thursday, is worth remembering
+  // exactly as a chat answer would be. Scoped to the helper's room; never blocks the run.
+  if (out.ok && out.answer) {
+    void captureMemoryFromExchange({
+      householdId: helper.householdId, actorId: helper.createdBy ?? runSession.actorId,
+      visibility: helper.visibility ?? "household", nestId: helper.nestId ?? null,
+      message: ask, answer: out.answer, via: "helper", agentId: helper.id, agentName: helper.name,
+    });
+  }
   appendAudit({
     type: "helper.run", agentId: helper.id, reason, ok: !!out.ok,
     error: out.ok ? undefined : out.error, toolCount: (out.toolCalls ?? []).length,

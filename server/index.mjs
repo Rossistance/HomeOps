@@ -3522,7 +3522,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
         // Source account (google subs): the connected account's email + the member who
         // connected it — so the UI can say WHOSE calendar this is. ICS subs have none.
         const account = s.accountId ? getAccountRaw(s.accountId) : null;
-        const ownerActorId = account?.connectedByActorId ?? null;
+        // An assignment made by hand wins over "whoever connected it"; an ICS feed has only the assignment.
+        const ownerActorId = s.ownerActorId ?? account?.connectedByActorId ?? null;
         return {
           id: s.id, name: s.name, url: s.url ?? null, source: s.source, color: s.color ?? null,
           lastSyncAt: s.lastSyncAt ?? null, lastResult: s.lastResult ?? null, eventCount: s.eventCount ?? 0, createdAt: s.createdAt,
@@ -3530,6 +3531,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
           accountEmail: account?.displayName ?? null,
           ownerActorId,
           ownerName: ownerActorId ? (getMember(ownerActorId)?.displayName ?? null) : null,
+          assigned: !!s.ownerActorId,
+          createdBy: s.createdBy ?? null,
         };
       });
       return json(res, 200, { subscriptions: subs }, req);
@@ -3704,6 +3707,45 @@ function mayWriteAgent(session, agent, nextVisibility) {
       return json(res, r.ok ? 200 : 422, { subscription: getSubscription(sub.id), sync: r }, req);
     }
     const subOne = path.match(/^\/api\/calendar\/subscriptions\/([^/]+)$/);
+    // Rename a calendar, or say whose it is. "Imported calendar" is not a name a family
+    // recognises, and an ICS feed has no account to tell us whose events these are — so an
+    // adult can name it and assign it, and every event it already imported takes the new
+    // owner (colour, free/busy) on the spot rather than at the next sync.
+    if (subOne && method === "PATCH") {
+      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
+      const sub = getSubscription(subOne[1]);
+      if (!sub || sub.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const patch = {};
+      if (typeof body.name === "string") {
+        const name = body.name.trim().slice(0, 80);
+        if (!name) return json(res, 400, { error: "name_required" }, req);
+        patch.name = name;
+      }
+      if (body.ownerActorId !== undefined) {
+        if (body.ownerActorId === null || body.ownerActorId === "") patch.ownerActorId = null;
+        else {
+          const m = getMember(String(body.ownerActorId));
+          if (!m || m.householdId !== g.session.householdId || m.archived) return json(res, 400, { error: "bad_member" }, req);
+          patch.ownerActorId = m.actorId;
+        }
+      }
+      if (!Object.keys(patch).length) return json(res, 400, { error: "nothing_to_change" }, req);
+      const next = patchSubscription(sub.id, patch);
+      let restamped = 0;
+      if (patch.ownerActorId !== undefined) {
+        const account = next.accountId ? getAccountRaw(next.accountId) : null;
+        const ownerId = next.ownerActorId ?? account?.connectedByActorId ?? null;
+        for (const ev of listEvents((e) => e.householdId === g.session.householdId && e.layer === "linked" && e.provenance?.subscriptionId === sub.id)) {
+          if ((ev.ownerId ?? null) !== ownerId) { patchEvent(ev.id, { ownerId }); restamped++; }
+        }
+      }
+      audit({ type: "calendar.subscription_update", subscriptionId: sub.id, fields: Object.keys(patch), restamped, ok: true }, req, g.session);
+      const account = next.accountId ? getAccountRaw(next.accountId) : null;
+      const ownerActorId = next.ownerActorId ?? account?.connectedByActorId ?? null;
+      return json(res, 200, { subscription: { id: next.id, name: next.name, url: next.url ?? null, source: next.source, color: next.color ?? null, lastSyncAt: next.lastSyncAt ?? null, lastResult: next.lastResult ?? null, eventCount: next.eventCount ?? 0, createdAt: next.createdAt, accountId: next.accountId ?? null, accountEmail: account?.displayName ?? null, ownerActorId, ownerName: ownerActorId ? (getMember(ownerActorId)?.displayName ?? null) : null, assigned: !!next.ownerActorId, createdBy: next.createdBy ?? null }, restamped }, req);
+    }
     if (subOne && method === "DELETE") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);

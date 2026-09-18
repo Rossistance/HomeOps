@@ -8,7 +8,7 @@
 import crypto from "node:crypto";
 import { safeFetch } from "./net.mjs";
 import { parseICS, expandRecurring } from "./ics.mjs";
-import { listEvents, putEvent, patchEvent, deleteEventRec, getAccountRaw, getSubscription, isEventTombstoned } from "./store.mjs";
+import { listEvents, putEvent, patchEvent, deleteEventRec, getAccountRaw, getSubscription, isEventTombstoned, getMember } from "./store.mjs";
 import { householdTimeZone, serverTimeZone, localMidnightISO, localDateKey, stampToMs, toInstantISO } from "./household-time.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
@@ -119,12 +119,15 @@ export async function syncSubscription({ sub, icsText, session }) {
   let windowStart = Date.now() - 30 * 864e5, windowEnd = Date.now() + 90 * 864e5;
   let googleAccountId = null; // set for google-sourced subs so linked events can be edited two-way
   let ownerActorId = null;    // the member who connected the account — synced events belong to them (colors, free/busy)
+  // A calendar can be assigned to a member by hand ("this is Amelia's school feed"): that
+  // assignment wins over the connecting account, and an ICS feed gets an owner at all.
+  const assignedOwner = sub?.ownerActorId && getMember(sub.ownerActorId) && !getMember(sub.ownerActorId).archived ? sub.ownerActorId : null;
   if (sub?.source === "google") {
     // Pull upcoming events from the actor's connected Google Calendar (next ~90 days).
     const account = resolveGoogleAccount(sub, session);
     if (!account) return { ok: false, error: "no_account" };
     googleAccountId = account.id;
-    ownerActorId = account.connectedByActorId ?? null;
+    ownerActorId = assignedOwner ?? account.connectedByActorId ?? null;
     const api = apiForAccount(account);
     // 30 days back, like the .ics path. With timeMin = now, every synced event that had just
     // ENDED vanished on the next sync (the removal loop below treats "not in this pull" as
@@ -229,7 +232,8 @@ export async function syncSubscription({ sub, icsText, session }) {
   for (const ev of parsed) {
     if (!ev.startAt) continue;
     const uid = ev.uid || crypto.createHash("sha1").update(`${ev.title}|${ev.startAt}`).digest("hex");
-    const fields = { title: ev.title, startAt: ev.startAt, endAt: ev.endAt, location: ev.location, allDay: ev.allDay, ...(ownerActorId ? { ownerId: ownerActorId } : {}) };
+    if (!ownerActorId && assignedOwner) ownerActorId = assignedOwner;
+  const fields = { title: ev.title, startAt: ev.startAt, endAt: ev.endAt, location: ev.location, allDay: ev.allDay, ...(ownerActorId ? { ownerId: ownerActorId } : {}) };
     // Google-sourced linked events carry the Google event id + account so in-app edits
     // can write back to Google (two-way). ICS feeds stay read-only mirrors.
     const gprov = googleAccountId ? { via: "google", googleEventId: uid, googleAccountId } : null;
