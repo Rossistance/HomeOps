@@ -19,7 +19,7 @@ import crypto from "node:crypto";
 import {
   listFamilyThreads, getFamilyThread, putFamilyThread, patchFamilyThread,
   listFamilyMessages, getFamilyMessage, putFamilyMessage, patchFamilyMessage,
-  getMember, listMembers, listNests, isAdultRole, addNotification, appendAudit, withLock,
+  getMember, listMembers, listNests, isAdultRole, appendAudit, withLock,
 } from "./store.mjs";
 import { pushToMember } from "./notify.mjs";
 
@@ -98,6 +98,10 @@ function roster(householdId) {
 }
 
 /** The thread as the API returns it: enriched members, unread count for `forActorId`. */
+/** "Delete" is per person: everything up to now disappears for them, the thread itself stays
+ *  for the others, and a new message brings it back for them fresh (like their phone's Messages). */
+const clearedMs = (t, actorId) => { const c = memberState(t, actorId)?.clearedAt; return c ? Date.parse(c) : 0; };
+
 export function publicThread(t, forActorId) {
   const people = roster(t.householdId);
   const members = Object.entries(t.members ?? {}).map(([actorId, m]) => {
@@ -105,7 +109,7 @@ export function publicThread(t, forActorId) {
     return { actorId, displayName: p?.displayName ?? actorId, color: p?.color ?? null, role: p?.role ?? null, joinedAt: m.joinedAt, leftAt: m.leftAt ?? null, lastReadAt: m.lastReadAt ?? null, mutedUntil: m.mutedUntil ?? null };
   });
   const me = memberState(t, forActorId);
-  const cutoff = me?.lastReadAt ? Date.parse(me.lastReadAt) : 0;
+  const cutoff = Math.max(me?.lastReadAt ? Date.parse(me.lastReadAt) : 0, clearedMs(t, forActorId));
   const leftAt = me?.leftAt ? Date.parse(me.leftAt) : Infinity;
   const unreadCount = me
     ? listFamilyMessages((x) => x.threadId === t.id && !x.deletedAt && x.fromActorId !== forActorId && x.kind !== "system"
@@ -115,6 +119,9 @@ export function publicThread(t, forActorId) {
     id: t.id, kind: t.kind, title: t.title ?? null, participantIds: activeIds(t), createdBy: t.createdBy,
     createdAt: t.createdAt, updatedAt: t.updatedAt, lastMessageAt: t.lastMessageAt ?? null, lastPreview: t.lastPreview ?? null,
     members, unreadCount, muted: isMuted(t, forActorId), left: !!me?.leftAt, archived: !!t.archived,
+    clearedAt: me?.clearedAt ?? null,
+    // The preview must not leak a line the reader cleared away.
+    ...(t.lastPreview && t.lastMessageAt && Date.parse(t.lastMessageAt) <= clearedMs(t, forActorId) ? { lastPreview: null, lastMessageAt: null } : {}),
   };
 }
 
@@ -123,6 +130,8 @@ export function listThreadsFor(actorId, householdId, { viewer } = {}) {
   const v = viewer ?? getMember(actorId);
   return listFamilyThreads((t) => t.householdId === householdId && !!memberState(t, actorId))
     .filter((t) => !viewer || viewer.actorId === actorId || canViewThread(t, viewer))
+    // A chat I deleted stays gone until someone writes in it again.
+    .filter((t) => !memberState(t, actorId)?.clearedAt || (t.lastMessageAt ? Date.parse(t.lastMessageAt) : 0) > clearedMs(t, actorId))
     .sort((a, b) => String(b.lastMessageAt ?? b.createdAt).localeCompare(String(a.lastMessageAt ?? a.createdAt)))
     .map((t) => publicThread(t, actorId))
     .filter(() => !!v);
@@ -142,6 +151,19 @@ export function createThread({ householdId, actorId, participantIds = [], title 
     if (!c.ok) return { ok: false, error: "cannot_message", reason: c.reason, who: id, whoName: other.displayName };
   }
   const at = nowISO();
+  // One thread per set of people, group or direct: the same three people asked for again
+  // is the chat they already have, not a second one beside it. (A creator who deleted it on
+  // their side gets it back fresh, as with a direct thread.)
+  const wanted = new Set([actorId, ...others]);
+  const same = listFamilyThreads((t) => t.householdId === householdId && !t.archived && (() => {
+    const active = activeIds(t);
+    return active.length === wanted.size && active.every((id) => wanted.has(id));
+  })())[0];
+  if (same) {
+    const mine = same.members[actorId];
+    if (mine?.leftAt) { same.members[actorId] = { ...mine, leftAt: null, joinedAt: at }; putFamilyThread({ ...same, updatedAt: at }); }
+    return { ok: true, thread: getFamilyThread(same.id), existed: true };
+  }
   if (others.length === 1) {
     const pair = new Set([actorId, others[0]]);
     const existing = listFamilyThreads((t) => t.householdId === householdId && t.kind === "direct" && !t.archived
@@ -200,10 +222,11 @@ export function listMessages(threadId, { before = null, limit = 50, forActorId =
   if (!t) return [];
   const me = forActorId ? memberState(t, forActorId) : null;
   const leftAt = me?.leftAt ? Date.parse(me.leftAt) : Infinity;
+  const cleared = forActorId ? clearedMs(t, forActorId) : 0;
   const beforeMs = before ? Date.parse(before) : Infinity;
   const n = Math.min(PAGE_MAX, Math.max(1, Number(limit) || 50));
   return listFamilyMessages((x) => x.threadId === threadId)
-    .filter((x) => Date.parse(x.at) <= leftAt && Date.parse(x.at) < beforeMs)
+    .filter((x) => Date.parse(x.at) <= leftAt && Date.parse(x.at) > cleared && Date.parse(x.at) < beforeMs)
     .sort((a, b) => String(a.at).localeCompare(String(b.at)))
     .slice(-n);
 }
@@ -240,10 +263,8 @@ async function notifyRecipients(t, m, senderName) {
   for (const actorId of activeIds(t)) {
     if (actorId === m.fromActorId) continue;
     try {
-      addNotification({
-        householdId: t.householdId, actorId, channel: "in_app", title, body: body.slice(0, 2000), to: null,
-        source: { kind: "thread", id: t.id, name: threadName }, threadId: t.id, data: { type: "thread", id: t.id, messageId: m.id },
-      });
+      // No Updates row: the chat itself is the record (unread count, Needs your attention).
+      // A row per message duplicated the thread inside the inbox that already lists it.
       const muted = isMuted(t, actorId);
       appendAudit({ type: "thread.push", threadId: t.id, messageId: m.id, actorId, householdId: t.householdId, skipped: muted ? "muted" : null });
       if (!muted) {
@@ -251,6 +272,14 @@ async function notifyRecipients(t, m, senderName) {
       }
     } catch { /* a delivery hiccup never loses the message itself */ }
   }
+}
+
+export function clearThread(threadId, actorId) {
+  const t = getFamilyThread(threadId);
+  if (!t || !memberState(t, actorId)) return null;
+  const members = { ...t.members, [actorId]: { ...t.members[actorId], clearedAt: nowISO(), lastReadAt: nowISO() } };
+  appendAudit({ type: "thread.clear", threadId, actorId, householdId: t.householdId });
+  return patchFamilyThread(threadId, { members });
 }
 
 export function markRead(threadId, actorId) {
@@ -383,6 +412,7 @@ export function searchMessages(actorId, householdId, q, { limit = 50 } = {}) {
     .filter((m) => {
       const me = memberState(mine.get(m.threadId), actorId);
       if (me?.leftAt && Date.parse(m.at) > Date.parse(me.leftAt)) return false;
+      if (Date.parse(m.at) <= clearedMs(mine.get(m.threadId), actorId)) return false;
       return String(m.text ?? "").toLowerCase().includes(needle) || (m.attachments ?? []).some((a) => String(a.name ?? "").toLowerCase().includes(needle));
     })
     .sort((a, b) => String(b.at).localeCompare(String(a.at)))

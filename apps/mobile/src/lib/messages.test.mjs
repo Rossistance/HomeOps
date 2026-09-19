@@ -28,7 +28,7 @@ test("Famili and Family chips appear only when rows carry those sources, and key
     note({ id: "c", source: { kind: "member", id: "m-owner" } }),
   ];
   const chips = notificationSources(notes, []);
-  assert.deepEqual(chips.map((c) => c.key), ["all", "assistant", "thread", "system"]);
+  assert.deepEqual(chips.map((c) => c.key), ["all", "assistant", "system"], "chat is not an update: no Family chip");
   assert.equal(sourceKeyOf(notes[0]), "assistant");
   assert.equal(sourceKeyOf(notes[1]), "thread");
   assert.equal(sourceKeyOf(notes[2]), "system");

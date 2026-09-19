@@ -75,7 +75,7 @@ test("a direct thread is unique per pair, and a group needs three people", async
   assert.deepEqual([...grp.data.thread.participantIds].sort(), ["m-alex", "m-lily", "m-morgan"]);
 });
 
-test("messages: unread counts, read cursor, receipts, sender never notified, others get an in-app row", async () => {
+test("messages: unread counts, read cursor, receipts; the chat is the record (no Updates rows)", async () => {
   const t = (await create(alex, ["m-morgan"])).data.thread.id;
   const m1 = await send(alex, t, "Can you grab milk?");
   assert.equal(m1.status, 200, JSON.stringify(m1.data));
@@ -86,14 +86,10 @@ test("messages: unread counts, read cursor, receipts, sender never notified, oth
   assert.equal(row.unreadCount, 2);
   assert.equal(row.lastPreview.text, "And eggs.");
   assert.equal((await mine(alex)).find((x) => x.id === t).unreadCount, 0, "my own messages are read");
-  // In-app rows: Morgan has two from this thread, Alex none.
-  const mn = (await morgan.req("/api/notifications")).data.notifications.filter((n) => n.threadId === t);
-  assert.equal(mn.length, 2);
-  assert.equal(mn[0].source.kind, "thread");
-  assert.equal(mn[0].data.type, "thread");
-  assert.equal(mn[0].title, "Alex Harper");
-  const an = (await alex.req("/api/notifications")).data.notifications.filter((n) => n.threadId === t);
-  assert.equal(an.length, 0);
+  // No Updates rows for chat: the Messages segment and the unread count are the record.
+  assert.equal((await morgan.req("/api/notifications")).data.notifications.filter((n) => n.threadId === t).length, 0);
+  const audit = (await alex.req("/api/audit?limit=50")).data.events;
+  assert.ok(audit.some((e) => e.type === "thread.push" && e.actorId === "m-morgan" && e.skipped === null), "the push still goes out");
   // Reading moves the cursor; Alex sees Morgan's receipt.
   await morgan.req(`/api/threads/${t}/read`, { method: "POST", body: "{}" });
   assert.equal((await mine(morgan)).find((x) => x.id === t).unreadCount, 0);
@@ -103,7 +99,7 @@ test("messages: unread counts, read cursor, receipts, sender never notified, oth
   assert.equal(v.data.messages[0].text, "Can you grab milk?");
 });
 
-test("mute: the in-app row still arrives, the push is skipped; unmute restores it", async () => {
+test("mute: the unread count still moves, the push is skipped; unmute restores it", async () => {
   const t = (await create(alex, ["m-morgan"])).data.thread.id;
   const mute = await morgan.req(`/api/threads/${t}/mute`, { method: "POST", body: JSON.stringify({ until: "forever" }) });
   assert.equal(mute.data.thread.muted, true);
@@ -112,7 +108,7 @@ test("mute: the in-app row still arrives, the push is skipped; unmute restores i
   const pushRow = audit.find((e) => e.type === "thread.push" && e.messageId === m.data.message.id);
   assert.ok(pushRow, "the push decision is recorded");
   assert.equal(pushRow.skipped, "muted");
-  assert.ok((await morgan.req("/api/notifications")).data.notifications.some((n) => n.data?.messageId === m.data.message.id), "in-app row still there");
+  assert.ok((await mine(morgan)).find((x) => x.id === t).unreadCount >= 1, "still counted as unread");
   await morgan.req(`/api/threads/${t}/mute`, { method: "POST", body: JSON.stringify({ until: null }) });
   const m2 = await send(alex, t, "unmuted");
   const audit2 = (await alex.req("/api/audit?limit=50")).data.events;
@@ -221,4 +217,34 @@ test("share attachments carry a fresh preview the reader may see, or a hidden ma
   const card = asMorgan.data.messages.at(-1).attachments[0].preview;
   assert.equal(card.hidden, true, "a private event stays hidden from the reader");
   assert.equal((await mine(morgan)).find((x) => x.id === t).lastPreview.text, "Shared event");
+});
+
+test("one thread per set of people: the same group asked for twice is the same chat", async () => {
+  const a = await create(alex, ["m-morgan", "m-jamie"], "Trio");
+  const b = await create(morgan, ["m-jamie", "m-alex"]);
+  assert.equal(a.status, 200); assert.equal(b.status, 200);
+  assert.equal(b.data.thread.id, a.data.thread.id, "whoever starts it, it is the chat they already have");
+  assert.equal(b.data.existed, true);
+  assert.equal(b.data.thread.title, "Trio");
+});
+
+test("deleting a chat clears it on my side only; a new message brings it back fresh", async () => {
+  const t = (await create(alex, ["m-jamie"])).data.thread.id;
+  await send(alex, t, "old news");
+  await send(jamie, t, "indeed");
+  const del = await alex.req(`/api/threads/${t}`, { method: "DELETE" });
+  assert.equal(del.status, 200);
+  assert.ok(!(await mine(alex)).some((x) => x.id === t), "gone from my list");
+  assert.ok((await mine(jamie)).some((x) => x.id === t), "still there for Jamie");
+  assert.equal((await view(jamie, t)).data.messages.length, 2, "Jamie keeps everything");
+  assert.equal((await view(alex, t)).data.messages.length, 0, "I see nothing from before");
+  await send(jamie, t, "are you there?");
+  const back = (await mine(alex)).find((x) => x.id === t);
+  assert.ok(back, "a new message brings the chat back");
+  assert.equal(back.unreadCount, 1);
+  assert.equal(back.lastPreview.text, "are you there?");
+  assert.equal((await view(alex, t)).data.messages.length, 1, "fresh: only what came after");
+  assert.equal((await alex.req("/api/threads/search?q=old%20news")).data.hits.length, 0, "search does not resurrect it");
+  // Messaging Jamie again is the same thread, seen fresh.
+  assert.equal((await create(alex, ["m-jamie"])).data.thread.id, t);
 });

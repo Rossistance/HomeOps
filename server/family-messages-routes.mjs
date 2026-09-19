@@ -2,7 +2,7 @@
 // only parses the request, gates the session, and answers. Called from index.mjs for any
 // path under /api/threads; returns true when it answered.
 import {
-  listThreadsFor, createThread, publicThread, listMessages, postMessage, markRead, setMute,
+  listThreadsFor, createThread, publicThread, listMessages, postMessage, markRead, setMute, clearThread,
   addMember, removeMember, leaveThread, renameThread, editMessage, deleteMessage, toggleReaction,
   searchMessages, setTyping, whoIsTyping, canViewThread, isActiveParticipant, isParentRole, isChildRole,
 } from "./family-messages.mjs";
@@ -10,6 +10,7 @@ import { getFamilyThread, getMember } from "./store.mjs";
 import { resolvePreview } from "./share-preview.mjs";
 
 const err = (json, res, req, status, error, extra = {}) => json(res, status, { error, ...extra }, req);
+const memberOf = (t, actorId) => !!t?.members?.[actorId];
 
 /** Attach a fresh preview to every `ref` attachment, as this reader may see it. */
 function withPreviews(messages, session) {
@@ -88,6 +89,14 @@ export async function handleFamilyMessageRoutes({ req, res, path, method, url, g
     return true;
   }
   if (rest === "read" && method === "POST") { markRead(threadId, s.actorId); json(res, 200, { ok: true }, req); return true; }
+  // Delete on MY side: the chat and its history vanish for me; the others keep everything.
+  if (rest === "" && method === "DELETE") {
+    if (!memberOf(t, s.actorId)) return err(json, res, req, 403, "not_participant"), true;
+    clearThread(threadId, s.actorId);
+    audit({ type: "thread.clear", threadId, ok: true }, req, s);
+    json(res, 200, { ok: true }, req);
+    return true;
+  }
   if (rest === "typing" && method === "POST") { if (active) setTyping(s.householdId, threadId, s.actorId); json(res, 200, { ok: true }, req); return true; }
   if (rest === "mute" && method === "POST") {
     const body = await readBody(req); if (!body) return err(json, res, req, 400, "malformed_json"), true;

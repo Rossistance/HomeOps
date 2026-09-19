@@ -2,7 +2,7 @@
 // avatar stack, the title (never my own name), the last line, how long ago, unread count
 // and a muted mark. Tapping opens the thread; search results jump into the thread at the hit.
 import { useEffect, useState } from "react";
-import { TextInput, View } from "react-native";
+import { Alert, TextInput, View } from "react-native";
 import { router } from "expo-router";
 import { api, type MessageRec, type ThreadRec } from "@/lib/api";
 import { threadTitle } from "@/lib/messages";
@@ -51,7 +51,12 @@ export function ThreadList({ threads, meActorId, now, onChanged }: { threads: Th
     }, 250);
     return () => { cancelled = true; clearTimeout(id); };
   }, [q]);
-  void onChanged;
+  const confirmDelete = (t: ThreadRec) => {
+    Alert.alert("Delete this chat?", "It disappears for you, along with everything in it. The others keep their copy, and a new message brings it back for you.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: () => void api.deleteThread(t.id).then(onChanged) },
+    ]);
+  };
 
   const live = threads.filter((t) => !t.archived);
   return (
@@ -112,8 +117,10 @@ export function ThreadList({ threads, meActorId, now, onChanged }: { threads: Th
                 <PressableScale
                   key={t.id}
                   onPress={() => router.push({ pathname: "/messages/[id]", params: { id: t.id } } as never)}
+                  onLongPress={() => confirmDelete(t)}
                   haptic="select"
                   accessibilityRole="button"
+                  accessibilityHint="Long press to delete this chat on your side"
                   accessibilityLabel={`${threadTitle(t, meActorId)}${unread ? `, ${t.unreadCount} unread` : ""}${t.muted ? ", muted" : ""}`}
                   style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: 12, borderBottomWidth: i === live.length - 1 ? 0 : 1, borderBottomColor: colors.border }}
                 >

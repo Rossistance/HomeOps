@@ -73,6 +73,7 @@ import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, sendRecoveryCode, pushToMember } from "./notify.mjs";
 import { handleFamilyMessageRoutes } from "./family-messages-routes.mjs";
 import { createHelpRequest } from "./help-requests.mjs";
+import { postMessage as postFamilyMessage } from "./family-messages.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
 import { gate, corsHeaders, sessionCookie, clearSessionCookie, isAllowedOrigin, ALLOWED_ORIGINS, IS_PROD, roleAtLeast, sessionFromReq } from "./auth.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
@@ -1870,6 +1871,21 @@ function mayWriteAgent(session, agent, nextVisibility) {
      * accounts, connectors, calendar, tasks/lists, files, knowledge/recipes, or any agent/
      * skill not named in the request. A fresh backup is taken FIRST and its name returned,
      * so the whole operation is reversible via /api/backups/restore. Requires confirm:"RESET". */
+    // Start fresh in the Inbox: clear delivered updates and/or decided approvals, nothing else.
+    // Narrower than reset-assistant on purpose — memory, chats, runs and helpers are untouched.
+    if (path === "/api/household/clear-inbox" && method === "POST") {
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = (await readBody(req)) ?? {};
+      const wanted = Array.isArray(body.collections) ? body.collections : ["notifications.json"];
+      const allowed = ["notifications.json", "approvals.json"];
+      const cleared = {};
+      for (const file of wanted) {
+        if (!allowed.includes(file)) return json(res, 400, { error: "not_clearable", file }, req);
+        const r = clearCollection(file); cleared[file] = r.ok ? r.cleared : (r.error || "err");
+      }
+      audit({ type: "household.clear_inbox", cleared, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, cleared }, req);
+    }
     if (path === "/api/household/reset-assistant" && method === "POST") {
       const g = gate(req, { minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
@@ -3201,6 +3217,27 @@ function mayWriteAgent(session, agent, nextVisibility) {
           reassignedTask = patchTask(linked.id, { assignedMemberId: helperId });
         }
       }
+      // A proposal made in a chat ("ask Beannie to drive to speech therapy?") is applied on a
+      // yes — the event takes the driver or the extra participant — and both people hear the
+      // outcome where the question was asked: in the thread, as lines from FamiliOS.
+      let applied = null;
+      if (hr.proposal?.threadId) {
+        try {
+          const ev = hr.proposal.eventId ? getEvent(hr.proposal.eventId) : null;
+          if (status === "accepted" && ev && ev.householdId === g.session.householdId && hr.proposal.patch) {
+            const pp = hr.proposal.patch;
+            const patch = {};
+            if (pp.driverId) patch.driverId = String(pp.driverId);
+            if (pp.participantId && !(ev.participantIds ?? []).includes(String(pp.participantId))) patch.participantIds = [...(ev.participantIds ?? []), String(pp.participantId)];
+            if (Object.keys(patch).length) { patchEvent(ev.id, { ...patch, updatedAt: new Date().toISOString() }); applied = { eventId: ev.id, ...patch }; }
+          }
+          const what = ev ? `“${ev.title}”${ev.startAt ? ` (${formatForHousehold(ev.startAt, g.session.householdId)})` : ""}` : `“${hr.message}”`;
+          const line = status === "accepted"
+            ? (applied ? `${hr.toName} accepted — calendar updated: ${applied.driverId ? `${hr.toName} is driving to` : `${hr.toName} is going to`} ${what}, now on ${hr.toName}'s upcoming events.` : `${hr.toName} accepted: ${what}.`)
+            : `${hr.toName} declined: ${what}${responseNote ? ` — ${responseNote}` : ""}.`;
+          await postFamilyMessage({ threadId: hr.proposal.threadId, fromActorId: g.session.actorId, kind: "system", text: line });
+        } catch { /* the answer is recorded either way */ }
+      }
       // Copy tracks direction: the notified party is always the creator (hr.fromActorId).
       // ask → "X accepted your request"; offer → "X accepted your help offer".
       const noun = hr.kind === "offer" ? "help offer" : "request";
@@ -3209,7 +3246,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       addNotification({ householdId: g.session.householdId, actorId: hr.fromActorId, channel: "in_app", title, body: `${hr.toName} ${status} your ${noun}${note}` });
       void pushToMember({ householdId: g.session.householdId, actorId: hr.fromActorId, title, body: `${hr.toName} ${status} your ${noun}${note}`, data: { type: "help_request", id: hr.id } });
       audit({ type: "help.respond", helpRequestId: hr.id, status, reassigned: !!reassignedTask, ...(reassignedTask ? { taskId: reassignedTask.id, assignedMemberId: reassignedTask.assignedMemberId } : {}), ok: true }, req, g.session);
-      return json(res, 200, { helpRequest: updated, reassigned: !!reassignedTask, ...(reassignedTask ? { task: reassignedTask } : {}) }, req);
+      return json(res, 200, { helpRequest: updated, reassigned: !!reassignedTask, ...(reassignedTask ? { task: reassignedTask } : {}), ...(applied ? { applied } : {}) }, req);
     }
     const helpCancel = path.match(/^\/api\/help-requests\/([^/]+)\/cancel$/);
     if (helpCancel && method === "POST") {

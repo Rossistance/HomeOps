@@ -37,7 +37,6 @@ export function notificationSources(
     }
   }
   if (notes.some((n) => n.source?.kind === "assistant")) out.push({ key: "assistant", label: "Famili", kind: "assistant" });
-  if (notes.some((n) => n.source?.kind === "thread")) out.push({ key: "thread", label: "Family", kind: "thread" });
   if (notes.some((n) => !n.source || n.source.kind === "system" || n.source.kind === "member")) out.push({ key: "system", label: "System", kind: "system" });
   // All first, helpers by name, then the fixed tail — a stable order to scan every time.
   const tail = (k: string) => (k === "assistant" ? 1 : k === "thread" ? 2 : k === "system" ? 3 : 0);

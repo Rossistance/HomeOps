@@ -4,14 +4,16 @@
 // plainly. Suggestions sit in a narrow rail BESIDE the bubble (never inside it), so the
 // message column never shifts.
 import { useState } from "react";
-import { Modal, Pressable, View } from "react-native";
+import { Alert, Modal, Pressable, View } from "react-native";
 import { Image } from "expo-image";
 import { router } from "expo-router";
 import type { MessageAttachment, MessageRec, ThreadMemberRec } from "@/lib/api";
 import { useFileDataUri } from "@/lib/file-data";
 import { memberAccent, fade } from "@/lib/member-colors";
 import { useTheme } from "@/theme";
-import { T, Sym, PressableScale } from "@/components/ui";
+import { T, Sym, PressableScale, Button } from "@/components/ui";
+import { api } from "@/lib/api";
+import { tapHaptic } from "@/theme";
 import { ShareCard } from "./share-card";
 import { VoiceNote } from "./voice-note";
 import { SuggestionRail } from "./suggestion-rail";
@@ -74,7 +76,19 @@ export function MessageBubble({ m, mine, sender, showName, receipt, threadId, me
   const fg = mine ? colors.onEmber : colors.text;
   const muted = mine ? "rgba(255,255,255,0.75)" : colors.textMuted;
   const reactions = Object.entries(m.reactions ?? {}).filter(([, who]) => who.length);
-  const openSuggestions = (m.suggestions ?? []).filter((s) => s.status === "open");
+  const visibleSuggestions = (m.suggestions ?? []).filter((s) => s.status === "open" && !(s.hideFrom ?? []).includes(meActorId ?? ""));
+  // Coordination asks are a question to THIS reader, in line; event/task ideas stay in the rail.
+  const asks = visibleSuggestions.filter((s) => s.type === "help");
+  const openSuggestions = visibleSuggestions.filter((s) => s.type !== "help");
+  const [askBusy, setAskBusy] = useState<string | null>(null);
+  async function answerAsk(sid: string, action: "apply" | "dismiss") {
+    setAskBusy(sid);
+    const r = await api.actOnSuggestion(threadId, m.id, sid, action);
+    setAskBusy(null);
+    if (r.error && r.error !== "already_taken") { tapHaptic("error"); Alert.alert("Couldn't do that", r.message ?? r.error); }
+    else tapHaptic(action === "apply" ? "success" : "select");
+    onSuggestionDone();
+  }
 
   if (m.kind === "system") {
     return (
@@ -103,7 +117,7 @@ export function MessageBubble({ m, mine, sender, showName, receipt, threadId, me
           ) : (
             <>
               {(m.attachments ?? []).map((a, i) => {
-                if (a.kind === "ref") return <ShareCard key={i} type={a.type} preview={a.preview} mine={mine} />;
+                if (a.kind === "ref") return <ShareCard key={i} type={a.type} preview={a.preview} mine={mine} onChanged={onSuggestionDone} />;
                 if (a.audio) return <VoiceNote key={i} fileId={a.fileId} durationMs={a.audio.durationMs} mine={mine} transcript={a.transcript ?? null} />;
                 if (/^image\//.test(a.mime ?? "")) return <ImageAttachment key={i} fileId={a.fileId} mine={mine} />;
                 return <FileAttachment key={i} a={a} mine={mine} />;
@@ -126,6 +140,19 @@ export function MessageBubble({ m, mine, sender, showName, receipt, threadId, me
             ))}
           </View>
         ) : null}
+        {asks.map((s) => (
+          <View key={s.id} style={{ marginTop: 6, marginHorizontal: 2, padding: 10, gap: 8, borderRadius: radii.row, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, maxWidth: 300 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <Sym name="sparkles" size={12} color={colors.ember} />
+              <T kind="subMedium" color={colors.text} style={{ flex: 1 }}>{s.title.endsWith("?") ? s.title : `${s.title}?`}</T>
+            </View>
+            {s.summary ? <T kind="caption" color={colors.textMuted}>{s.summary}</T> : null}
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <View style={{ flex: 1 }}><Button title="Yes" small variant="ember" icon="checkmark" loading={askBusy === s.id} onPress={() => void answerAsk(s.id, "apply")} /></View>
+              <View style={{ flex: 1 }}><Button title="No" small variant="neutral" icon="xmark" disabled={askBusy === s.id} onPress={() => void answerAsk(s.id, "dismiss")} /></View>
+            </View>
+          </View>
+        ))}
         {receipt ? <T kind="caption" color={colors.textFaint} style={{ marginTop: 2, marginHorizontal: 6 }}>{receipt}</T> : null}
       </View>
       {/* The rail: suggestions live beside the bubble, out of the way of the words. */}

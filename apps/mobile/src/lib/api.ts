@@ -340,6 +340,8 @@ export interface SharePreview {
   hidden?: boolean; type?: ShareType; id?: string; title?: string; subtitle?: string | null; when?: string | null; allDay?: boolean;
   where?: string | null; who?: string | null; to?: string | null; status?: string | null; mime?: string | null; sizeBytes?: number | null;
   slot?: string | null; body?: string | null; conversationId?: string | null; route?: { pathname: string; params?: Record<string, string> } | null;
+  /** help_request only: can THIS reader answer it, and what a yes does. */
+  canRespond?: boolean; fromActorId?: string; toActorId?: string; does?: string | null; event?: { id: string; title: string; when: string | null } | null;
 }
 export type MessageAttachment =
   | { kind: "file"; fileId: string; name?: string | null; mime?: string | null; audio?: { durationMs: number } | null; transcript?: string | null }
@@ -347,6 +349,8 @@ export type MessageAttachment =
 export interface SuggestionRec {
   id: string; kind: "create" | "update"; type: "event" | "task" | "help"; title: string; summary: string;
   patch: Record<string, unknown>; targetId?: string | null; ownerActorId?: string | null;
+  /** Members who should not see this one (the person being asked, for a yes/no ask). */
+  hideFrom?: string[];
   status: "open" | "applied" | "dismissed"; by?: string | null; at?: string | null;
   result?: { created?: { type: string; id: string }; requested?: { toActorId: string }; duplicateOf?: string; note?: string } | null;
 }
@@ -636,6 +640,17 @@ export const api = {
   },
   async sendMessage(id: string, body: { text?: string; attachments?: MessageAttachment[] }): Promise<{ message?: MessageRec; error?: string; message_?: string }> {
     const r = await req<{ message?: MessageRec; error?: string }>(`/threads/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify(body) });
+    return r.data ?? { error: "network" };
+  },
+  /** Delete on my side only: the chat and its history vanish for me; the others keep everything. */
+  async deleteThread(id: string): Promise<{ ok?: boolean; error?: string }> {
+    const r = await req<{ ok?: boolean; error?: string }>(`/threads/${encodeURIComponent(id)}`, { method: "DELETE" });
+    return r.data ?? { error: "network" };
+  },
+  /** Start fresh in the Inbox (Adult Admin+): clear delivered updates and/or decided approvals. */
+  async clearInbox(collections: ("notifications.json" | "approvals.json")[]): Promise<{ ok?: boolean; cleared?: Record<string, number>; error?: string }> {
+    const r = await req<{ ok?: boolean; cleared?: Record<string, number>; error?: string }>("/household/clear-inbox", { method: "POST", body: JSON.stringify({ collections }) });
+    if (r.status === 403) return { error: "insufficient_role" };
     return r.data ?? { error: "network" };
   },
   async markThreadRead(id: string): Promise<void> { await req(`/threads/${encodeURIComponent(id)}/read`, { method: "POST", body: "{}" }); },

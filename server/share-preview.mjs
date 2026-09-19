@@ -35,7 +35,16 @@ export function resolvePreview({ type, id }, session) {
       case "help_request": {
         const h = getHelpRequest(id);
         if (!h || h.householdId !== session.householdId) return { hidden: true };
-        return { type, id, title: h.message, who: h.fromName ?? null, to: h.toName ?? null, status: h.status, route: { pathname: "/help" } };
+        const ev = h.eventId ? getEvent(h.eventId) : null;
+        const does = h.proposal?.patch?.driverId ? `${h.toName} drives` : h.proposal?.patch?.participantId ? `${h.toName} goes along` : null;
+        return {
+          type, id, title: h.message, who: h.fromName ?? null, to: h.toName ?? null, status: h.status,
+          fromActorId: h.fromActorId, toActorId: h.toActorId,
+          canRespond: h.status === "pending" && h.toActorId === session.actorId,
+          event: ev ? { id: ev.id, title: ev.title, when: ev.startAt ?? null } : null,
+          does,
+          route: ev ? { pathname: "/event-form", params: { id: ev.id } } : { pathname: "/help" },
+        };
       }
       case "notification": {
         const n = listNotifications((x) => x.id === id && x.householdId === session.householdId)[0];

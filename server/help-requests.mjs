@@ -10,7 +10,11 @@ import { pushToMember } from "./notify.mjs";
 /**
  * @returns {{ ok: true, helpRequest } | { ok: false, status: number, error: string, message: string, helpRequest? }}
  */
-export function createHelpRequest({ session, toActorId, message, kind = "ask", eventId = null, taskId = null }) {
+/**
+ * `proposal` (optional) is what a YES does: { threadId, messageId, eventId, patch } — the event
+ * change applied on accept (a driver, an added participant), and the chat to report back into.
+ */
+export function createHelpRequest({ session, toActorId, message, kind = "ask", eventId = null, taskId = null, proposal = null }) {
   const to = getMember(String(toActorId ?? ""));
   if (!to || to.archived || to.householdId !== session.householdId) return { ok: false, status: 400, error: "bad_recipient", message: "Pick a current household member to ask." };
   const text = String(message ?? "").trim().slice(0, 500);
@@ -27,6 +31,7 @@ export function createHelpRequest({ session, toActorId, message, kind = "ask", e
     id: "hr_" + crypto.randomBytes(8).toString("hex"), householdId: session.householdId,
     fromActorId: session.actorId, fromName, toActorId: to.actorId, toName: to.displayName,
     kind: k, message: text, eventId: eventId ?? null, taskId: taskId ?? null,
+    ...(proposal && typeof proposal === "object" ? { proposal } : {}),
     status: "pending", responseNote: null, createdAt: new Date().toISOString(), respondedAt: null,
   });
   const nTitle = k === "offer" ? "Help offered" : "Can you help?";

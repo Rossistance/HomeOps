@@ -120,7 +120,9 @@ export default function InboxScreen() {
     }
     setError(null);
     setApprovalItems(approvals);
-    setNotices(delivered);
+    // Chat is not an update — the Messages segment is its record. Older rows written per
+    // message (before this rule) stay out of sight too.
+    setNotices(delivered.filter((n) => n.source?.kind !== "thread" && !n.threadId));
     setHelpers(helperList);
     setThreads(threadList);
     // Enrich pending approvals with the gated run step's REAL resolved input.
@@ -203,6 +205,20 @@ export default function InboxScreen() {
     () => (sourceKey === "all" ? notices : notices.filter((n) => sourceKeyOf(n) === sourceKey)),
     [notices, sourceKey],
   );
+  const isAdmin = ["Owner", "Adult Admin"].includes(session?.role ?? "");
+  const [clearing, setClearing] = useState(false);
+  const confirmClear = useCallback((what: "updates" | "approvals") => {
+    Alert.alert(what === "updates" ? "Clear all updates?" : "Clear decided approvals?", what === "updates" ? "Every delivered update in the household's inbox is removed. Helpers, chats and memory are untouched." : "The approvals history is removed for the household. Pending approvals go too — helpers waiting on one will ask again.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Clear", style: "destructive", onPress: () => void (async () => {
+        setClearing(true);
+        const r = await api.clearInbox([what === "updates" ? "notifications.json" : "approvals.json"]);
+        setClearing(false);
+        if (r.error) { tapHaptic("error"); Alert.alert("Couldn't clear", r.error === "insufficient_role" ? "Clearing needs an Owner or Adult Admin." : r.error); }
+        else { tapHaptic("success"); await load(); }
+      })() },
+    ]);
+  }, [load]);
   const openChat = useCallback((conversationId: string | null | undefined) => {
     if (!conversationId) return;
     router.push({ pathname: "/(ask)", params: { c: conversationId } });
@@ -310,7 +326,10 @@ export default function InboxScreen() {
           )}
           {decided.length > 0 ? (
             <Rise index={pending.length + 1}>
-              <SectionHeader title="Recently decided" />
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <View style={{ flex: 1 }}><SectionHeader title="Recently decided" /></View>
+                {isAdmin ? <Button title="Clear" small variant="ghost" icon="trash" loading={clearing} onPress={() => confirmClear("approvals")} /> : null}
+              </View>
               <Card padded={false} style={{ opacity: 0.85 }}>
                 {decided.map((a, i) => {
                   // WP-004: statusColor() doesn't recognize "expired" and would fall to
@@ -415,6 +434,13 @@ export default function InboxScreen() {
               </Card>
             </Rise>
           )}
+          {isAdmin && visibleNotices.length > 0 ? (
+            <Rise index={3}>
+              <View style={{ alignItems: "flex-end" }}>
+                <Button title="Clear all updates" small variant="ghost" icon="trash" loading={clearing} onPress={() => confirmClear("updates")} />
+              </View>
+            </Rise>
+          ) : null}
           <Rise index={3}>
             <SectionHeader title="Delivery check" />
             <Card>

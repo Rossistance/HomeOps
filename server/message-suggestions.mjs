@@ -45,6 +45,7 @@ Rules:
 - At most 3 suggestions; an empty list is the normal answer. Suggest only what the message clearly states or asks; never invent dates, places or people.
 - "patch" fields — event: title, startAt (ISO 8601 in the household's timezone, or YYYY-MM-DD for all day), endAt, location, notes, participantIds (actorIds from MEMBERS). task: title, dueAt (ISO or YYYY-MM-DD), assignedMemberId (actorId), notes, priority (low|medium|high). help: message (what is being asked, in the asker's words), toActorId (who is being asked), taskId or eventId when it is about an existing item.
 - If EXISTING already has the thing (same event, same task, same ask), set kind "update" with matchesExistingId and put only the changed fields in patch; if nothing changed, omit it entirely.
+- COORDINATION. When someone offers to drive, pick up, drop off, take, cover or handle an EXISTING event ("do you need help with Eleanor's appointment?", "I can take her Monday"), suggest type "help" phrased as a yes/no question to the person who owns that event: title "Ask <Offerer> to take <who> to <event>?", patch { toActorId: <the offerer's actorId>, message: "<what they would do, in plain words>", eventId: <the event id>, apply: { "driverId": <offerer's actorId> } } (use "participantId" instead of "driverId" when they would attend rather than drive). When someone ASKS another member to do such a thing, do the same with toActorId = the person being asked. Never suggest coordination for an event that is not in EXISTING; suggest a new event instead if the details are there.
 - Times are in the household's timezone. Resolve "tomorrow", "Friday" against TODAY.`;
 
 function visibleItems(session, days = 30) {
@@ -70,7 +71,11 @@ function fakeExtract(text) {
     const [, type, targetId, rest] = m;
     const parts = rest.split("|").map((x) => x.trim());
     const patch = {};
-    for (const p of parts.slice(1)) { const [k, ...v] = p.split("="); if (k && v.length) patch[k.trim()] = v.join("=").trim(); }
+    for (const p of parts.slice(1)) {
+      const [k, ...v] = p.split("="); if (!k || !v.length) continue;
+      const key = k.trim(); const val = v.join("=").trim();
+      if (key.startsWith("apply.")) { patch.apply = { ...(patch.apply ?? {}), [key.slice(6)]: val }; } else patch[key] = val;
+    }
     if (type === "help") { patch.message = parts[0]; out.push({ kind: "create", type, title: parts[0], summary: "Ask for help", patch, matchesExistingId: null }); continue; }
     patch.title = parts[0];
     out.push({ kind: targetId ? "update" : "create", type, title: parts[0], summary: `${targetId ? "Update" : "Add"} ${type}`, patch, matchesExistingId: targetId ?? null });
@@ -112,8 +117,15 @@ function normalizeSuggestion(raw, session) {
     if (!target || target.householdId !== session.householdId) { targetId = null; kind = "create"; }
     else { kind = "update"; ownerActorId = type === "event" ? (target.ownerId ?? target.createdBy ?? null) : (target.assignedMemberId ?? target.createdBy ?? null); }
   }
-  if (type === "help") { kind = "create"; targetId = null; }
-  return { id: sid(), kind, type, title, summary: String(raw?.summary ?? "").slice(0, 240), patch, targetId, ownerActorId, status: "open", by: null, at: null, result: null };
+  let hideFrom = [];
+  if (type === "help") {
+    kind = "create"; targetId = null;
+    // The person being asked should not be the one who taps "ask them"; everyone else in the
+    // chat may. A linked event is checked here so the yes/no is never about a phantom.
+    if (patch.toActorId) hideFrom = [String(patch.toActorId)];
+    if (patch.eventId && !(getEvent(String(patch.eventId))?.householdId === session.householdId)) { delete patch.eventId; delete patch.apply; }
+  }
+  return { id: sid(), kind, type, title, summary: String(raw?.summary ?? "").slice(0, 240), patch, targetId, ownerActorId, hideFrom, status: "open", by: null, at: null, result: null };
 }
 
 /** Read one stored message and attach up to three suggestions. Never throws. */
@@ -158,12 +170,19 @@ function stamp(v, tz) {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
-function applyCreate(s, session, tz) {
+async function applyCreate(s, session, tz, { threadId, messageId } = {}) {
   const p = s.patch ?? {};
   if (s.type === "help") {
-    const out = createHelpRequest({ session, toActorId: p.toActorId, message: p.message ?? s.title, eventId: p.eventId ?? null, taskId: p.taskId ?? null });
+    const apply = p.apply && typeof p.apply === "object" && p.eventId ? p.apply : null;
+    const proposal = apply ? { threadId, messageId, eventId: p.eventId, patch: apply } : (threadId ? { threadId, messageId, eventId: p.eventId ?? null, patch: null } : null);
+    const out = createHelpRequest({ session, toActorId: p.toActorId, message: p.message ?? s.title, eventId: p.eventId ?? null, taskId: p.taskId ?? null, proposal });
     if (!out.ok) return { ok: false, error: out.error, message: out.message };
-    return { ok: true, result: { requested: { toActorId: out.helpRequest.toActorId }, created: { type: "help_request", id: out.helpRequest.id } }, line: `asked ${out.helpRequest.toName} for help: “${out.helpRequest.message}”` };
+    // The ask lands in the chat, beside the words that prompted it, as a card the person
+    // asked can answer with one tap — and everyone else can see is waiting on them.
+    if (threadId) {
+      await postMessage({ threadId, fromActorId: session.actorId, kind: "share", text: "", attachments: [{ kind: "ref", type: "help_request", id: out.helpRequest.id }] });
+    }
+    return { ok: true, result: { requested: { toActorId: out.helpRequest.toActorId }, created: { type: "help_request", id: out.helpRequest.id } }, line: null };
   }
   const dup = findDuplicate({ type: s.type, title: p.title ?? s.title, when: s.type === "event" ? p.startAt : p.dueAt, householdId: session.householdId, tz });
   if (dup) return { ok: true, result: { duplicateOf: dup.id, note: `Already on the ${s.type === "event" ? "calendar" : "list"}: “${dup.title}”` }, line: null };
@@ -249,7 +268,7 @@ export async function applySuggestion({ threadId, messageId, suggestionId, sessi
       return { ok: true, suggestion: write({ ...s, status: "dismissed", by: session.actorId, at: nowISO() }) };
     }
     const tz = householdTimeZone(session.householdId);
-    const out = s.kind === "create" ? applyCreate(s, session, tz) : applyUpdate(s, session, tz);
+    const out = s.kind === "create" ? await applyCreate(s, session, tz, { threadId, messageId }) : applyUpdate(s, session, tz);
     if (!out.ok) return { ok: false, error: out.error, message: out.message, suggestion: s };
     const next = write({ ...s, status: "applied", by: session.actorId, at: nowISO(), result: out.result });
     if (out.line) {

@@ -6,7 +6,7 @@
 // Freshness is a 4-second poll while the screen is focused (the server's revision counter
 // feeds the lists; a thread you are looking at deserves faster than that), plus the push.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, ScrollView, TextInput, View } from "react-native";
 import { Stack, router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder, useAudioRecorderState } from "expo-audio";
@@ -211,6 +211,14 @@ export default function ThreadScreen() {
   }
 
   const canRemove = !!thread && (PARENT.has(myRole ?? "") || thread.createdBy === me) && active.length > 2;
+  // iOS will not open one modal while another is still dismissing: close the menu, then a beat later open the next sheet.
+  const afterMenu = (fn: () => void) => { setMenu(false); setTimeout(fn, 380); };
+  function deleteChat() {
+    Alert.alert("Delete this chat?", "It disappears for you, along with everything in it. The others keep their copy, and a new message brings it back for you.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: () => void api.deleteThread(id).then(() => router.back()) },
+    ]);
+  }
   const searchHits = useMemo(() => {
     const needle = q.trim().toLowerCase();
     if (!view || needle.length < 2) return [];
@@ -384,23 +392,24 @@ export default function ThreadScreen() {
       </HSheet>
 
       {/* ⋯ menu */}
-      <HSheet visible={menu} onClose={() => setMenu(false)} title={title} heightPct={0.7}>
+      <HSheet visible={menu} onClose={() => setMenu(false)} title={title} heightPct={0.86}>
         {thread ? (
-          <View style={{ gap: spacing.md }}>
+          <ScrollView contentContainerStyle={{ gap: spacing.md, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
             <Card padded={false}>
               {active.map((m, i) => (
                 <Row key={m.actorId} title={m.actorId === me ? `${m.displayName} (you)` : m.displayName} subtitle={m.role ?? undefined} last={i === active.length - 1} />
               ))}
             </Card>
             <Card padded={false}>
-              {canPost && !["Child View", "Limited Member"].includes(myRole ?? "") ? <Row icon="person.badge.plus" title="Add people" chevron onPress={() => { setMenu(false); router.push({ pathname: "/messages/new", params: { threadId: id } } as never); }} /> : null}
-              <Row icon={thread.muted ? "bell" : "bell.slash"} title={thread.muted ? "Unmute" : "Mute"} chevron onPress={() => { setMenu(false); if (thread.muted) void mute(null); else setMuteSheet(true); }} />
-              <Row icon="magnifyingglass" title="Search in this chat" chevron onPress={() => { setMenu(false); setSearchOpen(true); }} />
-              {isGroup && canPost ? <Row icon="textformat" title="Rename group" chevron onPress={() => { setMenu(false); rename(); }} /> : null}
-              {canRemove ? <Row icon="person.badge.minus" title="Remove someone" chevron onPress={() => { setMenu(false); setRemoveSheet(true); }} /> : null}
-              {canPost ? <Row icon="rectangle.portrait.and.arrow.right" iconColor={colors.coral} iconBg={colors.coralBg} title="Leave chat" onPress={() => { setMenu(false); leave(); }} last /> : null}
+              {canPost && !["Child View", "Limited Member"].includes(myRole ?? "") ? <Row icon="person.badge.plus" title="Add people" chevron onPress={() => afterMenu(() => router.push({ pathname: "/messages/new", params: { threadId: id } } as never))} /> : null}
+              <Row icon={thread.muted ? "bell" : "bell.slash"} title={thread.muted ? "Unmute" : "Mute"} chevron onPress={() => afterMenu(() => { if (thread.muted) void mute(null); else setMuteSheet(true); })} />
+              <Row icon="magnifyingglass" title="Search in this chat" chevron onPress={() => afterMenu(() => setSearchOpen(true))} />
+              {isGroup && canPost ? <Row icon="textformat" title="Rename group" chevron onPress={() => afterMenu(rename)} /> : null}
+              {canRemove ? <Row icon="person.badge.minus" title="Remove someone" chevron onPress={() => afterMenu(() => setRemoveSheet(true))} /> : null}
+              {canPost ? <Row icon="rectangle.portrait.and.arrow.right" title="Leave chat" onPress={() => afterMenu(leave)} /> : null}
+              <Row icon="trash" iconColor={colors.coral} iconBg={colors.coralBg} title="Delete chat" subtitle="Only on your side" onPress={() => afterMenu(deleteChat)} last />
             </Card>
-          </View>
+          </ScrollView>
         ) : null}
       </HSheet>
 

@@ -116,3 +116,35 @@ test("a help suggestion becomes a real Can-you-help to the named member", async 
   assert.equal(hr.toActorId, "m-morgan");
   assert.equal(hr.message, "Can you take Lily to dance Thursday?");
 });
+
+test("coordination: an offer to drive becomes a yes/no ask; a yes updates the calendar and reports back in the chat", async () => {
+  const ev = (await alex.req("/api/events", { method: "POST", body: JSON.stringify({ title: "Speech therapy", startAt: "2026-09-21T17:30:00.000Z", endAt: "2026-09-21T18:30:00.000Z" }) })).data.event;
+  const t = (await alex.req("/api/threads", { method: "POST", body: JSON.stringify({ participantIds: ["m-morgan", "m-jamie"], title: "Rides" }) })).data.thread.id;
+  // Jamie offers; the suggestion is for everyone BUT Jamie.
+  const m = (await send(jamie, t, `Do you need help with the therapy appointment Monday? [suggest help: Take Lily to speech therapy | toActorId=m-jamie | eventId=${ev.id} | apply.driverId=m-jamie]`)).data.message;
+  const s = (await waitSuggestions(alex, t, m.id)).suggestions[0];
+  assert.equal(s.type, "help");
+  assert.deepEqual(s.hideFrom, ["m-jamie"], "the person being asked does not see 'ask them'");
+  // Alex says yes → a help request to Jamie lands in the chat as a card Jamie can answer.
+  const r = await act(alex, t, m.id, s.id);
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const hrId = r.data.suggestion.result.created.id;
+  const asJamie = await jamie.req(`/api/threads/${t}`);
+  const card = asJamie.data.messages.find((x) => x.kind === "share" && x.attachments[0]?.type === "help_request");
+  assert.ok(card, "the ask is in the chat");
+  assert.equal(card.attachments[0].preview.canRespond, true, "Jamie can answer it");
+  assert.equal(card.attachments[0].preview.does, "Jamie Harper drives");
+  const asAlex = await alex.req(`/api/threads/${t}`);
+  assert.equal(asAlex.data.messages.find((x) => x.id === card.id).attachments[0].preview.canRespond, false, "Alex cannot answer his own ask");
+  assert.equal((await alex.req("/api/events")).data.events.find((e) => e.id === ev.id).driverId, null, "nothing moves until Jamie says yes");
+  // Jamie says yes.
+  const yes = await jamie.req(`/api/help-requests/${hrId}/respond`, { method: "POST", body: JSON.stringify({ response: "accept" }) });
+  assert.equal(yes.status, 200, JSON.stringify(yes.data));
+  assert.equal(yes.data.applied.driverId, "m-jamie");
+  assert.equal((await alex.req("/api/events")).data.events.find((e) => e.id === ev.id).driverId, "m-jamie", "Jamie is now the driver");
+  const after = await alex.req(`/api/threads/${t}`);
+  const line = after.data.messages.find((x) => x.kind === "system" && /accepted — calendar updated/.test(x.text));
+  assert.ok(line, "both hear it in the chat");
+  assert.match(line.text, /Jamie Harper is driving to “Speech therapy”/);
+  assert.equal(after.data.messages.find((x) => x.id === card.id).attachments[0].preview.status, "accepted");
+});
