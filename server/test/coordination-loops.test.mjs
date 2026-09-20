@@ -495,18 +495,20 @@ test("an awaiting_relay_consent loop plus NO closes it and the group learns noth
   });
 });
 
-test("DISCREPANCY: a YES to the relay question closes as 'relayed' even when the thread never heard it", async () => {
-  // Real behaviour, asserted as found rather than as wished for. The relay-consent YES branch
-  // does `await speakToChat({...}).catch(() => ({ ok: false }))` and DISCARDS the result, so
-  // every refusal speakToChat returns by value rather than by throwing (chat_helper_misconfigured,
-  // speak_not_authorized, speak_budget_exhausted, send_failed) lands here as a success: the loop
-  // is stamped closedReason "relayed", a coordination.relayed audit row is written, and the
-  // person who was asked is told "Told <asker>." while nothing left the house.
+test("a YES to the relay question reports what actually happened, not what was asked for", async () => {
+  // This test was written to pin a BUG and now pins its fix, which is worth saying out loud
+  // because the bug was the module's own first principle inverted.
   //
-  // This does NOT breach rule 3 (nothing reached the group without consent; nothing reached the
-  // group at all), and the group-silence assertions below still hold. It is the other honesty
-  // failure: a claim of having spoken. Pinned here so that fixing it is a deliberate change and
-  // not a surprise, and reported upward.
+  // The relay-consent YES branch used to do `await speakToChat({...}).catch(() => ({ok:false}))`
+  // and DISCARD the result. speakToChat refuses BY VALUE rather than by throwing, for
+  // chat_helper_misconfigured, speak_not_authorized, speak_budget_exhausted and send_failed, so
+  // every one of those landed as a success: closedReason "relayed", a coordination.relayed audit
+  // row, and the person who was asked told "Told <asker>." while nothing left the house.
+  //
+  // It did not breach rule 3 (nothing reached the group without consent; nothing reached the
+  // group at all). It was the other honesty failure, a claim of having spoken, and the person
+  // who said yes is precisely the one who needs to know it did not land, because they are the
+  // only one who can go and tell the other person themselves.
   const hh = freshHousehold();
   await runWithTenant(hh, async () => {
     putMember({ actorId: "m-alex", displayName: "Alex Harper", role: "Owner", householdId: hh });
@@ -535,12 +537,18 @@ test("DISCREPANCY: a YES to the relay question closes as 'relayed' even when the
     assert.equal(listImessageMessages((m) => m.chatGuid === guid && m.direction === "out").length, 0,
       "nothing was said in the thread");
     assert.equal(getImessageChat(`ch_${hh}`).lastSpokeAt, null);
-    assert.equal(reply, "Told Alex Harper.",
-      "AS FOUND, and wrong: the send failed and the target is told it succeeded");
-    assert.equal(after.closedReason, "relayed",
-      "AS FOUND, and wrong: 'relayed' is recorded for a relay that did not happen");
-    assert.equal(readAudit(200).filter((a) => a.type === "coordination.relayed").length, 1,
-      "AS FOUND: the audit row says relayed too, so nothing downstream can tell the difference");
+    assert.match(reply ?? "", /couldn't get a message into the family chat/i,
+      "the person who said yes is told the send failed, because they are the one who can act on it");
+    assert.match(reply ?? "", /Alex Harper hasn't been told/,
+      "and told specifically who did NOT hear it");
+    assert.equal(after.closedReason, "relay_failed",
+      "a relay that did not happen is not recorded as one");
+    assert.equal(readAudit(200).filter((a) => a.type === "coordination.relayed").length, 0,
+      "no relayed audit row for a message that does not exist");
+    assert.equal(readAudit(200).filter((a) => a.type === "coordination.relay_failed").length, 1,
+      "the failure is its own audit row, so downstream can tell the difference");
+    assert.equal(after.status, "closed_completed",
+      "the loop is still finished: the task was done, only the telling failed");
   });
 });
 

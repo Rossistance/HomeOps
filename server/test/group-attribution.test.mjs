@@ -74,9 +74,12 @@ after(async () => { await stopServer(ctx); });
 const sessionOf = (client, householdId = HH) => ({ actorId: client.actorId, householdId, role: client.role });
 
 const planWith = (title, steps) => ({ title, summary: "", steps });
-const addTaskStep = () => ({
-  toolId: "homeops.create_task", title: "Add the task", detail: "",
-  input: { title: "Bring the cooler", visibility: "household" },
+/** On GROUP_TOOL_IDS and on agt_chat's allow-list: the one way this surface says anything.
+ *  Approval-gated, so a run built on it PARKS rather than executing; every assertion here is
+ *  about what the run record says, and nothing below needs a step to have run. */
+const sendTextStep = () => ({
+  toolId: "sms.send", title: "Text the family", detail: "",
+  input: { to: "+15550100200", body: "Swim meet is on for Saturday." },
 });
 /** On agt_chat's deny-list BY NAME, and nowhere near GROUP_TOOL_IDS. */
 const sendMailStep = () => ({
@@ -101,7 +104,7 @@ test("the roles this file leans on are the seeded ones, resolved server-side", a
 test("a group_chat run acts as agt_chat; the same plan through the manual API acts as NOBODY", async () => {
   const group = await runWithTenant(HH, () => orchestrate({
     source: "group_chat", via: "group_chat", agentId: CHAT_HELPER_ID,
-    plan: planWith("Group ask", [addTaskStep()]), session: sessionOf(ownerClient),
+    plan: planWith("Group ask", [sendTextStep()]), session: sessionOf(ownerClient),
     goal: "Put the swim meet on the calendar",
   }));
   assert.ok(group.ok, JSON.stringify(group));
@@ -115,7 +118,7 @@ test("a group_chat run acts as agt_chat; the same plan through the manual API ac
   // a caller who could name a helper would inherit that helper's standing consent to send.
   const manual = await runWithTenant(HH, () => orchestrate({
     source: "manual", via: "manual", agentId: CHAT_HELPER_ID,
-    plan: planWith("Hand-rolled ask", [addTaskStep()]), session: sessionOf(ownerClient),
+    plan: planWith("Hand-rolled ask", [sendTextStep()]), session: sessionOf(ownerClient),
   }));
   assert.ok(manual.ok, JSON.stringify(manual));
   const manualRun = await runWithTenant(HH, () => getRun(manual.run.id));
@@ -131,7 +134,7 @@ test("ATTRIBUTION IS WHAT MAKES THE ALLOW-LIST APPLY: a denied tool is clamped, 
 
   const group = await runWithTenant(HH, () => orchestrate({
     source: "group_chat", via: "group_chat", agentId: CHAT_HELPER_ID,
-    plan: planWith("Add it, then tell the league", [addTaskStep(), sendMailStep()]),
+    plan: planWith("Text the family, then mail the league", [sendTextStep(), sendMailStep()]),
     session: sessionOf(ownerClient), goal: "Add it and email the league",
   }));
   assert.ok(group.ok, JSON.stringify(group));
@@ -156,7 +159,7 @@ test("ATTRIBUTION IS WHAT MAKES THE ALLOW-LIST APPLY: a denied tool is clamped, 
    * layer that stops gmail.send from a surface that may reach four tool ids. */
   const manual = await runWithTenant(HH, () => orchestrate({
     source: "manual", via: "manual", agentId: CHAT_HELPER_ID,
-    plan: planWith("Same plan, no identity", [addTaskStep(), sendMailStep()]),
+    plan: planWith("Same plan, no identity", [sendTextStep(), sendMailStep()]),
     session: sessionOf(ownerClient),
   }));
   assert.equal(manual.droppedSteps, 0, `nothing is clamped when nobody is acting: ${JSON.stringify(manual)}`);
@@ -239,11 +242,15 @@ test("queueApprovalRun is exported and takes its provenance, and the group value
 
   const ask = "Swim meet Saturday at 9";
   const q = await runWithTenant(HH, () => queueApprovalRun({
-    toolId: "homeops.create_task", input: { title: ask, visibility: "household" }, title: "Create a task",
+    toolId: "homeops.create_approval", input: { subject: ask, detail: "Raised from the family thread." }, title: "Raise an approval",
     session: sessionOf(ownerClient), conversationId: null, goal: ask, visibility: "household",
     source: "group_chat", via: "group_chat", summaryPrefix: "Asked in the family chat",
   }));
   assert.ok(q.ok, JSON.stringify(q));
+  // Not vacuous: the run really did park for a human, which is the only reason its summary is
+  // read by anyone. A summary asserted on a run that executed itself would prove nothing.
+  assert.equal(q.status, "waiting_for_approval", `it parks rather than acting: ${JSON.stringify(q)}`);
+  assert.ok(q.approvalId, `and there is a real approval for an adult to answer: ${JSON.stringify(q)}`);
 
   const run = await runWithTenant(HH, () => getRun(q.runId));
   assert.ok(run.plan.summary.startsWith("Asked in the family chat"),
@@ -269,7 +276,7 @@ test("the defaults keep the chat path exactly as it was", async () => {
   // same as it always did, with nothing at the call site saying so.
   const ask = "Book the dentist for the 14th";
   const q = await runWithTenant(HH, () => queueApprovalRun({
-    toolId: "homeops.create_task", input: { title: ask, visibility: "household" }, title: "Create a task",
+    toolId: "homeops.create_approval", input: { subject: ask, detail: "Raised from the family thread." }, title: "Raise an approval",
     session: sessionOf(ownerClient), conversationId: null, goal: ask, visibility: "household",
   }));
   assert.ok(q.ok, JSON.stringify(q));
@@ -288,7 +295,7 @@ test("A CHILD VIEW MEMBER'S YES CANNOT QUEUE AN ACTION", async () => {
    * session this role floor is asked about. Without it, a six-year-old agreeing with an offer
    * would put a real action in front of the adults with their own name on it. */
   const q = await runWithTenant(HH, () => queueApprovalRun({
-    toolId: "homeops.create_task", input: { title: "Buy the sweets", visibility: "household" }, title: "Create a task",
+    toolId: "homeops.create_approval", input: { subject: "Buy the sweets", detail: "Raised from the family thread." }, title: "Raise an approval",
     session: sessionOf(childClient), conversationId: null, goal: "Buy the sweets", visibility: "household",
     source: "group_chat", via: "group_chat", summaryPrefix: "Asked in the family chat",
   }));
@@ -300,10 +307,11 @@ test("A CHILD VIEW MEMBER'S YES CANNOT QUEUE AN ACTION", async () => {
   // The floor is at Limited Member, so the adult above it is unaffected: a role check that
   // refused everyone would pass this test and break the feature.
   const allowed = await runWithTenant(HH, () => queueApprovalRun({
-    toolId: "homeops.create_task", input: { title: "Buy the sweets", visibility: "household" }, title: "Create a task",
+    toolId: "homeops.create_approval", input: { subject: "Buy the sweets", detail: "Raised from the family thread." }, title: "Raise an approval",
     session: { ...sessionOf(ownerClient), role: "Limited Member" },
     conversationId: null, goal: "Buy the sweets", visibility: "household",
     source: "group_chat", via: "group_chat", summaryPrefix: "Asked in the family chat",
   }));
   assert.equal(allowed.ok, true, `Limited Member is the floor, not a wall: ${JSON.stringify(allowed)}`);
+  assert.equal(allowed.status, "waiting_for_approval", `and it parks for an adult, as it should: ${JSON.stringify(allowed)}`);
 });

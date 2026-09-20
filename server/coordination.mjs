@@ -133,8 +133,12 @@ export function transcriptResolution(loop, nowMs) {
   if (!loop.originChatGuid) return null;
   const days = Number(getSettings(loop.householdId).chatTranscriptDays ?? 0);
   if (!(days > 0)) return { unavailable: true }; // ephemeral transcript: say so rather than imply a check
+  // A chat we cannot read is not a chat that said nothing. The sweep retires such a loop
+  // before it ever gets here (loop_origin_gone), but a direct caller deserves the same
+  // distinction the chatTranscriptDays === 0 case gets rather than a null that reads as
+  // "checked, and nobody mentioned it".
   const chat = chatByGuid(loop.originChatGuid);
-  if (!chat) return null;
+  if (!chat) return { unavailable: true };
   const since = Date.parse(loop.auditCursorAt ?? loop.createdAt ?? "");
   if (!Number.isFinite(since)) return null;
   for (const m of messagesBetween(chat, since, nowMs)) {
@@ -322,9 +326,27 @@ export async function answerLoopReply({ actorId, text, nowMs }) {
   if (loop.status === "awaiting_relay_consent") {
     const asker = loop.requestedByActorId ? getMember(loop.requestedByActorId)?.displayName ?? "them" : "them";
     if (YES_RE.test(t)) {
+      /* THE RESULT OF THE SEND DECIDES WHAT WE CLAIM. speakToChat refuses BY VALUE, not by
+       * throwing: chat_helper_misconfigured, speak_not_authorized, speak_budget_exhausted
+       * and send_failed all come back as {ok:false}. Discarding that and closing as
+       * "relayed" anyway told this person "Told Alex" when the thread had heard nothing,
+       * wrote a coordination.relayed audit row for a message that did not exist, and left
+       * nothing downstream able to tell a real relay from a failed one.
+       *
+       * It is the opposite of the failure the rest of this module guards. Rule 3 is that
+       * nothing reaches the group without consent; this was consent given and nothing
+       * reaching the group, reported as though it had. The person who said yes is the one
+       * who needs to know it did not land, because they are the only one who can tell the
+       * other person themselves. */
       const chat = loop.originChatGuid ? chatByGuid(loop.originChatGuid) : null;
-      if (chat && chat.status === "bound") {
-        await speakToChat({ chat, householdId: loop.householdId, text: `${getMember(loop.targetActorId)?.displayName ?? "That"} is sorted — ${loop.intent.text} is handled.`, kind: "relay", atMs: nowMs }).catch(() => ({ ok: false }));
+      const relayed = chat && chat.status === "bound"
+        ? await speakToChat({ chat, householdId: loop.householdId, text: `${getMember(loop.targetActorId)?.displayName ?? "That"} is sorted — ${loop.intent.text} is handled.`, kind: "relay", atMs: nowMs }).catch((e) => ({ ok: false, error: "send_failed", message: String(e?.message ?? e) }))
+        : { ok: false, error: "loop_origin_gone", message: "That chat isn't there any more." };
+
+      if (!relayed.ok) {
+        patchCoordinationLoop(loop.id, { status: "closed_completed", closedReason: "relay_failed", dueAt: null, updatedAt: nowISO() });
+        appendAudit({ type: "coordination.relay_failed", loopId: loop.id, householdId: loop.householdId, error: relayed.error });
+        return `I couldn't get a message into the family chat, so ${asker} hasn't been told.`;
       }
       patchCoordinationLoop(loop.id, { status: "closed_completed", closedReason: "relayed", dueAt: null, updatedAt: nowISO() });
       appendAudit({ type: "coordination.relayed", loopId: loop.id, householdId: loop.householdId });
