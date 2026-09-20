@@ -144,6 +144,29 @@ test("health reports serving-now and deployed-at-all as separate answers", async
     "the original flag keeps its original meaning — existing readers must not silently change");
 });
 
+test("the runtime can take a screenshot, and says so in its version", async () => {
+  // The visual confirmation in a family group chat needs a PNG of a page. Asserted on the
+  // source text, like everything else in this file, because CI installs no Chromium.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../browser-runtime/index.mjs", import.meta.url), "utf8");
+  assert.match(src, /url\.pathname === "\/shot"/, "POST /shot is the screenshot endpoint");
+  assert.match(src, /page\.screenshot\(/, "…and it actually takes one");
+  assert.match(src, /base64: buf\.toString\("base64"\)/, "returned inside the same JSON envelope every other endpoint uses, because the backend reads this service through safeFetch as text");
+  assert.doesNotMatch(src, /const VERSION = "1\.1\.0"/, "a new endpoint means a new version: a backend talking to an older runtime must be able to tell");
+});
+
+test("a missing /shot degrades to no picture, never to a broken confirmation", async () => {
+  // The renderer is on a free plan that spins down. The written confirmation goes first and
+  // the picture is a bonus, so every failure here has to be silent rather than surfaced.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../web.mjs", import.meta.url), "utf8");
+  assert.match(src, /export async function screenshotPage/);
+  assert.match(src, /render_unavailable/, "an older runtime with no /shot is a missing capability, not an error worth telling a family about");
+  assert.match(src, /render_timeout/);
+  const gc = readFileSync(new URL("../group-chat.mjs", import.meta.url), "utf8");
+  assert.match(gc, /void sendVisualProof\(/, "fire-and-forget: the confirmation does not wait on the picture");
+});
+
 test("no keepalive timer was added to paper over the spin-down", async () => {
   // A 15-minute probe would keep the free service awake round the clock and burn the
   // month's hours. If this ever appears, the standby state has been quietly abandoned.

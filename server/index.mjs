@@ -69,6 +69,7 @@ import { householdTimeZone, formatForHousehold, wallClockISO } from "./household
 import { addEventTombstone } from "./store.mjs";
 import { listImessageChats, getImessageChat } from "./store.mjs";
 import { readPreviewToken, renderPreviewCard, renderPreviewGone } from "./preview-token.mjs";
+import { resolvePreview } from "./share-preview.mjs";
 
 /** Which household owns the record a preview token names. resolvePreview gates on
  *  canSeeEntity, which never compares householdId, so this is the check that actually
@@ -5516,7 +5517,20 @@ server.listen(PORT, () => {
   // concurrent test suite flaky. A minute's delay keeps the "a server that restarts often
   // still gets its nightly snapshot" guarantee and removes the startup contention. Unref'd
   // so it never holds the process open.
-  setTimeout(() => { void forEachTenant((t) => backupTick(t)); }, 60_000).unref?.();
+  /* Ten minutes, not one. The delay exists to avoid startup contention, and 60s did that
+   * — but it also lands squarely inside the window the CI `data-isolation` job measures.
+   * That job boots a real server on server/.data, hashes the directory, runs the whole
+   * suite beside it and requires the directory byte-identical afterwards. On a fresh data
+   * dir `lastBackupAt` is 0, so the first tick RUNS: it writes a backup file (a new line in
+   * the find listing), an audit row, and churns the WAL. Verified by booting HEAD with no
+   * suite running at all and watching the gate go red on its own at T+60s.
+   *
+   * The suite takes around 66 seconds, so the gate could only ever pass by finishing inside
+   * ~58 — a coin flip dressed as a check, and a gate that goes red for reasons nobody caused
+   * is a gate people learn to ignore. Ten minutes keeps the guarantee the comment below
+   * cares about (a server that restarts often still gets its snapshot) and takes the first
+   * tick out of the measured window entirely. */
+  setTimeout(() => { void forEachTenant((t) => backupTick(t)); }, 10 * 60_000).unref?.();
   // eslint-disable-next-line no-console
   // Report the ACTUAL bound port (PORT=0 asks the OS for a free one — the test
   // harness relies on this line to learn where the server landed).
