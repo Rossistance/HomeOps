@@ -442,9 +442,18 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
     appendAudit({ type: "tool.execute", ...base, ok: false, error: "not_configured", readiness });
     return { ok: false, error: "not_configured", readiness, message: `${c.name} is ${readiness.replace(/_/g, " ")} — configure it before this tool can run.` };
   }
-  // Approval is enforced by the route via a consumed server-side approval record.
-  // The legacy client `approved` boolean is intentionally NOT consulted here.
-  if (tool.requiresApproval && !ctx.approvalConsumed) {
+  /* Approval is enforced by the route via a consumed server-side approval record, or by a
+   * policy grant the engine already resolved (ctx.policyCleared). The legacy client
+   * `approved` boolean is intentionally NOT consulted here.
+   *
+   * `tool.requiresApproval` is the STATIC registry default, which is why the second half
+   * matters: when an Owner has granted a helper unattended high-risk steps, or set the
+   * household to Trusted, or cleared this one tool's gate, the policy layer resolves the
+   * capability to allowed and creates no approval record at all. Reading only the registry
+   * flag refused those grants outright — the dials worked everywhere except here. A caller
+   * that never consulted the policy layer (the direct tools/:id/execute route) passes
+   * neither flag and still meets the gate. */
+  if (tool.requiresApproval && !ctx.approvalConsumed && !ctx.policyCleared) {
     appendAudit({ type: "tool.execute", ...base, ok: false, error: "approval_required" });
     return { ok: false, error: "approval_required", message: `${tool.name} is a ${tool.risk.toLowerCase()}-risk action and needs your approval.` };
   }

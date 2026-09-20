@@ -617,14 +617,28 @@ function buildToolSet(ctx) {
 }
 
 /** Approval-gated step → a durable run, parked for a human. Waits briefly for the park so
- *  the model can name the approval; a run the policy lets straight through returns its result. */
-async function queueApprovalRun({ toolId, input, title, session, conversationId, goal, visibility }) {
+ *  the model can name the approval; a run the policy lets straight through returns its result.
+ *
+ *  EXPORTED, with its provenance as parameters rather than baked in, because a second
+ *  surface now queues approvals: the group-chat listener. Reusing this with the old
+ *  hardcoded `source: "assistant", via: "chat"` and the summary "Asked in chat: …" would
+ *  put a group-originated approval in an adult's Inbox claiming it was asked in chat. That
+ *  is a false system state in the one place where honesty decides whether an action
+ *  happens, so the caller says where it came from and the defaults keep chat unchanged.
+ *
+ *  The 5s poll below belongs on a REQUEST path, never inside a swept pass: it is bounded
+ *  and it is why a caller can name the approval in its reply, but it would hold a sweep
+ *  that has no reentrancy protection of its own. */
+export async function queueApprovalRun({
+  toolId, input, title, session, conversationId, goal, visibility,
+  source = "assistant", via = "chat", summaryPrefix = "Asked in chat",
+}) {
   if (!roleAtLeast(session.role, "Limited Member")) return { ok: false, error: "insufficient_role", message: "This profile can't start actions that need approval." };
   let r;
   try {
     r = await orchestrate({
-      source: "assistant", via: "chat", session, conversationId, goal, visibility,
-      plan: { title, summary: `Asked in chat: ${String(goal).slice(0, 140)}`, steps: [{ toolId, title, detail: String(goal).slice(0, 240), input, requiresApproval: true }] },
+      source, via, session, conversationId, goal, visibility,
+      plan: { title, summary: `${summaryPrefix}: ${String(goal).slice(0, 140)}`, steps: [{ toolId, title, detail: String(goal).slice(0, 240), input, requiresApproval: true }] },
     });
   } catch (e) { return { ok: false, error: "run_failed", message: String(e?.message ?? e) }; }
   if (!r?.ok) return { ok: false, error: r?.error ?? "run_failed", message: r?.message ?? "Couldn't queue that step." };

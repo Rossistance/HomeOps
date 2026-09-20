@@ -332,9 +332,28 @@ async function execResolved(resolved, input, ctx, approvalId) {
       return { ok: false, error: e?.code === "invalid_input" ? "invalid_input" : "provider_error", message: String(e?.message ?? e) };
     }
   }
-  // connector tool — executeTool re-checks readiness + kill switch; we pass the
-  // consumed-approval flag so gated connector tools (http.post/sms.send) run.
-  return await executeTool(resolved.tool.id, input, { actorId: ctx.actorId, householdId: ctx.householdId, requestId: ctx.runId, approvalConsumed: !!approvalId, approvalId });
+  /* connector tool — executeTool re-checks readiness + kill switch.
+   *
+   * TWO ways a gated connector tool is allowed to run, and only one of them used to be
+   * wired. A consumed approval is the obvious one. The other is a POLICY GRANT: an Owner
+   * letting a helper run high-risk steps unattended (agent.unattended_high_risk), a
+   * household set to Trusted (household.autonomy_trusted), or a per-tool risk override
+   * (household.risk_override). In all three the policy layer resolves the capability to
+   * "no approval needed" and no approval record is ever created, so approvalId is
+   * undefined here and executeTool's own gate — which re-reads the STATIC registry flag,
+   * not the verdict — refused anyway. The grant was honoured everywhere except the layer
+   * that acts on it, so a family could turn every dial they own and still be told their
+   * text needed approval.
+   *
+   * `policyCleared` carries the verdict the gate should be reading. It is deliberately
+   * NOT folded into approvalConsumed: those are different claims, and the audit trail
+   * should not say an approval was consumed when none existed. The direct
+   * /api/tools/:id/execute route passes neither, so its gate is untouched. */
+  return await executeTool(resolved.tool.id, input, {
+    actorId: ctx.actorId, householdId: ctx.householdId, requestId: ctx.runId,
+    approvalConsumed: !!approvalId, approvalId,
+    policyCleared: resolved.requiresApproval === false,
+  });
 }
 
 /* ================= CHAT TOOL EXECUTION (assistant-agent.mjs) =================

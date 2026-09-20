@@ -97,5 +97,7 @@ test("an explicit group delivery is still ignored outright", async () => {
   const payload = { type: "new-message", data: { guid: "p:0/failopen-6", text: "hey all", isFromMe: false, handle: { address: NUM }, chats: [{ guid: "iMessage;+;chat777" }] } };
   const r = await ctx.fetch("/api/webhooks/bluebubbles", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
   const d = await r.json();
-  assert.equal(d.ignored, "group_chat", "an UNBOUND group chat stays silent, tri-state or not");
+  // Silent either way; the refusal is now named for the reason rather than for the shape.
+  assert.equal(d.ignored, "chat_not_bound", "an UNBOUND group chat stays silent, tri-state or not");
+  assert.equal(d.reply ?? null, null, "and nothing goes back into the thread");
 });

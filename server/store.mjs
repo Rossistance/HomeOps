@@ -124,6 +124,23 @@ function vaultKey(tenant) {
   return k;
 }
 
+/* A key for something that is NOT the vault, derived the same way and separated by its
+ * purpose string so the two can never be the same bytes. Signing a short-lived preview
+ * link, for instance: that key must survive a restart (a link minted a minute ago has to
+ * verify) and must not be the key that decrypts credentials. Same master secret, different
+ * info parameter, which is exactly what HKDF's info parameter is for. */
+const _purposeKeys = new Map();
+export function derivePurposeKey(purpose, tenant = null) {
+  const t = String(tenant || RESIDENT_TENANT);
+  const cacheKey = `${purpose}:${t}`;
+  let k = _purposeKeys.get(cacheKey);
+  if (!k) {
+    k = Buffer.from(crypto.hkdfSync("sha256", MASTER_KEY, Buffer.from(t, "utf8"), Buffer.from(`familios:${purpose}:v1`), 32));
+    _purposeKeys.set(cacheKey, k);
+  }
+  return k;
+}
+
 export function encrypt(plain) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", vaultKey(T()), iv);

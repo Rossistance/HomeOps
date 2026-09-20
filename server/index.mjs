@@ -47,8 +47,13 @@ import { orchestrate, ensureDefaultHelper } from "./orchestrator.mjs";
 import { sandboxEnabled, seedSandboxAccounts, listSandboxEffects } from "./sandbox-connectors.mjs";
 import { seedDefaults } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
-import { handleInboundSms, replyToSender } from "./sms.mjs";
+import { handleInboundSms, replyToSender, setLoopReplyHandler } from "./sms.mjs";
 import { bluebubblesConfig, parseInboundWebhook, webhookSecretPresented, secretMatches } from "./bluebubbles.mjs";
+import {
+  handleInboundGroup, withChatLock, speakPermission, bindChat, revokeChat, setCoordinationOpener,
+} from "./group-chat.mjs";
+import { sweepGroupTriageAllTenants, pruneChatDecisions } from "./group-triage.mjs";
+import { openLoopFromRefusal, sweepCoordinationLoopsAllTenants, answerLoopReply } from "./coordination.mjs";
 import {
   createHelper, updateHelper, deleteHelper, listHelpers, getHelper, publicHelper,
   runHelper, mayWriteHelper, helperTemplates, reanchorHelperSchedules,
@@ -62,6 +67,22 @@ import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive, sweepEventReminders } from "./reminders.mjs";
 import { householdTimeZone, formatForHousehold, wallClockISO } from "./household-time.mjs";
 import { addEventTombstone } from "./store.mjs";
+import { listImessageChats, getImessageChat } from "./store.mjs";
+import { readPreviewToken, renderPreviewCard, renderPreviewGone } from "./preview-token.mjs";
+
+/** Which household owns the record a preview token names. resolvePreview gates on
+ *  canSeeEntity, which never compares householdId, so this is the check that actually
+ *  confines a signed token to the household it was minted for. */
+function previewOwnerHousehold(type, id) {
+  try {
+    if (type === "event") return getEvent(id)?.householdId ?? null;
+    if (type === "task" || type === "list_item") return getTask(id)?.householdId ?? null;
+    if (type === "meal") return getMeal(id)?.householdId ?? null;
+    if (type === "file") return getFileRec(id)?.householdId ?? null;
+    if (type === "help_request") return getHelpRequest(id)?.householdId ?? null;
+  } catch { /* a missing record is a missing preview, handled by the caller */ }
+  return null;
+}
 import { getAgent, getViewerNote, putViewerNote } from "./store.mjs";
 import { captureMemoryFromExchange } from "./memory-capture.mjs";
 import {
@@ -914,8 +935,35 @@ const handleRequest = async (req, res) => {
       if (!msg || msg.ignored) return json(res, 200, { ok: true, ignored: msg?.type ?? "not_a_message" }, req);
       // Our own outbound messages echo back through the same webhook.
       if (msg.isFromMe) return json(res, 200, { ok: true, ignored: "from_me" }, req);
-      // The assistant never speaks into a group thread — it would be answering everyone.
-      if (msg.isGroup === true) return json(res, 200, { ok: true, ignored: "group_chat" }, req);
+      /* Empty first, above the group fork: an empty group message is EMPTY, not
+       * group-shaped, and there is nothing in it for either path to act on. It used to sit
+       * below the group drop, which meant the two answers depended on which guard happened
+       * to be written first. */
+      if (!msg.address || !msg.text) { audit({ type: "imessage.inbound", ok: false, error: "empty" }, req); return json(res, 200, { ok: true, ignored: "empty" }, req); }
+      /* A GROUP thread, and whether we say anything in it depends entirely on whether an
+       * adult bound it. An unbound group chat is still ignored outright — the original
+       * rule, and the one that keeps a bot number silent in a thread nobody invited it to.
+       * A bound one is recorded (members only) and judged later by the triage sweep.
+       *
+       * Note the order against the 1:1 path below: the claim happens INSIDE the group
+       * handler, under the chat lock, so a redelivered group message cannot produce a
+       * second record. The 1:1 path keeps its own existing claim, unchanged. */
+      if (msg.isGroup === true) {
+        const g = await withChatLock(msg.chatGuid ?? "unknown", async () => {
+          const sid = msg.guid;
+          if (sid) {
+            const seen = sysDoc(SMS_SEEN_FILE, {});
+            if (seen[sid]) return { ignored: "replayed", replayed: true };
+            const cutoff = Date.now() - SMS_SEEN_TTL_MS;
+            for (const [k, v] of Object.entries(seen)) if (!v?.at || v.at < cutoff) delete seen[k];
+            seen[sid] = { at: Date.now(), replyText: null };
+            putSysDoc(SMS_SEEN_FILE, seen);
+          }
+          return await handleInboundGroup({ msg, atMs: Date.now() });
+        });
+        audit({ type: "imessage.inbound", group: true, ok: !!g.handled, kind: g.kind ?? null, error: g.handled ? undefined : (g.ignored ?? null) }, req);
+        return json(res, 200, { ok: true, ...(g.handled ? { handled: true, kind: g.kind } : { ignored: g.ignored }) }, req);
+      }
       /* …and it does not run the ASSISTANT on a thread it cannot classify either. `null` is
        * the parser saying this delivery carried no chat context at all (no `chats`, no
        * `chatGuid`). That used to collapse into `false`, so a group message in the bare
@@ -924,7 +972,6 @@ const handleRequest = async (req, res) => {
        * — those are compliance obligations that must work from any delivery shape, and
        * `keywordOnly` is what narrows this path to them. */
       const keywordOnly = msg.isGroup === null;
-      if (!msg.address || !msg.text) { audit({ type: "imessage.inbound", ok: false, error: "empty" }, req); return json(res, 200, { ok: true, ignored: "empty" }, req); }
 
       /* IDEMPOTENCY. The bridge can re-deliver after a reconnect, and this handler runs the
        * assistant — an LLM call — before it answers. A duplicate must not become a second
@@ -1277,6 +1324,52 @@ const handleRequest = async (req, res) => {
      *
      * Deliberately narrow: it resolves the member's OWN photoFileId and refuses any other
      * id, so it can never become a general unauthenticated file reader. */
+    /* PREVIEW CARD — the page the headless renderer screenshots so a confirmation in the
+     * family's group chat is evidence rather than a claim.
+     *
+     * Under /api/ deliberately. serveStatic returns false for /api/* but otherwise serves
+     * the SPA shell for ANY extensionless path, so a preview route living at /preview/card
+     * that was misspelled or registered after the static handler would answer HTTP 200 with
+     * the app shell and a status-code test would prove nothing.
+     *
+     * No gate() here, which means no tenant is set and none of the usual protections apply:
+     * currentTenant() would be the resident household whatever the token says, and
+     * canSeeEntity defaults its session to {} — which makes `entity.ownerId === actorId`
+     * compare undefined to undefined and return true, and it never checks householdId at
+     * all. So the token drives runWithTenant, the synthetic session is complete, and the
+     * household is re-checked on the record. Same three steps as the avatar route below. */
+    if (path === "/api/preview/card" && method === "GET") {
+      const sendPage = (html, status = 200) => {
+        res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store, private", "x-robots-tag": "noindex" });
+        return res.end(html);
+      };
+      const tok = readPreviewToken(url.searchParams.get("t"), Date.now());
+      if (!tok.ok) return sendPage(renderPreviewGone(), 200);
+      // The household in a signed token still has to be a household that exists — a stale
+      // token for a deleted tenant must not open a database by name.
+      if (!/^(hh_[a-z0-9]+|local)$/.test(tok.householdId) || !(tok.householdId === CURRENT_TENANT || tenantEngine().tenantIds().includes(tok.householdId))) {
+        return sendPage(renderPreviewGone(), 200);
+      }
+      const card = runWithTenant(tok.householdId, () => {
+        const session = { actorId: tok.actorId, householdId: tok.householdId, role: tok.role };
+        const member = getMember(tok.actorId);
+        if (!member || member.archived || member.householdId !== tok.householdId) return null;
+        const p = resolvePreview({ type: tok.type, id: tok.id }, session);
+        if (!p || p.hidden) return null;
+        // resolvePreview's event/task/file/meal branches gate on canSeeEntity, which never
+        // compares householdId. Re-check it here against the record itself.
+        const owner = previewOwnerHousehold(tok.type, tok.id);
+        if (owner && owner !== tok.householdId) return null;
+        return p;
+      });
+      if (!card) return sendPage(renderPreviewGone(), 200);
+      const kindLabel = { event: "On the calendar", task: "On the list", list_item: "On the list", meal: "Meal plan", file: "In the library", help_request: "Asked" }[tok.type] ?? "In FamiliOS";
+      return sendPage(renderPreviewCard({
+        title: card.title ?? "", when: card.when ? formatForHousehold(card.when, tok.householdId) : null,
+        where: card.where ?? null, who: card.who ?? null, status: card.status ?? null, kindLabel,
+      }));
+    }
+
     const preAuthAvatar = path.match(/^\/api\/profiles\/([^/]+)\/avatar$/);
     if (preAuthAvatar && method === "GET") {
       if (!isAllowedOrigin(req.headers.origin)) return json(res, 403, { error: "origin_not_allowed" }, req);
@@ -4572,6 +4665,57 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       return json(res, 200, { sections: helperTemplates() }, req);
     }
+
+    /* ========================================================================
+     * GROUP CHATS — the external iMessage threads Famili has been let into.
+     *
+     * A chat appears here as `pending` only once a verified member of THIS household has
+     * spoken in it; until then FamiliOS does not know the thread exists and holds nothing
+     * about it. Binding is an adult's deliberate act and requires the speak grant to
+     * already exist, because the first thing a bind does is introduce Famili in the thread
+     * — and an introduction that parks for approval would leave the bind neither done nor
+     * failed. Revoking, by contrast, is answered to anyone: see group-chat.mjs.
+     * ======================================================================== */
+    if (path === "/api/group-chats" && method === "GET") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const perm = speakPermission(g.session.householdId);
+      const chats = listImessageChats((c) => c.status !== "revoked").map((c) => ({
+        id: c.id, chatGuid: c.chatGuid, displayName: c.displayName ?? "", status: c.status,
+        boundBy: c.boundBy ?? null, boundAt: c.boundAt ?? null, speakGrant: c.speakGrant ?? null,
+        lastMessageAt: c.lastMessageAt ?? null, lastSpokeAt: c.lastSpokeAt ?? null,
+        knownParticipants: (c.knownParticipants ?? []).map((p) => ({ memberId: p.memberId, name: getMember(p.memberId)?.displayName ?? null })),
+        // Pseudonymous, and the word is deliberate: a salted slow hash of a ten-digit
+        // number resists a casual read of a backup, not a determined attacker.
+        unknownParticipantCount: (c.unknownParticipantHashes ?? []).length,
+        messageCount: Object.values(c.messageIdsByDay ?? {}).reduce((n, ids) => n + ids.length, 0),
+      }));
+      return json(res, 200, {
+        chats,
+        canSpeak: perm.ok, speakGrant: perm.ok ? perm.grant : null,
+        speakBlockedReason: perm.ok ? null : perm.message,
+        transcriptDays: Number(getSettings(g.session.householdId).chatTranscriptDays ?? 0),
+      }, req);
+    }
+    if (path === "/api/group-chats" && method === "POST") {
+      // Bind. Adult Admin and up: this lets an automated voice into a thread containing
+      // people who are not in this household, which is not a Limited Member's call.
+      const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      if (!String(body.chatId ?? "").trim()) return json(res, 400, { error: "invalid_input", message: "Which chat?" }, req);
+      const out = await bindChat({ chatId: String(body.chatId), session: g.session, displayName: body.displayName ?? "" });
+      if (!out.ok) return json(res, out.status ?? 400, { error: out.error, message: out.message }, req);
+      audit({ type: "imessage.chat_bind", chatId: body.chatId, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, chat: { id: out.chat.id, status: out.chat.status, speakGrant: out.chat.speakGrant } }, req);
+    }
+    const groupChatId = path.match(/^\/api\/group-chats\/([^/]+)$/);
+    if (groupChatId && method === "DELETE") {
+      const g = gate(req, { minRole: "Adult Member" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const chat = getImessageChat(groupChatId[1]);
+      if (!chat || chat.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      const out = revokeChat({ chat, by: "member", actorId: g.session.actorId });
+      audit({ type: "imessage.chat_revoke", chatId: chat.id, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, messagesDeleted: out.messagesDeleted }, req);
+    }
     if (path === "/api/helpers" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       return json(res, 200, { helpers: listHelpers(g.session).map((h) => publicHelper(h, g.session)) }, req);
@@ -5247,6 +5391,12 @@ server.listen(PORT, () => {
   // than importing it there) is what keeps triggers and helpers out of an import cycle.
   setHelperRunner(runHelper);
   registerTriggerRunHooks();   // WP-001: write each run's TERMINAL status back to its trigger
+  /* The two halves of the deferred coordination loop, registered rather than imported:
+   * coordination.mjs already reads the chat record and the transcript through
+   * group-chat.mjs, and sms.mjs is reached from there too, so importing either back would
+   * close a cycle. Same reason setHelperRunner exists one line up. */
+  setCoordinationOpener(openLoopFromRefusal);
+  setLoopReplyHandler(answerLoopReply);
   // Recovery + sweeps + trigger tick run once PER HOUSEHOLD, each inside that
   // household's tenant context — one family's broken state never blocks another's.
   void forEachTenant(() => recoverRuns()); // re-drive any runs that were mid-flight at shutdown
@@ -5257,6 +5407,33 @@ server.listen(PORT, () => {
   // "15 minutes before" lands within half a minute of the mark.
   setInterval(() => { void forEachTenant(() => sweepTaskReminders()); }, 30_000);
   setInterval(() => { void forEachTenant(() => sweepEventReminders()); }, 30_000);
+  /* The passive group-chat listener. Debounce lives as a TIMESTAMP on the chat record, not
+   * as a setTimeout, so a deploy does not silently drop every in-flight window — the
+   * failure mode of a lost timer here is "the message that never came", which leaves no
+   * trace. 60s is generous against a 45s quiet gap.
+   *
+   * Reentrancy guard, because these two are the first swept work that SENDS: the ladder has
+   * none of its own and forEachTenant is serial, so a slow pass must not overlap the next
+   * tick. (Expo push gained an 8s deadline in the same change, for the same reason.)
+   * Writes nothing when nothing is due — the CI data-isolation gate hashes the live
+   * server's data dir and requires it byte-identical while the suite runs beside it. */
+  let _groupSweepInFlight = false;
+  setInterval(() => {
+    if (_groupSweepInFlight) return;
+    _groupSweepInFlight = true;
+    void sweepGroupTriageAllTenants().finally(() => { _groupSweepInFlight = false; });
+  }, 60_000);
+  setInterval(() => { void forEachTenant(() => pruneChatDecisions()); }, 60 * 60_000);
+  /* Deferred coordination loops. Same reentrancy guard and the same never-write-when-idle
+   * rule: this one sends a private message to a person, so a pass that overlapped itself
+   * would be a second nudge about someone's health. The record is stamped before the send
+   * for the same reason a reminder is. */
+  let _loopSweepInFlight = false;
+  setInterval(() => {
+    if (_loopSweepInFlight) return;
+    _loopSweepInFlight = true;
+    void sweepCoordinationLoopsAllTenants().finally(() => { _loopSweepInFlight = false; });
+  }, 60_000);
   // Archive is cheap and slow-moving; hourly is generous. First pass shortly after boot so
   // a long-stopped server catches up without waiting an hour.
   setInterval(() => { void forEachTenant(() => sweepTaskArchive()); }, 60 * 60_000);

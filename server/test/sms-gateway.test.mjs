@@ -87,7 +87,13 @@ test("NEGATIVE: echoes of our own sends, group chats and non-message events are 
   const turns = (await adult.req(`/api/conversations/${before.id}`)).data.conversation.messages.length;
 
   assert.equal((await body(await post(ctx, event("+15550108899", "I replied", { isFromMe: true })))).ignored, "from_me");
-  assert.equal((await body(await post(ctx, event("+15550108899", "hey all", { chats: [{ guid: "iMessage;+;chat123" }] })))).ignored, "group_chat");
+  // An UNBOUND group chat is still ignored — the original rule holds, and it is the one
+  // that keeps a shared bot number silent in a thread nobody invited it to. What changed is
+  // only the NAME of the refusal: the assistant now knows what a bound group chat is, so
+  // "we are not in this one" is the honest reason rather than "groups, never". A verified
+  // member speaking does leave a `pending` row an adult can find in the app; it does not
+  // put a word in the thread and it does not touch the assistant.
+  assert.equal((await body(await post(ctx, event("+15550108899", "hey all", { chats: [{ guid: "iMessage;+;chat123" }] })))).ignored, "chat_not_bound");
   assert.equal((await body(await post(ctx, { type: "typing-indicator", data: { guid: "x" } }))).ignored, "typing-indicator");
   assert.equal((await body(await post(ctx, event("+15550108899", "   ")))).ignored, "empty");
   const broken = await ctx.fetch("/api/webhooks/bluebubbles", { method: "POST", headers: { "content-type": "application/json", "x-familios-webhook-secret": SECRET }, body: "{not json" });
