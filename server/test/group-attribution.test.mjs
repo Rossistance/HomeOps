@@ -226,9 +226,9 @@ test("GROUP_TOOL_IDS is the call-site floor: the record cannot widen what this s
 
   // Refused out loud, in the audit trail, because a floor that refuses silently is a floor
   // nobody can tell is holding.
-  const audited = await runWithTenant(HH_FLOOR, () => readAudit(50)).then((rows) =>
-    rows.find((a) => a.type === "imessage.tool_out_of_scope" && a.toolId === "gmail.send"));
-  assert.ok(audited, "the out-of-scope refusal is written down");
+  const rows = await runWithTenant(HH_FLOOR, () => readAudit(50));
+  const audited = rows.find((a) => a.type === "imessage.tool_out_of_scope" && a.toolId === "gmail.send");
+  assert.ok(audited, `the out-of-scope refusal is written down: ${JSON.stringify(rows.map((a) => a.type))}`);
 });
 
 /* ───────────────── 2. provenance: what the run says about itself ───────────────── */

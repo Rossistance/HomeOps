@@ -316,6 +316,34 @@ export interface EffectivePolicy {
  *  Enforced in server/policy.mjs rule 7, which is the only place that decides what it means. */
 export type Autonomy = "Cautious" | "Balanced" | "Trusted";
 
+/** One external iMessage group chat FamiliOS has been let into, or is waiting to be. */
+export interface GroupChat {
+  id: string;
+  chatGuid: string;
+  displayName: string;
+  status: "pending" | "bound" | "declined" | "revoked";
+  boundBy: string | null;
+  boundAt: string | null;
+  /** Which dial authorised Famili to speak here. A household can flip autonomy to Trusted
+   *  without ever opening the helper, so the answer says which one applied. */
+  speakGrant: "helper_unattended" | "household_trusted" | "risk_override" | null;
+  lastMessageAt: string | null;
+  lastSpokeAt: string | null;
+  knownParticipants: Array<{ memberId: string; name: string | null }>;
+  /** Pseudonymous, and the word is deliberate: a salted slow hash of a ten-digit number
+   *  resists a casual read of a backup, not a determined attacker. Nothing identifying is
+   *  kept about these people and none of their messages are stored. */
+  unknownParticipantCount: number;
+  messageCount: number;
+}
+export interface GroupChatsView {
+  chats: GroupChat[];
+  canSpeak: boolean;
+  speakGrant: string | null;
+  speakBlockedReason: string | null;
+  transcriptDays: number;
+}
+
 export interface BackendSettings {
   externalActionsEnabled: boolean;
   ownerPinSet?: boolean;
@@ -331,6 +359,17 @@ export interface BackendSettings {
   autonomyDefaulted?: boolean;
   autonomySetByRole?: string | null;
   autonomySetAt?: string | null;
+  /** The cheap tier the passive group-chat listener runs on. Separate from
+   *  aiActiveProvider because they are two decisions: a household that has not made the
+   *  second one should see that it has not, rather than see a blank. */
+  aiTriageProvider?: string | null;
+  aiTriageModel?: string | null;
+  aiTriageDailyBudget?: number;
+  /** Shadow mode is the default: the classifier records its verdicts from the moment a
+   *  chat is bound and proposes nothing until this is on. */
+  chatProposalsEnabled?: boolean;
+  /** 0 means the external chat transcript is ephemeral, which is the default. */
+  chatTranscriptDays?: number;
   /** Daily AI call cap — metered and enforced server-side since C1.3, settable since 2.8.
    *  null means unmetered, which is the default. `aiCallsToday` is the count it measures. */
   aiDailyCallBudget?: number | null;
@@ -643,6 +682,26 @@ export const backend = {
   },
   async setSettings(patch: Record<string, unknown>): Promise<{ externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; autoApproveImprovementsDefaulted?: boolean; timezone?: string | null; hideProfilesPreAuth?: boolean }> {
     try { return (await req<{ settings: { externalActionsEnabled: boolean; calendarAutoSync?: boolean; autoApproveImprovements?: boolean; autoApproveImprovementsDefaulted?: boolean; timezone?: string | null; hideProfilesPreAuth?: boolean } }>("/settings", { method: "POST", body: JSON.stringify(patch), mutation: true })).settings; } catch { return { externalActionsEnabled: true }; }
+  },
+
+  /* ---- External group chats (the passive listener) ----
+   * A chat only appears here once a verified member of this household has spoken in it;
+   * until then FamiliOS does not know the thread exists. Binding takes an adult and
+   * requires the speak grant to already exist, because the first thing a bind does is
+   * introduce Famili in the thread. Revoking is open to anyone in the chat, which is
+   * handled over the bridge rather than here. */
+  async groupChats(): Promise<GroupChatsView> {
+    try {
+      return await req<GroupChatsView>("/group-chats");
+    } catch { return { chats: [], canSpeak: false, speakGrant: null, speakBlockedReason: "FamiliOS is unreachable.", transcriptDays: 0 }; }
+  },
+  async bindGroupChat(chatId: string, displayName?: string): Promise<{ ok?: boolean; error?: string; message?: string }> {
+    try { return await req("/group-chats", { method: "POST", body: JSON.stringify({ chatId, displayName }), mutation: true }); }
+    catch { return { error: "backend_unreachable" }; }
+  },
+  async revokeGroupChat(chatId: string): Promise<{ ok?: boolean; messagesDeleted?: number; error?: string; message?: string }> {
+    try { return await req(`/group-chats/${encodeURIComponent(chatId)}`, { method: "DELETE", mutation: true }); }
+    catch { return { error: "backend_unreachable" }; }
   },
 
   /* ---- AI providers ---- */

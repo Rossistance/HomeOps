@@ -280,6 +280,14 @@ function settingsView(s, session) {
      * endpoint should not enumerate which third-party keys a deployment holds. */
     placesProvider: placesProvider(),
     aiActiveProvider: s.aiActiveProvider ?? null,
+    /* The cheap tier the passive group-chat listener runs on. Reported separately from the
+     * active provider because they are two decisions, and because a household that has not
+     * made the second one should see that rather than see a blank. */
+    aiTriageProvider: s.aiTriageProvider ?? null,
+    aiTriageModel: s.aiTriageModel ?? null,
+    aiTriageDailyBudget: Number(s.aiTriageDailyBudget ?? 0) || 0,
+    chatProposalsEnabled: s.chatProposalsEnabled === true,
+    chatTranscriptDays: Number(s.chatTranscriptDays ?? 0) || 0,
     calendarAutoSync: s.calendarAutoSync === true,
     autoApproveImprovements: s.autoApproveImprovements !== false,
     autoApproveImprovementsDefaulted: typeof s.autoApproveImprovements !== "boolean",
@@ -4964,6 +4972,35 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // WP-010 pre-auth privacy (ISS-015): when ON, this household's roster is hidden from
       // the pre-auth profile picker to anyone without a session for it (see /api/profiles).
       if (typeof body.hideProfilesPreAuth === "boolean") patch.hideProfilesPreAuth = body.hideProfilesPreAuth;
+      /* GROUP CHAT. Three dials, and the defaults are the quiet ones.
+       *
+       * chatProposalsEnabled is the shadow-mode gate: the classifier runs and records its
+       * verdict from the moment a chat is bound, and proposes nothing until this is turned
+       * on, so the precision bar is read off the decision log rather than guessed at.
+       * chatTranscriptDays defaults to 0, meaning the transcript is ephemeral; raising it
+       * is what buys a coordination loop's ability to check whether someone said they had
+       * already handled something. 90 is the ceiling. */
+      if (typeof body.chatProposalsEnabled === "boolean") patch.chatProposalsEnabled = body.chatProposalsEnabled;
+      if (body.chatTranscriptDays !== undefined) {
+        const d = Number(body.chatTranscriptDays);
+        if (!Number.isFinite(d) || d < 0 || d > 90) return json(res, 400, { error: "invalid_input", message: "Keep chat history between 0 and 90 days." }, req);
+        patch.chatTranscriptDays = Math.floor(d);
+      }
+      // The triage tier. Naming a provider it has no key for is refused rather than stored:
+      // a tier that reads as configured and cannot answer is the fabricated readiness this
+      // codebase refuses everywhere else.
+      if (body.aiTriageProvider !== undefined) {
+        const pid = body.aiTriageProvider === null || body.aiTriageProvider === "" ? null : String(body.aiTriageProvider);
+        if (pid && !aiProviderById(pid)) return json(res, 400, { error: "unknown_provider", message: "That isn't a provider FamiliOS knows." }, req);
+        patch.aiTriageProvider = pid;
+        if (!pid) patch.aiTriageModel = null;
+      }
+      if (body.aiTriageModel !== undefined) patch.aiTriageModel = body.aiTriageModel ? String(body.aiTriageModel).slice(0, 120) : null;
+      if (body.aiTriageDailyBudget !== undefined) {
+        const b = Number(body.aiTriageDailyBudget);
+        if (!Number.isFinite(b) || b < 0) return json(res, 400, { error: "invalid_input", message: "A daily classification cap is a number, or 0 for unmetered." }, req);
+        patch.aiTriageDailyBudget = Math.floor(b);
+      }
       /* A DIAL THAT WAS ENFORCED AND COULD NOT BE TURNED.
        *
        * store.mjs has metered every AI call per household since C1.3, and aiBudgetExhausted()
