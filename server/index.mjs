@@ -915,7 +915,15 @@ const handleRequest = async (req, res) => {
       // Our own outbound messages echo back through the same webhook.
       if (msg.isFromMe) return json(res, 200, { ok: true, ignored: "from_me" }, req);
       // The assistant never speaks into a group thread — it would be answering everyone.
-      if (msg.isGroup) return json(res, 200, { ok: true, ignored: "group_chat" }, req);
+      if (msg.isGroup === true) return json(res, 200, { ok: true, ignored: "group_chat" }, req);
+      /* …and it does not run the ASSISTANT on a thread it cannot classify either. `null` is
+       * the parser saying this delivery carried no chat context at all (no `chats`, no
+       * `chatGuid`). That used to collapse into `false`, so a group message in the bare
+       * payload layout ran through the one-to-one path: the household assistant read it and
+       * replied to the sender. Fail closed on free text, and keep honouring STOP/START/HELP
+       * — those are compliance obligations that must work from any delivery shape, and
+       * `keywordOnly` is what narrows this path to them. */
+      const keywordOnly = msg.isGroup === null;
       if (!msg.address || !msg.text) { audit({ type: "imessage.inbound", ok: false, error: "empty" }, req); return json(res, 200, { ok: true, ignored: "empty" }, req); }
 
       /* IDEMPOTENCY. The bridge can re-deliver after a reconnect, and this handler runs the
@@ -932,7 +940,7 @@ const handleRequest = async (req, res) => {
           return json(res, 200, { ok: true, replayed: true, replied: !!prior.replyText }, req);
         }
       }
-      const r = await handleInboundSms({ from: msg.address, body: msg.text, chatGuid: msg.chatGuid });
+      const r = await handleInboundSms({ from: msg.address, body: msg.text, chatGuid: msg.chatGuid, keywordOnly });
       if (sid) {
         // Prune on write: a busy deployment must not accumulate every message id forever.
         const seen = sysDoc(SMS_SEEN_FILE, {});
@@ -944,6 +952,13 @@ const handleRequest = async (req, res) => {
       if (r.unknownSender) {
         audit({ type: "imessage.inbound", ok: false, error: "unknown_or_unverified_sender" }, req);
         return json(res, 200, { ok: true, ignored: "unknown_sender" }, req);
+      }
+      // A known sender whose thread we could not classify: nothing ran, so the answer must
+      // not read as `handled`. The number is known — but saying so here would be the one
+      // thing this endpoint never does, so the shape matches every other ignore.
+      if (r.kind === "unclassified_thread") {
+        audit({ type: "imessage.inbound", ok: false, error: "unclassified_thread" }, req);
+        return json(res, 200, { ok: true, ignored: "unclassified_thread" }, req);
       }
       // The answer goes back over the same bridge, into the same thread.
       const delivery = r.replyText ? await replyToSender({ from: msg.address, chatGuid: msg.chatGuid, text: r.replyText }) : { ok: false, error: "no_reply" };

@@ -208,7 +208,14 @@ export function parseInboundWebhook(payload) {
     chatGuid,
     service,
     isFromMe: d.isFromMe === true,
-    isGroup: chats.some((c) => isGroupChatGuid(c?.guid)) || isGroupChatGuid(chatGuid),
+    /* TRI-STATE, and the third state is the point. `true` and `false` are answers; `null`
+     * means the delivery carried no chat context at all — the bare payload layout above,
+     * where `chats` is absent and there is no `chatGuid`. That used to resolve to `false`,
+     * so a group message delivered in that layout fell past the group guard and was handled
+     * as a one-to-one: the household assistant ran on it and answered the sender. A guard
+     * that cannot tell must not guess, so the caller drops `null` instead of treating the
+     * unknown as private. */
+    isGroup: chats.length > 0 || chatGuid ? chats.some((c) => isGroupChatGuid(c?.guid)) || isGroupChatGuid(chatGuid) : null,
     dateCreated: d.dateCreated ?? null,
   };
 }

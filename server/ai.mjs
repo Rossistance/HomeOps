@@ -9,7 +9,15 @@ export const AI_PROVIDERS = [
   { id: "openai", name: "OpenAI", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.openai.com/v1", defaultModel: "gpt-5-mini", docs: "Paste an API key from platform.openai.com." },
   { id: "anthropic", name: "Anthropic Claude", kind: "cloud", style: "anthropic", needsKey: true, defaultBaseUrl: "https://api.anthropic.com", defaultModel: "claude-haiku-4-5", docs: "Paste an API key from console.anthropic.com." },
   { id: "gemini", name: "Google Gemini", kind: "cloud", style: "gemini", needsKey: true, defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta", defaultModel: "gemini-2.5-flash", docs: "Paste an API key from aistudio.google.com." },
-  { id: "compatible", name: "OpenAI-compatible", kind: "cloud", style: "openai", needsKey: true, needsBaseUrl: true, defaultBaseUrl: "", defaultModel: "", docs: "Any OpenAI-compatible endpoint (Together, Groq, OpenRouter, vLLM, …). Set base URL + key." },
+  { id: "compatible", name: "OpenAI-compatible", kind: "cloud", style: "openai", needsKey: true, needsBaseUrl: true, defaultBaseUrl: "", defaultModel: "", docs: "Any OpenAI-compatible endpoint (OpenRouter, vLLM, …). Set base URL + key." },
+  /* Serverless open-weights, as their own rows rather than the single `compatible` slot —
+   * a two-tier split needs a cheap classifier AND a dense reasoner configured at the same
+   * time, and `compatible` holds exactly one endpoint per household. Both speak the OpenAI
+   * Chat Completions shape, so `style: "openai"` reuses the request path below unchanged.
+   * (See ai-model.mjs: the SDK path routes them to createOpenAICompatible, NOT the
+   * Responses API, which is correct for these two and is now said out loud there.) */
+  { id: "groq", name: "Groq", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama-3.3-70b-versatile", docs: "Paste an API key from console.groq.com. Fast open-weights inference, billed per token." },
+  { id: "together", name: "Together AI", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.together.xyz/v1", defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo", docs: "Paste an API key from api.together.ai. Open-weights inference, billed per token." },
   // needsKey stays false — a bare local Ollama has no auth and must keep working keyless.
   // keyOptional lets Settings store a bearer for ollama.com's cloud API (Authorization:
   // Bearer, keys at ollama.com/settings/keys) or an auth-protected remote/proxied Ollama;
@@ -140,6 +148,11 @@ export function bootstrapAIFromEnv(householdId) {
     { id: "openai", env: "OPENAI_API_KEY" },
     { id: "anthropic", env: "ANTHROPIC_API_KEY" },
     { id: "gemini", env: "GEMINI_API_KEY" },
+    // Without these two, a deployment-provided open-weights key could only ever arrive by
+    // hand through Settings — which is not a thing a family does, and not a thing a
+    // multi-tenant deployment can do on their behalf.
+    { id: "groq", env: "GROQ_API_KEY" },
+    { id: "together", env: "TOGETHER_API_KEY" },
   ];
   const applied = [];
   for (const s of sources) {
@@ -147,10 +160,22 @@ export function bootstrapAIFromEnv(householdId) {
     if (!key || !String(key).trim()) continue;
     if (getSecret(cfgId(s.id), "apiKey")) continue; // already configured — hands off
     const body = { apiKey: String(key).trim() };
-    if (process.env.HOMEOPS_AI_MODEL) body.model = String(process.env.HOMEOPS_AI_MODEL).trim();
+    const willBeActive = !getSettings(householdId).aiActiveProvider;
+    // HOMEOPS_AI_MODEL names a model for the provider this deployment actually runs on.
+    // Stamping it onto every provider would hand Groq an OpenAI model id and call the
+    // result "configured" — so it only applies to the one becoming active.
+    if (willBeActive && process.env.HOMEOPS_AI_MODEL) body.model = String(process.env.HOMEOPS_AI_MODEL).trim();
     setProviderConfig(s.id, body);
-    if (!getSettings(householdId).aiActiveProvider) setActiveProvider(s.id, householdId);
+    if (willBeActive) setActiveProvider(s.id, householdId);
     applied.push(s.id);
+  }
+  /* The triage tier is opt-in, but a deployment that supplied an open-weights key plainly
+   * intends it to be used for the cheap tier. Claimed once, only when nothing is set, and
+   * only for a provider whose key actually landed — never guessed into existence. */
+  const st = getSettings(householdId);
+  if (!st.aiTriageProvider) {
+    const tier = ["groq", "together"].find((id) => applied.includes(id) || getSecret(cfgId(id), "apiKey"));
+    if (tier) setSettings({ aiTriageProvider: tier, aiTriageModel: aiProviderById(tier)?.defaultModel ?? "" }, householdId);
   }
   return applied;
 }
@@ -382,6 +407,51 @@ export async function providerChat(id, { messages = [], model } = {}) {
   } catch (e) {
     return { ok: false, error: "provider_error", message: String(e?.message ?? e) };
   }
+}
+
+/* ---- JSON-shaped provider calls -------------------------------------------------------
+ *
+ * Three separate tolerant extractors had grown up in this codebase — engine.mjs
+ * (extractJSONLoose), context.mjs (extractJSON) and message-suggestions.mjs — at three
+ * different robustness tiers. The weakest was the one doing the most model-facing work:
+ * message-suggestions took the first `{` to the last `}` with NO code-fence handling, on a
+ * prompt whose own first line says "no code fences". A fenced reply from a chattier model
+ * parsed as null and the feature went quietly dead. This is the one extractor, at the
+ * strongest tier: fences, surrounding prose, and the raw-newline-inside-a-string repair.
+ *
+ * Returns { ok:true, json, model } or { ok:false, error, ... }. `bad_json` is a real,
+ * nameable failure — a caller must be able to tell "the model said nothing usable" apart
+ * from "the model said no", because those mean opposite things to a silent classifier. */
+export function parseLooseJSON(text) {
+  if (!text) return null;
+  let t = String(text).trim();
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) t = fence[1].trim();
+  const first = t.indexOf("{");
+  const last = t.lastIndexOf("}");
+  if (first === -1 || last === -1 || last < first) return null;
+  const slice = t.slice(first, last + 1);
+  try { return JSON.parse(slice); } catch { /* fall through to the repair attempt */ }
+  // A raw newline (or tab) inside a string literal is the common malformation; escape the
+  // ones that sit inside quotes and leave structural whitespace alone.
+  let out = ""; let inStr = false; let esc = false;
+  for (const ch of slice) {
+    if (esc) { out += ch; esc = false; continue; }
+    if (ch === "\\") { out += ch; esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; out += ch; continue; }
+    if (inStr && (ch === "\n" || ch === "\r" || ch === "\t")) { out += ch === "\t" ? "\\t" : "\\n"; continue; }
+    out += ch;
+  }
+  try { return JSON.parse(out); } catch { return null; }
+}
+
+/** providerChat, plus the parse. Same failure shapes, with `bad_json` added. */
+export async function providerChatJSON(id, { messages = [], model } = {}) {
+  const out = await providerChat(id, { messages, model });
+  if (!out.ok) return out;
+  const json = parseLooseJSON(out.text);
+  if (json === null) return { ok: false, error: "bad_json", message: "The model's reply wasn't usable JSON.", model: out.model, raw: String(out.text ?? "").slice(0, 400) };
+  return { ok: true, json, model: out.model };
 }
 
 // Never surface raw provider payloads/secrets; return a short, safe message.

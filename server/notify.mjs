@@ -49,16 +49,36 @@ export function approvalPushTokens(approval) {
     .map((r) => r.token);
 }
 
+/* Expo's push endpoint, with a deadline. Every other outbound call in this codebase goes
+ * through safeFetch, which caps at 8s (net.mjs). These two did not: a bare fetch with no
+ * AbortController waits as long as the socket stays open. That was survivable while pushes
+ * only ever fired from a request, and stopped being survivable when swept work started
+ * sending them — the interval ladder in index.mjs has no reentrancy guard and forEachTenant
+ * is serial, so one wedged connection stalls reminders for every household on the box.
+ * Deliberately NOT safeFetch: this is a fixed first-party host, not a user-supplied URL. */
+const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
+const EXPO_TIMEOUT_MS = 8000;
+async function expoPush(messages) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), EXPO_TIMEOUT_MS);
+  try {
+    await fetch(EXPO_PUSH_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(messages),
+      signal: ctl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function pushApprovalNotification(approval) {
   try {
     const tokens = approvalPushTokens(approval);
     if (!tokens.length) return { ok: false, reason: "no_tokens" };
     const body = `${approval.toolId ?? "Action"}${approval.preview ? " — " + String(approval.preview).slice(0, 80) : ""}`;
-    await fetch("https://exp.host/--/api/v2/push/send", {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify(tokens.map((to) => ({ to, title: "Approval needed", body, data: { type: "approval", id: approval.id }, sound: "default", badge: 1 }))),
-    });
+    await expoPush(tokens.map((to) => ({ to, title: "Approval needed", body, data: { type: "approval", id: approval.id }, sound: "default", badge: 1 })));
     return { ok: true, sent: tokens.length };
   } catch {
     return { ok: false, reason: "send_failed" };
@@ -82,21 +102,17 @@ export async function pushToMember({ householdId, actorId, title, body, data, ti
       .filter((r) => (r.householdId == null || r.householdId === hh) && r.actorId === actorId)
       .map((r) => r.token);
     if (!tokens.length) return { ok: false, reason: "no_tokens" };
-    await fetch("https://exp.host/--/api/v2/push/send", {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      /* Cluster N — "the priority to get this notification needs to be on high… it will
-       * still ring on high." Expo maps priority:"high" to APNs high priority, and
-       * interruptionLevel:"timeSensitive" is what lets iOS surface a reminder through a
-       * Focus mode WHEN the user has granted the app Time Sensitive notifications — the
-       * capability is theirs to grant, so this is a request, not a promise to bypass
-       * silence. Only reminders ask for it; ordinary chatter must not cry wolf. */
-      body: JSON.stringify(tokens.map((to) => ({
-        to, title, body: String(body ?? "").slice(0, bodyLimit), data: data ?? {}, sound: "default", badge: 1,
-        ...(categoryId ? { categoryId } : {}),
-        ...(timeSensitive ? { priority: "high", interruptionLevel: "timeSensitive" } : {}),
-      }))),
-    });
+    /* Cluster N — "the priority to get this notification needs to be on high… it will
+     * still ring on high." Expo maps priority:"high" to APNs high priority, and
+     * interruptionLevel:"timeSensitive" is what lets iOS surface a reminder through a
+     * Focus mode WHEN the user has granted the app Time Sensitive notifications — the
+     * capability is theirs to grant, so this is a request, not a promise to bypass
+     * silence. Only reminders ask for it; ordinary chatter must not cry wolf. */
+    await expoPush(tokens.map((to) => ({
+      to, title, body: String(body ?? "").slice(0, bodyLimit), data: data ?? {}, sound: "default", badge: 1,
+      ...(categoryId ? { categoryId } : {}),
+      ...(timeSensitive ? { priority: "high", interruptionLevel: "timeSensitive" } : {}),
+    })));
     return { ok: true, sent: tokens.length };
   } catch {
     return { ok: false, reason: "send_failed" };

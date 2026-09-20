@@ -140,6 +140,13 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      # Serverless open-weights. Either one present with no triage tier chosen also claims
+      # the cheap tier the passive group-chat listener runs on (server/ai-tier.mjs) — the
+      # listener stays inert until one of these exists, by design.
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TOGETHER_API_KEY
+        sync: false
       # Optional OAuth providers. Fill these in the Render dashboard.
       - key: HOMEOPS_OAUTH_GOOGLE_CLIENT_ID
         sync: false

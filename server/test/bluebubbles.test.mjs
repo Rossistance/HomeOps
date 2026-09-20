@@ -87,6 +87,7 @@ test("a new-message event is read into one shape, whatever layout the server use
   assert.equal(bare.type, "new-message");
   assert.equal(bare.address, "+15550108899");
   assert.equal(bare.chatGuid, null, "no chat listed → nothing to remember");
+  assert.equal(bare.isGroup, null, "no chat listed → the group question is UNANSWERED, not answered 'no'");
 });
 
 test("NEGATIVE: what must never reach the assistant is marked, not dropped silently", () => {

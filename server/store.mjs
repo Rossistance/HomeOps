@@ -199,7 +199,12 @@ function readJSON(file, fallback) {
 export const revEmitter = new EventEmitter();
 revEmitter.setMaxListeners(0);
 const _dataRevByTenant = new Map(); // tenantId -> rev
-const REV_EXCLUDE = new Set(["sessions.json", "idempotency.json", "health.json", "oauth_states.json", "contact_verifications.json"]);
+/* Collections whose churn must NOT wake every connected client over the /api/changes SSE.
+ * imessage_messages and chat_decisions are the high-churn pair: an external group chat
+ * writes a row per inbound message and a row per triage pass, and no client renders
+ * either — bumping dataRev for them would make every phone in the household refetch the
+ * world because someone else's group chat was busy. */
+const REV_EXCLUDE = new Set(["sessions.json", "idempotency.json", "health.json", "oauth_states.json", "contact_verifications.json", "imessage_messages.json", "chat_decisions.json"]);
 function ensureRev(tenant) {
   if (!_dataRevByTenant.has(tenant)) _dataRevByTenant.set(tenant, Date.now());
   return _dataRevByTenant.get(tenant);
@@ -370,13 +375,22 @@ export function setSettings(patch, householdId) {
  * silently. No budget set = unlimited (the family's server stays unmetered
  * until a plan says otherwise). */
 const dayKey = (d = new Date()) => d.toISOString().slice(0, 10);
-export function recordAiUsage(householdId, kind = "other") {
+/**
+ * @param {object} [opts]
+ * @param {boolean} [opts.countsTowardTotal] false keeps this call OFF `rec.total`, and
+ *   therefore off `aiBudgetExhausted` and the eight sites that enforce it. Passive triage
+ *   runs on family chat volume; counted normally it would exhaust the household's
+ *   assistant budget by lunchtime and the family would find Ask Famili dead for reasons
+ *   nobody could see. The per-kind counter still rises, so the tier is metered by
+ *   `kindBudgetExhausted` against its own cap — bounded, just not out of the same purse.
+ */
+export function recordAiUsage(householdId, kind = "other", { countsTowardTotal = true } = {}) {
   const t = householdId ?? T();
   const all = engine.getDoc(t, "ai_usage.json", {});
   const day = dayKey();
   const rec = all[day] ?? {};
   rec[kind] = (rec[kind] ?? 0) + 1;
-  rec.total = (rec.total ?? 0) + 1;
+  if (countsTowardTotal) rec.total = (rec.total ?? 0) + 1;
   all[day] = rec;
   // Keep ~60 days; usage history is operational, not archival.
   for (const k of Object.keys(all)) if (k < dayKey(new Date(Date.now() - 60 * 86400000))) delete all[k];
@@ -390,6 +404,13 @@ export function aiBudgetExhausted(householdId) {
   const budget = Number(getSettings(householdId).aiDailyCallBudget);
   if (!Number.isFinite(budget) || budget <= 0) return false; // unmetered
   return (getAiUsage(householdId).total ?? 0) >= budget;
+}
+/** Per-kind ceiling, for tiers metered outside `.total` (see recordAiUsage). Same
+ *  unmetered-by-default rule: no budget set means no ceiling. */
+export function kindBudgetExhausted(householdId, kind, budget) {
+  const n = Number(budget);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  return (getAiUsage(householdId)[kind] ?? 0) >= n;
 }
 
 /* ---- Plan & entitlement (C1.5) ----
@@ -1316,5 +1337,62 @@ export const listFamilyMessages = (filter) => _familyMessages.list(filter);
 export const getFamilyMessage = (id) => _familyMessages.get(id);
 export const putFamilyMessage = (m) => _familyMessages.put(m);
 export const patchFamilyMessage = (id, patch) => _familyMessages.patch(id, patch);
+
+/* ---- External iMessage GROUP chats (the passive listener) ----------------------------
+ *
+ * Four collections, and the division between them is the privacy design, not filing.
+ *
+ * imessage_chats    one row per bound group chat. It carries its own INDEX —
+ *                   messageIdsByDay — because this database has no secondary indexes and
+ *                   no ORDER BY anywhere (tenant-db.mjs): the only sub-linear read is a
+ *                   point read on (collection, id). Day buckets turn both readers
+ *                   (triage's recent window, a coordination loop's 24-48h audit) into
+ *                   bounded point reads, and turn retention into a bucket drop plus N
+ *                   point deletes instead of the full-collection scan that deciding
+ *                   "which rows are old" would otherwise need.
+ * imessage_messages MEMBERS ONLY. A handle that resolves to no member of the bound
+ *                   household never gets a row here — their words live in the in-memory
+ *                   debounce window and are never written. The shared bridge is one Apple
+ *                   ID for every household (docs/IMESSAGE_BLUEBUBBLES.md), so this is a
+ *                   bot number sitting in someone's private thread; keeping a stranger's
+ *                   messages because a member added us is not ours to do.
+ * chat_decisions    every triage verdict INCLUDING the silent ones. A negative-bias
+ *                   classifier fails invisibly by construction — a miss produces no
+ *                   artifact and no complaint — so silence has to be written down or
+ *                   there is no way to tell a well-tuned listener from a dead one.
+ * chat_proposals    the one open offer per chat, and what a yes executes.
+ */
+const _imessageChats = keyedCollection("imessage_chats.json");
+export const listImessageChats = (filter) => _imessageChats.list(filter);
+export const getImessageChat = (id) => _imessageChats.get(id);
+export const putImessageChat = (c) => _imessageChats.put(c);
+export const patchImessageChat = (id, patch) => _imessageChats.patch(id, patch);
+export const deleteImessageChatRec = (id) => _imessageChats.remove(id);
+
+const _imessageMessages = keyedCollection("imessage_messages.json");
+export const listImessageMessages = (filter) => _imessageMessages.list(filter);
+export const getImessageMessage = (id) => _imessageMessages.get(id);
+export const putImessageMessage = (m) => _imessageMessages.put(m);
+export const deleteImessageMessageRec = (id) => _imessageMessages.remove(id);
+
+const _chatDecisions = keyedCollection("chat_decisions.json");
+export const listChatDecisions = (filter) => _chatDecisions.list(filter);
+export const putChatDecision = (d) => _chatDecisions.put(d);
+export const deleteChatDecisionRec = (id) => _chatDecisions.remove(id);
+
+const _chatProposals = keyedCollection("chat_proposals.json");
+export const listChatProposals = (filter) => _chatProposals.list(filter);
+export const getChatProposal = (id) => _chatProposals.get(id);
+export const putChatProposal = (p) => _chatProposals.put(p);
+export const patchChatProposal = (id, patch) => _chatProposals.patch(id, patch);
+
+/* ---- Deferred coordination loops ----
+ * An unresolved ask that left the group thread and is waiting to be re-checked quietly.
+ * See coordination.mjs for the state machine; the shape lives there too. */
+const _coordinationLoops = keyedCollection("coordination_loops.json");
+export const listCoordinationLoops = (filter) => _coordinationLoops.list(filter);
+export const getCoordinationLoop = (id) => _coordinationLoops.get(id);
+export const putCoordinationLoop = (l) => _coordinationLoops.put(l);
+export const patchCoordinationLoop = (id, patch) => _coordinationLoops.patch(id, patch);
 
 export { DATA_DIR };
