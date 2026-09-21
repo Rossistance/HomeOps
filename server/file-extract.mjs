@@ -47,7 +47,7 @@ export async function extractStructured({ householdId, text, sourceName }) {
 
   const providerId = getSettings(householdId).aiActiveProvider;
   if (!providerId) {
-    return { ok: false, error: "no_provider", message: "No AI provider is connected, so I can't pull items out of a file yet. Add one in Settings → AI Providers." };
+    return { ok: false, error: "no_provider", message: "No AI provider is connected for this household yet, so I can't pull items out of a file." };
   }
   if (aiBudgetExhausted(householdId)) {
     return { ok: false, error: "budget_exhausted", message: "The household's daily AI budget is used up, so I'll leave this file for now." };

@@ -105,7 +105,7 @@ async function searchTavily(q, maxResults) {
 }
 
 // OpenAI web search: the household's existing OpenAI key (env or the key saved
-// in Settings → AI Providers) powers real search via the Responses API's
+// by the deployment's OPENAI_API_KEY) powers real search via the Responses API's
 // web_search tool. No browser, no scraping, works on any host — this is what
 // keeps Ask runs alive on small instances where Chromium can't run.
 function openAIKey() {

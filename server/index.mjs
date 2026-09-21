@@ -53,6 +53,7 @@ import {
   handleInboundGroup, withChatLock, speakPermission, bindChat, revokeChat, setCoordinationOpener, announceStoragePolicy, dropNonMemberMessages,
 } from "./group-chat.mjs";
 import { runWakeTurn } from "./group-agent.mjs";
+import { triageTier } from "./ai-tier.mjs";
 import { sweepGroupTriageAllTenants, pruneChatDecisions } from "./group-triage.mjs";
 import { openLoopFromRefusal, sweepCoordinationLoopsAllTenants, answerLoopReply } from "./coordination.mjs";
 import {
@@ -114,7 +115,7 @@ import { runAssistantAgent } from "./assistant-agent.mjs";
 // the streaming and non-streaming paths can never persist different shapes.
 function assistantTurnMessage(out, at) {
   if (!out.ok) {
-    return { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available. Add one in Settings → AI Providers, then ask me again.", error: out.error ?? "assistant_error", at };
+    return { role: "assistant", kind: "error", text: out.message || "I couldn't respond — no AI provider is available for this household yet.", error: out.error ?? "assistant_error", at };
   }
   return {
     role: "assistant", kind: "answer", text: out.answer ?? "",
@@ -2100,9 +2101,31 @@ function mayWriteAgent(session, agent, nextVisibility) {
 
     /* ---- Everything below requires an authenticated, allowed-origin session ---- */
     // Connectors list
+    /* WHAT THE APP OFFERS TO SET UP, versus what the ENGINE can reach.
+     *
+     * These two endpoints feed the Connections screens on web and mobile and nothing else —
+     * toolCatalog() reads PROVIDERS and CONNECTORS straight from their modules, so nothing
+     * filtered here can stop a tool from running, a helper from working, or a configured
+     * account from being used. This is a shelf-tidying decision, not a capability one.
+     *
+     * Only Google is surfaced. The other OAuth providers are real code with no credentials
+     * behind them, so every one of them is a row a family can tap, read a scope list for,
+     * and get nowhere with — clutter in front of the handful of things that work. They come
+     * back by adding an id here, which is deliberately a code change: a provider becomes
+     * offerable when someone has actually wired it up, not when it merely exists.
+     *
+     * Connectors are filtered on `live` rather than by name, because that set moves on its
+     * own — the iMessage bridge is live today and was not last week, and hard-coding it
+     * would have hidden the thing this deployment runs on.
+     *
+     * The trade, said out loud: a connector that is not live cannot be configured FROM the
+     * app any more, because its setup surface is what got hidden. Re-surfacing is the
+     * one-line change above. */
+    const SURFACED_PROVIDER_IDS = new Set(["google"]);
+
     if (path === "/api/connectors" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      return json(res, 200, { connectors: listConnectors() }, req);
+      return json(res, 200, { connectors: listConnectors().filter((c) => c.live) }, req);
     }
 
     const connMatch = path.match(/^\/api\/connectors\/([^/]+)(\/(config|health))?$/);
@@ -2155,7 +2178,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
        * name is right here — attached server-side so the web and the app say the same thing. */
       const roster = new Map(listMembers((m) => m.householdId === g.session.householdId).map((m) => [m.actorId, m.displayName]));
       const named = (a) => ({ ...a, memberName: roster.get(a.connectedByActorId) ?? null });
-      const providers = listConnectorProviders().map((p) => ({ ...p, accounts: (byProvider[p.id] ?? []).map(named) }));
+      const providers = listConnectorProviders()
+        .filter((p) => SURFACED_PROVIDER_IDS.has(p.id))
+        .map((p) => ({ ...p, accounts: (byProvider[p.id] ?? []).map(named) }));
       return json(res, 200, { providers, redirectUri: oauthRedirectUri() }, req);
     }
     if (path === "/api/accounts" && method === "GET") {
@@ -4724,10 +4749,24 @@ function mayWriteAgent(session, agent, nextVisibility) {
         unknownParticipantCount: (c.unknownParticipantHashes ?? []).length,
         messageCount: Object.values(c.messageIdsByDay ?? {}).reduce((n, ids) => n + ids.length, 0),
       }));
+      /* CAN IT HEAR, not just may it speak.
+       *
+       * These are two different questions and the card only ever asked one. A household
+       * could have every permission granted and a bound chat and still have Famili deaf,
+       * because the triage tier had no usable model — and the only place that truth
+       * existed was a decision-log row nobody opens. With the AI screens no longer
+       * routed, there is now nowhere else a person could ever find out.
+       *
+       * So the one card that says whether Famili is in your chat also says whether it is
+       * actually listening, in the words triageTier already uses. */
+      const hear = triageTier(g.session.householdId);
       return json(res, 200, {
         chats,
         canSpeak: perm.ok, speakGrant: perm.ok ? perm.grant : null,
         speakBlockedReason: perm.ok ? null : perm.message,
+        canListen: hear.ok,
+        listenModel: hear.ok ? hear.model : null,
+        listenBlockedReason: hear.ok ? null : hear.message,
         transcriptDays: Number(getSettings(g.session.householdId).chatTranscriptDays ?? 0),
       }, req);
     }

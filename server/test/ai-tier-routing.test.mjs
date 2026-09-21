@@ -99,12 +99,43 @@ test("a configured triage tier resolves to ITS provider and model", async () => 
   });
 });
 
-test("an empty triage model falls back to the PROVIDER's default, not to the dense model", async () => {
+test("AN EMPTY TRIAGE MODEL FALLS BACK TO THE PROVIDER'S TRIAGE DEFAULT — never the flagship", async () => {
+  /* THIS TEST USED TO ASSERT THE OPPOSITE, and it was pinning a bug.
+   *
+   * It read `assert.equal(t.model, aiProviderById("groq").defaultModel)` — the DENSE
+   * flagship. So an unset triage model quietly ran the household's largest model a few
+   * hundred times a day on work that is thrown away, which is the exact silent fallback
+   * this module's own header says it refuses. On Together's published prices that is
+   * roughly ten times the flash tier.
+   *
+   * The root cause was one field being asked to mean two things. Providers now declare
+   * both, and the flagship is not in this resolution chain at all. */
   await runWithTenant(HH, () => {
     setSettings({ aiTriageProvider: "groq", aiTriageModel: "" }, HH);
     const t = triageTier(HH);
-    assert.equal(t.ok, true);
-    assert.equal(t.model, aiProviderById("groq").defaultModel);
+    assert.equal(t.ok, true, JSON.stringify(t));
+    assert.equal(t.model, aiProviderById("groq").defaultTriageModel, "the small model, declared for this purpose");
+    assert.notEqual(t.model, aiProviderById("groq").defaultModel, "and NOT the tier a person waits on");
+  });
+});
+
+test("A PROVIDER WITH NO TRIAGE DEFAULT GOES INERT AND SAYS SO, rather than guessing expensively", async () => {
+  /* The other half of the rule. openai has a flagship and no declared small model, so
+   * there is nothing honest to fall back to — and reaching for its flagship is precisely
+   * what was wrong before. Inert is recoverable and visible; a surprise invoice is
+   * neither. */
+  const openai = aiProviderById("openai");
+  assert.ok(openai.defaultModel, "precondition: it does have a dense default to be tempted by");
+  assert.equal(openai.defaultTriageModel ?? null, null, "precondition: and no small one declared");
+
+  await runWithTenant(HH, () => {
+    setConnectorConfig("ai.openai", {}, { apiKey: "test-key" });
+    setSettings({ aiTriageProvider: "openai", aiTriageModel: "" }, HH);
+    const t = triageTier(HH);
+    assert.equal(t.ok, false, `it refuses rather than reaching for the flagship: ${JSON.stringify(t)}`);
+    assert.equal(t.error, "triage_not_configured", JSON.stringify(t));
+    assert.match(t.message, /not listening/i, "and says what it means for the family");
+    assert.match(t.message, /HOMEOPS_AI_TRIAGE_MODEL/, "and how to fix it, now that there is no screen for it");
   });
 });
 
@@ -121,5 +152,9 @@ test("groq and together are their own rows, so both tiers can be configured at o
     assert.equal(p.needsKey, true);
     assert.ok(p.defaultBaseUrl.startsWith("https://"), "a real default endpoint, not a blank to fill in");
     assert.ok(p.defaultModel, "and a real default model");
+    /* Both open-weights providers declare a small model too, or the listener they exist to
+     * power cannot run on them without a deployment setting it by hand. */
+    assert.ok(p.defaultTriageModel, `${id} declares a model sized for the listener`);
+    assert.notEqual(p.defaultTriageModel, p.defaultModel, `${id}'s two tiers are two models`);
   }
 });

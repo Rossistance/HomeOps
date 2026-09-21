@@ -4,7 +4,6 @@ import { brand } from "@/brand";
 import { exportBackup, importBackup } from "@/storage/backup";
 import { PageHeader, Card, SectionTitle, Button, Toggle, Select, Badge, Modal, HealthDot, Field, TextInput, Avatar } from "@/components/ui";
 import { Icon } from "@/components/Icon";
-import { AIProvidersPanel } from "@/screens/AIProviders";
 import { backend, type CatalogTool, type RiskOverride, type Autonomy, type BackendSettings, type GroupChatsView } from "@/connectors/api";
 import { useCalmMode, useAdvancedMode } from "@/lib/prefs";
 
@@ -135,15 +134,18 @@ export function Settings() {
         {/* Connectors */}
         <Card className="card-pad">
           <SectionTitle icon="Plug" action={<Button size="sm" variant="secondary" onClick={() => navigate("connections")}>Open Connections</Button>}>Connectors</SectionTitle>
-          <p className="mb-2 text-sm text-ink-500">{connectors.filter((c) => c.live).length} of {connectors.length} connectors are live. Configure providers, OAuth, API keys, and webhooks in Connections.</p>
+          <p className="mb-2 text-sm text-ink-500">{connectors.length} {connectors.length === 1 ? "connector is" : "connectors are"} live. Connect Google in Connections; the rest are set up by the deployment.</p>
           <div className="flex flex-wrap gap-1.5">{connectors.map((c) => <Badge key={c.id} color="gray">{c.name}</Badge>)}</div>
         </Card>
 
-        {/* AI providers (real adapters) */}
-        <Card className="card-pad">
-          <SectionTitle icon="Sparkles">AI providers</SectionTitle>
-          <AIProvidersPanel />
-        </Card>
+        {/* AI PROVIDERS ARE NOT SET UP HERE ANY MORE.
+            Keys arrive as deployment environment variables (GROQ_API_KEY, TOGETHER_API_KEY,
+            …) and bootstrapAIFromEnv claims the active and triage tiers on first boot, so
+            the panel was a second way to configure something already configured — and the
+            more dangerous way, since a household could point a tier at a model their
+            deployment has no key for and get a provider that reads "healthy" and fails on
+            every call. The panel itself still exists (screens/AIProviders.tsx) for whoever
+            needs it back; it is the ROUTE into it that is gone. */}
 
         {/* Privacy */}
         <Card className="card-pad">
@@ -334,8 +336,17 @@ function GroupChatsCard({ toast }: { toast: (t: Omit<Toast, "id">) => void }) {
           : "It only keeps messages from your own household's members; anyone else's stay unsaved."}
       </p>
 
+      {/* LISTENING AND SPEAKING ARE TWO DIFFERENT PERMISSIONS, and a household could have
+          every speaking grant in place while Famili was deaf — the triage tier having no
+          usable model. That truth used to live only in a decision-log row. It is shown
+          first because a Famili that cannot hear has nothing to say. */}
+      {!view.canListen && (
+        <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-ink-600">
+          {view.listenBlockedReason ?? "Famili isn't listening in chats yet."}
+        </p>
+      )}
       {view.canSpeak
-        ? <p className="mt-2 rounded-lg bg-sage-50 px-3 py-2 text-sm text-ink-600">Famili can speak in a chat it has joined, because {grantLabel}.</p>
+        ? <p className="mt-2 rounded-lg bg-sage-50 px-3 py-2 text-sm text-ink-600">Famili can speak in a chat it has joined, because {grantLabel}.{view.canListen && view.listenModel ? ` It listens with ${view.listenModel}.` : ""}</p>
         : <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-ink-600">{view.speakBlockedReason ?? "Famili can't speak in a chat yet."}</p>}
 
       <div className="mt-3">

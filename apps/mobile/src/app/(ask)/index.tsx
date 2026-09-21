@@ -677,7 +677,7 @@ export default function AskScreen() {
       upsertMsg({
         id: aid, role: "assistant", error: true,
         text: r.error === "no_provider"
-          ? "I need an AI provider connected (Settings → AI Providers), then ask me again."
+          ? "I need an AI provider connected for this household — that is set up by whoever runs this deployment."
           : (r.message || "I couldn't reach the AI provider just now."),
       });
     }

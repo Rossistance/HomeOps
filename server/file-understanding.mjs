@@ -78,7 +78,7 @@ Do not speculate about anything not visible. If part is illegible, say which par
 async function describeImage({ householdId, mime, base64, prompt }) {
   const providerId = getSettings(householdId).aiActiveProvider;
   if (!providerId) {
-    return { ok: false, error: "no_provider", message: "No AI provider is connected, so I can't look at images yet. Add one in Settings → AI Providers." };
+    return { ok: false, error: "no_provider", message: "No AI provider is connected for this household yet, so I can't look at images." };
   }
   const out = await providerChat(providerId, {
     messages: [

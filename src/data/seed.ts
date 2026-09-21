@@ -376,9 +376,9 @@ export function defaultSettings(): AppData["settings"] {
       activeProvider: "local",
       providers: [
         { id: "local", label: "Local rules engine", enabled: true, apiKeyPlaceholder: "", note: "Default. Runs entirely on-device with deterministic logic. No data leaves your browser." },
-        { id: "anthropic", label: "Anthropic Claude", enabled: false, apiKeyPlaceholder: "Managed in Settings → AI Providers", note: "Connect a real provider in Settings → AI Providers." },
-        { id: "openai", label: "OpenAI", enabled: false, apiKeyPlaceholder: "Managed in Settings → AI Providers", note: "Connect a real provider in Settings → AI Providers." },
-        { id: "gemini", label: "Google Gemini", enabled: false, apiKeyPlaceholder: "Managed in Settings → AI Providers", note: "Connect a real provider in Settings → AI Providers." },
+        { id: "anthropic", label: "Anthropic Claude", enabled: false, apiKeyPlaceholder: "Managed by the deployment", note: "Configured by whoever runs this deployment." },
+        { id: "openai", label: "OpenAI", enabled: false, apiKeyPlaceholder: "Managed by the deployment", note: "Configured by whoever runs this deployment." },
+        { id: "gemini", label: "Google Gemini", enabled: false, apiKeyPlaceholder: "Managed by the deployment", note: "Configured by whoever runs this deployment." },
       ],
     },
     soloProfessionalMode: false,

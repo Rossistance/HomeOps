@@ -341,6 +341,11 @@ export interface GroupChatsView {
   canSpeak: boolean;
   speakGrant: string | null;
   speakBlockedReason: string | null;
+  /** Whether the passive listener has a usable triage model — a different question from
+   *  canSpeak, and the only place a person can now learn the answer. */
+  canListen: boolean;
+  listenModel: string | null;
+  listenBlockedReason: string | null;
   transcriptDays: number;
 }
 
@@ -695,7 +700,7 @@ export const backend = {
   async groupChats(): Promise<GroupChatsView> {
     try {
       return await req<GroupChatsView>("/group-chats");
-    } catch { return { chats: [], canSpeak: false, speakGrant: null, speakBlockedReason: "FamiliOS is unreachable.", transcriptDays: 0 }; }
+    } catch { return { chats: [], canSpeak: false, speakGrant: null, speakBlockedReason: "FamiliOS is unreachable.", canListen: false, listenModel: null, listenBlockedReason: "FamiliOS is unreachable.", transcriptDays: 0 }; }
   },
   async bindGroupChat(chatId: string, displayName?: string): Promise<{ ok?: boolean; error?: string; message?: string }> {
     try { return await req("/group-chats", { method: "POST", body: JSON.stringify({ chatId, displayName }), mutation: true }); }

@@ -16,8 +16,29 @@ export const AI_PROVIDERS = [
    * Chat Completions shape, so `style: "openai"` reuses the request path below unchanged.
    * (See ai-model.mjs: the SDK path routes them to createOpenAICompatible, NOT the
    * Responses API, which is correct for these two and is now said out loud there.) */
-  { id: "groq", name: "Groq", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama-3.3-70b-versatile", docs: "Paste an API key from console.groq.com. Fast open-weights inference, billed per token." },
-  { id: "together", name: "Together AI", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.together.xyz/v1", defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo", docs: "Paste an API key from api.together.ai. Open-weights inference, billed per token." },
+  /* TWO DEFAULTS, BECAUSE THE TIERS WANT OPPOSITE THINGS.
+   *
+   * defaultModel is for the tier a PERSON waits on — the best the provider serves.
+   * defaultTriageModel is for the passive listener, which answers "nothing here" almost
+   * every time and runs on family-chat volume, so it wants the smallest model that can
+   * return a JSON verdict. One field could not be both, and the triage tier borrowing
+   * defaultModel is how llama-3.3-70b-versatile — the DENSE default — came to be this
+   * deployment's classifier. On Together's own published prices the flagship is roughly
+   * ten times the flash tier, for work that is thrown away.
+   *
+   * Only set where a real completion was checked against the live catalog (2026-09-21).
+   * A provider with no defaultTriageModel makes the listener inert AND SAYS SO, which is
+   * ai-tier.mjs's declared rule — guessing with someone's flagship is exactly the silent
+   * fallback that module refuses and, until now, performed.
+   *
+   * defaultModel is a FALLBACK a household inherits before it ever runs Discover, so a
+   * stale one is not a cosmetic problem: llama-3.3-70b-versatile was this default, and
+   * Groq has since retired the whole Llama 3.x line — the API answers "The model ... does
+   * not exist or you do not have access to it". A household that never opened the model
+   * picker got a provider marked healthy (the /models probe succeeds) that failed on
+   * every actual call. Verified against the live catalog on 2026-09-21. */
+  { id: "groq", name: "Groq", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.groq.com/openai/v1", defaultModel: "openai/gpt-oss-120b", defaultTriageModel: "openai/gpt-oss-20b", docs: "Paste an API key from console.groq.com. Fast open-weights inference, billed per token." },
+  { id: "together", name: "Together AI", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.together.xyz/v1", defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo", defaultTriageModel: "zai-org/GLM-5.3-Flash", docs: "Paste an API key from api.together.ai. Open-weights inference, billed per token." },
   // needsKey stays false — a bare local Ollama has no auth and must keep working keyless.
   // keyOptional lets Settings store a bearer for ollama.com's cloud API (Authorization:
   // Bearer, keys at ollama.com/settings/keys) or an auth-protected remote/proxied Ollama;
@@ -175,7 +196,23 @@ export function bootstrapAIFromEnv(householdId) {
   const st = getSettings(householdId);
   if (!st.aiTriageProvider) {
     const tier = ["groq", "together"].find((id) => applied.includes(id) || getSecret(cfgId(id), "apiKey"));
-    if (tier) setSettings({ aiTriageProvider: tier, aiTriageModel: aiProviderById(tier)?.defaultModel ?? "" }, householdId);
+    /* HOMEOPS_AI_TRIAGE_MODEL names the CHEAP model for this tier, and it is its own
+     * variable rather than sharing HOMEOPS_AI_MODEL because the two tiers want opposite
+     * things: one wants the best model a person will wait for, the other wants the
+     * smallest one that can return a JSON verdict a few hundred times a day.
+     *
+     * Without it we fall back to the provider's defaultModel, which is the DENSE flagship —
+     * that is how llama-3.3-70b-versatile came to be this deployment's triage model, and
+     * why a retired model id sat in settings with nothing reporting it. A deployment that
+     * cares about the bill should set this; ai-tier.mjs explains why. */
+    const triageModel = String(process.env.HOMEOPS_AI_TRIAGE_MODEL ?? "").trim();
+    /* Left EMPTY when no env names one, rather than stamped with a default. triageTier
+     * resolves it from the provider's defaultTriageModel at read time, so there is ONE
+     * place that decides — and a provider whose triage default later changes does not
+     * leave every existing household pinned to the string that was current the day they
+     * first booted. Stamping is how the retired llama-3.3-70b-versatile got frozen into
+     * this deployment's settings and stayed there. */
+    if (tier) setSettings({ aiTriageProvider: tier, aiTriageModel: triageModel }, householdId);
   }
   return applied;
 }
@@ -229,7 +266,14 @@ export async function providerModels(id) {
     // LM Studio server that now requires a token tells us that, and providerHealth needs
     // the text to recognize it and turn it into an actionable hint.
     if (!r.httpOk) return { ok: false, error: "provider_error", status: r.status, message: sanitizeProviderError(r.json) };
-    return { ok: true, models: (r.json?.data ?? []).map((m) => m.id) };
+    /* TWO SHAPES WEAR THE SAME STYLE. OpenAI answers { data: [...] } and everything that
+     * copies its API is expected to do the same — but Together AI answers a BARE ARRAY.
+     * Reading only `.data` turned a perfectly good key into "0 models", which in the UI
+     * reads as a broken connection rather than as a parse that missed: the request had
+     * succeeded, the status was 200, and nothing said so. Both shapes are now accepted,
+     * and `name` is taken as an id fallback for compatibles that label it that way. */
+    const rows = Array.isArray(r.json) ? r.json : (r.json?.data ?? []);
+    return { ok: true, models: rows.map((m) => (typeof m === "string" ? m : m?.id ?? m?.name)).filter(Boolean) };
   } catch (e) {
     return { ok: false, error: "provider_error", message: String(e?.message ?? e) };
   }

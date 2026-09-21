@@ -323,7 +323,7 @@ const PAUSED_HELPER_RE = /paused helper|which helpers? (are|is) (paused|off)/i;
  *  the real intent catalog rather than a hand-maintained marketing blurb. */
 export function describeLocalCapabilities(): string {
   const examples = INTENTS.slice(0, 6).map((i) => i.label.toLowerCase()).join(", ");
-  return `Without a connected AI provider I run on FamiliOS's built-in rules engine, so I can answer questions about your own household — today's calendar, what is waiting on your approval, what is overdue, what you missed — and set up a helper for things like ${examples}. Anything open-ended needs a provider connected in Settings → AI Providers.`;
+  return `Without a connected AI provider I run on FamiliOS's built-in rules engine, so I can answer questions about your own household — today's calendar, what is waiting on your approval, what is overdue, what you missed — and set up a helper for things like ${examples}. Anything open-ended needs an AI provider connected for this household, which is set up by whoever runs this deployment.`;
 }
 
 /** Answers a factual question about the household's own live data with no
@@ -389,7 +389,7 @@ export function answerLocally(text: string, data: AppData, member?: Member): Loc
   if (scoreIntent(t, intent) > 0) {
     return {
       kind: "unsupported",
-      text: `That sounds like a standing job — the kind a helper does. Open **Helpers → New helper**, start from "${intent.label}", and edit what it should do in your own words before you save it. For open-ended answers here in chat, connect an AI provider in Settings → AI Providers.`,
+      text: `That sounds like a standing job — the kind a helper does. Open **Helpers → New helper**, start from "${intent.label}", and edit what it should do in your own words before you save it. Open-ended answers here in chat need an AI provider connected for this household.`,
     };
   }
 
