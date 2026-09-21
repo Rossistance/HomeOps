@@ -229,7 +229,14 @@ export async function providerModels(id) {
     // LM Studio server that now requires a token tells us that, and providerHealth needs
     // the text to recognize it and turn it into an actionable hint.
     if (!r.httpOk) return { ok: false, error: "provider_error", status: r.status, message: sanitizeProviderError(r.json) };
-    return { ok: true, models: (r.json?.data ?? []).map((m) => m.id) };
+    /* TWO SHAPES WEAR THE SAME STYLE. OpenAI answers { data: [...] } and everything that
+     * copies its API is expected to do the same — but Together AI answers a BARE ARRAY.
+     * Reading only `.data` turned a perfectly good key into "0 models", which in the UI
+     * reads as a broken connection rather than as a parse that missed: the request had
+     * succeeded, the status was 200, and nothing said so. Both shapes are now accepted,
+     * and `name` is taken as an id fallback for compatibles that label it that way. */
+    const rows = Array.isArray(r.json) ? r.json : (r.json?.data ?? []);
+    return { ok: true, models: rows.map((m) => (typeof m === "string" ? m : m?.id ?? m?.name)).filter(Boolean) };
   } catch (e) {
     return { ok: false, error: "provider_error", message: String(e?.message ?? e) };
   }
