@@ -18,10 +18,18 @@ export function AIProvidersPanel() {
   const [models, setModels] = useState<Record<string, string[]>>({});
   const [testOut, setTestOut] = useState<Record<string, { ok: boolean; text: string }>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  /* The cheap classifier tier is a SECOND choice against a provider the household may not
+     otherwise use, so it is its own state rather than a field on any one provider card. */
+  const [triage, setTriage] = useState<{ provider: string; model: string; budget: number }>({ provider: "", model: "", budget: 400 });
 
   const load = async () => {
-    const list = await backend.aiProviders();
+    const [list, settings] = await Promise.all([backend.aiProviders(), backend.getSettings()]);
     setProviders(list);
+    setTriage({
+      provider: settings.aiTriageProvider ?? "",
+      model: settings.aiTriageModel ?? "",
+      budget: Number(settings.aiTriageDailyBudget ?? 0) || 400,
+    });
     setForms((prev) => {
       const next = { ...prev };
       for (const p of list) if (!next[p.id]) next[p.id] = { apiKey: "", baseUrl: p.baseUrl || p.defaultBaseUrl, model: p.model || p.defaultModel };
@@ -60,6 +68,26 @@ export function AIProvidersPanel() {
     const r = await backend.aiChat({ providerId: p.id, messages: [{ role: "user", content: "Reply with a friendly 6-word hello for a family app." }], model: forms[p.id]?.model || undefined });
     setBusy(null);
     setTestOut((s) => ({ ...s, [p.id]: { ok: r.ok, text: r.ok ? r.text ?? "" : r.message ?? r.error ?? "error" } }));
+  };
+  const saveTriage = async () => {
+    setBusy("triage");
+    try {
+      await backend.setSettings({
+        aiTriageProvider: triage.provider || null,
+        aiTriageModel: triage.provider ? (triage.model || null) : null,
+        aiTriageDailyBudget: triage.budget,
+      });
+      toast({
+        kind: triage.provider ? "success" : "info",
+        title: triage.provider ? "Famili is listening in group chats" : "Famili is not listening in group chats",
+        message: triage.provider
+          ? `Classifying with ${triage.model || "the provider's default"}, up to ${triage.budget} times a day.`
+          : "With no triage model set, the group listener stays inert — it will not quietly fall back to your main model.",
+      });
+      await load();
+    } catch (e) {
+      toast({ kind: "error", title: "Could not save", message: e instanceof Error ? e.message : "Try again." });
+    } finally { setBusy(null); }
   };
   const setActive = async (p: AIProvider) => { await backend.aiSetActive(p.id); await load(); toast({ kind: "success", title: `${p.name} is the active model` }); };
   const revoke = async (p: AIProvider) => { await backend.aiRevokeProvider(p.id); await load(); toast({ kind: "info", title: `${p.name} disconnected` }); };
@@ -141,7 +169,7 @@ export function AIProvidersPanel() {
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {canAdmin && <Button size="sm" variant="primary" disabled={busy === p.id} onClick={() => save(p)}><Icon name="Save" size={13} /> Save</Button>}
               <Button size="sm" variant="secondary" disabled={busy === p.id} onClick={() => check(p)}><Icon name="Activity" size={13} /> Test connection</Button>
-              {p.local && <Button size="sm" variant="secondary" disabled={busy === p.id} onClick={() => discover(p)}><Icon name="Search" size={13} /> Discover models</Button>}
+              {(p.local || usable) && <Button size="sm" variant="secondary" disabled={busy === p.id} onClick={() => discover(p)}><Icon name="Search" size={13} /> Discover models</Button>}
               <Button size="sm" variant="ghost" disabled={busy === p.id || !usable} onClick={() => test(p)}><Icon name="MessageSquare" size={13} /> Send test message</Button>
               {!p.active && usable && canAdmin && <Button size="sm" variant="ember" onClick={() => setActive(p)}><Icon name="Star" size={13} /> Set active</Button>}
               {configuredish && canAdmin && <Button size="sm" variant="ghost" onClick={() => revoke(p)}><Icon name="Ban" size={13} /> Disconnect</Button>}
@@ -154,6 +182,80 @@ export function AIProvidersPanel() {
           </div>
         );
       })}
+      </div>
+
+      {/* ───────────────── the cheap tier ─────────────────
+          Two tiers, two decisions. The provider above answers when a PERSON is waiting.
+          This one reads the family's group chat, on family-chat volume, and returns
+          "nothing here" almost every time — which is why it must not be the same model.
+          There is deliberately NO FALLBACK from this tier to the dense one: unconfigured
+          means the listener is inert and says so, because a silent fallback would bill the
+          expensive model for every message in a group chat and the family would find out
+          from an invoice. */}
+      <div className="card card-pad">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-ink-100 text-ink-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]"><Icon name="Ear" size={16} /></span>
+          <span className="font-display text-base font-semibold text-ink-900">Listening in group chats</span>
+          <Badge color={triage.provider ? "sage" : "amber"}>{triage.provider ? "On" : "Off"}</Badge>
+        </div>
+        <p className="mt-2 text-xs text-ink-500">
+          Famili reads your family group chat with a small, cheap model and stays quiet unless something is clearly settled.
+          It runs on chat volume, so this is deliberately <strong>not</strong> the model above — pick the cheapest small one your
+          provider offers. With nothing set, Famili simply doesn&apos;t listen; it never falls back to your main model.
+        </p>
+
+        <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+          <Field label="Provider">
+            <Select
+              value={triage.provider}
+              disabled={!canAdmin}
+              onChange={(e) => setTriage((t) => ({ ...t, provider: e.target.value, model: "" }))}
+            >
+              <option value="">Don&apos;t listen</option>
+              {providers
+                .filter((p) => p.readiness === "configured" || p.readiness === "healthy")
+                .map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </Select>
+          </Field>
+          <Field label="Model">
+            {/* Populated by "Discover models" on the provider's own card, so the exact ids
+                come from the provider rather than from anyone's memory of them. */}
+            {triage.provider && models[triage.provider]?.length ? (
+              <Select value={triage.model} disabled={!canAdmin} onChange={(e) => setTriage((t) => ({ ...t, model: e.target.value }))}>
+                <option value="">(provider default — usually too big)</option>
+                {models[triage.provider].map((m) => <option key={m} value={m}>{m}</option>)}
+              </Select>
+            ) : (
+              <TextInput
+                value={triage.model}
+                disabled={!canAdmin || !triage.provider}
+                placeholder={triage.provider ? "Discover models above, or type an id" : "Pick a provider first"}
+                onChange={(e) => setTriage((t) => ({ ...t, model: e.target.value }))}
+              />
+            )}
+          </Field>
+          <Field label="Most calls per day">
+            <TextInput
+              type="number"
+              value={String(triage.budget)}
+              disabled={!canAdmin || !triage.provider}
+              onChange={(e) => setTriage((t) => ({ ...t, budget: Number(e.target.value) || 0 }))}
+            />
+          </Field>
+        </div>
+
+        {triage.provider && !triage.model && (
+          <p className="mt-3 rounded-2xl bg-amber-50 px-3.5 py-2.5 text-xs text-amber-700">
+            No model chosen, so this will use the provider&apos;s default — which is usually its largest one. That works, and it
+            costs far more than it needs to. Use <strong>Discover models</strong> on the provider above and pick a small one.
+          </p>
+        )}
+
+        {canAdmin && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="primary" disabled={busy === "triage"} onClick={() => void saveTriage()}><Icon name="Save" size={13} /> Save</Button>
+          </div>
+        )}
       </div>
     </div>
   );
