@@ -50,8 +50,9 @@ import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveCon
 import { handleInboundSms, replyToSender, setLoopReplyHandler } from "./sms.mjs";
 import { bluebubblesConfig, parseInboundWebhook, webhookSecretPresented, secretMatches } from "./bluebubbles.mjs";
 import {
-  handleInboundGroup, withChatLock, speakPermission, bindChat, revokeChat, setCoordinationOpener,
+  handleInboundGroup, withChatLock, speakPermission, bindChat, revokeChat, setCoordinationOpener, announceStoragePolicy, dropNonMemberMessages,
 } from "./group-chat.mjs";
+import { runWakeTurn } from "./group-agent.mjs";
 import { sweepGroupTriageAllTenants, pruneChatDecisions } from "./group-triage.mjs";
 import { openLoopFromRefusal, sweepCoordinationLoopsAllTenants, answerLoopReply } from "./coordination.mjs";
 import {
@@ -287,6 +288,7 @@ function settingsView(s, session) {
     aiTriageModel: s.aiTriageModel ?? null,
     aiTriageDailyBudget: Number(s.aiTriageDailyBudget ?? 0) || 0,
     chatProposalsEnabled: s.chatProposalsEnabled === true,
+    storeAllChatParticipants: s.storeAllChatParticipants === true,
     chatTranscriptDays: Number(s.chatTranscriptDays ?? 0) || 0,
     calendarAutoSync: s.calendarAutoSync === true,
     autoApproveImprovements: s.autoApproveImprovements !== false,
@@ -971,6 +973,18 @@ const handleRequest = async (req, res) => {
           return await handleInboundGroup({ msg, atMs: Date.now() });
         });
         audit({ type: "imessage.inbound", group: true, ok: !!g.handled, kind: g.kind ?? null, error: g.handled ? undefined : (g.ignored ?? null) }, req);
+        /* LANE 2, PHASE 2 — the dense turn, deliberately OUTSIDE the lock and outside the
+         * response. handleInboundGroup stayed synchronous and deterministic and handed back
+         * a verdict; it already took the durable lease, so a redelivery or a second wake
+         * word cannot start a rival turn while this one runs. The answer arrives in the
+         * thread as its own message, which is how every other outbound already works — the
+         * webhook response was never the delivery channel. Answering 200 now also means the
+         * bridge's own timeout and retry policy cannot influence whether the family gets an
+         * answer. Errors are swallowed INSIDE runWakeTurn, which also releases the lease. */
+        if (g.kind === "wake" && g.turn) {
+          void runWakeTurn({ ...g.turn, atMs: Date.now() });
+          return json(res, 200, { ok: true, handled: true, kind: "wake_accepted" }, req);
+        }
         return json(res, 200, { ok: true, ...(g.handled ? { handled: true, kind: g.kind } : { ignored: g.ignored }) }, req);
       }
       /* …and it does not run the ASSISTANT on a thread it cannot classify either. `null` is
@@ -987,6 +1001,17 @@ const handleRequest = async (req, res) => {
        * conversation turn, a second plan, a second approval in the family's queue. Keyed on
        * the message GUID (the Mac's own per-message id) and stored in the _system tenant,
        * because a text is deduplicated before we know whose it is. */
+      /* CLAIM BEFORE THE TURN, NOT AFTER IT.
+       *
+       * The check and the write used to sit on either side of handleInboundSms — which is an
+       * LLM call that can run for minutes. Two deliveries arriving inside that window both
+       * read an empty slot, both passed, and the family got two answers, two plans and two
+       * approvals for one text. The re-delivery this guard exists for is exactly the case
+       * that takes longest to arrive, so the window was not a narrow one.
+       *
+       * The claim is written first and the reply text patched in afterwards; a replay during
+       * the turn is reported as replayed with replied:false, which is true — that delivery
+       * did not produce an answer. The group branch above has always worked this way. */
       const sid = msg.guid;
       if (sid) {
         const seen = sysDoc(SMS_SEEN_FILE, {});
@@ -995,15 +1020,16 @@ const handleRequest = async (req, res) => {
           audit({ type: "imessage.inbound", ok: true, replayed: true, messageGuid: sid }, req);
           return json(res, 200, { ok: true, replayed: true, replied: !!prior.replyText }, req);
         }
-      }
-      const r = await handleInboundSms({ from: msg.address, body: msg.text, chatGuid: msg.chatGuid, keywordOnly });
-      if (sid) {
         // Prune on write: a busy deployment must not accumulate every message id forever.
-        const seen = sysDoc(SMS_SEEN_FILE, {});
         const cutoff = Date.now() - SMS_SEEN_TTL_MS;
         for (const [k, v] of Object.entries(seen)) if (!v?.at || v.at < cutoff) delete seen[k];
-        seen[sid] = { at: Date.now(), replyText: r.replyText ?? null };
+        seen[sid] = { at: Date.now(), replyText: null };
         putSysDoc(SMS_SEEN_FILE, seen);
+      }
+      const r = await handleInboundSms({ from: msg.address, body: msg.text, chatGuid: msg.chatGuid, keywordOnly });
+      if (sid && r.replyText) {
+        const seen = sysDoc(SMS_SEEN_FILE, {});
+        if (seen[sid]) { seen[sid].replyText = r.replyText; putSysDoc(SMS_SEEN_FILE, seen); }
       }
       if (r.unknownSender) {
         audit({ type: "imessage.inbound", ok: false, error: "unknown_or_unverified_sender" }, req);
@@ -4939,7 +4965,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
       /* The switches that change what runs WITHOUT asking a human first. Same reasoning as
        * the risk overrides: a deliberate pause, proved by the PIN, at the moment of the act.
        * Setting the PIN itself is exempt — you can't be asked for what you're establishing. */
-      const DANGEROUS = ["externalActionsEnabled", "calendarAutoSync", "autoApproveImprovements"];
+      /* storeAllChatParticipants is here because it widens what is retained about people
+       * who never consented to any of this — the same category of change as opening the
+       * kill switch, and not one a shoulder-surfed session should be able to make. */
+      const DANGEROUS = ["externalActionsEnabled", "calendarAutoSync", "autoApproveImprovements", "storeAllChatParticipants"];
       /* The autonomy preset joins them, but only on the way UP to Trusted — the tier that
        * clears send/spend gates household-wide. Balanced can never reach a delivering
        * capability (policy.mjs rule 7 is bounded by isHighStakes), and dropping back to
@@ -4981,6 +5010,28 @@ function mayWriteAgent(session, agent, nextVisibility) {
        * is what buys a coordination loop's ability to check whether someone said they had
        * already handled something. 90 is the ceiling. */
       if (typeof body.chatProposalsEnabled === "boolean") patch.chatProposalsEnabled = body.chatProposalsEnabled;
+      /* storeAllChatParticipants changes what is kept about people who are not FamiliOS
+       * users and cannot check. Famili already told every bound chat which policy it runs
+       * under, so the chats are told FIRST and the change only lands if they all heard it —
+       * the same rule bindChat applies to the same promise. Turning it OFF also deletes what
+       * was kept, because the chat is being told it is gone. */
+      let storagePolicyChange = null;
+      if (typeof body.storeAllChatParticipants === "boolean") {
+        const current = getSettings(g.session.householdId).storeAllChatParticipants === true;
+        if (body.storeAllChatParticipants !== current) {
+          const heard = await announceStoragePolicy({ householdId: g.session.householdId, session: g.session, storeAll: body.storeAllChatParticipants });
+          if (!heard.ok) {
+            appendAudit({ type: "imessage.storage_policy_changed", ok: false, error: "announcement_failed", failed: heard.failed.length, householdId: g.session.householdId });
+            return json(res, 409, {
+              error: "announcement_failed",
+              message: `Famili couldn't tell ${heard.failed.length === 1 ? "one of your chats" : `${heard.failed.length} of your chats`} about the change, so nothing was changed. Check that it can still speak there, then try again.`,
+              failed: heard.failed,
+            }, req);
+          }
+          storagePolicyChange = body.storeAllChatParticipants;
+        }
+        patch.storeAllChatParticipants = body.storeAllChatParticipants;
+      }
       if (body.chatTranscriptDays !== undefined) {
         const d = Number(body.chatTranscriptDays);
         if (!Number.isFinite(d) || d < 0 || d > 90) return json(res, 400, { error: "invalid_input", message: "Keep chat history between 0 and 90 days." }, req);
@@ -5041,6 +5092,14 @@ function mayWriteAgent(session, agent, nextVisibility) {
         patch.timezone = body.timezone;
       }
       const next = setSettings(patch, g.session.householdId);
+      /* Turning it OFF deletes what was kept, in the same breath as announcing that it is
+       * gone. Holding a non-member's words under a policy the household has withdrawn is the
+       * one outcome this setting must never produce. */
+      let nonMemberRowsDropped = 0;
+      if (storagePolicyChange !== null) {
+        if (storagePolicyChange === false) nonMemberRowsDropped = dropNonMemberMessages(g.session.householdId).dropped;
+        appendAudit({ type: "imessage.storage_policy_changed", ok: true, storeAll: storagePolicyChange, dropped: nonMemberRowsDropped, householdId: g.session.householdId });
+      }
       // "Every day at 7 AM" was resolved on the OLD clock; the next fire would land at the
       // wrong hour (and a one-shot schedule at the wrong hour forever).
       let reanchored = 0;

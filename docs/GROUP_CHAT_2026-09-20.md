@@ -2,6 +2,11 @@
 
 **Shipped 2026-09-20.** Spec: [specs/2026-09-20-milestone-spec.md](specs/2026-09-20-milestone-spec.md).
 
+> **Superseded in part, 2026-09-21.** The routing and tool-scope sections below describe
+> one lane; there are now three, and the addressed lane has the full agent and full tool
+> catalog. See [GROUP_CHAT_LANES_2026-09-21.md](GROUP_CHAT_LANES_2026-09-21.md). The
+> consent design in this document is unchanged and still governs.
+
 Families coordinate where they already talk. The in-app Messages surface that
 shipped two days ago is good, and it asks a family to move. This does the
 opposite: Famili sits in the iMessage group chat they already have, and mostly

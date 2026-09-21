@@ -15,16 +15,28 @@
 // group listener reaching gmail.send and homeops.notify_contact.
 //
 // The fix does not try to make the shared gate stricter, because a deny-only default is
-// right for the other twenty helpers. It puts the floor at the CALL SITE instead, in three
-// layers that fail in three different directions:
+// right for the other twenty helpers. It puts the floor at the CALL SITE instead, in layers
+// that fail in different directions:
 //
-//   1. GROUP_TOOL_IDS, a frozen module constant in group-chat.mjs, checked before the
-//      record is consulted. Widening it is a code review; editing a helper is not.
+//   1. PROPOSAL_TOOL_IDS, a frozen module constant in group-chat.mjs, checked before the
+//      record is consulted. Widening it is a code review; editing a helper is not. It is
+//      DERIVED from PROPOSAL_KINDS, so the enum and the tool set cannot drift apart.
 //   2. A deny-list populated by NAME rather than by omission, so the layer that survives an
 //      emptied allow-list is the layer that runs first and unconditionally.
 //   3. chatHelperUsable(), which asserts INERT-NOT-PERMISSIVE: an emptied allow-list makes
-//      the listener refuse to act rather than act with more reach than anyone granted it.
+//      the voice refuse to act rather than act with more reach than anyone granted it.
 //      Inert is visible and recoverable. Permissive is invisible until it does something.
+//   4. ROLE ATTRIBUTION, for the lane the first three do not cover.
+//
+// WHICH SURFACE EACH LAYER PROTECTS, because this stopped being "the group" once there were
+// two lanes. Layers 1-3 govern UNINVITED speech: the passive classifier's proposals and the
+// voice they are spoken with (agt_chat). They do NOT govern Lane 2, where a member addressed
+// Famili by name and gets the same dense agent and full tool catalog as the app — a menu of
+// three verbs cannot hold a conversation, and the voice agent this is the foundation for
+// will need the range. Lane 2's safety is layer 4: the turn is attributed to agt_household,
+// so the whole policy ladder applies, and policy.mjs rule 4b degrades a non-adult's
+// consequential calls to an approval an adult signs. Different acts, different guards —
+// not one lane trusted less than the other.
 //
 // The first test here is the regression itself, and it is the one that matters. The rest pin
 // the authorization model around it: what the constant contains, what Object.freeze actually
@@ -46,7 +58,7 @@ const {
   putImessageChat, patchImessageChat,
 } = await import("../store.mjs");
 const {
-  GROUP_TOOL_IDS, CHAT_HELPER_ID, ensureChatHelper, chatHelperUsable, speakPermission,
+  PROPOSAL_TOOL_IDS, PROPOSAL_KINDS, CHAT_HELPER_ID, ensureChatHelper, chatHelperUsable, speakPermission,
 } = await import("../group-chat.mjs");
 const { sweepGroupTriage } = await import("../group-triage.mjs");
 const { isToolStepAllowed } = await import("../helper-shape.mjs");
@@ -138,20 +150,25 @@ test("THE REGRESSION: an emptied allow-list makes the listener INERT, never perm
 
 /* ─────────────────────── 2. the constant the record cannot widen ─────────────────────── */
 
-test("GROUP_TOOL_IDS is a frozen module constant, and it is narrow", () => {
-  assert.equal(Object.isFrozen(GROUP_TOOL_IDS), true, "the floor is code, so it is declared as code that cannot be reassigned");
-  assert.equal(GROUP_TOOL_IDS.size, 4, `exactly four ids reach this surface: ${JSON.stringify([...GROUP_TOOL_IDS])}`);
-  assert.deepEqual([...GROUP_TOOL_IDS].sort(), [
-    "homeops.create_event_draft",
-    "homeops.create_list_item",
-    "homeops.create_task",
-    "sms.send",
-  ], `three local writes and the one way to say something: ${JSON.stringify([...GROUP_TOOL_IDS])}`);
+test("PROPOSAL_TOOL_IDS is a frozen module constant, it is narrow, and it is DERIVED", () => {
+  assert.equal(Object.isFrozen(PROPOSAL_TOOL_IDS), true, "the floor is code, so it is declared as code that cannot be reassigned");
+  assert.equal(PROPOSAL_TOOL_IDS.size, 3, `exactly three ids a passive proposal may become: ${JSON.stringify([...PROPOSAL_TOOL_IDS])}`);
+
+  /* DERIVED, NOT RESTATED. The classifier answers with a kind from PROPOSAL_KINDS and the
+   * server maps it to a tool id; if this set were written out by hand, adding a kind would
+   * silently produce a proposal that openProposal then refuses as out of scope. Asserting
+   * the relationship rather than the contents makes that class of drift impossible instead
+   * of merely unlikely — and it is why this test does not need updating when a kind is
+   * added. sms.send is deliberately NOT here: it is the voice, held by agt_chat's own
+   * allow-list, and a proposal must never be able to become "send a message". */
+  assert.deepEqual([...PROPOSAL_TOOL_IDS].sort(), Object.values(PROPOSAL_KINDS).sort(),
+    `the set is exactly the enum's values: ${JSON.stringify([...PROPOSAL_TOOL_IDS])} vs ${JSON.stringify(Object.values(PROPOSAL_KINDS))}`);
+  assert.equal(PROPOSAL_TOOL_IDS.has("sms.send"), false, "speaking is not a proposal outcome");
 
   // The point of the list is what is NOT on it. Each of these is reachable by an ordinary
   // helper and would be reachable here too if the emptied allow-list were the only gate.
   for (const loud of ["gmail.send", "homeops.notify_contact", "http.post", "browser.open", "homeops.write_memory", "calendar.create"]) {
-    assert.equal(GROUP_TOOL_IDS.has(loud), false, `${loud} is not on the group surface`);
+    assert.equal(PROPOSAL_TOOL_IDS.has(loud), false, `${loud} is not a proposal outcome`);
   }
 });
 
@@ -161,15 +178,15 @@ test("Object.freeze seals the constant's properties; a Set's contents are not pr
   // Object.freeze does not reach, so .add() works. What cannot happen is the thing this
   // constant exists to prevent, which is DATA widening it. Reaching .add() at all takes a
   // code change to group-chat.mjs; a helper record, a request body and a migration cannot.
-  assert.throws(() => { GROUP_TOOL_IDS.extra = "homeops.notify_contact"; }, TypeError,
+  assert.throws(() => { PROPOSAL_TOOL_IDS.extra = "homeops.notify_contact"; }, TypeError,
     "the object itself is not extensible, so no property can be hung off it");
 
   const probe = "gmail.send";
-  GROUP_TOOL_IDS.add(probe);
-  assert.equal(GROUP_TOOL_IDS.has(probe), true, "freeze does not reach a Set's internal slots: add() neither throws nor no-ops");
-  GROUP_TOOL_IDS.delete(probe);
-  assert.equal(GROUP_TOOL_IDS.has(probe), false, "restored, so no later test inherits a widened floor");
-  assert.equal(GROUP_TOOL_IDS.size, 4, "and back to four");
+  PROPOSAL_TOOL_IDS.add(probe);
+  assert.equal(PROPOSAL_TOOL_IDS.has(probe), true, "freeze does not reach a Set's internal slots: add() neither throws nor no-ops");
+  PROPOSAL_TOOL_IDS.delete(probe);
+  assert.equal(PROPOSAL_TOOL_IDS.has(probe), false, "restored, so no later test inherits a widened floor");
+  assert.equal(PROPOSAL_TOOL_IDS.size, 3, "and back to three");
 });
 
 /* ─────────────────────── 3. the listener ships silent ─────────────────────── */
@@ -284,8 +301,11 @@ test("the household kill switch blocks the speak, in the canonical sentence", as
 
 test("the deny-list is populated by NAME, and a deny beats an intact allow-list", async () => {
   const agent = await runWithTenant(HH_DENY, () => ensureChatHelper(HH_DENY));
-  assert.deepEqual(agent.allowedToolIds.slice().sort(), [...GROUP_TOOL_IDS].sort(),
-    `the seed's allow-list is the frozen constant: ${JSON.stringify(agent.allowedToolIds)}`);
+  /* agt_chat is the VOICE now, and nothing else: Lane 2's work is attributed to
+   * agt_household, so the only id this identity needs is the one it speaks with. Lane 1's
+   * proposals execute as it too and are separately held to PROPOSAL_TOOL_IDS. */
+  assert.deepEqual(agent.allowedToolIds.slice().sort(), ["sms.send"],
+    `the seed's allow-list is just the voice: ${JSON.stringify(agent.allowedToolIds)}`);
 
   // Named rather than left to omission. Omission is what an emptied list destroys; a name
   // survives it, because isToolStepAllowed checks denies first and unconditionally.

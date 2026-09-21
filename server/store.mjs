@@ -610,6 +610,33 @@ export function canSeeEntity(entity, { role, actorId } = {}) {
   return true; // household | childVisible
 }
 
+/* THE SAME GATE, NARROWED BY WHERE THE ANSWER WILL BE READ ALOUD.
+ *
+ * canSeeEntity answers "may this person see this?". In a shared iMessage thread that is the
+ * wrong question, because the audience is not the asker. The thread holds the household AND
+ * people who are not in it — a grandparent, a neighbour — and Famili answering a member's
+ * question recites the answer to all of them.
+ *
+ * So the group channel asks a second question: is this thing shared ANYWAY? Only household
+ * and childVisible qualify. The two gates are an INTERSECTION, and the order matters:
+ * canSeeEntity returns true early on isOwner || isParticipant, BEFORE it reads visibility
+ * (:602) — which is exactly the branch that would hand a member's own `private` event to
+ * the room. Checking visibility as well closes that, while keeping every nest limit and
+ * role rule the asker is already subject to.
+ *
+ * `adults` is deliberately NOT in the group set. Every member of the thread may well be an
+ * adult; the thread also contains people who are not in the household at all, and "adults
+ * in this family" was never a description of that audience.
+ *
+ * Personal data is not unreachable — it is reachable in the channel where the audience is
+ * one person. A member who wants their own calendar reads it in a 1:1 text or in the app. */
+export function canSeeEntityInChannel(entity, session = {}, channel = "personal") {
+  if (!canSeeEntity(entity, session)) return false;
+  if (channel !== "group") return true;
+  const vis = normalizeVisibility(entity?.visibility);
+  return vis === "household" || vis === "childVisible";
+}
+
 /**
  * Is this actor a joined member of that nest?
  *

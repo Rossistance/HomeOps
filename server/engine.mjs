@@ -371,7 +371,15 @@ async function execResolved(resolved, input, ctx, approvalId) {
  *   { ok: false, needsApproval: true, resolved }         caller must queue a run
  *   { ok: false, error, message, policyBlocked?: true }  refused or failed (model sees why)
  */
-export async function executeToolForChat({ toolId, input = {}, session, agent = null, conversationId = null } = {}) {
+/* `actorIsAdult` is OPT-IN, and deliberately not derived from session.role here.
+ *
+ * Reading it off the session would switch policy rule 4b on for every caller at once —
+ * including the app and 1:1 texts, where a Limited Member in a Balanced household would
+ * abruptly start needing approval for things that have always just worked. That is a
+ * behaviour change families would feel as new nagging, and it is not what was asked for.
+ * The rule itself is written channel-agnostically; only the group lane passes the flag,
+ * so widening it later is a change at a call site rather than a rewrite of the policy. */
+export async function executeToolForChat({ toolId, input = {}, session, agent = null, conversationId = null, actorIsAdult = null } = {}) {
   const householdId = session?.householdId;
   const actorId = session?.actorId ?? null;
   if (!householdId) return { ok: false, error: "no_session", message: "No household session." };
@@ -398,6 +406,7 @@ export async function executeToolForChat({ toolId, input = {}, session, agent = 
       agent,
       settings: getSettings(householdId),
       override: getRiskOverride(householdId, toolId, actorId),
+      actorIsAdult,
     });
     if (decision.decision === BLOCKED) {
       appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent.id, rule: decision.rule, reason: decision.reason, householdId, actorId, conversationId });
