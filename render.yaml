@@ -147,6 +147,11 @@ services:
         sync: false
       - key: TOGETHER_API_KEY
         sync: false
+      # The cheap model the passive group-chat listener classifies with. Without it the
+      # listener inherits the provider's flagship, which is the one thing ai-tier.mjs exists
+      # to prevent. Verified working on Groq: openai/gpt-oss-20b
+      - key: HOMEOPS_AI_TRIAGE_MODEL
+        sync: false
       # Optional OAuth providers. Fill these in the Render dashboard.
       - key: HOMEOPS_OAUTH_GOOGLE_CLIENT_ID
         sync: false

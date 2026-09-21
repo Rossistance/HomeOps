@@ -778,7 +778,7 @@ export async function runAssistantAgent({ message, context, session, providerId,
   if (!text) return { ok: false, error: "empty_message", message: "Type a message first." };
   if (!session?.householdId) return { ok: false, error: "authentication_required", message: "Sign in first." };
   const primaryId = activeProviderId(providerId, session.householdId);
-  if (!primaryId) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers, then ask me again." };
+  if (!primaryId) return { ok: false, error: "no_provider", message: "No AI provider is connected for this household yet — that is set up by whoever runs this deployment, not in the app." };
   if (aiBudgetExhausted(session.householdId)) return { ok: false, error: "ai_budget_exhausted", message: "Your household's daily AI budget is used up — it resets at midnight (UTC). An admin can raise or remove the limit in Settings." };
 
   const phase = (p) => { try { onPhase?.(p); } catch { /* progress must never break a turn */ } };
@@ -864,7 +864,7 @@ export async function runAssistantAgent({ message, context, session, providerId,
        * gets a sentence about what it means for them. */
       if (streamError) lines.push(ctx.toolCalls.length
         ? "I couldn't finish the rest of it — the model stopped partway. What's listed above did happen."
-        : "The model stopped before it answered. Try again, or ask an adult to check Settings → AI Providers.");
+        : "The model stopped before it answered. Try again in a moment.");
       answer = lines.join("\n\n") || "I'm not sure how to help with that yet — could you say a bit more?";
     }
     /* Tools were in play AND the provider broke: some actions may have run and the agent

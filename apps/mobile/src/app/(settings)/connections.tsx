@@ -531,19 +531,14 @@ export default function ConnectionsScreen() {
             </Rise>
           )}
 
-          {/* Cluster V — "it would be prudent to move the AI providers under the all
-              connections and calendars. Currently it services everything here." The model
-              that answers the household IS a connection; keeping it in a separate branch of
-              Settings made people hunt for it in the one place it doesn't live. */}
-          <Rise index={4}>
-            <Card padded={false}>
-              <Row
-                icon="cpu" iconColor={colors.ember} iconBg={colors.emberBg}
-                title="AI providers" subtitle="The model answering for this household"
-                chevron onPress={() => router.push("/ai")} last
-              />
-            </Card>
-          </Rise>
+          {/* THE AI PROVIDER ROW IS GONE FROM HERE ON PURPOSE.
+              Keys arrive as deployment environment variables and bootstrapAIFromEnv claims
+              the active and triage tiers on first boot, so this row led to a screen that
+              configured something already configured — and gave a household a way to point
+              a tier at a model the deployment has no key for, which reads "healthy" and
+              fails on every call. The screen file (settings/ai.tsx) is untouched; only the
+              way in is. Cluster V's point still stands if it ever comes back: the model
+              answering the household is a connection and belongs among them. */
 
           {/* "This information down here is like a connector status — it's useful, but it can
               also benefit from a collapsed state." Folded by default: it answers a question

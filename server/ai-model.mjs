@@ -2,7 +2,7 @@
 //
 // The Ask Famili agent (assistant-agent.mjs) runs on the Vercel AI SDK's ToolLoopAgent,
 // which needs a LanguageModel object. This module turns the household's configured
-// provider (server/ai.mjs — the same registry Settings → AI Providers edits, with the key
+// provider (server/ai.mjs — the registry bootstrapAIFromEnv populates, with the key
 // in the vault) into one, for every provider style the app supports:
 //
 //   openai      → @ai-sdk/openai (Responses API — the only one that takes function tools on current models)
@@ -48,7 +48,7 @@ export async function languageModelFor(providerId, { model } = {}) {
     const md = await providerModels(providerId);
     if (md.ok && md.models?.[0]) modelId = md.models[0];
   }
-  if (!modelId) return { ok: false, error: "no_model", message: `No model is selected for ${p.name}. Pick one in Settings → AI Providers.` };
+  if (!modelId) return { ok: false, error: "no_model", message: `No model is selected for ${p.name} — set HOMEOPS_AI_MODEL (or HOMEOPS_AI_TRIAGE_MODEL for the listener) on the deployment.` };
   const fetchFn = guardedFetch(p.local);
   const base = trimSlash(c.baseUrl);
   let lm;

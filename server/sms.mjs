@@ -167,7 +167,7 @@ const SMS_MAX = 1500; // iMessage has no segment limit; this is the point past w
 export function smsReplyText(out) {
   if (!out.ok) {
     return out.error === "no_provider"
-      ? "FamiliOS here — I can't think right now (no AI provider is connected). An adult can add one in Settings → AI Providers."
+      ? "FamiliOS here — I can't think right now: no AI provider is connected for this household yet."
       : "FamiliOS here — something went wrong on my end. Try again in a bit, or use the app.";
   }
   if (out.kind === "plan" && out.plan) {

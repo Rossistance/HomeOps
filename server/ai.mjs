@@ -181,7 +181,17 @@ export function bootstrapAIFromEnv(householdId) {
   const st = getSettings(householdId);
   if (!st.aiTriageProvider) {
     const tier = ["groq", "together"].find((id) => applied.includes(id) || getSecret(cfgId(id), "apiKey"));
-    if (tier) setSettings({ aiTriageProvider: tier, aiTriageModel: aiProviderById(tier)?.defaultModel ?? "" }, householdId);
+    /* HOMEOPS_AI_TRIAGE_MODEL names the CHEAP model for this tier, and it is its own
+     * variable rather than sharing HOMEOPS_AI_MODEL because the two tiers want opposite
+     * things: one wants the best model a person will wait for, the other wants the
+     * smallest one that can return a JSON verdict a few hundred times a day.
+     *
+     * Without it we fall back to the provider's defaultModel, which is the DENSE flagship —
+     * that is how llama-3.3-70b-versatile came to be this deployment's triage model, and
+     * why a retired model id sat in settings with nothing reporting it. A deployment that
+     * cares about the bill should set this; ai-tier.mjs explains why. */
+    const triageModel = String(process.env.HOMEOPS_AI_TRIAGE_MODEL ?? "").trim();
+    if (tier) setSettings({ aiTriageProvider: tier, aiTriageModel: triageModel || aiProviderById(tier)?.defaultModel || "" }, householdId);
   }
   return applied;
 }

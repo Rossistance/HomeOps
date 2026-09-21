@@ -1209,8 +1209,8 @@ export const useStore = create<Store>((set, get) => {
           m.text = code === "ai_disabled"
             ? "AI chat isn't turned on for your profile yet. Ask a parent to switch it on in Household → Members, and I'll be right here!"
             : code === "no_provider"
-            ? "I need an AI provider to think. Connect one in Settings → AI Providers, then ask me again."
-            : "I couldn't reach the AI provider just now. Check it's configured and reachable in Settings → AI Providers, then ask me again.";
+            ? "I need an AI provider to think, and none is connected for this household yet — that is set up by whoever runs this deployment."
+            : "I couldn't reach the AI provider just now. Try again in a moment.";
         } else if (r.kind === "plan" && r.plan) {
           // Auto-run (C-intel): the server already started executing this plan —
           // attach the run so the card shows live status instead of a Run button.
@@ -2779,7 +2779,7 @@ export const useStore = create<Store>((set, get) => {
       commit((d) => {
         d.settings.ai.activeProvider = id;
       });
-      toast({ kind: "info", title: "AI provider updated", message: id === "local" ? "Using the local rules engine." : "Manage real providers in Settings → AI Providers." });
+      toast({ kind: "info", title: "AI provider updated", message: id === "local" ? "Using the local rules engine." : "Real providers are configured by the deployment." });
     },
   };
 });

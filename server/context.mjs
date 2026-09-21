@@ -590,7 +590,7 @@ ${body}
 export async function generateMiniApp({ goal, type, session, providerId } = {}) {
   if (!goal || !String(goal).trim()) return { ok: false, error: "empty_goal", message: "Describe the mini app you want." };
   const id = activeProviderId(providerId, session?.householdId);
-  if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected. Add one in Settings → AI Providers to generate mini apps." };
+  if (!id) return { ok: false, error: "no_provider", message: "No AI provider is connected for this household yet, so I can't build a mini app." };
   const gated = budgetGate(session); if (gated) return gated;
   const user = `Allowed types: ${MINIAPP_TYPES.join(", ")}.${type ? ` Preferred type: ${type}.` : ""}\nRequest: ${String(goal).trim()}`;
   const out = await providerChat(id, { messages: [{ role: "system", content: MINIAPP_SYS }, { role: "user", content: user }] });
