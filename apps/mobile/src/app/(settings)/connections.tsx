@@ -538,7 +538,7 @@ export default function ConnectionsScreen() {
               a tier at a model the deployment has no key for, which reads "healthy" and
               fails on every call. The screen file (settings/ai.tsx) is untouched; only the
               way in is. Cluster V's point still stands if it ever comes back: the model
-              answering the household is a connection and belongs among them. */
+              answering the household is a connection and belongs among them. */}
 
           {/* "This information down here is like a connector status — it's useful, but it can
               also benefit from a collapsed state." Folded by default: it answers a question
