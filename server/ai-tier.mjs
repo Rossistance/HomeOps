@@ -40,7 +40,25 @@ export function triageTier(householdId) {
     // is actionable: one needs a choice, the other needs a key.
     return { ok: false, error: "triage_not_configured", message: `The triage provider (${aiProviderById(providerId)?.name ?? providerId}) has no key yet, so Famili is not listening in chats.` };
   }
-  const model = String(s.aiTriageModel ?? "").trim() || aiProviderById(providerId)?.defaultModel || null;
+  /* WHERE THE MODEL COMES FROM, in order, and what is deliberately NOT in the list.
+   *
+   * An explicit setting wins; then the provider's own defaultTriageModel — a model sized
+   * for a classifier. defaultModel is NOT a fallback here, and that is the whole point.
+   * It used to be, which meant an unset triage model quietly ran the household's DENSE
+   * flagship a few hundred times a day: precisely the silent fallback this module's header
+   * says it refuses. The header was right and the code was not.
+   *
+   * A provider with no declared triage model makes the listener inert and says so, rather
+   * than guessing with something expensive. Inert is recoverable and visible; a surprise
+   * invoice is neither. */
+  const model = String(s.aiTriageModel ?? "").trim() || aiProviderById(providerId)?.defaultTriageModel || null;
+  if (!model) {
+    return {
+      ok: false,
+      error: "triage_not_configured",
+      message: `${aiProviderById(providerId)?.name ?? providerId} has no small model set for listening, so Famili is not listening in chats. Set HOMEOPS_AI_TRIAGE_MODEL on the deployment.`,
+    };
+  }
   return { ok: true, providerId, model };
 }
 

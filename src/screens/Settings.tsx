@@ -336,8 +336,17 @@ function GroupChatsCard({ toast }: { toast: (t: Omit<Toast, "id">) => void }) {
           : "It only keeps messages from your own household's members; anyone else's stay unsaved."}
       </p>
 
+      {/* LISTENING AND SPEAKING ARE TWO DIFFERENT PERMISSIONS, and a household could have
+          every speaking grant in place while Famili was deaf — the triage tier having no
+          usable model. That truth used to live only in a decision-log row. It is shown
+          first because a Famili that cannot hear has nothing to say. */}
+      {!view.canListen && (
+        <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-ink-600">
+          {view.listenBlockedReason ?? "Famili isn't listening in chats yet."}
+        </p>
+      )}
       {view.canSpeak
-        ? <p className="mt-2 rounded-lg bg-sage-50 px-3 py-2 text-sm text-ink-600">Famili can speak in a chat it has joined, because {grantLabel}.</p>
+        ? <p className="mt-2 rounded-lg bg-sage-50 px-3 py-2 text-sm text-ink-600">Famili can speak in a chat it has joined, because {grantLabel}.{view.canListen && view.listenModel ? ` It listens with ${view.listenModel}.` : ""}</p>
         : <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-ink-600">{view.speakBlockedReason ?? "Famili can't speak in a chat yet."}</p>}
 
       <div className="mt-3">

@@ -53,6 +53,7 @@ import {
   handleInboundGroup, withChatLock, speakPermission, bindChat, revokeChat, setCoordinationOpener, announceStoragePolicy, dropNonMemberMessages,
 } from "./group-chat.mjs";
 import { runWakeTurn } from "./group-agent.mjs";
+import { triageTier } from "./ai-tier.mjs";
 import { sweepGroupTriageAllTenants, pruneChatDecisions } from "./group-triage.mjs";
 import { openLoopFromRefusal, sweepCoordinationLoopsAllTenants, answerLoopReply } from "./coordination.mjs";
 import {
@@ -4748,10 +4749,24 @@ function mayWriteAgent(session, agent, nextVisibility) {
         unknownParticipantCount: (c.unknownParticipantHashes ?? []).length,
         messageCount: Object.values(c.messageIdsByDay ?? {}).reduce((n, ids) => n + ids.length, 0),
       }));
+      /* CAN IT HEAR, not just may it speak.
+       *
+       * These are two different questions and the card only ever asked one. A household
+       * could have every permission granted and a bound chat and still have Famili deaf,
+       * because the triage tier had no usable model — and the only place that truth
+       * existed was a decision-log row nobody opens. With the AI screens no longer
+       * routed, there is now nowhere else a person could ever find out.
+       *
+       * So the one card that says whether Famili is in your chat also says whether it is
+       * actually listening, in the words triageTier already uses. */
+      const hear = triageTier(g.session.householdId);
       return json(res, 200, {
         chats,
         canSpeak: perm.ok, speakGrant: perm.ok ? perm.grant : null,
         speakBlockedReason: perm.ok ? null : perm.message,
+        canListen: hear.ok,
+        listenModel: hear.ok ? hear.model : null,
+        listenBlockedReason: hear.ok ? null : hear.message,
         transcriptDays: Number(getSettings(g.session.householdId).chatTranscriptDays ?? 0),
       }, req);
     }
