@@ -16,7 +16,13 @@ export const AI_PROVIDERS = [
    * Chat Completions shape, so `style: "openai"` reuses the request path below unchanged.
    * (See ai-model.mjs: the SDK path routes them to createOpenAICompatible, NOT the
    * Responses API, which is correct for these two and is now said out loud there.) */
-  { id: "groq", name: "Groq", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama-3.3-70b-versatile", docs: "Paste an API key from console.groq.com. Fast open-weights inference, billed per token." },
+  /* defaultModel is a FALLBACK a household inherits before it ever runs Discover, so a
+   * stale one is not a cosmetic problem: llama-3.3-70b-versatile was this default, and
+   * Groq has since retired the whole Llama 3.x line — the API answers "The model ... does
+   * not exist or you do not have access to it". A household that never opened the model
+   * picker got a provider marked healthy (the /models probe succeeds) that failed on
+   * every actual call. Verified against the live catalog on 2026-09-21. */
+  { id: "groq", name: "Groq", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.groq.com/openai/v1", defaultModel: "openai/gpt-oss-120b", docs: "Paste an API key from console.groq.com. Fast open-weights inference, billed per token." },
   { id: "together", name: "Together AI", kind: "cloud", style: "openai", needsKey: true, defaultBaseUrl: "https://api.together.xyz/v1", defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo", docs: "Paste an API key from api.together.ai. Open-weights inference, billed per token." },
   // needsKey stays false — a bare local Ollama has no auth and must keep working keyless.
   // keyOptional lets Settings store a bearer for ollama.com's cloud API (Authorization:
