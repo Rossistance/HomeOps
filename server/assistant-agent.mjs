@@ -748,9 +748,30 @@ function householdNow(timeZone) {
   } catch { return new Date().toString(); }
 }
 
+/* WHEN THE TURN DID NOT GO THE WAY THE PROSE MAKES IT LOOK.
+ *
+ * Two things can be true of an answer that reads like any other: it came from a BACKUP
+ * provider because the household's own did not respond, and the agent could not finish
+ * ACTING because the provider broke partway through the loop. Both change what a reader
+ * should conclude, and neither is visible in the words.
+ *
+ * Composed from what actually happened, never from "a fallback occurred" on its own. A
+ * backup provider that completed its tool calls cleanly has nothing to warn anyone about,
+ * and a banner that cries wolf on every failover is how people learn to read past the one
+ * that matters. The strong claim is reserved for the case where it is true.
+ *
+ * Prepended to the ANSWER rather than left as a field alone, because the surfaces that most
+ * need it — a text message, a group thread — have no UI to render a banner in. It is also
+ * returned as a field so the app can style it instead of reading it twice. */
+function turnNotice({ fellBackFrom, actionsDegraded }) {
+  if (actionsDegraded) return "Agent actions temporarily unavailable — I could look things up, but couldn't finish acting on this.";
+  if (fellBackFrom) return "Answered by a backup model — your usual one didn't respond.";
+  return null;
+}
+
 /**
  * Run one Ask Famili turn.
- * @returns {Promise<{ok:true, kind:"answer"|"build", answer:string, model:string, toolCalls:Array, runId?:string, runIds:string[], build?:object, degraded?:boolean, fellBackFrom?:string, steps:number} | {ok:false, error:string, message:string}>}
+ * @returns {Promise<{ok:true, kind:"answer"|"build", answer:string, model:string, toolCalls:Array, runId?:string, runIds:string[], build?:object, degraded?:boolean, fellBackFrom?:string, notice?:string, actionsDegraded?:boolean, steps:number} | {ok:false, error:string, message:string}>}
  */
 export async function runAssistantAgent({ message, context, session, providerId, history, agent = null, conversationId = null, visibility, asHelper = false, channel = "personal" } = {}, { onToken, onPhase, onEvent } = {}) {
   const text = String(message ?? "").trim();
@@ -836,13 +857,26 @@ export async function runAssistantAgent({ message, context, session, providerId,
       if (done.length) lines.push(`Done: ${done.map((c) => `${c.label}${c.summary ? ` (${short(c.summary, 60)})` : ""}`).join(", ")}.`);
       if (waiting.length) lines.push(`Waiting for your approval: ${waiting.map((c) => c.label).join(", ")} — nothing has been sent yet.`);
       if (failed.length) lines.push(`Couldn't finish: ${failed.map((c) => `${c.label} (${short(c.summary ?? "", 80)})`).join("; ")}.`);
-      if (streamError) lines.push(`I hit a snag with the AI provider (${short(errMessage, 120)}).`);
+      /* The provider's own words are NOT put in front of a family. Groq's gpt-oss models
+       * refuse the turn after a tool result with "'messages.2' : property 'reasoning' ...",
+       * which tells a person in a group chat nothing and an engineer reading the audit log
+       * quite a lot — so the raw text goes to providerWarning and the audit, and the person
+       * gets a sentence about what it means for them. */
+      if (streamError) lines.push(ctx.toolCalls.length
+        ? "I couldn't finish the rest of it — the model stopped partway. What's listed above did happen."
+        : "The model stopped before it answered. Try again, or ask an adult to check Settings → AI Providers.");
       answer = lines.join("\n\n") || "I'm not sure how to help with that yet — could you say a bit more?";
     }
+    /* Tools were in play AND the provider broke: some actions may have run and the agent
+     * could not see them through. That is the one state that earns the strong notice. */
+    const actionsDegraded = !!streamError && ctx.toolCalls.length > 0;
+    const notice = turnNotice({ fellBackFrom, actionsDegraded });
     return {
       ok: true,
       kind: "answer",
-      answer: answer.trim(),
+      answer: notice ? notice + "\n\n" + answer.trim() : answer.trim(),
+      ...(notice ? { notice } : {}),
+      ...(actionsDegraded ? { actionsDegraded: true } : {}),
       model: `${lm.providerId}/${lm.modelId}`,
       toolCalls: ctx.toolCalls,
       runIds: ctx.runIds,
@@ -854,11 +888,35 @@ export async function runAssistantAgent({ message, context, session, providerId,
     };
   };
 
+  /* CAN THIS TURN BE RUN AGAIN WITHOUT DOING ANYTHING TWICE?
+   *
+   * Only if everything it managed to do was a READ. A retry re-executes the tool calls, so
+   * replaying a turn that created an event, sent a text or queued an approval produces a
+   * second one — which is the same duplication the inbound webhook's claim-before-the-turn
+   * fix exists to prevent, arriving from the other direction. `awaiting_approval` is
+   * excluded for the same reason: the family would get two things to sign for one request.
+   *
+   * Reads are free of consequence, and a read-only turn is also the common case for the
+   * failure this guards (a provider that accepts the lookup and then refuses to summarise
+   * it), so the safe half of the idea is worth having on its own. */
+  const replaySafe = (r) => (r.toolCalls ?? []).length > 0
+    && (r.toolCalls ?? []).every((c) => c.action === "Read" && c.status === "done");
+
   let out = await attempt(primaryId);
   if (!out.ok && out.transient) {
     for (const alt of fallbackProviderIds(primaryId)) {
       const again = await attempt(alt, { fellBackFrom: primaryId });
       if (again.ok) { out = again; break; }
+    }
+  } else if (out.ok && out.actionsDegraded && replaySafe(out)) {
+    /* A DEGRADED TURN IS NOT A FAILED ONE, so it never reached the loop above — that one
+     * only catches a provider that died before doing anything. This is the other shape:
+     * the tools ran, the model then refused to carry on, and the person is holding a
+     * partial answer. Retried on a backup, and kept ONLY if the backup actually finished;
+     * a second degraded answer is not an improvement on the first. */
+    for (const alt of fallbackProviderIds(primaryId)) {
+      const again = await attempt(alt, { fellBackFrom: primaryId });
+      if (again.ok && !again.actionsDegraded) { out = again; break; }
     }
   }
   if (!out.ok) delete out.transient;
