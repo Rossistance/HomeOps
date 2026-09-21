@@ -70,7 +70,13 @@ export async function languageModelFor(providerId, { model } = {}) {
        * speaks the legacy shape — and those are configured as "compatible", not "openai". */
       lm = createOpenAI({ apiKey: c.apiKey, baseURL: base, fetch: fetchFn }).responses(modelId);
     } else {
-      // "compatible" and "lmstudio" — any OpenAI-shaped chat endpoint.
+      /* "compatible", "lmstudio", "groq", "together" — any OpenAI-shaped CHAT COMPLETIONS
+       * endpoint. Groq and Together land here by design, not by falling off the end of the
+       * branch list: they carry style "openai" so ai.mjs builds an OpenAI-shaped body for
+       * them, but they do NOT implement the Responses API, so routing them through the
+       * `p.id === "openai"` branch above would send `.responses()` calls to a server that
+       * only speaks /chat/completions. The branch above is keyed on the provider ID rather
+       * than the style precisely so these two can share the style without sharing the API. */
       lm = createOpenAICompatible({ name: p.id, baseURL: base, apiKey: c.apiKey || undefined, fetch: fetchFn })(modelId);
     }
   } catch (e) {

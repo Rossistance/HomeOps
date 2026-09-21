@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { useStore } from "@/store/useStore";
+import { useStore, type Toast } from "@/store/useStore";
 import { brand } from "@/brand";
 import { exportBackup, importBackup } from "@/storage/backup";
 import { PageHeader, Card, SectionTitle, Button, Toggle, Select, Badge, Modal, HealthDot, Field, TextInput, Avatar } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { AIProvidersPanel } from "@/screens/AIProviders";
-import { backend, type CatalogTool, type RiskOverride, type Autonomy, type BackendSettings } from "@/connectors/api";
+import { backend, type CatalogTool, type RiskOverride, type Autonomy, type BackendSettings, type GroupChatsView } from "@/connectors/api";
 import { useCalmMode, useAdvancedMode } from "@/lib/prefs";
 
 export function Settings() {
@@ -154,6 +154,8 @@ export function Settings() {
           <Row label="Hide family names on the sign-in screen" desc="Until someone signs in, this device's profile picker shows no names (ISS-015 privacy flag; enforced server-side)."><Toggle checked={hideProfilesPreAuth} onChange={(v) => void toggleHideProfilesPreAuth(v)} ariaLabel="Hide family names on the sign-in screen" /></Row>
         </Card>
 
+        <GroupChatsCard toast={toast} />
+
         {/* Appearance & solo mode */}
         <Card className="card-pad">
           <SectionTitle icon="Palette">Appearance & branding</SectionTitle>
@@ -233,6 +235,123 @@ function Row({ label, desc, children }: { label: string; desc?: string; children
       <div><p className="text-sm font-medium text-ink-800">{label}</p>{desc && <p className="text-xs text-ink-500">{desc}</p>}</div>
       <div className="shrink-0">{children}</div>
     </div>
+  );
+}
+
+/* ---- Famili in the family's group chat ----
+ *
+ * A chat appears here only once a VERIFIED member of this household has spoken in it;
+ * until then FamiliOS does not know the thread exists and holds nothing about it. That is
+ * also why there is no "add a chat" button: there is nothing to type, and inviting someone
+ * to type a chat id would be inviting them to guess at other people's threads.
+ *
+ * The card leads with whether Famili can speak at all, because out of the box it cannot:
+ * speaking is a high-stakes send and an Owner has to grant it through a dial that already
+ * exists. A household can flip autonomy to Trusted without ever opening the helper, so the
+ * card says WHICH grant applies rather than just yes.
+ */
+function GroupChatsCard({ toast }: { toast: (t: Omit<Toast, "id">) => void }) {
+  const [view, setView] = useState<GroupChatsView | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [proposalsOn, setProposalsOn] = useState(false);
+  const [days, setDays] = useState(0);
+
+  const load = async () => {
+    const [v, s] = await Promise.all([backend.groupChats(), backend.getSettings()]);
+    setView(v);
+    setProposalsOn(s.chatProposalsEnabled === true);
+    setDays(Number(s.chatTranscriptDays ?? 0));
+  };
+  useEffect(() => { void load(); }, []);
+
+  // Nothing to show and nothing to explain: a household with no group chat should not be
+  // told about a feature it has not met.
+  if (!view || (view.chats.length === 0 && !view.canSpeak)) return null;
+
+  const bind = async (id: string) => {
+    setBusy(id);
+    const r = await backend.bindGroupChat(id);
+    setBusy(null);
+    if (r.ok) { toast({ kind: "success", title: "Famili joined the chat", message: "It introduced itself once and will stay quiet unless something is clearly settled." }); void load(); }
+    else toast({ kind: "error", title: "Couldn't join", message: r.message ?? r.error });
+  };
+  const revoke = async (id: string) => {
+    setBusy(id);
+    const r = await backend.revokeGroupChat(id);
+    setBusy(null);
+    if (r.ok) { toast({ kind: "info", title: "Famili left the chat", message: `It stays gone, and ${r.messagesDeleted ?? 0} stored messages were deleted.` }); void load(); }
+    else toast({ kind: "error", title: "Couldn't leave", message: r.message ?? r.error });
+  };
+  const setProposals = async (v: boolean) => {
+    setProposalsOn(v);
+    await backend.setSettings({ chatProposalsEnabled: v });
+    toast({
+      kind: v ? "success" : "info",
+      title: v ? "Famili can offer to help" : "Famili is listening only",
+      message: v ? "It will offer once when something is clearly settled, and only act if someone says yes." : "It reads and records what it would have suggested, and says nothing.",
+    });
+  };
+  const setDaysValue = async (v: number) => {
+    setDays(v);
+    await backend.setSettings({ chatTranscriptDays: v });
+  };
+
+  const grantLabel = view.speakGrant === "household_trusted" ? "your household autonomy is set to Trusted"
+    : view.speakGrant === "risk_override" ? "an Owner cleared the approval gate for texting"
+      : "you allowed this helper to act on its own";
+
+  return (
+    <Card className="card-pad">
+      <SectionTitle icon="MessageCircle">Famili in your group chat</SectionTitle>
+      <p className="mt-2 text-sm text-ink-600">
+        Famili can sit in a family group chat and offer to add things you have already decided on. It only keeps messages from your own household's members; anyone else's stay unsaved.
+      </p>
+
+      {view.canSpeak
+        ? <p className="mt-2 rounded-lg bg-sage-50 px-3 py-2 text-sm text-ink-600">Famili can speak in a chat it has joined, because {grantLabel}.</p>
+        : <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-ink-600">{view.speakBlockedReason ?? "Famili can't speak in a chat yet."}</p>}
+
+      <div className="mt-3">
+        {view.chats.map((c) => (
+          <div key={c.id} className="flex items-center justify-between gap-4 border-b border-sand-100 py-2.5 last:border-0">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-ink-800">
+                {c.displayName || c.knownParticipants.map((p) => p.name).filter(Boolean).join(", ") || "Group chat"}
+              </p>
+              <p className="text-xs text-ink-500">
+                {c.status === "bound" ? "Famili is in this chat" : "Waiting for you to decide"}
+                {c.unknownParticipantCount > 0 && ` · ${c.unknownParticipantCount} ${c.unknownParticipantCount === 1 ? "person" : "people"} outside your household (nothing of theirs is stored)`}
+              </p>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              {c.status === "pending" && <Button size="sm" disabled={busy === c.id || !view.canSpeak} onClick={() => void bind(c.id)}>Let Famili in</Button>}
+              {c.status === "bound" && <Button size="sm" variant="ghost" disabled={busy === c.id} onClick={() => void revoke(c.id)}>Remove</Button>}
+            </div>
+          </div>
+        ))}
+        {view.chats.length === 0 && <p className="py-2 text-sm text-ink-500">No group chats yet. One appears here after someone in your household texts in a group the family number is part of.</p>}
+      </div>
+
+      <div className="mt-3">
+        <Row
+          label="Let Famili offer to help"
+          desc="Off, it reads and records what it would have suggested without saying anything. Turn it on once you have seen it get things right."
+        >
+          <Toggle checked={proposalsOn} onChange={(v) => void setProposals(v)} ariaLabel="Let Famili offer to help" />
+        </Row>
+        <Row
+          label="Keep chat history"
+          desc="How long your own members' messages are kept, so Famili can tell whether something was already sorted. Zero keeps nothing beyond the current conversation."
+        >
+          <Select value={String(days)} onChange={(e) => void setDaysValue(Number(e.target.value))} aria-label="Keep chat history">
+            <option value="0">Don't keep</option>
+            <option value="7">7 days</option>
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+          </Select>
+        </Row>
+      </div>
+    </Card>
   );
 }
 

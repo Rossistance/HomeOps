@@ -402,16 +402,21 @@ export function sandboxApiFor(account) {
  * ------------------------------------------------------------------ */
 export async function sandboxConnectorExecute(toolId, input = {}, ctx = {}) {
   if (toolId === "sms.send") {
-    if (!input.to || !input.body) return { ok: false, error: "invalid_input", message: "Provide `to` and `body` to send a text.", sandbox: true };
+    /* Mirrors the real validation exactly: a destination is `to` OR `chatGuid`. It used to
+     * demand `to` and hard-return `chatGuid: null`, which made the sandbox a green light
+     * for group sends it never modelled — a test could pass without the GUID having been
+     * carried anywhere. The effect log records whichever destination was actually used, so
+     * "who did this reach" is answerable for a group thread too. */
+    if ((!input.to && !input.chatGuid) || !input.body) return { ok: false, error: "invalid_input", message: "Provide `to` or `chatGuid`, plus `body`, to send a text.", sandbox: true };
     recordSandboxEffect({
       provider: null, connectorId: "sms", toolId: "sms.send", action: "Send", channel: "sms",
-      recipient: input.to, content: String(input.body),
+      recipient: input.chatGuid ?? input.to, content: String(input.body),
       actorId: ctx.actorId, householdId: ctx.householdId,
     });
     // Real bridge shape: { sent, guid, chatGuid, to, action }. `sid` stays as the message id's
     // older name so nothing reading a step result has to change. Annotated sandbox:true.
     const guid = nextId("SBX-SM");
-    return { ok: true, result: { sent: true, guid, sid: guid, chatGuid: null, to: input.to, action: "sent", sandbox: true }, sandbox: true };
+    return { ok: true, result: { sent: true, guid, sid: guid, chatGuid: input.chatGuid ?? null, to: input.to ?? null, action: "sent", sandbox: true }, sandbox: true };
   }
   return { ok: false, error: "sandbox_unmocked_tool", message: `No sandbox mock for connector tool ${toolId}.`, sandbox: true };
 }

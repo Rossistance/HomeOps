@@ -40,7 +40,7 @@ import { chromium } from "playwright";
 
 const PORT = Number(process.env.BROWSER_RUNTIME_PORT || process.env.PORT || 9223);
 const NAME = "homeops-browser-runtime";
-const VERSION = "1.1.0";
+const VERSION = "1.2.0"; // 1.2.0 adds POST /shot
 const MAX_TEXT = 20000;
 const NAV_TIMEOUT = 30000;
 
@@ -102,6 +102,34 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, title, url: finalUrl, textLength: text.length, text, links });
     } catch (e) {
       return send(res, 200, { ok: false, error: "navigation_failed", message: String(e?.message ?? e) });
+    } finally { try { await ctx?.close(); } catch { /* ignore */ } }
+  }
+
+  /* /shot — one PNG of one page, base64 in the same JSON envelope every other endpoint
+   * uses. Base64 rather than raw bytes so nothing about the transport changes: the backend
+   * reaches this service through safeFetch, which reads a response as text with a size cap.
+   *
+   * This exists so a confirmation in a family's group chat can carry a picture of the
+   * actual record rather than the app's word that one exists. The page it shoots is
+   * server-rendered complete and carries a two-minute signed token; see preview-token.mjs. */
+  if (req.method === "POST" && url.pathname === "/shot") {
+    const body = await readBody(req);
+    if (!body) return send(res, 400, { ok: false, error: "bad_json" });
+    if (!isHttpUrl(body.url)) return send(res, 400, { ok: false, error: "invalid_url", message: "Provide an http(s) URL." });
+    const width = Math.min(1200, Math.max(200, Number(body.width) || 520));
+    const height = Math.min(1600, Math.max(200, Number(body.height) || 420));
+    let ctx;
+    try {
+      const b = await getBrowser();
+      ctx = await b.newContext({ viewport: { width, height }, deviceScaleFactor: 2 });
+      const page = await ctx.newPage();
+      await page.goto(body.url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+      // The page has no scripts and no subresources by construction, so there is nothing to
+      // wait for beyond layout. fullPage keeps a taller card from being cropped silently.
+      const buf = await page.screenshot({ type: "png", fullPage: true });
+      return send(res, 200, { ok: true, mime: "image/png", bytes: buf.length, base64: buf.toString("base64") });
+    } catch (e) {
+      return send(res, 200, { ok: false, error: "render_failed", message: String(e?.message ?? e) });
     } finally { try { await ctx?.close(); } catch { /* ignore */ } }
   }
 

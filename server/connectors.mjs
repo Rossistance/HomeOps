@@ -146,7 +146,7 @@ export const CONNECTORS = [
       { key: "webhookSecret", label: "Webhook secret", type: "secret", env: "BLUEBUBBLES_WEBHOOK_SECRET", required: false },
       { key: "sendMethod", label: "Send method", type: "text", env: "BLUEBUBBLES_SEND_METHOD", required: false, default: "private-api" },
     ],
-    tools: [{ id: "sms.send", name: "Send text", action: "Send", risk: "High", requiresApproval: true, delivers: true, description: "Send an iMessage / text (requires approval).", inputs: [{ key: "to", label: "To number", type: "text", placeholder: "+15551234567", required: true }, { key: "body", label: "Message", type: "textarea", placeholder: "Your text…", required: true }] }],
+    tools: [{ id: "sms.send", name: "Send text", action: "Send", risk: "High", requiresApproval: true, delivers: true, description: "Send an iMessage / text (requires approval).", inputs: [{ key: "to", label: "To number", type: "text", placeholder: "+15551234567", required: false }, { key: "chatGuid", label: "Chat", type: "text", placeholder: "iMessage;+;chat123", required: false }, { key: "body", label: "Message", type: "textarea", placeholder: "Your text…", required: true }] }],
     triggers: [],
   },
 ];
@@ -442,9 +442,18 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
     appendAudit({ type: "tool.execute", ...base, ok: false, error: "not_configured", readiness });
     return { ok: false, error: "not_configured", readiness, message: `${c.name} is ${readiness.replace(/_/g, " ")} — configure it before this tool can run.` };
   }
-  // Approval is enforced by the route via a consumed server-side approval record.
-  // The legacy client `approved` boolean is intentionally NOT consulted here.
-  if (tool.requiresApproval && !ctx.approvalConsumed) {
+  /* Approval is enforced by the route via a consumed server-side approval record, or by a
+   * policy grant the engine already resolved (ctx.policyCleared). The legacy client
+   * `approved` boolean is intentionally NOT consulted here.
+   *
+   * `tool.requiresApproval` is the STATIC registry default, which is why the second half
+   * matters: when an Owner has granted a helper unattended high-risk steps, or set the
+   * household to Trusted, or cleared this one tool's gate, the policy layer resolves the
+   * capability to allowed and creates no approval record at all. Reading only the registry
+   * flag refused those grants outright — the dials worked everywhere except here. A caller
+   * that never consulted the policy layer (the direct tools/:id/execute route) passes
+   * neither flag and still meets the gate. */
+  if (tool.requiresApproval && !ctx.approvalConsumed && !ctx.policyCleared) {
     appendAudit({ type: "tool.execute", ...base, ok: false, error: "approval_required" });
     return { ok: false, error: "approval_required", message: `${tool.name} is a ${tool.risk.toLowerCase()}-risk action and needs your approval.` };
   }
@@ -550,7 +559,14 @@ export async function executeTool(toolId, input = {}, ctx = {}) {
       if (!r.ok) return { ok: false, error: "provider_error", message: j.error?.message ?? "Calendar create failed" };
       result = { created: true, id: j.id, htmlLink: j.htmlLink };
     } else if (toolId === "sms.send") {
-      if (!input.to || !input.body) return { ok: false, error: "invalid_input", message: "Provide `to` and `body` to send a text." };
+      /* A destination is either a number or an already-known chat. The GUID form is how a
+       * GROUP thread is addressed — there is no number for "the family chat" — and it was
+       * already honoured below; only the validation insisted on `to`. Note what this does
+       * NOT do: sms.send has no recipient-verification gate (that chain lives in
+       * deliverNotification), so whatever holds an approval here can address anything.
+       * Authorizing that a GUID is a bound chat for this household is the CALLER's job,
+       * and group-chat.mjs does it against the stored record before it ever gets here. */
+      if ((!input.to && !input.chatGuid) || !input.body) return { ok: false, error: "invalid_input", message: "Provide `to` or `chatGuid`, plus `body`, to send a text." };
       // The thread the person already has with the household number, when one is known —
       // agent deliverables (briefings, task lists) then arrive in the conversation they text.
       const chatGuid = input.chatGuid || rememberedChatGuid(input.to);

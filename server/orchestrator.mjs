@@ -99,8 +99,21 @@ export async function orchestrate({
   /* A hand-rolled plan submitted through the manual API is deliberately left
    * UNATTRIBUTED: lending it the household assistant's identity would lend it that
    * helper's standing consent to send, which is exactly the impersonation a client must
-   * not be able to buy by posting a sourceRef. Only chat and helper runs get an identity. */
-  const attributed = viaLabel === "chat" || viaLabel === "schedule" || viaLabel === "agent";
+   * not be able to buy by posting a sourceRef.
+   *
+   * "group_chat" is attributed, and the distinction against that rule is worth stating
+   * because it looks adjacent. What the rule guards is a CLIENT choosing an identity: the
+   * manual run API takes a sourceRef from the request body, so a caller could name any
+   * helper and inherit its standing consent. A group run's sourceRef is assembled
+   * server-side from a secret-gated webhook, a chat record an authenticated adult bound,
+   * and a verified member's reply; no part of it comes from a client. And the identity it
+   * gets, agt_chat, ships with unattended DISABLED, so there is no standing consent to
+   * lend until an Owner deliberately creates one.
+   *
+   * Leaving it unattributed would be the worse answer, not the safer one: helper = null
+   * below skips the allow-list check on every step. Attribution is what makes the
+   * allow-list and the policy ladder apply at all. */
+  const attributed = viaLabel === "chat" || viaLabel === "schedule" || viaLabel === "agent" || viaLabel === "group_chat";
   const helper = attributed ? resolveActingHelper({ agentId, session }) : null;
 
   const steps = (plan.steps ?? []).map((s) => {

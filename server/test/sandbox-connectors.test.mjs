@@ -179,6 +179,32 @@ describe("sandbox mode — consent/approval/kill-switch gates run BEFORE the tra
       assert.equal(out.error, "invalid_input");
     });
   });
+
+  /* A GROUP thread has no phone number, so it is addressed by chat GUID and by nothing
+   * else. The twin used to demand `to`, hard-return `chatGuid: null` and log the recipient
+   * as `to` — which made it a green light for a path it did not model: a test could pass
+   * with the GUID carried nowhere. The effect log has to answer "who did this reach" for a
+   * group thread too, or the sandbox is worse than no sandbox. */
+  test("a GROUP send is addressed by chatGuid alone, and the effect log records it", async () => {
+    await withSandbox(async () => {
+      const guid = "iMessage;+;chat-sandbox-1";
+      const out = await conn.executeTool("sms.send", { chatGuid: guid, body: "into the family chat" }, { actorId: "m-gate", householdId: "local", approvalConsumed: true });
+      assert.equal(out.ok, true, JSON.stringify(out));
+      assert.equal(out.result.chatGuid, guid, "the GUID is carried through, not dropped");
+      assert.equal(out.result.to, null, "and no number was invented for a thread that has none");
+      const effs = effectsFor(guid);
+      assert.equal(effs.length, 1, "the effect log answers 'who did this reach' for a group too");
+      assert.equal(effs[0].content, "into the family chat");
+    });
+  });
+
+  test("a send with neither a number nor a chat is still refused", async () => {
+    await withSandbox(async () => {
+      const out = await conn.executeTool("sms.send", { body: "nowhere to go" }, { actorId: "m-gate", householdId: "local", approvalConsumed: true });
+      assert.equal(out.ok, false);
+      assert.equal(out.error, "invalid_input", "relaxing `to` must not mean accepting no destination at all");
+    });
+  });
 });
 
 /* ------------------------------------------------------------------ *

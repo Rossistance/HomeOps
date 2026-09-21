@@ -198,6 +198,11 @@ export function smsReplyText(out) {
  * household — the receiving side cannot tell two families apart. So: ask every household
  * whether it knows this number.
  */
+/** Set by index.mjs at boot. See the call site in handleInboundSms for why this is a
+ *  registration rather than an import. */
+let _loopReply = null;
+export function setLoopReplyHandler(fn) { _loopReply = typeof fn === "function" ? fn : null; }
+
 export async function householdsForNumber(from) {
   const hits = [];
   await forEachTenant((householdId) => {
@@ -207,7 +212,19 @@ export async function householdsForNumber(from) {
   return hits;
 }
 
-export async function handleInboundSms({ from, body, chatGuid = null }) {
+/**
+ * @param {object} p
+ * @param {boolean} [p.keywordOnly] Handle STOP/START/HELP and refuse everything else with
+ *   `unclassified_thread`. Set when the delivery carried no chat context at all, so we
+ *   cannot tell a one-to-one from a group (see parseInboundWebhook's tri-state `isGroup`).
+ *   The split is deliberate and it is not symmetric: STOP and HELP are compliance
+ *   obligations that must be honoured from ANY delivery shape, they are whole-message
+ *   string matches, no model sees them, and their answer discloses nothing about a
+ *   household. Free text is the opposite on every count — it goes to the household
+ *   assistant, which answers with that family's calendar. Running that against a thread we
+ *   cannot classify is how group text got answered as private mail.
+ */
+export async function handleInboundSms({ from, body, chatGuid = null, keywordOnly = false }) {
   const matches = await householdsForNumber(from);
   if (matches.length === 0) return { replyText: null, unknownSender: true };
 
@@ -236,6 +253,30 @@ export async function handleInboundSms({ from, body, chatGuid = null }) {
     // "you're opted out (×3)" is not a better message.
     const lead = applied[0];
     return { replyText: lead.replyText, conversationId: lead.conversationId, actorId: lead.actorId, kind: "keyword", keyword, action: lead.action, households: applied.length };
+  }
+
+  /* A DEFERRED ASK IS WAITING ON THIS PERSON. When a coordination loop has nudged someone
+   * privately, their next short reply is an answer to that, not an opening line to the
+   * assistant — running the assistant on "yes" would produce a confused question back.
+   * Registered rather than imported: coordination.mjs reaches this module through
+   * group-chat.mjs, so importing it here would close the cycle. */
+  if (matches.length === 1 && _loopReply) {
+    const answered = await runWithTenant(matches[0].householdId, async () => {
+      const sender = resolveSmsSender(from);
+      if (!sender) return null;
+      return await _loopReply({ actorId: sender.member.actorId, text: body, nowMs: Date.now() });
+    });
+    if (answered) {
+      return { replyText: answered, conversationId: null, actorId: null, kind: "coordination" };
+    }
+  }
+
+  // Not a keyword, and we could not tell whose thread this is: nothing further is safe.
+  // Silent on the wire — an answer here would be the assistant speaking into a thread it
+  // cannot see the shape of — and audited so the silence is inspectable.
+  if (keywordOnly) {
+    appendAudit({ type: "sms.unclassified_thread", from, households: matches.length });
+    return { replyText: null, kind: "unclassified_thread" };
   }
 
   /* A CONVERSATION NEEDS EXACTLY ONE HOUSEHOLD. If a number is registered to two, there is no

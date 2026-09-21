@@ -292,6 +292,36 @@ export function browserRuntimeBase() {
   return `${local ? "http" : "https"}://${raw}`;
 }
 
+/**
+ * A PNG of one page, from the out-of-process runtime.
+ *
+ * Only the external runtime, never the in-process Chromium: that one aborts every
+ * loopback and private-range request it makes (browser.mjs), which is exactly what a
+ * preview URL pointed at this server's own public hostname resolves to in most
+ * deployments. The timeout is short on purpose. The runtime sits on a free plan that spins
+ * down, and the caller treats a miss as nothing-happened rather than as a failure, so
+ * waiting out a cold start would trade a silent skip for a stalled confirmation.
+ *
+ * @returns {Promise<{ok:true, bytes:Buffer, mime:string} | {ok:false, error:string}>}
+ */
+export async function screenshotPage(url, { width = 520, height = 420, timeoutMs = 20_000 } = {}) {
+  const base = browserRuntimeBase();
+  if (!base || !/^https?:/.test(base)) return { ok: false, error: "render_unavailable" };
+  const r = await safeFetch(
+    `${base}/shot`,
+    { method: "POST", headers: { "content-type": "application/json", ...runtimeAuthHeader() }, body: JSON.stringify({ url, width, height }) },
+    { allowLoopback: true, timeoutMs, maxBytes: 12_000_000 },
+  );
+  if (!r.ok) return { ok: false, error: r.error === "fetch_failed" ? "render_timeout" : "render_unavailable" };
+  if (!r.httpOk) return { ok: false, error: r.status === 401 ? "render_unauthorized" : "render_unavailable" };
+  let j;
+  try { j = JSON.parse(r.text); } catch { return { ok: false, error: "render_unavailable" }; }
+  // An older runtime has no /shot and answers its generic 404 shape; that is a missing
+  // capability, not an error worth surfacing to a family.
+  if (!j?.ok || !j.base64) return { ok: false, error: "render_unavailable" };
+  return { ok: true, bytes: Buffer.from(j.base64, "base64"), mime: j.mime ?? "image/png" };
+}
+
 async function tryBrowserRuntime(url) {
   const base = browserRuntimeBase();
   if (!base || !/^https?:/.test(base)) return null;

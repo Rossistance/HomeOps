@@ -181,6 +181,70 @@ export async function sendText({ to, chatGuid, text, tempGuid } = {}) {
   return { ok: false, error: "provider_error", status: r.status, message: why ? `BlueBubbles: ${why}` : `BlueBubbles rejected the send (HTTP ${r.status}).` };
 }
 
+/* bbFetch hardcodes a JSON content-type and stringifies its body, which is right for every
+ * other call and wrong for exactly one: an attachment is multipart. Letting fetch set the
+ * header is the whole trick — it computes the boundary, and a hand-set content-type
+ * silently produces a body the Mac cannot parse. FormData and Blob are Node built-ins
+ * here, so this adds no dependency. */
+async function bbFetchMultipart(cfg, path, form, { timeoutMs = 30000 } = {}) {
+  if (!cfg.url || !cfg.password) return { ok: false, error: "not_configured", message: "The BlueBubbles server isn't set up." };
+  let u;
+  try { u = new URL(cfg.url + path); } catch { return { ok: false, error: "not_configured", message: "The BlueBubbles server URL isn't a valid URL." }; }
+  u.searchParams.set("password", cfg.password);
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const r = await fetch(u, {
+      method: "POST",
+      headers: { authorization: `Bearer ${cfg.password}`, accept: "application/json" },
+      body: form,
+      signal: ctl.signal,
+    });
+    let json = null;
+    try { json = await r.json(); } catch { json = null; }
+    return { ok: r.ok, status: r.status, json };
+  } catch (e) {
+    return { ok: false, error: "unreachable", message: String(e?.message ?? e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Send one image into a chat. Used for the visual confirmation that follows a written one:
+ * a picture of the actual card, from the actual database, so "I added that" is evidence
+ * rather than a claim.
+ *
+ * NEVER gates the confirmation. The caller sends its words first and treats this as a
+ * bonus, because the renderer behind it is on a free plan that spins down and takes the
+ * better part of a minute to wake. A confirmation that waits for a picture is a
+ * confirmation that arrives a minute late.
+ *
+ * @returns {{ok:true, guid, chatGuid} | {ok:false, error, message}}
+ */
+export async function sendAttachment({ chatGuid, filename, mime, bytes, tempGuid } = {}) {
+  const cfg = bluebubblesConfig();
+  if (!bluebubblesConfigured(cfg)) return { ok: false, error: "not_configured", message: "Connect the iMessage bridge (BlueBubbles) in Connections first." };
+  if (!chatGuid) return { ok: false, error: "invalid_input", message: "No chat to send to." };
+  if (!bytes || !bytes.length) return { ok: false, error: "invalid_input", message: "Nothing to attach." };
+  const temp = tempGuid || `familios-${crypto.randomUUID()}`;
+  const name = String(filename || "card.png");
+  const form = new FormData();
+  form.set("chatGuid", chatGuid);
+  form.set("tempGuid", temp);
+  form.set("name", name);
+  form.set("method", cfg.method);
+  form.set("attachment", new Blob([bytes], { type: mime || "image/png" }), name);
+  const r = await bbFetchMultipart(cfg, "/api/v1/message/attachment", form);
+  if (r.ok) return { ok: true, guid: r.json?.data?.guid ?? null, chatGuid };
+  if (r.error === "unreachable" || r.error === "not_configured") return { ok: false, error: r.error, message: r.message };
+  const why = r.json?.error?.error ?? r.json?.error?.message ?? r.json?.message ?? null;
+  // PENDING: the exact multipart field names vary across BlueBubbles releases. This matches
+  // the documented /api/v1/message/attachment shape; confirm against the deployed bridge
+  // before relying on it, and note that the caller degrades silently either way.
+  return { ok: false, error: "provider_error", status: r.status, message: why ? `BlueBubbles: ${why}` : `BlueBubbles rejected the attachment (HTTP ${r.status}).` };
+}
+
 /* -------------------------------- Webhooks -------------------------------- */
 
 /**
@@ -208,7 +272,14 @@ export function parseInboundWebhook(payload) {
     chatGuid,
     service,
     isFromMe: d.isFromMe === true,
-    isGroup: chats.some((c) => isGroupChatGuid(c?.guid)) || isGroupChatGuid(chatGuid),
+    /* TRI-STATE, and the third state is the point. `true` and `false` are answers; `null`
+     * means the delivery carried no chat context at all — the bare payload layout above,
+     * where `chats` is absent and there is no `chatGuid`. That used to resolve to `false`,
+     * so a group message delivered in that layout fell past the group guard and was handled
+     * as a one-to-one: the household assistant ran on it and answered the sender. A guard
+     * that cannot tell must not guess, so the caller drops `null` instead of treating the
+     * unknown as private. */
+    isGroup: chats.length > 0 || chatGuid ? chats.some((c) => isGroupChatGuid(c?.guid)) || isGroupChatGuid(chatGuid) : null,
     dateCreated: d.dateCreated ?? null,
   };
 }
