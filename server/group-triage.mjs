@@ -35,7 +35,7 @@ import { providerChatJSON } from "./ai.mjs";
 import { triageTier, TRIAGE_USAGE_KIND, DEFAULT_TRIAGE_DAILY_BUDGET } from "./ai-tier.mjs";
 import { householdTimeZone } from "./household-time.mjs";
 import {
-  chatHelperUsable, readWindow, recentMessages, pruneChatTranscript, withChatLock,
+  chatHelperUsable, mergedWindow, pruneChatTranscript, withChatLock, turnInFlight,
   PROPOSAL_KINDS, openProposal, proposalsEnabled,
 } from "./group-chat.mjs";
 
@@ -93,44 +93,62 @@ function renderWindow(items) {
   return items.map((it) => `${it.isMember ? (getMember(it.memberId)?.displayName ?? "member") : "someone else"}: ${it.text}`).join("\n");
 }
 
-/** A window digest over MEMBER-VISIBLE text only. This is what precision is later judged
- *  against — non-member text was deliberately never kept, so a digest including it could
- *  not be reproduced from the database and would imply an audit that cannot be done. */
+/** A window digest over MEMBER-VISIBLE text only, in EVERY household.
+ *
+ *  The original reason was that non-member text was never kept, so a digest covering it
+ *  could not be reproduced from the database. storeAllChatParticipants inverts that premise
+ *  for the households that turn it on — and the digest stays member-only anyway, now by
+ *  CHOICE rather than by necessity: precision is compared across households, and a number
+ *  computed over a different set of text in different families is not a number. Do not
+ *  "fix" this to follow the setting. */
 function windowDigest(items) {
   const memberText = items.filter((i) => i.isMember).map((i) => i.text).join("\n");
   return crypto.createHash("sha256").update(memberText).digest("hex").slice(0, 16);
 }
 
-/**
- * THE SPAN GUARD, and it does two jobs at once.
+/* THE SPAN GUARD WAS DOING TWO JOBS UNDER ONE NAME, AND THEY PULL APART CLEANLY.
  *
- * A model can hallucinate the very quote it offers as evidence, so the span is checked to
- * exist verbatim. And it is checked only against MEMBER messages, which makes the
- * third-party rule a production guard rather than a metric someone reads later: a proposal
- * whose settling words came from a non-member cannot be made, and nothing a non-member
- * wrote is copied into a durable proposal record.
- */
-export function verifySpan(span, items) {
+ *   1. ANTI-HALLUCINATION. A model can invent the very quote it offers as evidence, so the
+ *      span must exist verbatim somewhere in the window.
+ *   2. WHOSE DECISION IS THIS. It must come from a MEMBER. A neighbour saying "let's do 4pm"
+ *      is not this family settling something, and a proposal built on their words would put
+ *      an outsider in charge of the household's calendar.
+ *
+ * Job 2 was never about storage, which is why storeAllChatParticipants does not touch it:
+ * whether a non-member's words are KEPT and whether they can SETTLE something are different
+ * questions with different answers.
+ *
+ * Splitting them buys one thing the merged version could not give: the decision log can now
+ * tell a hallucination apart from a policy refusal. Both used to land on "span_not_found",
+ * which made the precision number — this feature's only instrument — unable to distinguish
+ * "the model made it up" from "the model read it correctly and we declined". */
+
+/** Job 1 on its own: does this text appear verbatim anywhere in the window? */
+export function spanExists(span, items) {
   const needle = String(span ?? "").trim();
   if (!needle || needle.length < 4) return { ok: false, error: "span_not_found" };
   const norm = (s) => String(s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
   const hay = needle.length > 400 ? needle.slice(0, 400) : needle;
   for (const it of items) {
-    if (!it.isMember) continue;
-    if (norm(it.text).includes(norm(hay))) return { ok: true, memberId: it.memberId, text: it.text };
+    if (norm(it.text).includes(norm(hay))) return { ok: true, memberId: it.memberId ?? null, text: it.text, isMember: !!it.isMember };
   }
   return { ok: false, error: "span_not_found" };
 }
 
+/** Both jobs, in the order that lets the caller tell them apart. Behaviour is unchanged. */
+export function verifySpan(span, items) {
+  const found = spanExists(span, items);
+  if (!found.ok) return found;
+  if (!found.isMember) return { ok: false, error: "span_from_non_member" };
+  return { ok: true, memberId: found.memberId, text: found.text };
+}
+
 /** One triage pass over one chat, in the current tenant. Never throws. */
 export async function triageChat({ chat, nowMs }) {
-  const items = readWindow(chat.chatGuid, nowMs);
-  const durable = recentMessages(chat, 12);
-  // The window is what the classifier sees; if the in-memory half is gone (a restart), the
-  // durable member-only half still gives it something real rather than nothing.
-  const merged = items.length
-    ? items
-    : durable.map((m) => ({ text: m.text, memberId: m.fromMemberId, isMember: !!m.fromMemberId, atMs: Date.parse(m.at) }));
+  /* ONE reader for both lanes (group-chat.mjs mergedWindow), so the passive classifier and
+   * the addressed agent cannot drift apart about what the conversation was. The either/or
+   * and the restart trade-off are documented there. */
+  const merged = mergedWindow(chat, nowMs);
   if (!merged.length) return { decision: "skipped", reason: "empty_window" };
   if (!merged.some((i) => i.isMember)) return { decision: "skipped", reason: "no_member_context" };
 
@@ -196,9 +214,17 @@ export async function triageChat({ chat, nowMs }) {
 
   const span = verifySpan(judged.span, merged);
   if (!span.ok) {
-    putChatDecision({ ...base, decision: "silent", reason: "span_not_found", kind: judged.kind, providerId, model, latencyMs });
-    appendAudit({ type: "imessage.triage_span_rejected", chatId: chat.id, householdId: chat.householdId, kind: judged.kind });
-    return { decision: "silent", reason: "span_not_found" };
+    /* The two silences are recorded APART. "span_not_found" is the model inventing its own
+     * evidence; "span_from_non_member" is the model reading correctly and the household rule
+     * declining. Collapsing them made the precision log unable to tell a broken classifier
+     * from a working one doing what it was told. */
+    const reason = span.error === "span_from_non_member" ? "span_from_non_member" : "span_not_found";
+    putChatDecision({ ...base, decision: "silent", reason, kind: judged.kind, providerId, model, latencyMs });
+    appendAudit({
+      type: reason === "span_from_non_member" ? "imessage.triage_span_non_member" : "imessage.triage_span_rejected",
+      chatId: chat.id, householdId: chat.householdId, kind: judged.kind,
+    });
+    return { decision: "silent", reason };
   }
 
   const decision = {
@@ -256,6 +282,11 @@ export async function sweepGroupTriage(nowMs = null) {
       const pr = pruneChatTranscript(chat, now);
       out.pruned += pr.dropped;
 
+      /* A Lane 2 turn is live on this chat: the dense agent is mid-answer on this very
+       * window. Judging it now would surface a passive proposal about the thing that is
+       * being handled, and the two would land in the thread within seconds of each other.
+       * Not a state change, so nothing is written and the cursor stays put. */
+      if (turnInFlight(chat, now)) { out.skipped++; continue; }
       if (!unjudged || !quiet) { out.checked++; continue; }
       if (stale) {
         // Judging yesterday's conversation would surface a proposal about a settled thing.

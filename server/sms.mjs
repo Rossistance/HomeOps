@@ -20,6 +20,7 @@ import {
   forEachTenant, runWithTenant,
 } from "./store.mjs";
 import { runAssistantAgent } from "./assistant-agent.mjs";
+import { resolveActingHelper } from "./orchestrator.mjs";
 import { sendText, rememberChatGuid, rememberedChatGuid } from "./bluebubbles.mjs";
 
 /* ---------------------------- STOP / START / HELP ----------------------------
@@ -324,9 +325,21 @@ async function respondInTenant({ from, body }) {
   const session = { actorId: member.actorId, actorName: member.displayName ?? member.actorId, role: member.role, householdId };
   const at = new Date().toISOString();
   appendConversationMessage(conv.id, { role: "user", text: String(body), channel: "sms", at });
-  // A text gets the same engine the app does — it reads real data and does real work,
-  // rather than the old one-shot classifier that could only ever answer or describe a plan.
-  const out = await runAssistantAgent({ message: String(body), session, conversationId: conv.id, visibility: "personal" });
+  /* A text gets the same engine the app does — it reads real data and does real work,
+   * rather than the old one-shot classifier that could only ever answer or describe a plan.
+   *
+   * ATTRIBUTION IS NOT COSMETIC. engine.mjs executeToolForChat gates its whole policy ladder
+   * behind `if (agent)`: with no acting helper, isToolStepAllowed never runs and
+   * resolveEffectivePolicy is never consulted, so a text fell through to the capability's
+   * raw requiresApproval. Every layer a family had configured — a denied tool, the household
+   * kill switch on an internal tool, a risk override, a `Trusted` stance — simply did not
+   * apply to texting, in either direction. orchestrator.mjs says it plainly: "Attribution is
+   * what makes the allow-list and the policy ladder apply at all."
+   *
+   * The 1:1 channel is `personal`: one person asked and one person reads the answer, so this
+   * is the one surface where their own private items are the right thing to see. */
+  const agent = resolveActingHelper({ session });
+  const out = await runAssistantAgent({ message: String(body), session, conversationId: conv.id, visibility: "personal", channel: "personal", agent });
   const replyText = smsReplyText(out);
   appendConversationMessage(conv.id, out.ok
     ? { role: "assistant", kind: "answer", text: out.answer ?? replyText, model: out.model ?? null, channel: "sms", at, ...(out.toolCalls?.length ? { toolCalls: out.toolCalls } : {}) }

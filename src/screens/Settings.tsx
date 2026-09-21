@@ -254,12 +254,14 @@ function GroupChatsCard({ toast }: { toast: (t: Omit<Toast, "id">) => void }) {
   const [view, setView] = useState<GroupChatsView | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [proposalsOn, setProposalsOn] = useState(false);
+  const [storeAll, setStoreAll] = useState(false);
   const [days, setDays] = useState(0);
 
   const load = async () => {
     const [v, s] = await Promise.all([backend.groupChats(), backend.getSettings()]);
     setView(v);
     setProposalsOn(s.chatProposalsEnabled === true);
+    setStoreAll(s.storeAllChatParticipants === true);
     setDays(Number(s.chatTranscriptDays ?? 0));
   };
   useEffect(() => { void load(); }, []);
@@ -282,6 +284,28 @@ function GroupChatsCard({ toast }: { toast: (t: Omit<Toast, "id">) => void }) {
     if (r.ok) { toast({ kind: "info", title: "Famili left the chat", message: `It stays gone, and ${r.messagesDeleted ?? 0} stored messages were deleted.` }); void load(); }
     else toast({ kind: "error", title: "Couldn't leave", message: r.message ?? r.error });
   };
+  /* Turning this ON changes what is kept about people who are not in the household and are
+   * not FamiliOS users. Famili re-introduces itself in every chat it has joined to say so —
+   * the server refuses the change outright if it cannot, because the sentence those people
+   * heard when it joined would otherwise stop being true without anyone telling them. */
+  const setStoreAllParticipants = async (v: boolean) => {
+    const prev = storeAll;
+    setStoreAll(v);
+    try {
+      await backend.setSettings({ storeAllChatParticipants: v });
+      toast({
+        kind: v ? "success" : "info",
+        title: v ? "Famili keeps the whole chat" : "Famili keeps only your household's messages",
+        message: v
+          ? "Everyone's messages in your joined chats are kept, and included in your household export. Famili has told each chat."
+          : "Anyone else's messages are no longer kept, and what was kept has been deleted. Famili has told each chat.",
+      });
+    } catch (e) {
+      setStoreAll(prev);
+      toast({ kind: "error", title: "Nothing was changed", message: e instanceof Error ? e.message : "Famili couldn't tell your chats about the change." });
+    }
+  };
+
   const setProposals = async (v: boolean) => {
     setProposalsOn(v);
     await backend.setSettings({ chatProposalsEnabled: v });
@@ -304,7 +328,10 @@ function GroupChatsCard({ toast }: { toast: (t: Omit<Toast, "id">) => void }) {
     <Card className="card-pad">
       <SectionTitle icon="MessageCircle">Famili in your group chat</SectionTitle>
       <p className="mt-2 text-sm text-ink-600">
-        Famili can sit in a family group chat and offer to add things you have already decided on. It only keeps messages from your own household's members; anyone else's stay unsaved.
+        Famili can sit in a family group chat and offer to add things you have already decided on.{" "}
+        {storeAll
+          ? "It keeps everyone's messages in the chats it has joined, including people outside your household."
+          : "It only keeps messages from your own household's members; anyone else's stay unsaved."}
       </p>
 
       {view.canSpeak
@@ -320,7 +347,7 @@ function GroupChatsCard({ toast }: { toast: (t: Omit<Toast, "id">) => void }) {
               </p>
               <p className="text-xs text-ink-500">
                 {c.status === "bound" ? "Famili is in this chat" : "Waiting for you to decide"}
-                {c.unknownParticipantCount > 0 && ` · ${c.unknownParticipantCount} ${c.unknownParticipantCount === 1 ? "person" : "people"} outside your household (nothing of theirs is stored)`}
+                {c.unknownParticipantCount > 0 && ` · ${c.unknownParticipantCount} ${c.unknownParticipantCount === 1 ? "person" : "people"} outside your household (${storeAll ? "their messages are kept" : "nothing of theirs is stored"})`}
               </p>
             </div>
             <div className="flex shrink-0 gap-2">
@@ -338,6 +365,12 @@ function GroupChatsCard({ toast }: { toast: (t: Omit<Toast, "id">) => void }) {
           desc="Off, it reads and records what it would have suggested without saying anything. Turn it on once you have seen it get things right."
         >
           <Toggle checked={proposalsOn} onChange={(v) => void setProposals(v)} ariaLabel="Let Famili offer to help" />
+        </Row>
+        <Row
+          label="Keep everyone's messages"
+          desc="Off, Famili keeps only your own household's messages. On, it keeps everyone's in the chats it has joined — including guests and extended family who are not FamiliOS users — and those messages are included in your household export. Famili tells each chat either way."
+        >
+          <Toggle checked={storeAll} onChange={(v) => void setStoreAllParticipants(v)} ariaLabel="Keep everyone's messages" />
         </Row>
         <Row
           label="Keep chat history"

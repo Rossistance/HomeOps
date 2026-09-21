@@ -12,7 +12,7 @@ import { CONNECTORS, readinessOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { providerChat, providerChatStream, providerChatWithFallback, aiProviderById } from "./ai.mjs";
 import { scheduleText, autonomyText, helperVisibleTo } from "./helper-shape.mjs";
-import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, listAgents, listConversations, getRiskOverride, recordAiUsage, aiBudgetExhausted } from "./store.mjs";
+import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, canSeeEntityInChannel, listAgents, listConversations, getRiskOverride, recordAiUsage, aiBudgetExhausted } from "./store.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
 import { searchWeb, readPage } from "./web.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
@@ -382,8 +382,14 @@ export function isUpcomingForContext(e, nowISO, tz) {
   return !Number.isNaN(endMs) && endMs >= nowMs;      // started earlier, still running
 }
 
-export async function buildServerContext(session, clientContext, { goal } = {}) {
+/* `channel` is WHERE THE ANSWER WILL BE READ, which is not the same question as who asked.
+ * "personal" (the default, and every caller that existed before the group lanes) filters to
+ * what the asker may see. "group" narrows further to what is shared anyway, because the
+ * audience of a family group thread includes people who are not in the household. See
+ * canSeeEntityInChannel in store.mjs for the reasoning and for why `adults` is not in it. */
+export async function buildServerContext(session, clientContext, { goal, channel = "personal" } = {}) {
   if (!session) return clientContext ?? {};
+  const inChannel = (e) => canSeeEntityInChannel(e, session, channel);
   const hh = session.householdId;
   const now = new Date().toISOString();
   const tz = householdTimeZone(hh);
@@ -403,7 +409,7 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
   // is still upcoming"), and the extra clause keeps multi-day events that began earlier
   // but haven't finished yet.
   const events = listEvents((e) => e.householdId === hh)
-    .filter((e) => canSeeEntity(e, session))
+    .filter(inChannel)
     .filter((e) => isUpcomingForContext(e, now, tz))
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
     .slice(0, 12)
@@ -411,7 +417,7 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
     // inventing a time, and can reason about what is happening RIGHT NOW.
     .map((e) => ({ id: e.id, title: e.title, startAt: e.startAt, endAt: e.endAt ?? null, allDay: e.allDay === true, location: e.location, driverId: e.driverId, participants: e.participantIds }));
   const tasks = listTasks((t) => t.householdId === hh)
-    .filter((t) => canSeeEntity(t, session))
+    .filter(inChannel)
     .filter((t) => t.status !== "done")
     .slice(0, 10)
     .map((t) => ({ id: t.id, title: t.title, type: t.type, dueAt: t.dueAt, assignedMemberId: t.assignedMemberId }));
@@ -420,7 +426,12 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
   // healthy, ground the assistant on profile() + search(goal) instead of a flat recency
   // slice. When it's degraded/offline, fall back to the legacy listMemory() behavior with
   // an EXPLICIT disclosure marker in the context — never a silent, unannounced downgrade.
-  const visibleToActor = (m) => m.scope !== "personal" || (m.sourceActorId ?? m.source?.actorId) === session.actorId;
+  /* In the group channel a personal memory is dropped OUTRIGHT rather than matched against
+   * the asker: the asker is not the audience, and "their own memory" is the single most
+   * sensitive thing this context carries. Memory has its own `scope` vocabulary rather than
+   * an entity `visibility`, so canSeeEntityInChannel does not reach it. */
+  const visibleToActor = (m) =>
+    m.scope !== "personal" || (channel !== "group" && (m.sourceActorId ?? m.source?.actorId) === session.actorId);
   let memory; let memoryDisclosure;
   const memHealth = await memoryProvider.health();
   if (memHealth.ok) {
@@ -468,6 +479,9 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
    * other ones — is never pulled in: that is exactly the isolation the silo promises, and
    * the same rule canSeeConversation already enforces on the wire. Titles plus the last
    * exchange, capped, because this is orientation and not a transcript.
+   *
+   * This one needs no `channel` narrowing: the household filter it already applies IS the
+   * group rule. Said out loud because it is the field that most looks like it was missed.
    */
   const familyChats = listConversations((c) => c.householdId === hh && c.visibility === "household")
     .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))
@@ -487,7 +501,12 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
    * one member's private helper appears in another member's context and the assistant
    * cheerfully names it — which matters more now that an Adult Member's helpers are
    * personal by default. */
-  const existingHelpers = listAgents(inHh).filter((a) => helperVisibleTo(a, session)).map((a) => ({
+  /* In the group channel, a PERSONAL helper is dropped even from its own owner: naming
+   * "Ross's medication reminder" to the thread discloses it to everyone reading. */
+  const existingHelpers = listAgents(inHh)
+    .filter((a) => helperVisibleTo(a, session))
+    .filter((a) => channel !== "group" || String(a.visibility ?? "household") === "household")
+    .map((a) => ({
     id: a.id, name: a.name, purpose: a.purpose ?? "",
     runs: scheduleText(a.schedule), permission: autonomyText(a),
     enabled: a.enabled !== false && a.status !== "Paused",
@@ -495,7 +514,11 @@ export async function buildServerContext(session, clientContext, { goal } = {}) 
   }));
   // The meal plan rides along so scheduling conflicts are visible BEFORE the
   // assistant proposes anything ("Wednesday already has tacos — swap or keep?").
+  /* Meals carry no visibility filter on the personal path and never have — a meal plan is a
+   * household artifact. The group narrowing is applied one-directionally so that stays true:
+   * this must not become the commit that quietly starts hiding meals in the app. */
   const upcomingMeals = listMeals((m) => m.householdId === hh && !m.archived && m.date && m.date >= now.slice(0, 10))
+    .filter((m) => channel !== "group" || canSeeEntityInChannel(m, session, "group"))
     .sort((a, b) => String(a.date).localeCompare(String(b.date)))
     .slice(0, 14)
     .map((m) => ({ date: m.date, slot: m.slot, title: m.title }));

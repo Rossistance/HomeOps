@@ -22,14 +22,24 @@
 //    know" without holding who they are — pseudonymous, not anonymous, and said that way.
 //    Binding requires an authenticated adult. Revoking requires nothing at all.
 //
-// 3. THE FLOOR IS CODE, NOT DATA. isToolStepAllowed treats an EMPTY allow-list as
-//    PERMISSIVE — deny-only, the documented default every helper starts from
-//    (helper-shape.mjs). So an allow-list on a helper record is a preference, not a
+// 3. THE FLOOR IS CODE, NOT DATA — FOR WHAT SPEAKS UNPROMPTED. isToolStepAllowed treats an
+//    EMPTY allow-list as PERMISSIVE — deny-only, the documented default every helper starts
+//    from (helper-shape.mjs). So an allow-list on a helper record is a preference, not a
 //    boundary: a UI edit, or a PATCH whose allowedToolIds arrives as a string, empties it
-//    and the failure direction is FULL PRIVILEGE. On the one surface where the assistant
-//    speaks unprompted that is unacceptable, so GROUP_TOOL_IDS below is a frozen constant
-//    the record cannot widen, the deny-list is populated by NAME rather than by omission,
-//    and an emptied allow-list makes the listener INERT rather than permissive.
+//    and the failure direction is FULL PRIVILEGE. Where the assistant speaks UNINVITED that
+//    is unacceptable, so PROPOSAL_TOOL_IDS is a frozen constant the record cannot widen, the
+//    deny-list is populated by NAME rather than by omission, and an emptied allow-list makes
+//    the voice INERT rather than permissive.
+//
+// 4. …AND ATTRIBUTION, FOR WHAT WAS ASKED FOR. When a member addresses Famili by name
+//    (group-agent.mjs, Lane 2) none of the above applies: they get the same dense agent and
+//    the same full tool catalog as the app, because an assistant that can only reach three
+//    hardcoded verbs is not one that can hold a conversation — and the voice agent this is
+//    the foundation for will need every bit of that range. Safety there is not a smaller
+//    menu but a real identity: the turn runs as agt_household, so the whole policy ladder
+//    applies, and policy.mjs rule 4b degrades a non-adult's consequential calls to an
+//    approval an adult signs. The lanes differ because uninvited speech and an answered
+//    question are different acts, not because one of them is trusted less.
 import crypto from "node:crypto";
 import {
   runWithTenant, forEachTenant, currentTenant, withLock, appendAudit, getSettings,
@@ -37,6 +47,7 @@ import {
   listImessageChats, getImessageChat, putImessageChat, patchImessageChat,
   getImessageMessage, putImessageMessage, deleteImessageMessageRec,
   listChatProposals, getChatProposal, putChatProposal, patchChatProposal,
+  putChatDecision,
 } from "./store.mjs";
 import { resolveEffectivePolicy, ALLOWED, BLOCKED } from "./policy.mjs";
 import { executeToolForChat } from "./engine.mjs";
@@ -49,20 +60,47 @@ import { localDateKey, householdTimeZone } from "./household-time.mjs";
 
 /* ─────────────────────────────── the floor ─────────────────────────────── */
 
-/** Everything the group surface may ever reach. A frozen module constant, checked at the
- *  call site BEFORE the helper record is consulted, so emptying that record cannot widen
- *  it. Adding an id here is a code review; editing a helper in the app is not. */
-export const GROUP_TOOL_IDS = Object.freeze(new Set([
-  "homeops.create_event_draft",
-  "homeops.create_task",
-  "homeops.create_list_item",
-  "sms.send",
-]));
+/* WHAT THE FLOOR IS FOR, NOW THAT THERE ARE TWO LANES.
+ *
+ * It used to be the whole safety story: the group surface could reach exactly four tool ids
+ * and nothing else, because the passive classifier was the only thing that could act and a
+ * model handed a wide menu it would then be refused from narrates work it did not do.
+ *
+ * That argument still holds for LANE 1 — an 8B classifier returning a kind from an enum
+ * must not be able to name a tool — and it does not hold for LANE 2, where a member
+ * addressed Famili by name and gets the same dense agent and the same full catalog as the
+ * app. Lane 2 is not gated by this list at all. It is gated by attribution: the turn runs
+ * as agt_household, so engine.mjs applies the allow-list, the kill switch, the household's
+ * risk overrides, and the actor's own standing (policy.mjs rule 4b), and anything
+ * consequential is drafted and parked rather than executed.
+ *
+ * So the layers now protect named surfaces rather than "the group":
+ *   1. PROPOSAL_TOOL_IDS  — what a LANE 1 proposal may become. Derived from the enum below
+ *                           so the two cannot drift.
+ *   2. CHAT_DENIED_TOOL_IDS — what agt_chat, the VOICE, may never touch.
+ *   3. chatHelperUsable()  — an emptied allow-list makes the VOICE inert, not permissive.
+ *   4. role attribution    — who is asking, applied to Lane 2's real tool calls.
+ *
+ * Derived, not restated: PROPOSAL_TOOL_IDS is exactly the values of PROPOSAL_KINDS, and is
+ * defined beside that enum further down rather than here — Object.values() at this point in
+ * the file would read the enum inside its temporal dead zone and throw at import. */
 
 export const CHAT_HELPER_ID = "agt_chat";
 
+/* agt_chat is the VOICE and nothing else now: the identity sms.send executes as, so "may
+ * Famili speak in my group chat" stays the single dial an Owner already granted. Lane 1's
+ * proposals execute as it too, and are separately held to PROPOSAL_TOOL_IDS.
+ *
+ * Existing records are NOT rewritten (see ensureChatHelper): a family's four-id list still
+ * contains sms.send, so speaking keeps working, and the other three ids on it are simply
+ * inert. Trimming them would be a write to every household's data to no effect. */
+const CHAT_VOICE_TOOL_IDS = Object.freeze(["sms.send"]);
+
 /** Named explicitly rather than left to omission — this is the layer that survives a UI
- *  edit, because isToolStepAllowed checks the deny-list first and unconditionally. */
+ *  edit, because isToolStepAllowed checks the deny-list first and unconditionally.
+ *
+ *  Scope: agt_chat, which is now only the VOICE (sms.send into a bound thread) and Lane 1's
+ *  proposals. It does NOT govern Lane 2, which acts as agt_household. */
 const CHAT_DENIED_TOOL_IDS = Object.freeze([
   "homeops.notify_contact", "homeops.send_notification_draft", "homeops.create_approval",
   "homeops.write_memory", "homeops.plan_meal", "homeops.find_places", "homeops.read_file",
@@ -74,10 +112,22 @@ const CHAT_DENIED_TOOL_IDS = Object.freeze([
 
 /** Limits. A chat that has said its piece for the day has said enough. */
 export const MAX_SPOKEN_PER_DAY = 6;
+/* …but that cap is about UNPROMPTED speech. An answer to a member who addressed Famili by
+ * name is the same act as a 1:1 text, which has no cap at all, and a seventh question of the
+ * day meeting silence reads as broken rather than as restraint. Capped separately, and not
+ * uncapped: this is a shared bot number and a member leaning on the wake word is a real cost.
+ * The harder ceiling is the household's aiDailyCallBudget, which runAssistantAgent enforces. */
+export const MAX_ANSWERS_PER_DAY = 30;
 const WINDOW_MAX = 24;              // messages held in the in-memory debounce window
 const WINDOW_TTL_MS = 30 * 60_000;  // …and for how long, restart aside
 const RING_MAX = 40;                // recentMessageIds on the chat record
 const DEFAULT_TRANSCRIPT_DAYS = 0;  // ephemeral by default: the setting that holds least
+/* How long a Lane 2 turn may hold a chat before another message may start one. Longer than
+ * runAssistantAgent's own TURN_TIMEOUT_MS (240s) so the lease outlives the work it guards;
+ * a lease that expired first would let a second turn start beside a live one. Stored ON THE
+ * CHAT RECORD rather than in memory, because this deployment restarts on every deploy and an
+ * in-memory lease is a lease that silently vanishes mid-turn. */
+const TURN_LEASE_MS = 300_000;
 
 /* ───────────────────────── the chat helper identity ───────────────────────── */
 
@@ -94,7 +144,7 @@ export function ensureChatHelper(householdId = currentTenant()) {
     const allow = Array.isArray(existing.allowedToolIds) ? existing.allowedToolIds : [];
     const deny = Array.isArray(existing.deniedToolIds) ? existing.deniedToolIds : [];
     const patch = {};
-    if (!allow.length) patch.allowedToolIds = [...GROUP_TOOL_IDS];
+    if (!allow.length) patch.allowedToolIds = [...CHAT_VOICE_TOOL_IDS];
     if (!deny.length) patch.deniedToolIds = [...CHAT_DENIED_TOOL_IDS];
     if (Object.keys(patch).length) patchAgent(CHAT_HELPER_ID, patch);
     return getAgent(CHAT_HELPER_ID);
@@ -110,7 +160,7 @@ export function ensureChatHelper(householdId = currentTenant()) {
     // Ships SILENT. Speaking is sms.send, which is high-stakes on three counts, so an Owner
     // or Adult Admin has to grant it deliberately. Nothing here grants itself anything.
     approvalPolicy: { autoAllow: [], alwaysApprove: [], unattended: { enabled: false } },
-    allowedToolIds: [...GROUP_TOOL_IDS],
+    allowedToolIds: [...CHAT_VOICE_TOOL_IDS],
     deniedToolIds: [...CHAT_DENIED_TOOL_IDS],
     allowedFunctionIds: [], deniedFunctionIds: [],
     visibility: "household", nestId: null,
@@ -277,30 +327,52 @@ export function clearWindow(chatGuid) { _windows.delete(chatGuid); }
  *
  * A member's message becomes a durable row and joins both indexes on the chat record: the
  * ring (the classifier's recent window) and the day bucket (a coordination loop's 24-48h
- * audit). A non-member's message joins neither — it goes to the in-memory window only, and
- * all that persists is a pseudonymous handle hash and a count.
+ * audit).
+ *
+ * A NON-MEMBER'S MESSAGE DEPENDS ON ONE SETTING, and the default is unchanged.
+ *
+ * By default it joins neither index — it goes to the in-memory window only, and all that
+ * persists is a pseudonymous handle hash and a count. That default exists because this
+ * deployment is one Apple ID for every household: a grandparent or a neighbour in the thread
+ * never agreed to anything, and storing their words is a decision made on their behalf.
+ *
+ * `storeAllChatParticipants` lets ONE household decide otherwise for its own chats — a
+ * family whose thread is only ever family, who would rather Famili had the whole
+ * conversation as context. It is off for everyone else, it takes the household PIN to turn
+ * on, and Famili re-introduces itself in every bound chat to say which policy is in force,
+ * because the announcement it already made is a promise and a stale promise is a lie.
+ *
+ * Even then the raw handle is NOT stored on the row. Keeping the message is what the family
+ * chose; keeping a stranger's phone number is a second, larger decision nobody asked for.
  */
 export function recordInboundGroupMessage({ chat, msg, memberId, atMs }) {
   const isMember = !!memberId;
   pushWindow(chat.chatGuid, { handle: msg.address, memberId: memberId ?? null, text: msg.text, atMs, isMember });
 
   const patch = { lastMessageAt: new Date(atMs).toISOString(), updatedAt: nowISO() };
+  let fromHandleHash = null;
   if (!isMember) {
     const h = handleHash(msg.address, chat.participantSalt);
+    fromHandleHash = h;
     const seen = Array.isArray(chat.unknownParticipantHashes) ? chat.unknownParticipantHashes : [];
     if (!seen.some((x) => x.h === h)) patch.unknownParticipantHashes = [...seen, { h, firstSeenAt: new Date(atMs).toISOString() }];
-    patchImessageChat(chat.id, patch);
-    return { stored: false, reason: "non_member" };
+    if (!storeAllParticipants(chat.householdId)) {
+      patchImessageChat(chat.id, patch);
+      return { stored: false, reason: "non_member" };
+    }
   }
 
   const known = Array.isArray(chat.knownParticipants) ? chat.knownParticipants : [];
-  if (!known.some((p) => p.memberId === memberId)) {
+  if (isMember && !known.some((p) => p.memberId === memberId)) {
     patch.knownParticipants = [...known, { memberId, handle: msg.address, firstSeenAt: new Date(atMs).toISOString() }];
   }
 
   const row = {
     id: messageId(), householdId: chat.householdId, chatGuid: chat.chatGuid,
-    guid: msg.guid ?? null, fromMemberId: memberId, text: String(msg.text ?? ""),
+    guid: msg.guid ?? null, fromMemberId: memberId ?? null, text: String(msg.text ?? ""),
+    // Attributable without identifying: enough to dedupe and to keep the transcript legible,
+    // and not enough to recover whose number it was.
+    ...(fromHandleHash ? { fromHandleHash } : {}),
     at: new Date(atMs).toISOString(), direction: "in",
   };
   putImessageMessage(row);
@@ -311,7 +383,7 @@ export function recordInboundGroupMessage({ chat, msg, memberId, atMs }) {
   const buckets = chat.messageIdsByDay && typeof chat.messageIdsByDay === "object" ? chat.messageIdsByDay : {};
   patch.messageIdsByDay = { ...buckets, [day]: [...(buckets[day] ?? []), row.id] };
   patchImessageChat(chat.id, patch);
-  return { stored: true, row };
+  return { stored: true, row, member: isMember };
 }
 
 /** Record what Famili itself said, so the thread reads back whole. */
@@ -340,6 +412,30 @@ export function recordOutboundGroupMessage({ chat, text, atMs }) {
 export function recentMessages(chat, limit = RING_MAX) {
   const ids = (Array.isArray(chat.recentMessageIds) ? chat.recentMessageIds : []).slice(-limit);
   return ids.map((id) => getImessageMessage(id)).filter(Boolean);
+}
+
+/**
+ * THE CONVERSATION, as both lanes see it. One reader, so the passive classifier and the
+ * addressed agent provably read the same thing instead of drifting apart.
+ *
+ * Either/or, not a union: the in-memory window holds everyone's text and is the real
+ * conversation; the durable ring is a restart fallback and is member-only by construction,
+ * so after a restart the classifier is less well grounded. That is the trade the third-party
+ * rule buys, and it is stated here rather than discovered later.
+ *
+ * Famili's own outbound rows carry fromMemberId: null, so on the fallback path they would
+ * otherwise be labelled as a stranger's words. `isSelf` keeps them distinguishable.
+ */
+export function mergedWindow(chat, nowMs) {
+  const live = readWindow(chat.chatGuid, nowMs);
+  if (live.length) return live.map((i) => ({ ...i, isSelf: false }));
+  return recentMessages(chat, 12).map((m) => ({
+    text: m.text,
+    memberId: m.fromMemberId ?? null,
+    isMember: !!m.fromMemberId,
+    isSelf: m.direction === "out",
+    atMs: Date.parse(m.at),
+  }));
 }
 
 /** A coordination loop's audit: day buckets between two instants, still point reads. This
@@ -449,8 +545,18 @@ export async function notePendingChat({ msg, atMs }) {
  *  exists and who connected it, and a first name is already visible to everyone in the
  *  thread. A deliberate, bounded exception to the silence rule — the rule protects people
  *  who never chose FamiliOS, and an announcement is how they get to choose. */
-export function announcementText(memberName) {
-  return `Famili here — ${memberName} connected me to this chat so I can offer to add things to their family calendar and lists. I only keep messages from their household's own members; everyone else's stay unsaved. Reply "Famili stop" any time and I'll leave and stay gone.`;
+/* WHAT IS KEPT IS STATED, NOT IMPLIED — and it has to stay true.
+ *
+ * This sentence is read by people who never signed up for FamiliOS, and it is the only
+ * moment they get to decide. So the retention clause is the one the household is ACTUALLY
+ * running, not the one the default happens to be. The default branch returns the original
+ * wording byte for byte: the promise made to every chat bound before the setting existed
+ * does not get quietly reworded underneath them. */
+export function announcementText(memberName, { storeAll = false } = {}) {
+  const retention = storeAll
+    ? "I keep this chat's messages so I can follow what you're arranging"
+    : "I only keep messages from their household's own members; everyone else's stay unsaved";
+  return `Famili here — ${memberName} connected me to this chat so I can offer to add things to their family calendar and lists. ${retention}. Reply "Famili stop" any time and I'll leave and stay gone.`;
 }
 
 /**
@@ -489,7 +595,7 @@ export async function bindChat({ chatId: id, session, displayName = "" }) {
   const memberName = getMember(session.actorId)?.displayName ?? "Someone";
   const said = await speakToChat({
     chat, householdId: session.householdId, session,
-    text: announcementText(memberName), kind: "announcement", force: true,
+    text: announcementText(memberName, { storeAll: storeAllParticipants(session.householdId) }), kind: "announcement", force: true,
   });
   if (!said.ok) {
     /* A silent join is not on the menu, so a failed announcement is a failed bind. Say WHY
@@ -537,10 +643,77 @@ export function revokeChat({ chat, by = "participant", actorId = null }) {
  *  sentence CONTAINING "stop" is not a request to leave, and treating it as one would make
  *  the feature impossible to talk about in the chat it lives in. */
 const STOP_RE = /^(famili[,!. ]*\s*)?(stop|leave|go away|unsubscribe|opt ?out)[.!]?$/i;
+/** The stop words on their own, for a message whose address has already been stripped. */
+const STOP_WORD_RE = /^(stop|leave|go away|unsubscribe|opt ?out)[.!]?$/i;
 export function isStopRequest(text) {
   const t = String(text ?? "").trim();
   if (!t || t.length > 40) return false;
-  return STOP_RE.test(t) || /^famili\s+(stop|leave|go away)[.!]?$/i.test(t);
+  if (STOP_RE.test(t) || /^famili\s+(stop|leave|go away)[.!]?$/i.test(t)) return true;
+  /* EVERY WAY OF ADDRESSING FAMILI HAS TO WORK FOR "STOP" TOO.
+   *
+   * STOP_RE only ever knew the bare and comma forms. Once detectWake taught the feature
+   * three more ways to say its name, "Famili: stop", "@famili stop" and "hey famili stop"
+   * all fell through it — and then matched the WAKE rule instead, which would have answered
+   * a request to leave by starting a dense model turn with the prompt "stop". Ordering the
+   * stop check first does not help when the stop check itself does not recognise the
+   * sentence. Revocation is the one thing anyone in the thread may do, so it recognises
+   * every address form the rest of the module does. */
+  const w = detectWake(t);
+  return !!w && w.prompt.length > 0 && STOP_WORD_RE.test(w.prompt);
+}
+
+/* ───────────────── being addressed (Lane 2) ─────────────────
+ *
+ * Lane 1 is Famili overhearing. Lane 2 is Famili being SPOKEN TO, and the difference has to
+ * be decided by a regex rather than a model, because the decision is what determines whether
+ * a model runs at all.
+ *
+ * STRICT, and the strictness is the design. An explicit address marker is required — a
+ * leading @, a greeting, or punctuation after the name. Bare "famili <something>" does NOT
+ * match, because "we should ask Famili about it" and "Famili is being weird lately" are the
+ * family TALKING ABOUT the assistant, and answering those is precisely the interrupting
+ * houseguest this whole feature is built to avoid. The same whole-message/anchored precedent
+ * as STOP_RE above and classifySmsKeyword in sms.mjs.
+ *
+ * The cost is recall: "Famili what's on Saturday?" is a natural phrasing and it misses. That
+ * is a real trade and it is NOT being guessed at — wakeNearMiss() below records every one of
+ * those so the rule can be widened later against a measured number instead of an argument.
+ *
+ * \b after the name keeps "familiar", "familia" and "family" out. */
+const WAKE_RE = new RegExp(
+  "^\\s*(?:" +
+    "@famili(?:os)?\\b[\\s,:;!?.-]*" +                              // @famili …
+    "|(?:hey|hi|hello|ok|okay|yo)[\\s,]+famili(?:os)?\\b[\\s,:;!?.-]*" + // hey famili …
+    "|famili(?:os)?\\b\\s*[,:;!?.\\u2014-]+\\s*" +                   // famili, … / famili: …
+  ")",
+  "i",
+);
+/** Just the name, nothing after it — "Famili?" or "@famili". A valid address with no ask. */
+const WAKE_BARE_RE = /^\s*@?famili(?:os)?\b\s*[,:;!?.—-]*\s*$/i;
+
+/**
+ * Was Famili addressed? Returns `{ prompt }` with the address stripped, or null.
+ * An empty prompt is a VALID wake — someone said its name and nothing else.
+ */
+export function detectWake(text) {
+  const t = String(text ?? "").trim();
+  if (!t) return null;
+  if (WAKE_BARE_RE.test(t)) return { prompt: "" };
+  const m = WAKE_RE.exec(t);
+  if (!m) return null;
+  return { prompt: t.slice(m[0].length).trim() };
+}
+
+/**
+ * A message that BEGINS with the name but failed the strict test — "Famili what's on
+ * Saturday?". Recorded, never acted on. This is the instrument that turns "should the rule
+ * be looser?" into a question with an answer. Deliberately excludes anything detectWake
+ * already matched and anything that is a stop request.
+ */
+export function wakeNearMiss(text) {
+  const t = String(text ?? "").trim();
+  if (!t || detectWake(t) || isStopRequest(t)) return false;
+  return /^\s*famili(?:os)?\b/i.test(t);
 }
 
 /* ───────────────── speaking ───────────────── */
@@ -561,7 +734,12 @@ const dayKeyFor = (householdId, atMs) => localDateKey(atMs, householdTimeZone(ho
  * any number or chat. A model-supplied GUID never reaches it, and `to` is never set, so the
  * rememberedChatGuid fallback inside the connector cannot fire either.
  */
-export async function speakToChat({ chat, householdId, session, text, kind = "proposal", force = false, atMs = null }) {
+/* `budget` is WHICH ceiling this utterance counts against, and the distinction is the
+ * whole point: MAX_SPOKEN_PER_DAY exists to stop Famili volunteering too often, which
+ * has nothing to say about answering a member who used its name. "unprompted" is the
+ * default so every existing caller keeps today's behaviour exactly; force:true still
+ * means "no ceiling at all" (announcements, goodbyes) and is spelled "none". */
+export async function speakToChat({ chat, householdId, session, text, kind = "proposal", force = false, atMs = null, budget = "unprompted" }) {
   const at = atMs ?? Date.parse(nowISO());
   const body = String(text ?? "").trim();
   if (!body) return { ok: false, error: "invalid_input", message: "Nothing to say." };
@@ -574,10 +752,16 @@ export async function speakToChat({ chat, householdId, session, text, kind = "pr
   // Anti-spam. A chat that has said its piece for the day has said enough; refused in
   // silence, because the alternative is announcing the limit into the thread.
   const day = dayKeyFor(householdId, at);
+  const lane = force ? "none" : budget;
   const spoken = chat.spokeDayKey === day ? Number(chat.spokeCountDay ?? 0) : 0;
-  if (!force && spoken >= MAX_SPOKEN_PER_DAY) {
+  const answered = chat.answerDayKey === day ? Number(chat.answerCountDay ?? 0) : 0;
+  if (lane === "unprompted" && spoken >= MAX_SPOKEN_PER_DAY) {
     appendAudit({ type: "imessage.speak_budget_exhausted", chatId: chat.id, householdId, spoken });
     return { ok: false, error: "speak_budget_exhausted", message: "Famili has already said enough in that chat today." };
+  }
+  if (lane === "answer" && answered >= MAX_ANSWERS_PER_DAY) {
+    appendAudit({ type: "imessage.answer_budget_exhausted", chatId: chat.id, householdId, answered });
+    return { ok: false, error: "answer_budget_exhausted", message: "Famili has answered as much as it can in that chat today." };
   }
 
   const usable = chatHelperUsable();
@@ -597,13 +781,58 @@ export async function speakToChat({ chat, householdId, session, text, kind = "pr
   }
   if (!out.ok) return { ok: false, error: out.error ?? "send_failed", message: out.message ?? "The message didn't send." };
 
+  /* Only the lane that was charged is incremented. An answer must not eat the unprompted
+   * allowance, or a talkative afternoon would silence the evening's proposals. */
   patchImessageChat(chat.id, {
     lastSpokeAt: new Date(at).toISOString(),
-    spokeDayKey: day, spokeCountDay: spoken + 1, updatedAt: nowISO(),
+    ...(lane === "answer"
+      ? { answerDayKey: day, answerCountDay: answered + 1 }
+      : lane === "unprompted" ? { spokeDayKey: day, spokeCountDay: spoken + 1 } : {}),
+    updatedAt: nowISO(),
   });
   recordOutboundGroupMessage({ chat: getImessageChat(chat.id) ?? chat, text: body, atMs: at });
   appendAudit({ type: "imessage.spoke", chatId: chat.id, chatGuid: chat.chatGuid, householdId, kind });
   return { ok: true, result: out.result };
+}
+
+/* ───────────────── the Lane 2 turn lease ─────────────────
+ *
+ * A Lane 2 turn is a dense model call that may run for minutes. It CANNOT be held inside
+ * withChatLock: that would block every other message in the chat for the duration —
+ * including "Famili stop", which is the one message that must never wait — stall the triage
+ * sweep's sequential pass, and make a re-delivery's dedupe check queue behind the very turn
+ * it is supposed to short-circuit.
+ *
+ * So the lock is used for the claim (milliseconds, no model) and the lease guards the work.
+ * Taking and releasing are separate, both cheap, and the release is guarded by the message
+ * guid so a zombie turn finishing late cannot clear the lease a reclaimer already took.
+ */
+export function takeTurnLease({ chat, messageGuid, actorId, atMs }) {
+  const fresh = getImessageChat(chat.id) ?? chat;
+  const live = fresh.activeTurn;
+  if (live?.startedAt && atMs - live.startedAt < TURN_LEASE_MS) {
+    return { ok: false, error: "turn_in_flight", heldBy: live.messageGuid ?? null };
+  }
+  const reclaimed = !!live;
+  patchImessageChat(fresh.id, { activeTurn: { messageGuid, startedAt: atMs, actorId: actorId ?? null }, updatedAt: nowISO() });
+  return { ok: true, reclaimed };
+}
+
+export function releaseTurnLease({ chat, messageGuid }) {
+  const fresh = getImessageChat(chat.id);
+  if (!fresh) return { ok: false, error: "gone" };
+  // Only the holder may clear it. A turn that overran and finished after its lease was
+  // reclaimed must not delete the replacement's claim.
+  if (fresh.activeTurn && fresh.activeTurn.messageGuid !== messageGuid) return { ok: false, error: "not_holder" };
+  patchImessageChat(fresh.id, { activeTurn: null, updatedAt: nowISO() });
+  return { ok: true };
+}
+
+/** Is a Lane 2 turn live on this chat right now? Read by the triage sweep, which must not
+ *  judge a window the dense agent is mid-answer on. */
+export function turnInFlight(chat, atMs) {
+  const t = chat?.activeTurn;
+  return !!(t?.startedAt && atMs - t.startedAt < TURN_LEASE_MS);
 }
 
 /* ───────────────── the inbound entry point ───────────────── */
@@ -667,6 +896,55 @@ export async function handleInboundGroup({ msg, atMs }) {
           return { handled: true, kind: resolved.ok ? `proposal_${resolved.outcome}` : "proposal_failed" };
         }
       }
+
+      /* LANE 2 — Famili was addressed by name.
+       *
+       * Deliberately AFTER the stop check (an outsider's "stop" outranks everything) and
+       * after the affirmative check (an open offer is a live commitment, and resolving it
+       * deterministically costs nothing). In practice a wake prefix and a whole-message
+       * "yes" cannot both match, but the ordering is the guarantee, not the coincidence.
+       *
+       * This function stays DETERMINISTIC: it decides that a turn should happen, claims the
+       * lease, and hands the verdict back. The model call is kicked off by the caller,
+       * outside the chat lock. */
+      const wake = detectWake(msg.text);
+      if (wake) {
+        if (!sender) {
+          /* Same rule as the unverified "yes" above: nothing runs, and they are not told
+           * why. A stranger learning their wake word was refused for want of verification
+           * is a stranger learning this thread belongs to a FamiliOS household. */
+          appendAudit({ type: "imessage.wake_unverified", chatId: fresh.id, householdId });
+          return { handled: true, kind: "recorded", stored: rec.stored, ignoredWake: "sender_not_verified" };
+        }
+        const lease = takeTurnLease({ chat: fresh, messageGuid: msg.guid ?? null, actorId: sender.member.actorId, atMs });
+        if (!lease.ok) {
+          /* Busy. Recorded, and SILENT — answering "I'm still working on the last one" into
+           * a family thread is the nagging this product refuses. The audit count is how we
+           * find out whether one-turn-at-a-time is actually costing anyone anything. */
+          appendAudit({ type: "imessage.wake_busy", chatId: fresh.id, householdId, heldBy: lease.heldBy });
+          return { handled: true, kind: "recorded", stored: rec.stored, ignoredWake: "turn_in_flight" };
+        }
+        if (lease.reclaimed) appendAudit({ type: "imessage.turn_lease_expired", chatId: fresh.id, householdId });
+        return {
+          handled: true, kind: "wake", lane: 2,
+          turn: {
+            chatId: fresh.id, householdId, prompt: wake.prompt,
+            messageGuid: msg.guid ?? null,
+            sender: { actorId: sender.member.actorId, role: sender.member.role, displayName: sender.member.displayName ?? sender.member.actorId },
+          },
+        };
+      }
+
+      /* A near-miss is recorded and NOT acted on: "Famili what's on Saturday?" is the most
+       * natural way to address it and the strict matcher misses it on purpose. Counting them
+       * is what lets the rule be widened later against a number instead of an opinion. */
+      if (sender && wakeNearMiss(msg.text)) {
+        putChatDecision({
+          id: `cd_${crypto.randomUUID()}`, chatId: fresh.id, householdId,
+          at: nowISO(), decision: "silent", reason: "wake_near_miss",
+          memberMessageCount: 1, nonMemberMessageCount: 0,
+        });
+      }
       return { handled: true, kind: "recorded", stored: rec.stored, memberId: sender?.member?.actorId ?? null };
     });
   }
@@ -700,9 +978,89 @@ export const PROPOSAL_KINDS = Object.freeze({
   list_item: "homeops.create_list_item",
 });
 
+/** What a LANE 1 proposal may become — derived from the enum above so the two cannot drift.
+ *  See "the floor" at the top of this file for which surface each layer now protects.
+ *  Lane 2 is deliberately NOT gated by this: it is gated by attribution. */
+export const PROPOSAL_TOOL_IDS = Object.freeze(new Set(Object.values(PROPOSAL_KINDS)));
+
 /** Phase 1b's gate, made concrete. Shadow mode is the default: the classifier runs and
  *  writes its verdicts down, and proposes nothing, until a household turns this on. The
  *  precision bar is read off the decision log before that happens, not guessed at. */
+/** Does this household keep everyone's messages, or only its own members'? Default false —
+ *  the setting that holds least, and the one every other household keeps. */
+export function storeAllParticipants(householdId = currentTenant()) {
+  return getSettings(householdId).storeAllChatParticipants === true;
+}
+
+/**
+ * Tell every bound chat that the retention policy changed — BEFORE it changes.
+ *
+ * The announcement Famili made at bind time is a promise, and the people it was made to are
+ * mostly not FamiliOS users: they cannot open an app to check, and they did not choose any
+ * of this. Flipping the setting underneath that sentence turns it into a lie, which is
+ * precisely the "fabricated success" this codebase refuses everywhere else.
+ *
+ * So the announcement is attempted first and the change only lands if every bound chat
+ * heard it. Refusing a settings write because a chat is unreachable is annoying; changing
+ * what is kept about someone who was told otherwise is not recoverable. bindChat already
+ * takes this exact position — "a silent join is not on the menu" — and this is the same rule
+ * applied to the same promise.
+ *
+ * @returns {Promise<{ok:boolean, announced:number, failed:Array<{chatId,displayName}>}>}
+ */
+export async function announceStoragePolicy({ householdId, session, storeAll, atMs = null }) {
+  const at = atMs ?? Date.now();
+  const bound = listImessageChats((c) => c.householdId === householdId && c.status === "bound");
+  const text = storeAll
+    ? `Famili here — one change to mention: from now on I keep this chat's messages so I can follow what you're arranging. Reply "Famili stop" any time and I'll leave, and everything goes with me.`
+    : `Famili here — one change to mention: from now on I only keep messages from this household's own members; everyone else's stay unsaved, and what I had of them is deleted. Reply "Famili stop" any time and I'll leave.`;
+
+  const failed = [];
+  let announced = 0;
+  for (const chat of bound) {
+    const said = await speakToChat({ chat, householdId, session, text, kind: "policy_change", force: true, atMs: at })
+      .catch(() => ({ ok: false }));
+    if (said.ok) announced++;
+    else failed.push({ chatId: chat.id, displayName: chat.displayName ?? "" });
+  }
+  return { ok: failed.length === 0, announced, failed };
+}
+
+/**
+ * Drop every stored non-member message in this household's chats.
+ *
+ * Run when the setting goes OFF. Deleting is not optional: keeping them would mean holding
+ * data under a policy the household has just withdrawn, and the chat was told it was gone.
+ * Member rows and Famili's own rows are untouched — only rows with no member behind them.
+ */
+export function dropNonMemberMessages(householdId) {
+  let dropped = 0;
+  for (const chat of listImessageChats((c) => c.householdId === householdId)) {
+    const buckets = chat.messageIdsByDay && typeof chat.messageIdsByDay === "object" ? chat.messageIdsByDay : {};
+    const doomed = new Set();
+    for (const ids of Object.values(buckets)) {
+      for (const id of ids) {
+        const m = getImessageMessage(id);
+        // direction "out" is Famili's own voice, which also has no member behind it.
+        if (m && !m.fromMemberId && m.direction !== "out") doomed.add(id);
+      }
+    }
+    if (!doomed.size) continue;
+    for (const id of doomed) if (deleteImessageMessageRec(id)) dropped++;
+    const nextBuckets = {};
+    for (const [day, ids] of Object.entries(buckets)) {
+      const kept = ids.filter((id) => !doomed.has(id));
+      if (kept.length) nextBuckets[day] = kept;
+    }
+    patchImessageChat(chat.id, {
+      messageIdsByDay: nextBuckets,
+      recentMessageIds: (Array.isArray(chat.recentMessageIds) ? chat.recentMessageIds : []).filter((id) => !doomed.has(id)),
+      updatedAt: nowISO(),
+    });
+  }
+  return { dropped };
+}
+
 export function proposalsEnabled(householdId = currentTenant()) {
   return getSettings(householdId).chatProposalsEnabled === true;
 }
@@ -735,7 +1093,7 @@ const OFFER_TEXT = {
 export async function openProposal({ chat, kind, title, details, spanMemberId, atMs, decisionId = null }) {
   const toolId = PROPOSAL_KINDS[kind];
   if (!toolId) return { ok: false, error: "invalid_input", message: "Not a proposal kind." };
-  if (!GROUP_TOOL_IDS.has(toolId)) return { ok: false, error: "tool_not_in_group_scope", message: "That action isn't in the group surface." };
+  if (!PROPOSAL_TOOL_IDS.has(toolId)) return { ok: false, error: "tool_not_in_group_scope", message: "That action isn't in the group surface." };
   if (!proposalsEnabled(chat.householdId)) return { ok: false, error: "proposals_disabled" };
   if (openProposalFor(chat.chatGuid, atMs)) return { ok: false, error: "proposal_already_open" };
 
@@ -823,7 +1181,7 @@ export async function resolveProposal({ chat, proposal, answer, memberSession, a
     return { ok: true, outcome: "refused", proposal: getChatProposal(proposal.id) };
   }
 
-  if (!GROUP_TOOL_IDS.has(proposal.toolId)) {
+  if (!PROPOSAL_TOOL_IDS.has(proposal.toolId)) {
     // The call-site floor. A stored proposal cannot widen what this surface may reach,
     // whatever the helper record says, because this Set is code rather than data.
     appendAudit({ type: "imessage.tool_out_of_scope", chatId: chat.id, householdId: chat.householdId, toolId: proposal.toolId });

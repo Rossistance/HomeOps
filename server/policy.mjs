@@ -70,9 +70,17 @@ export function reachesOutside(cap) {
  * @param agent    {{ approvalPolicy?, allowedToolIds?, deniedToolIds? }|null} the acting agent
  * @param settings {{ externalActionsEnabled? }} household settings
  * @param override {{ skipApproval?, riskClass? }|null} household risk override for this capability
+ * @param actorIsAdult {boolean|null} is the HUMAN behind this call an adult of the household?
+ *        A BOOLEAN, not a role string, on purpose. Every relaxation below rule 4b is granted
+ *        household- or helper-wide — which is to say, granted by and for the household's
+ *        adults — and a Limited Member borrowing one is the gap rule 4b closes. This module
+ *        imports nothing (that is what makes it trivially testable), so it cannot call
+ *        isAdultRole; and a second copy of an adult test written here would eventually
+ *        disagree with the first. The caller that already owns the lookups answers the
+ *        question. Source of truth: isAdultRole, store.mjs. `null` = not stated, rule off.
  * @returns {{ decision, rule, reason, requiresApproval, risk, baseRequiresApproval, riskOverridden, canAutoAllow }}
  */
-export function resolveEffectivePolicy({ cap, agent = null, settings = {}, override = null } = {}) {
+export function resolveEffectivePolicy({ cap, agent = null, settings = {}, override = null, actorIsAdult = null } = {}) {
   const base = {
     baseRequiresApproval: !!cap?.requiresApproval,
     risk: override?.riskClass ?? cap?.risk ?? "Low",
@@ -116,6 +124,25 @@ export function resolveEffectivePolicy({ cap, agent = null, settings = {}, overr
   const alwaysApprove = agent?.approvalPolicy?.alwaysApprove ?? [];
   if (cap?.id && alwaysApprove.includes(cap.id)) {
     return decide(NEEDS_APPROVAL, "agent.always_approve", "This helper is set to always ask you first.");
+  }
+
+  /* 4b. WHO IS ACTUALLY ASKING — the last tightening, and the first rule that looks past the
+   *     agent at the person.
+   *
+   *     Everything from rule 5 down is a RELAXATION, and every one of them is set at
+   *     household or helper level: a risk override an Owner recorded, an autoAllow list, an
+   *     unattended dial, a `Trusted` stance. They are grants the household's ADULTS made.
+   *     Until now the acting human's own standing never entered the calculation, so a
+   *     Limited Member's request inherited every one of those grants intact — which is fine
+   *     while the only way in is an authenticated session the same adults handed out, and
+   *     stops being fine the moment a request can arrive as a text in a group chat.
+   *
+   *     So: a non-adult never clears a gate the capability itself asks for. They are not
+   *     blocked — the action is drafted and parked for an adult to sign, which is the
+   *     existing approval queue doing the job it already does. Tightening only; a capability
+   *     that needed no approval still needs none. */
+  if (actorIsAdult === false && base.baseRequiresApproval) {
+    return decide(NEEDS_APPROVAL, "actor.not_adult", `${cap?.name ?? cap?.id ?? "This"} needs an adult in the household to approve it.`);
   }
 
   // 5. RELAXING, household level. An Owner/Adult Admin re-classing a tool for their own

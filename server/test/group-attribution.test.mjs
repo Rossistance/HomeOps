@@ -18,9 +18,11 @@
 // allow-list and the policy ladder apply at all. So the manual run below is the UNGUARDED one,
 // which is the opposite of how the pair looks at a glance.
 //
-// The third attribution test is about a floor that does not live on any record. GROUP_TOOL_IDS
-// is checked at the call site BEFORE the helper record is consulted, so a widened record
-// cannot buy reach that the surface never had.
+// The third attribution test is about a floor that does not live on any record.
+// PROPOSAL_TOOL_IDS is checked at the call site BEFORE the helper record is consulted, so a
+// widened record cannot buy reach that a PASSIVE proposal never had. It bounds Lane 1 only:
+// when a member addresses Famili by name, Lane 2 runs the full agent as agt_household and is
+// bounded by the policy ladder and the actor's own role instead (see group-agent.mjs).
 //
 // PROVENANCE (assistant-agent.mjs queueApprovalRun). It used to bake in source "assistant",
 // via "chat" and the summary "Asked in chat: ...". Reused unchanged by the group listener, it
@@ -51,7 +53,7 @@ const {
 const { orchestrate, DEFAULT_HOUSEHOLD_AGENT_ID } = await import("../orchestrator.mjs");
 const { queueApprovalRun } = await import("../assistant-agent.mjs");
 const {
-  GROUP_TOOL_IDS, CHAT_HELPER_ID, ensureChatHelper, resolveProposal, PROPOSAL_TTL_MS,
+  PROPOSAL_TOOL_IDS, CHAT_HELPER_ID, ensureChatHelper, resolveProposal, PROPOSAL_TTL_MS,
 } = await import("../group-chat.mjs");
 const { isToolStepAllowed } = await import("../helper-shape.mjs");
 
@@ -74,14 +76,14 @@ after(async () => { await stopServer(ctx); });
 const sessionOf = (client, householdId = HH) => ({ actorId: client.actorId, householdId, role: client.role });
 
 const planWith = (title, steps) => ({ title, summary: "", steps });
-/** On GROUP_TOOL_IDS and on agt_chat's allow-list: the one way this surface says anything.
+/** agt_chat's whole allow-list: the one way this surface says anything.
  *  Approval-gated, so a run built on it PARKS rather than executing; every assertion here is
  *  about what the run record says, and nothing below needs a step to have run. */
 const sendTextStep = () => ({
   toolId: "sms.send", title: "Text the family", detail: "",
   input: { to: "+15550100200", body: "Swim meet is on for Saturday." },
 });
-/** On agt_chat's deny-list BY NAME, and nowhere near GROUP_TOOL_IDS. */
+/** On agt_chat's deny-list BY NAME, and never a proposal outcome. */
 const sendMailStep = () => ({
   toolId: "gmail.send", title: "Email the league", detail: "",
   input: { to: "coach@example.invalid", subject: "Saturday", body: "A body long enough to look real." },
@@ -167,7 +169,7 @@ test("ATTRIBUTION IS WHAT MAKES THE ALLOW-LIST APPLY: a denied tool is clamped, 
     "the identical gmail.send step passes the orchestrator untouched, because no allow-list ran");
 });
 
-test("GROUP_TOOL_IDS is the call-site floor: the record cannot widen what this surface reaches", async () => {
+test("PROPOSAL_TOOL_IDS is the call-site floor: the record cannot widen what a Lane 1 proposal becomes", async () => {
   const GUID = "iMessage;+;chat-groupattr-floor";
   const CHAT_ID = "ich_groupattr_floor";
   const PROPOSAL_ID = "prp_groupattr_floor";
@@ -178,7 +180,7 @@ test("GROUP_TOOL_IDS is the call-site floor: the record cannot widen what this s
     // This is the state a UI edit, a mistyped PATCH or a bad migration could produce, and it
     // is the state the floor exists to survive.
     patchAgent(CHAT_HELPER_ID, {
-      allowedToolIds: [...GROUP_TOOL_IDS, "gmail.send"],
+      allowedToolIds: [...PROPOSAL_TOOL_IDS, "sms.send", "gmail.send"],
       deniedToolIds: [],
     });
     putImessageChat({
@@ -212,7 +214,7 @@ test("GROUP_TOOL_IDS is the call-site floor: the record cannot widen what this s
   const widened = await runWithTenant(HH_FLOOR, () => getAgent(CHAT_HELPER_ID));
   const wouldAllow = isToolStepAllowed(widened, "gmail.send");
   assert.equal(wouldAllow.ok, true, `the helper record permits gmail.send: ${JSON.stringify(wouldAllow)}`);
-  assert.equal(GROUP_TOOL_IDS.has("gmail.send"), false, "and the frozen constant never has");
+  assert.equal(PROPOSAL_TOOL_IDS.has("gmail.send"), false, "and the frozen constant never has");
 
   const chat = { id: CHAT_ID, householdId: HH_FLOOR, chatGuid: GUID };
   const out = await runWithTenant(HH_FLOOR, () => resolveProposal({
@@ -265,7 +267,7 @@ test("queueApprovalRun is exported and takes its provenance, and the group value
    * agentId, so this run resolves to the household default helper rather than to agt_chat:
    * its via says group_chat while its identity says agt_household. It is attributed, so the
    * ladder does apply, and the only toolId that can arrive here has already passed the
-   * GROUP_TOOL_IDS floor in resolveProposal; what it does NOT get is agt_chat's own
+   * PROPOSAL_TOOL_IDS floor in resolveProposal; what it does NOT get is agt_chat's own
    * deny-list. Pinned rather than glossed, so a later change to either side is visible. */
   assert.equal(run.sourceRef.agentId, DEFAULT_HOUSEHOLD_AGENT_ID,
     `a group-originated approval acts as the household default, not as agt_chat: ${JSON.stringify(run.sourceRef)}`);

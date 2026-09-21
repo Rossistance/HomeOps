@@ -368,6 +368,8 @@ export interface BackendSettings {
   /** Shadow mode is the default: the classifier records its verdicts from the moment a
    *  chat is bound and proposes nothing until this is on. */
   chatProposalsEnabled?: boolean;
+  /** Keep messages from people outside the household in joined group chats. Default false. */
+  storeAllChatParticipants?: boolean;
   /** 0 means the external chat transcript is ephemeral, which is the default. */
   chatTranscriptDays?: number;
   /** Daily AI call cap — metered and enforced server-side since C1.3, settable since 2.8.
