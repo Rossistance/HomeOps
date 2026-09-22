@@ -99,6 +99,7 @@ import { pushApprovalNotification, deliverNotification, sendVerificationCode, se
 import { handleFamilyMessageRoutes } from "./family-messages-routes.mjs";
 import { handleActionRoutes } from "./actions/routes.mjs";
 import { newEventRecord } from "./actions/schemas/event.mjs";
+import { newTaskRecord } from "./actions/schemas/task.mjs";
 import { createHelpRequest } from "./help-requests.mjs";
 import { postMessage as postFamilyMessage } from "./family-messages.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
@@ -3363,14 +3364,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
       for (const ing of wanted) {
         if (open.has(norm(ing.item))) continue;
         open.add(norm(ing.item));
-        putTask({
-          id: "tk_" + crypto.randomBytes(8).toString("hex"), householdId: session.householdId,
-          title: String(ing.item).trim(), type: "list", listName: "Groceries", status: "todo",
-          dueAt: null, assignedMemberId: null, spaceId: "sp-family", priority: "low",
-          amount: null, visibility: meal.visibility ?? "household", mealId: meal.id,
-          notes: `For ${meal.title}`, source: "meal", createdBy: session.actorId,
-          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-        });
+        putTask(newTaskRecord({
+          title: String(ing.item).trim(), type: "list", listName: "Groceries", priority: "low",
+          visibility: meal.visibility ?? "household", mealId: meal.id, notes: `For ${meal.title}`, source: "meal",
+        }, session));
         added++;
       }
       return added;

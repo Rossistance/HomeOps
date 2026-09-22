@@ -49,11 +49,12 @@ test("HTTP WRITERS: the action, a completion, a calendar link — every task GET
   assert.ok(v.ok, `the action's own output holds: ${v.field} — ${v.message}`);
 });
 
-test("IN-PROCESS WRITERS still written by hand fit the same record", async () => {
+test("IN-PROCESS WRITERS fit the same record — the list-item action, and the grocery writers still by hand", async () => {
   const tctx = { householdId: "local", actorId: "m-alex", runId: "run_test" };
   const li = await INTERNAL_FUNCTIONS["homeops.create_list_item"].run(tctx, { text: "Batteries", listName: "Shopping" });
   assert.equal(li.ok, true, JSON.stringify(li));
-  fits(store.getTask(li.result.id), "create_list_item");
+  fits(store.getTask(li.result.task.id), "create_list_item");
+  assert.ok(li.result.task.id.startsWith("li_"), "a list item's id says what it is");
   const meal = await INTERNAL_FUNCTIONS["homeops.plan_meal"].run(tctx, { title: "Contract chili", date: "2031-07-09", slot: "dinner", ingredients: ["beans", { item: "salt", have: true }] });
   assert.equal(meal.ok, true, JSON.stringify(meal));
   const groceries = store.listTasks((t) => t.mealId === meal.result.mealId);
@@ -64,6 +65,26 @@ test("IN-PROCESS WRITERS still written by hand fit the same record", async () =>
   fits(viaTool.result.task, "create_task through the registry");
   assert.equal(viaTool.result.task.source, "agent");
   assert.deepEqual(viaTool.result.task.remindOffsets, [30]);
+});
+
+test("EVERY WRITER NOW SHARES ONE SET OF DEFAULTS — a grocery item has the same keys as a typed task", async () => {
+  /* Before newTaskRecord a list item had no dueAt, no assignee, no reminder plan; a typed
+   * task had them as nulls and empties. Now every task written from any door carries the
+   * same structural keys — the ones the schema leaves optional only for rows written
+   * before this existed. */
+  const structural = ["type", "status", "dueAt", "startAt", "endAt", "assignedMemberId", "spaceId", "priority", "amount", "visibility", "nestId",
+    "notes", "remindMinutesBefore", "remindOffsets", "remindersSent", "reminderSentAt", "source", "createdBy", "createdAt", "updatedAt"];
+  const viaHttp = ok200(await adult.req("/api/tasks"), "GET /api/tasks").tasks;
+  const inProcess = store.listTasks((t) => t.householdId === "local");
+  assert.ok(viaHttp.length >= 2 && inProcess.length >= 3, "both halves wrote tasks");
+  const sources = new Set([...viaHttp, ...inProcess].map((t) => t.source));
+  for (const s of ["user", "agent", "assistant"]) assert.ok(sources.has(s), `writer "${s}" is exercised: ${[...sources]}`);
+  for (const t of [...viaHttp, ...inProcess]) {
+    const missing = structural.filter((k) => !(k in t));
+    assert.deepEqual(missing, [], `${t.source} (${t.type}) lacks ${missing.join(", ")}`);
+  }
+  const grocery = inProcess.find((t) => t.type === "list" && t.mealId);
+  assert.ok(grocery && grocery.dueAt === null && Array.isArray(grocery.remindOffsets) && grocery.startAt === null, "a plan_meal grocery got the same defaults");
 });
 
 test("a task with an invented field is refused by the same validator", () => {

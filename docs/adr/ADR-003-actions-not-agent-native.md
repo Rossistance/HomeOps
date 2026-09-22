@@ -131,8 +131,11 @@ record is why.
    that does not go through the helper.
 3. **Next surfaces**: ~~tasks~~ — **`homeops.create_task` + `POST /api/tasks` done,
    2026-09-22** (`server/actions/tasks.mjs`, `TASK_RECORD`, `TaskRecord` generated for both
-   clients; one rule for reminders-before-a-date, the product's). Still to do: meals, list
-   items (`homeops.create_list_item` still writes a task by hand), `GET /api/events` and
+   clients; one rule for reminders-before-a-date, the product's). ~~List items~~ — **done,
+   2026-09-22:** `homeops.create_list_item` is a declared action on `create_task`'s run
+   with type `list`, and every task writer (the grocery writers in `plan_meal` and the meals
+   route, a message suggestion) goes through `newTaskRecord(fields, ctx)`, the task-side
+   twin of `newEventRecord`, guarded the same way. Still to do: meals, `GET /api/events` and
    `GET /api/tasks` as declared reads.
 4. **Native `famili.*` tools bypass the policy ladder** (`assistant-agent.mjs`, the second
    loop in `buildToolSet`) while registry tools go through `executeToolForChat`. Decide

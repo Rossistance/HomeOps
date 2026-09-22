@@ -8,7 +8,7 @@
 // import it (context → internal-functions → here), and a cycle would leave INTERNAL_INPUTS
 // half-built. The import-order smoke test in server/test/actions-define.test.mjs pins this.
 import { createEvent } from "./events.mjs";
-import { createTask } from "./tasks.mjs";
+import { createTask, createListItem } from "./tasks.mjs";
 
 export function buildRegistry(actions) {
   const byId = new Map(), byRoute = new Map();
@@ -24,7 +24,7 @@ export function buildRegistry(actions) {
   return { byId, byRoute };
 }
 
-export const ACTIONS = Object.freeze([createEvent, createTask]);
+export const ACTIONS = Object.freeze([createEvent, createTask, createListItem]);
 const { byId, byRoute } = buildRegistry(ACTIONS);
 
 export const getAction = (id) => byId.get(id) ?? null;

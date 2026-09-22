@@ -16,6 +16,7 @@ import { isValidReminder } from "./reminders.mjs";
 import { eid, nowISO, badStamp, DATE_ONLY_RE, unknownMember, ghostMessage } from "./actions/shared.mjs";
 import { ACTION_INTERNAL_FUNCTIONS } from "./actions/registry.mjs";
 import { newEventRecord } from "./actions/schemas/event.mjs";
+import { newTaskRecord } from "./actions/schemas/task.mjs";
 import crypto from "node:crypto";
 
 const MEMORY_SCOPES = ["household", "personal", "nest"];
@@ -408,12 +409,10 @@ export const INTERNAL_FUNCTIONS = {
       const openGrocery = new Set(listTasks((t) => t.householdId === ctx.householdId && t.type === "list" && t.listName === "Groceries" && t.status !== "done").map((t) => norm(t.title)));
       const groceryIds = [];
       for (const ing of ingredients.filter((i) => !i.have && !openGrocery.has(norm(i.item)))) {
-        const tk = putTask({
-          id: eid("tk"), householdId: ctx.householdId, title: ing.item, type: "list", status: "todo",
-          listName: "Groceries", spaceId: "sp-family", priority: "low", visibility: "household",
-          source: "assistant", createdBy: ctx.actorId, notes: `For ${meal.title}`, mealId: meal.id,
-          createdAt: now, updatedAt: now,
-        });
+        const tk = putTask(newTaskRecord({
+          title: ing.item, type: "list", listName: "Groceries", priority: "low",
+          notes: `For ${meal.title}`, mealId: meal.id, source: "assistant",
+        }, ctx));
         groceryIds.push(tk.id);
       }
       // 3) Calendar event (idempotent by mealId) with the full recipe body in notes.
@@ -447,29 +446,8 @@ export const INTERNAL_FUNCTIONS = {
     },
   },
 
-  "homeops.create_list_item": {
-    id: "homeops.create_list_item",
-    name: "Add a list item",
-    action: "Write",
-    risk: "Low",
-    requiresApproval: false,
-    delivers: false,
-    connectorId: "homeops",
-    connectorName: "FamiliOS",
-    // List items (groceries, packing) are modeled as lightweight tasks of type "list".
-    async run(ctx, input) {
-      const title = String(input?.text ?? input?.title ?? "").trim();
-      if (!title) return { ok: false, error: "empty_text", message: "Nothing to add." };
-      const rec = putTask({
-        id: eid("li"), householdId: ctx.householdId, title,
-        type: "list", status: "todo", listName: input?.listName ?? "Shopping",
-        spaceId: input?.spaceId ?? "sp-family", priority: "low",
-        visibility: input?.visibility ?? "household", source: "agent",
-        createdBy: ctx.actorId, createdAt: nowISO(), updatedAt: nowISO(),
-      });
-      return { ok: true, result: { id: rec.id, title: rec.title, listName: rec.listName } };
-    },
-  },
+  /* `homeops.create_list_item` is a DECLARED action (actions/tasks.mjs) that runs on the
+   * same code as create_task with type "list"; it arrives through the spread at the bottom. */
 
   "homeops.attach_note_or_file_reference": {
     id: "homeops.attach_note_or_file_reference",

@@ -252,6 +252,27 @@ export type CreateTaskResult = {
 /** Error codes homeops.create_task can return. */
 export type CreateTaskError = "invalid_input" | "empty_title" | "invalid_dueAt" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_in_nest" | "bad_reminder";
 
+/** Input of homeops.create_list_item. Add one item to a household list — Groceries, Shopping, Packing… A list item is a lightweight task of type list, so it shows up wherever tasks do. Check the list first (famili__list_tasks) so the same item is not added twice. */
+export type CreateListItemInput = {
+  /** The item, as the family would write it on the list: Milk, AA batteries, sunscreen. */
+  text: string;
+  /** Which list (Groceries, Shopping, Packing…). Default Shopping. */
+  listName?: string;
+  /** Who can see it. Default household. nest needs nestId. */
+  visibility?: "household" | "private" | "personal" | "adults" | "nest" | "childVisible";
+  /** The nest, when visibility is nest. */
+  nestId?: string | null;
+  spaceId?: string;
+};
+
+/** Result of homeops.create_list_item. */
+export type CreateListItemResult = {
+  task: TaskRecord;
+};
+
+/** Error codes homeops.create_list_item can return. */
+export type CreateListItemError = "invalid_input" | "empty_title" | "invalid_dueAt" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_in_nest" | "bad_reminder";
+
 /** Every declared action that answers over HTTP, by id. */
 export const ACTION_ROUTES = {
   "homeops.create_event_draft": { method: "POST", path: "/api/events" },
