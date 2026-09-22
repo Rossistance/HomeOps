@@ -28,6 +28,7 @@ import {
  * time, which is what makes the cycle safe. */
 import { createHelper, updateHelper, listHelpers, publicHelper, runHelper, AUTONOMY, SCHEDULE_KINDS } from "./helpers.mjs";
 import { executeToolForChat } from "./engine.mjs";
+import { getAction } from "./actions/registry.mjs";
 import { orchestrate } from "./orchestrator.mjs";
 import {
   getRun, listEvents, getEvent, patchEvent, deleteEventRec, listTasks, getTask, patchTask, deleteTaskRec,
@@ -118,12 +119,24 @@ const KEY_HINTS = {
 // servings/replace could never be threaded). Declared here so the model can pass them.
 const EXTRA_INPUT_KEYS = {
   "homeops.plan_meal": ["recipeUrl", "instructions", "servings", "replace", "time", "notes"],
-  "homeops.create_event_draft": ["endAt", "notes"],
   "homeops.create_task": ["notes", "type", "visibility"],
   "homeops.create_list_item": ["visibility"],
   "homeops.write_memory": ["type"],
 };
 const LIST_KEYS = new Set(["items", "participantIds", "ingredients", "instructions", "whatToBring"]);
+
+/* WHICH SCHEMA THE MODEL SEES for a catalog tool. A DECLARED action (actions/*.mjs) hands
+ * over its own input schema verbatim — typed, described, one source — and the three
+ * hand-kept tables above (INTERNAL_INPUTS keys, EXTRA_INPUT_KEYS, KEY_HINTS by key name)
+ * are not consulted for it at all. Everything not yet declared still goes through the
+ * join, exactly as before. Exported so a test can assert which path a tool takes without
+ * a live model. */
+export function inputSchemaForCatalogTool(t) {
+  const action = getAction(t.toolId);
+  if (action) return action.input;
+  const inputs = t.source === "internal" ? (INTERNAL_INPUTS[t.toolId] ?? t.inputs) : t.inputs;
+  return schemaForInputs(inputs, EXTRA_INPUT_KEYS[t.toolId] ?? []);
+}
 
 function propFor(key, label) {
   const hint = KEY_HINTS[key];
@@ -186,6 +199,7 @@ function summarizeForCard(toolId, result) {
   if (!result || typeof result !== "object") return short(result);
   const r = result;
   if (r.title) return String(r.title);
+  if (r.event?.title) return String(r.event.title); // a declared action returns the record
   if (r.note) return String(r.note);
   const arr = Object.values(r).find((v) => Array.isArray(v));
   if (arr) return `${arr.length} result${arr.length === 1 ? "" : "s"}`;
@@ -674,8 +688,7 @@ function buildToolSet(ctx) {
     const name = toToolName(t.toolId);
     const entry = { id: t.toolId, label: t.name, action: t.action, connectorName: t.connectorName };
     names.set(name, entry);
-    const inputs = t.source === "internal" ? (INTERNAL_INPUTS[t.toolId] ?? t.inputs) : t.inputs;
-    const schema = schemaForInputs(inputs, EXTRA_INPUT_KEYS[t.toolId] ?? []);
+    const schema = inputSchemaForCatalogTool(t);
     const approvalNote = t.requiresApproval ? " Requires the family's approval: calling it queues the step and reports that it is waiting — nothing happens until a person approves." : "";
     tools[name] = tool({
       description: `${t.name} (${t.connectorName ?? t.connectorId}; ${t.action.toLowerCase()}, ${String(t.risk).toLowerCase()} risk).${t.description ? " " + t.description : ""}${approvalNote}`,
