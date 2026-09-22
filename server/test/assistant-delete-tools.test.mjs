@@ -20,7 +20,7 @@ import path from "node:path";
 process.env.HOMEOPS_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "familios-delete-tools-"));
 process.on("exit", () => { try { fs.rmSync(process.env.HOMEOPS_DATA_DIR, { recursive: true, force: true }); } catch { /* best effort */ } });
 
-const { startServer, stopServer, makeSession } = await import("./harness.mjs");
+const { startServer, stopServer, makeSession, readStoreDoc, writeStoreDoc } = await import("./harness.mjs");
 const { useFakeModel } = await import("./fake-model.mjs");
 
 let ctx, alex, morgan, fake;
@@ -121,6 +121,46 @@ test("A PERSONAL MEMORY CANNOT BE FORGOTTEN BY ANYONE BUT ITS OWNER — not even
 
   const own = await turn(alex, "forget my note", [{ toolCalls: [{ name: "famili__delete_memory", args: { memoryId: entry.id } }] }, { text: "ok" }]);
   assert.equal(own.data.toolCalls?.[0]?.status, "done", JSON.stringify(own.data.toolCalls));
+});
+
+/** Plant a memory row straight into the store, the way a writer other than the chat would. */
+function plantMemory(row) {
+  const all = readStoreDoc(ctx, "memory.json", []);
+  writeStoreDoc(ctx, "memory.json", [...all, { id: row.id, householdId: "local", type: "Fact", createdAt: Date.now(), ...row }]);
+}
+
+test("AN ORPHANED PERSONAL MEMORY — authored by a helper, not a person — can be cleared by an adult", async () => {
+  /* Build 76: "QA [RUN-2] memory probe" sat in personal scope under an actor that is not a
+   * member. Nobody could read it in the app, nobody could delete it, and it was going to
+   * outlive the household. Personal to nobody is not a privacy boundary; it is a leak. */
+  plantMemory({ id: "mem_orphan_qa", scope: "personal", text: "QA [RUN-2] memory probe — stored by the app QA tester", source: { runId: "run_qa", actorId: "agt_qa_helper" } });
+  assert.ok(!(await memory(morgan)).some((m) => m.id === "mem_orphan_qa"), "it is still invisible to READ — canSeeMemory is unchanged");
+  const r = await turn(morgan, "forget the QA probe", [{ toolCalls: [{ name: "famili__delete_memory", args: { memoryId: "mem_orphan_qa" } }] }, { text: "ok" }]);
+  assert.equal(r.data.toolCalls?.[0]?.status, "done", JSON.stringify(r.data.toolCalls));
+  assert.ok(!readStoreDoc(ctx, "memory.json", []).some((m) => m.id === "mem_orphan_qa"), "and it is gone from the store");
+});
+
+test("the API's DELETE follows the same predicate: an orphan yields to an adult, a person's own does not", async () => {
+  plantMemory({ id: "mem_orphan_2", scope: "personal", text: "left behind by the scheduler", source: { runId: "run_s", actorId: "scheduler" } });
+  plantMemory({ id: "mem_alex_own", scope: "personal", text: "Alex's own private note", source: { runId: "run_a", actorId: "m-alex" } });
+  assert.equal((await morgan.req("/api/memory/mem_orphan_2", { method: "DELETE" })).status, 200, "an adult clears the orphan");
+  assert.equal((await morgan.req("/api/memory/mem_alex_own", { method: "DELETE" })).status, 404, "but not a living member's personal memory — not even as 'forbidden'");
+  assert.equal((await alex.req("/api/memory/mem_alex_own", { method: "DELETE" })).status, 200, "its owner still can");
+});
+
+test("THE TASK RECORD ECHOES ITS REMINDER, so a person can see a nudge is attached before waiting for it", async () => {
+  const dueAt = new Date(Date.now() + 2 * 3600e3).toISOString();
+  const tk = (await morgan.req("/api/tasks", { method: "POST", body: JSON.stringify({ title: "QA echo", dueAt, remindOffsets: [15] }) })).data.task;
+  assert.ok(tk?.id, "task created");
+  fake.state.requests = [];
+  const r = await turn(morgan, "what's on my list?", [{ toolCalls: [{ name: "famili__list_tasks", args: { status: "open" } }] }, { text: "listed" }]);
+  assert.equal(r.data.ok, true, JSON.stringify(r.data));
+  // The tool message body is itself a JSON string; read it the way the model does.
+  const rows = toolRows(fake.state.requests[1]);
+  const listed = JSON.parse(rows[0].content).result.tasks.find((t) => t.id === tk.id);
+  assert.ok(listed, `the task is in the listing: ${String(rows[0]?.content).slice(0, 200)}`);
+  assert.equal(listed.remindMinutesBefore, 15, "the lead is visible to the model");
+  assert.deepEqual(listed.remindOffsets, [15]);
 });
 
 test("update_task through chat refuses a made-up assignee instead of assigning a ghost", async () => {

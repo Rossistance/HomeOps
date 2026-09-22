@@ -36,6 +36,8 @@ const ALSO_GOOGLE_KEY = "familios_save_also_google";
 const REMINDERS: { minutes: number | null; label: string }[] = [
   { minutes: null, label: "None" },
   { minutes: 0, label: "At the time" },
+  { minutes: 5, label: "5 min before" },
+  { minutes: 10, label: "10 min before" },
   { minutes: 15, label: "15 min before" },
   { minutes: 30, label: "30 min before" },
   { minutes: 60, label: "1 hour before" },

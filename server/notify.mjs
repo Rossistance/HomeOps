@@ -1,7 +1,7 @@
 // FamiliOS AI — push notifications (Expo). Shared by the run engine (so a run that
 // parks for approval notifies the household even with NO browser open) and by the
 // HTTP layer (API-created approvals). Fire-and-forget; never throws.
-import { getPushTokens, addNotification, appendAudit, getContactMethod, getMember, listMembers, canApprove, getSettings, getAgent } from "./store.mjs";
+import { getPushTokens, removePushToken, addNotification, appendAudit, getContactMethod, getMember, listMembers, canApprove, getSettings, getAgent } from "./store.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { executeTool, listConnectors, readinessOf } from "./connectors.mjs";
@@ -58,19 +58,48 @@ export function approvalPushTokens(approval) {
  * Deliberately NOT safeFetch: this is a fixed first-party host, not a user-supplied URL. */
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 const EXPO_TIMEOUT_MS = 8000;
+const clip = (v, n = 200) => (v == null ? undefined : String(typeof v === "string" ? v : JSON.stringify(v)).slice(0, n));
+/* EXPO ANSWERS EVERY MESSAGE WITH A TICKET — { status: "ok" } or { status: "error", message,
+ * details: { error } } — and this function used to throw the reply away. A token Expo
+ * rejected (DeviceNotRegistered, InvalidCredentials, a build signed against the wrong
+ * project) was therefore indistinguishable from a delivered push: on 2026-09-22 two
+ * reminders with valid leads went out, nothing arrived, and the server had counted both as
+ * sent. The reply is read now. `tickets: null` means Expo gave no per-message verdicts (or
+ * a test stub did), which is "nothing to judge", not "delivered". */
 async function expoPush(messages) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), EXPO_TIMEOUT_MS);
   try {
-    await fetch(EXPO_PUSH_URL, {
+    const res = await fetch(EXPO_PUSH_URL, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(messages),
       signal: ctl.signal,
     });
+    let body = null;
+    try { body = await res.json(); } catch { body = null; }
+    if (res.ok === false) return { ok: false, reason: `expo_http_${res.status}`, detail: clip(body) };
+    return { ok: true, tickets: Array.isArray(body?.data) ? body.data : null };
   } finally {
     clearTimeout(timer);
   }
+}
+/** Read the tickets against the tokens they answer (Expo replies in order). Every rejection
+ *  becomes an audit row a person can read; a device Expo says is gone is forgotten, so a dead
+ *  token stops standing in front of the live ones. */
+function judgeTickets(tokens, tickets, { householdId, actorId, purpose }) {
+  if (!tickets) return { delivered: tokens.length, rejected: [], unverified: true };
+  let delivered = 0;
+  const rejected = [];
+  tickets.forEach((t, i) => {
+    if (t?.status === "ok") { delivered++; return; }
+    const token = tokens[i];
+    const error = t?.details?.error ?? "unknown";
+    rejected.push({ error, message: clip(t?.message, 160) });
+    appendAudit({ type: "push.rejected", purpose, error, message: clip(t?.message, 300), tokenTail: token ? String(token).slice(-8) : null, householdId, actorId: actorId ?? null });
+    if (error === "DeviceNotRegistered" && token) removePushToken(token);
+  });
+  return { delivered, rejected };
 }
 
 export async function pushApprovalNotification(approval) {
@@ -78,8 +107,11 @@ export async function pushApprovalNotification(approval) {
     const tokens = approvalPushTokens(approval);
     if (!tokens.length) return { ok: false, reason: "no_tokens" };
     const body = `${approval.toolId ?? "Action"}${approval.preview ? " — " + String(approval.preview).slice(0, 80) : ""}`;
-    await expoPush(tokens.map((to) => ({ to, title: "Approval needed", body, data: { type: "approval", id: approval.id }, sound: "default", badge: 1 })));
-    return { ok: true, sent: tokens.length };
+    const r = await expoPush(tokens.map((to) => ({ to, title: "Approval needed", body, data: { type: "approval", id: approval.id }, sound: "default", badge: 1 })));
+    if (!r.ok) return { ok: false, reason: r.reason };
+    const { delivered, rejected } = judgeTickets(tokens, r.tickets, { householdId: approval.householdId ?? "local", purpose: "approval" });
+    if (!delivered) return { ok: false, reason: `expo_rejected:${rejected[0]?.error ?? "unknown"}`, rejected };
+    return { ok: true, sent: delivered, ...(rejected.length ? { rejected } : {}) };
   } catch {
     return { ok: false, reason: "send_failed" };
   }
@@ -108,12 +140,19 @@ export async function pushToMember({ householdId, actorId, title, body, data, ti
      * Focus mode WHEN the user has granted the app Time Sensitive notifications — the
      * capability is theirs to grant, so this is a request, not a promise to bypass
      * silence. Only reminders ask for it; ordinary chatter must not cry wolf. */
-    await expoPush(tokens.map((to) => ({
+    const r = await expoPush(tokens.map((to) => ({
       to, title, body: String(body ?? "").slice(0, bodyLimit), data: data ?? {}, sound: "default", badge: 1,
       ...(categoryId ? { categoryId } : {}),
       ...(timeSensitive ? { priority: "high", interruptionLevel: "timeSensitive" } : {}),
     })));
-    return { ok: true, sent: tokens.length };
+    if (!r.ok) {
+      appendAudit({ type: "push.rejected", purpose: data?.type ?? "member", error: r.reason, message: r.detail, householdId: hh, actorId });
+      return { ok: false, reason: r.reason };
+    }
+    const { delivered, rejected } = judgeTickets(tokens, r.tickets, { householdId: hh, actorId, purpose: data?.type ?? "member" });
+    // Every device rejected is a push nobody got; the reason travels up to the reminder audit.
+    if (!delivered) return { ok: false, reason: `expo_rejected:${rejected[0]?.error ?? "unknown"}`, rejected };
+    return { ok: true, sent: delivered, ...(rejected.length ? { rejected } : {}) };
   } catch {
     return { ok: false, reason: "send_failed" };
   }

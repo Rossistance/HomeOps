@@ -26,7 +26,7 @@
 //   Leaving does not delete. A thread or a list someone made stays with the nest for whoever
 //   is left; if the nest empties out it is archived, not erased.
 import crypto from "node:crypto";
-import { listNests, getNest, putNest, deleteNestRec, listMembers, appendAudit, actorInNest } from "./store.mjs";
+import { listNests, getNest, putNest, deleteNestRec, listMembers, appendAudit, actorInNest , getMember, isAdultRole } from "./store.mjs";
 
 const nid = () => "nest_" + crypto.randomBytes(8).toString("hex");
 const now = () => new Date().toISOString();
@@ -72,6 +72,20 @@ export function canSeeMemory(m, session) {
   if (m.scope === "personal") return m.source?.actorId === session.actorId;
   if (m.scope === "nest") return canSeeNest(m.nestId, session.householdId, session.actorId);
   return true;
+}
+
+/* Who may FORGET a memory: everyone who can see it — plus one case canSeeMemory cannot
+ * cover. A personal memory is owned by its author, and the App QA helper (2026-09-22) wrote
+ * one under an actor that is not a person: nobody could see it in the app, nobody could
+ * delete it, and it was going to outlive the household. A personal memory whose author is
+ * not a live member — an agent, the scheduler, someone who has left — is personal to
+ * nobody, and an adult may clear it. It is still invisible to read (canSeeMemory is
+ * unchanged); this is the one place the household may act on what it cannot see. */
+export function canForgetMemory(m, session) {
+  if (canSeeMemory(m, session)) return true;
+  if (m?.scope !== "personal" || !isAdultRole(session?.role)) return false;
+  const author = m.source?.actorId ? getMember(m.source.actorId) : null;
+  return !author || author.archived === true;
 }
 
 /** A display name for the space switcher: "GPop + Beannie", in his own example. */
