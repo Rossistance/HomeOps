@@ -100,6 +100,7 @@ import { handleFamilyMessageRoutes } from "./family-messages-routes.mjs";
 import { handleActionRoutes } from "./actions/routes.mjs";
 import { newEventRecord } from "./actions/schemas/event.mjs";
 import { newTaskRecord } from "./actions/schemas/task.mjs";
+import { syncMealGroceries } from "./actions/meals.mjs";
 import { createHelpRequest } from "./help-requests.mjs";
 import { postMessage as postFamilyMessage } from "./family-messages.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
@@ -147,7 +148,7 @@ function attachAgentRun(out) {
 }
 
 const PORT = Number(process.env.PORT || 8787);
-const VERSION = "1.2.0";
+const VERSION = "1.3.0"; // 1.3: declared actions (ADR-003) — events, tasks, list items, meals, and the reads
 
 // WP-006 s3 (connector sandbox): when HOMEOPS_CONNECTOR_SANDBOX=1, an OWNER
 // session seeds deterministic sandbox connector accounts for its household, so
@@ -3288,69 +3289,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
 
     /* ---- Meal plan (family meals) — household/visibility scoped; Limited Member+ writes.
      * Grocery items reuse tasks (type:"list", listName:"Groceries"). ---- */
-    if (path === "/api/meals" && method === "GET") {
-      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      // plan_meal's replace:true archives the meal it replaced; the planner must not show both.
-      const visible = listMeals((m) => m.householdId === g.session.householdId && !m.archived).filter((m) => canSeeEntity(m, g.session));
-      return json(res, 200, { meals: visible }, req);
-    }
-    /* P2 [09:20] — "are these ingredients automatically added to the grocery list? If not,
-     * they need to be."
-     *
-     * They were, but only when the ASSISTANT planned the meal (homeops.plan_meal). A meal a
-     * person typed in themselves never reached the list — the same recipe, added by hand,
-     * silently produced no groceries. Same behaviour both ways now.
-     *
-     * Only ingredients not already marked `have`, deduped against what is already open on the
-     * list so re-saving a meal doesn't stack a third "eggs", and linked by mealId so the
-     * grocery item can be traced back to the meal that asked for it. */
-    const syncMealGroceries = (meal, session) => {
-      const wanted = (meal.ingredients ?? []).filter((i) => i?.item && !i.have);
-      if (wanted.length === 0) return 0;
-      const norm = (x) => String(x ?? "").trim().toLowerCase();
-      const open = new Set(
-        listTasks((t) => t.householdId === session.householdId && t.type === "list" && t.listName === "Groceries" && t.status !== "done")
-          .map((t) => norm(t.title)),
-      );
-      let added = 0;
-      for (const ing of wanted) {
-        if (open.has(norm(ing.item))) continue;
-        open.add(norm(ing.item));
-        putTask(newTaskRecord({
-          title: String(ing.item).trim(), type: "list", listName: "Groceries", priority: "low",
-          visibility: meal.visibility ?? "household", mealId: meal.id, notes: `For ${meal.title}`, source: "meal",
-        }, session));
-        added++;
-      }
-      return added;
-    };
-
-    if (path === "/api/meals" && method === "POST") {
-      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!String(body.title ?? "").trim()) return json(res, 400, { error: "title_required" }, req);
-      const ingredients = Array.isArray(body.ingredients) ? body.ingredients.map((i) => (typeof i === "string" ? { item: i, have: false } : { item: String(i.item ?? ""), have: !!i.have })).filter((i) => i.item) : [];
-      const meal = putMeal({
-        id: "meal_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        date: body.date ?? null, slot: ["breakfast", "lunch", "dinner", "snack"].includes(body.slot) ? body.slot : "dinner",
-        // Optional suggested time (HH:MM) — used when pushing the meal to the calendar;
-        // slot-default times apply when unset (item 5).
-        time: typeof body.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.time) ? body.time : null,
-        title: String(body.title).trim(), notes: body.notes ?? "", ingredients, visibility: body.visibility ?? "household",
-        // Recipe metadata (Phase 3): servings is a positive integer or null; recipeUrl free-form.
-        servings: Number.isFinite(+body.servings) && +body.servings > 0 ? Math.floor(+body.servings) : null,
-        recipeUrl: typeof body.recipeUrl === "string" ? body.recipeUrl.trim() : "",
-        // Step-by-step instructions (extracted from the recipe source by web.recipe, or typed).
-        instructions: Array.isArray(body.instructions) ? body.instructions.map((s) => String(s).trim()).filter(Boolean).slice(0, 60) : [],
-        source: "user", createdBy: g.session.actorId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      });
-      const groceriesAdded = syncMealGroceries(meal, g.session);
-      audit({ type: "meal.create", mealId: meal.id, groceriesAdded, ok: true }, req, g.session);
-      // The count travels so the app can SAY what happened rather than the family finding
-      // out later, or not at all.
-      return json(res, 200, { meal, groceriesAdded }, req);
-    }
+    /* GET /api/meals and POST /api/meals are DECLARED (server/actions/meals.mjs), answered by
+     * handleActionRoutes at the top of this chain; syncMealGroceries moved there with them
+     * and is imported above for the PATCH route below. */
     const mealOne = path.match(/^\/api\/meals\/([^/]+)$/);
     if (mealOne && (method === "PATCH" || method === "POST")) {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);

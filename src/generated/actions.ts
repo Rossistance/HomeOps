@@ -161,6 +161,37 @@ export interface TaskRecord {
   updatedAt: string;
 }
 
+export interface MealRecord {
+  /** Starts with meal_. */
+  id: string;
+  householdId: string;
+  title: string;
+  /** YYYY-MM-DD, or null for an unplanned dish. */
+  date: string | null;
+  slot: "breakfast" | "lunch" | "dinner" | "snack";
+  /** HH:MM on the household's clock; the slot's default applies when null. */
+  time?: string | null;
+  notes: string;
+  ingredients: Array<{
+    item: string;
+    have: boolean;
+  }>;
+  /** Step-by-step, one step per entry. */
+  instructions?: Array<string>;
+  servings?: number | null;
+  recipeUrl?: string;
+  visibility: string;
+  nestId?: string | null;
+  /** Set when plan_meal replaced this dish; the planner hides it. */
+  archived?: boolean;
+  source: string;
+  createdBy: string;
+  /** ISO 8601. */
+  createdAt: string;
+  /** ISO 8601. */
+  updatedAt: string;
+}
+
 /** Input of homeops.create_event_draft. Create a family calendar event. From chat it lands as a draft the family reviews on the calendar; from the app it is confirmed. Give startAt as YYYY-MM-DD for an all-day event. participantIds and driverId must be member ids from the household roster (famili__list_members). */
 export type CreateEventDraftInput = {
   /** Short human title. */
@@ -295,10 +326,56 @@ export type ListTasksResult = {
 /** Error codes homeops.list_tasks can return. */
 export type ListTasksError = "invalid_input";
 
+/** Input of homeops.create_meal. Add a dish to the meal plan and put its missing ingredients on the grocery list. */
+export type CreateMealInput = {
+  /** The dish. */
+  title: string;
+  /** YYYY-MM-DD, or null for an unplanned dish. */
+  date?: string | null;
+  /** Default dinner. */
+  slot?: "breakfast" | "lunch" | "dinner" | "snack";
+  /** HH:MM; the slot's default applies when absent or malformed. */
+  time?: string | null;
+  notes?: string;
+  /** Bare strings, or { item, have }. */
+  ingredients?: Array<unknown>;
+  /** Step-by-step, one step per entry. */
+  instructions?: Array<string>;
+  /** A positive whole number of servings. Anything else is stored as null (unknown). */
+  servings?: number | string | null;
+  /** Source recipe URL, if any. Anything that is not a string is stored as empty. */
+  recipeUrl?: unknown;
+  /** Who can see it. Default household. nest needs nestId. */
+  visibility?: "household" | "private" | "personal" | "adults" | "nest" | "childVisible";
+  nestId?: string | null;
+};
+
+/** Result of homeops.create_meal. */
+export type CreateMealResult = {
+  meal: MealRecord;
+  groceriesAdded: number;
+};
+
+/** Error codes homeops.create_meal can return. */
+export type CreateMealError = "invalid_input" | "empty_title" | "not_in_nest";
+
+/** Input of homeops.list_meals. Every dish on the plan the viewer can see. A dish plan_meal replaced is archived and not shown. */
+export type ListMealsInput = Record<string, never>;
+
+/** Result of homeops.list_meals. */
+export type ListMealsResult = {
+  meals: Array<MealRecord>;
+};
+
+/** Error codes homeops.list_meals can return. */
+export type ListMealsError = "invalid_input";
+
 /** Every declared action that answers over HTTP, by id. */
 export const ACTION_ROUTES = {
   "homeops.create_event_draft": { method: "POST", path: "/api/events" },
   "homeops.create_task": { method: "POST", path: "/api/tasks" },
   "homeops.list_events": { method: "GET", path: "/api/events" },
   "homeops.list_tasks": { method: "GET", path: "/api/tasks" },
+  "homeops.create_meal": { method: "POST", path: "/api/meals" },
+  "homeops.list_meals": { method: "GET", path: "/api/meals" },
 } as const;

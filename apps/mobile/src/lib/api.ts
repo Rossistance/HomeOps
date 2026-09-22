@@ -253,11 +253,9 @@ export type TaskRec = TaskRecord;
 // Meal plan + the read-only "linked" calendar layer (ICS/Google subscriptions) —
 // same shapes as the web client (src/connectors/api.ts).
 export interface MealIngredient { item: string; have?: boolean }
-export interface Meal {
-  id: string; householdId: string; date: string | null; time?: string | null; slot: string; title: string; notes: string;
-  ingredients: MealIngredient[]; visibility: string; source: string; createdBy: string; createdAt: string; updatedAt: string;
-  servings?: number | null; recipeUrl?: string; instructions?: string[];
-}
+/* Generated from server/actions/schemas/meal.mjs, like EventRec and TaskRec. */
+import type { MealRecord } from "@/generated/actions";
+export type Meal = MealRecord;
 export interface CalendarSubscription {
   id: string; name: string; url: string | null; source: string;
   /** Per-calendar accent (name or hex) — each connected calendar's events render as distinctly colored cards. */

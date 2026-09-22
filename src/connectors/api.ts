@@ -449,7 +449,9 @@ export interface HelpRequest {
   responseNote: string | null; createdAt: string; respondedAt: string | null;
 }
 export interface MealIngredient { item: string; have?: boolean }
-export interface Meal { id: string; householdId: string; date: string | null; time?: string | null; slot: string; title: string; notes: string; ingredients: MealIngredient[]; instructions?: string[]; servings?: number | null; recipeUrl?: string; visibility: string; source: string; createdBy: string; createdAt: string; updatedAt: string }
+/* Generated from server/actions/schemas/meal.mjs, like ServerEvent and ServerTask. */
+import type { MealRecord } from "@/generated/actions";
+export type Meal = MealRecord;
 export interface ServerConversationMessage {
   role: "user" | "assistant"; text: string; kind?: string; plan?: AgentPlan | null; model?: string | null; at: string;
   /** New engine: what the turn did, and the durable run(s) an approval gate parked. */
