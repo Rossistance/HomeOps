@@ -109,6 +109,7 @@ test("INDEX.MJS NO LONGER HAND-WRITES A ROUTE A DECLARED ACTION OWNS, and dispat
   const src = await fs.promises.readFile(new URL("../index.mjs", import.meta.url), "utf8");
   assert.equal(src.includes('path === "/api/events" && method === "POST"'), false,
     "a hand-written POST /api/events would be dead code that is still read and believed");
+  assert.equal(src.includes('path === "/api/events" && method === "GET"'), false, "…and the same for the declared read");
   const seam = src.indexOf("handleActionRoutes({");
   const health = src.indexOf('path === "/api/health"');
   const limits = src.indexOf("routing order is the firewall order");

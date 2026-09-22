@@ -27,7 +27,8 @@ export async function handleActionRoutes({ req, res, path, method, url, gate, js
 
   // via:"user" is the ONLY thing the door tells the action about itself. runId/agentId are
   // null the way engine.mjs passes them for a chat turn: a person, not a run, is acting.
-  const out = await action.invoke({ householdId: g.session.householdId, actorId: g.session.actorId, runId: null, agentId: null, via: "user" }, body);
+  // role rides along for the reads, whose visibility gate (canSeeEntity) is role-aware.
+  const out = await action.invoke({ householdId: g.session.householdId, actorId: g.session.actorId, role: g.session.role, runId: null, agentId: null, via: "user" }, body);
   if (!out.ok) {
     json(res, action.errors[out.error] ?? 400, { error: out.error, message: out.message, ...(out.field ? { field: out.field } : {}) }, req);
     return true;

@@ -273,8 +273,32 @@ export type CreateListItemResult = {
 /** Error codes homeops.create_list_item can return. */
 export type CreateListItemError = "invalid_input" | "empty_title" | "invalid_dueAt" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_in_nest" | "bad_reminder";
 
+/** Input of homeops.list_events. Every event the viewer can see, with the per-viewer decorations the calendar screens need: editable, appendable, myNotes and staleSource. */
+export type ListEventsInput = Record<string, never>;
+
+/** Result of homeops.list_events. */
+export type ListEventsResult = {
+  events: Array<EventRecord>;
+};
+
+/** Error codes homeops.list_events can return. */
+export type ListEventsError = "invalid_input";
+
+/** Input of homeops.list_tasks. Every task, chore, bill and list item the viewer can see. */
+export type ListTasksInput = Record<string, never>;
+
+/** Result of homeops.list_tasks. */
+export type ListTasksResult = {
+  tasks: Array<TaskRecord>;
+};
+
+/** Error codes homeops.list_tasks can return. */
+export type ListTasksError = "invalid_input";
+
 /** Every declared action that answers over HTTP, by id. */
 export const ACTION_ROUTES = {
   "homeops.create_event_draft": { method: "POST", path: "/api/events" },
   "homeops.create_task": { method: "POST", path: "/api/tasks" },
+  "homeops.list_events": { method: "GET", path: "/api/events" },
+  "homeops.list_tasks": { method: "GET", path: "/api/tasks" },
 } as const;

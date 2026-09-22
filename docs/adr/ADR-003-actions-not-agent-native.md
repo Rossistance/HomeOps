@@ -135,8 +135,13 @@ record is why.
    2026-09-22:** `homeops.create_list_item` is a declared action on `create_task`'s run
    with type `list`, and every task writer (the grocery writers in `plan_meal` and the meals
    route, a message suggestion) goes through `newTaskRecord(fields, ctx)`, the task-side
-   twin of `newEventRecord`, guarded the same way. Still to do: meals, `GET /api/events` and
-   `GET /api/tasks` as declared reads.
+   twin of `newEventRecord`, guarded the same way. ~~`GET /api/events` / `GET /api/tasks`
+   as declared reads~~ — **done, 2026-09-22** (`server/actions/reads.mjs`): HTTP-only
+   actions (`agent: false`) whose `output` schema is what both clients' result types are
+   generated from and what the contract tests validate the whole response against. The
+   model keeps its own windowed, channel-scoped `famili.list_*` reads. Output validation
+   at runtime warns once per field and never refuses — a family's years-old rows may carry
+   a key the schema does not know. Still to do on this rung: meals.
 4. **Native `famili.*` tools bypass the policy ladder** (`assistant-agent.mjs`, the second
    loop in `buildToolSet`) while registry tools go through `executeToolForChat`. Decide
    whether native tools become actions — the next real architectural decision.
