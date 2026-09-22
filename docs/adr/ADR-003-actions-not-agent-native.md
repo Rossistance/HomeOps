@@ -118,16 +118,18 @@ record is why.
 
 ## Follow-up ladder
 
-1. **Phantom helper tools** — `INTERNAL_INPUTS` rows `homeops.list_agents / get_agent /
-   update_agent` (`server/context.mjs`) and the prompt line in `assistant-agent.mjs` name
-   tools that are not in `INTERNAL_FUNCTIONS`. Declare them as actions or delete the rows;
-   then add the guard *every `INTERNAL_INPUTS` key is an `INTERNAL_FUNCTIONS` id* (it fails
-   today, which is why it is not in this slice).
+1. ~~**Phantom helper tools**~~ — **Done, 2026-09-22.** The rows and the prompt line were
+   deleted (the real tools are the native `famili.*_helper` set), and
+   `tool-registry-consistency.test.mjs` now refuses any tool name in the prompt or the hint
+   tables that does not resolve to a registry entry or a native tool.
 2. **The other event writers** — `calendar.mjs` (ICS/Google sync), task → calendar, meal →
    calendar, `plan_meal`, `message-suggestions.mjs` — onto one `newEventRecord(fields, ctx)`
    so `EVENT_RECORD` has one writer of its defaults; `putEvent` stays a blind upsert.
-3. **Next surfaces**: tasks (`POST /api/tasks` + `homeops.create_task`), meals, list items —
-   same shape, one slice each. `GET /api/events` as a declared read.
+3. **Next surfaces**: ~~tasks~~ — **`homeops.create_task` + `POST /api/tasks` done,
+   2026-09-22** (`server/actions/tasks.mjs`, `TASK_RECORD`, `TaskRecord` generated for both
+   clients; one rule for reminders-before-a-date, the product's). Still to do: meals, list
+   items (`homeops.create_list_item` still writes a task by hand), `GET /api/events` and
+   `GET /api/tasks` as declared reads.
 4. **Native `famili.*` tools bypass the policy ladder** (`assistant-agent.mjs`, the second
    loop in `buildToolSet`) while registry tools go through `executeToolForChat`. Decide
    whether native tools become actions — the next real architectural decision.

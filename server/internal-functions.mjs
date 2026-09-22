@@ -22,20 +22,15 @@ const PRIORITIES = ["low", "medium", "high"];
 const MEAL_SLOTS = ["breakfast", "lunch", "dinner", "snack"];
 
 export const INTERNAL_FUNCTIONS = {
-  /* ---- Helper (agent) inspection + iteration --------------------------------------
-   * The assistant could not read or change a helper. It had 13 tools and all of them
-   * moved DATA — not one touched an agent. So when a family asked it to fix the briefing
-   * helper, it answered "Update agent · ag-briefing", said the change was made, and
-   * nothing happened: there was no such capability to call. Ten minutes of a recorded
-   * session went into iterating against a control that did not exist.
-   *
-   * That is the whole point of connecting a model: the intelligence layer is supposed to
-   * be able to look at a helper, understand what it is doing wrong, and change it. These
-   * three tools give it eyes and hands on the helpers themselves.
-   *
-   * Editing a helper's standing instructions changes what it will do UNATTENDED later, so
-   * update is approval-gated — the family sees the before/after and signs off. Reading is
-   * free.
+  /* ---- Helper (agent) inspection + iteration is NOT in this registry ----------------
+   * The assistant once could not read or change a helper: it had 13 tools and all of them
+   * moved DATA, so when a family asked it to fix the briefing helper it answered "Update
+   * agent · ag-briefing", said the change was made, and nothing happened. The fix landed
+   * as the native famili.list_helpers / create_helper / update_helper / run_helper tools in
+   * assistant-agent.mjs (adult-gated, personal channel) — but a comment here, three
+   * INTERNAL_INPUTS rows and a prompt line kept describing a homeops.* trio that never
+   * existed, and the model was still being told to call it. Those are gone;
+   * tool-registry-consistency.test.mjs keeps them gone.
    */
   "homeops.find_places": {
     id: "homeops.find_places",
@@ -282,41 +277,9 @@ export const INTERNAL_FUNCTIONS = {
     },
   },
 
-  "homeops.create_task": {
-    id: "homeops.create_task",
-    name: "Create a task",
-    action: "Write",
-    risk: "Low",
-    requiresApproval: false,
-    delivers: false,
-    connectorId: "homeops",
-    connectorName: "FamiliOS",
-    async run(ctx, input) {
-      const title = String(input?.title ?? "").trim();
-      if (!title) return { ok: false, error: "empty_title", message: "A task needs a title." };
-      if (badStamp(input?.dueAt)) return { ok: false, error: "invalid_dueAt", message: "dueAt isn't a valid date/time — use ISO 8601 or YYYY-MM-DD." };
-      if (input?.priority != null && input.priority !== "" && !PRIORITIES.includes(input.priority)) return { ok: false, error: "bad_priority", message: "priority must be low, medium or high." };
-      { const ghost = unknownMember(input?.assignedMemberId); if (ghost) return { ok: false, error: "unknown_member", message: ghostMessage(ghost) }; }
-      /* A reminder set at creation. The sweep (reminders.mjs) reads remindOffsets, so the
-       * same shape POST /api/tasks writes is written here — a lead the app does not offer is
-       * refused rather than stored as a nudge that never fires, and a lead with nothing to
-       * count back from is refused for the same reason. */
-      const remind = input?.remindMinutesBefore == null || input?.remindMinutesBefore === "" ? null : Number(input.remindMinutesBefore);
-      if (remind !== null && !isValidReminder(remind)) return { ok: false, error: "bad_reminder", message: "Pick a reminder lead the app offers: 0 (at the time), 15, 30, 60 or 1440 minutes." };
-      if (remind !== null && !input?.dueAt) return { ok: false, error: "reminder_needs_time", message: "A reminder needs a dueAt to count back from — set the due date and time too." };
-      const rec = putTask({
-        id: eid("tk"), householdId: ctx.householdId, title,
-        type: input?.type ?? "task", status: "todo", dueAt: input?.dueAt ?? null,
-        assignedMemberId: input?.assignedMemberId ?? null, spaceId: input?.spaceId ?? "sp-family",
-        priority: input?.priority ?? "medium", amount: input?.amount ?? null,
-        visibility: input?.visibility ?? "household", notes: input?.notes ?? "",
-        remindMinutesBefore: remind, remindOffsets: remind === null ? [] : [remind], remindersSent: [],
-        source: "agent", createdBy: ctx.actorId, createdByAgentId: input?.agentId ?? null,
-        createdAt: nowISO(), updatedAt: nowISO(),
-      });
-      return { ok: true, result: { id: rec.id, title: rec.title, type: rec.type, ...(remind === null ? {} : { remindMinutesBefore: remind }) } };
-    },
-  },
+  /* `homeops.create_task` is a DECLARED action (actions/tasks.mjs); it arrives through the
+   * ...ACTION_INTERNAL_FUNCTIONS spread at the bottom. create_list_item below still writes
+   * a task by hand — next on the ladder. */
 
   "homeops.plan_meal": {
     id: "homeops.plan_meal",

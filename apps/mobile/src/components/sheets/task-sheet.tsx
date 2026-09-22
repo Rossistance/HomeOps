@@ -67,7 +67,7 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
   const [assignee, setAssignee] = useState<string | null>(null);
-  const [priority, setPriority] = useState("medium");
+  const [priority, setPriority] = useState<TaskRec["priority"]>("medium");
   const [scheduled, setScheduled] = useState(false);
   const [start, setStart] = useState<Date>(nextHalfHour);
   const [hasEnd, setHasEnd] = useState(false);
@@ -315,7 +315,7 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
         <View style={{ gap: 6 }}>
           <T kind="eyebrow">Priority</T>
           <ChipRow>
-            {["low", "medium", "high"].map((p) => (
+            {(["low", "medium", "high"] as const).map((p) => (
               <Chip key={p} label={p[0].toUpperCase() + p.slice(1)} selected={priority === p} onPress={canEdit ? () => setPriority(p) : undefined} />
             ))}
           </ChipRow>

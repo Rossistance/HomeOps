@@ -3104,54 +3104,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const visible = listTasks((t) => t.householdId === g.session.householdId).filter((t) => canSeeEntity(t, g.session));
       return json(res, 200, { tasks: visible }, req);
     }
-    if (path === "/api/tasks" && method === "POST") {
-      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!String(body.title ?? "").trim()) return json(res, 400, { error: "title_required" }, req);
-      // H2 [21:49] — "it should have a start date and time and an end date and time, like a
-      // calendar item, not just today/tomorrow/next week." Validated the same way events are:
-      // an unparseable stamp is refused here rather than stored and rendered as "Invalid Date".
-      for (const k of ["startAt", "endAt", "dueAt"]) {
-        if (badTimestamp(body[k])) return json(res, 400, { error: "bad_timestamp", message: `"${k}" isn't a valid date and time.` }, req);
-      }
-      // H5 [22:19] — "reminders: 15 minutes before, 30 minutes before, producing a real
-      // notification." Only the offsets the UI offers are storable, so nothing can be set
-      // that no screen can show or explain.
-      if (body.remindMinutesBefore !== undefined && !isValidReminder(body.remindMinutesBefore)) {
-        return json(res, 400, { error: "bad_reminder" }, req);
-      }
-      // Cluster N — "I need to be able to select both of them… all of them if need be."
-      if (body.remindOffsets !== undefined && !isValidReminderList(body.remindOffsets)) {
-        return json(res, 400, { error: "bad_reminder", message: "Pick reminder times from the offered list." }, req);
-      }
-      /* Was: a nest you're not in silently became "private", so the task existed but not
-       * where you put it. Refusing says so. Same helper as knowledge and the same three
-       * scopes, which is what "throughout the app" has to mean to be worth anything. */
-      const tkVis = resolveVisibility(body.visibility, body.nestId, g.session);
-      if (!tkVis) return json(res, 403, { error: "not_in_nest", message: "You can only put this in a nest you're part of." }, req);
-      const tk = putTask({
-        id: "tk_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        title: String(body.title).trim(), type: body.type ?? "task", status: body.status ?? "todo",
-        dueAt: body.dueAt ?? null, assignedMemberId: body.assignedMemberId ?? null, spaceId: body.spaceId ?? "sp-family",
-        priority: body.priority ?? "medium",
-        amount: body.amount ?? null,
-        /* T1 — "their own grocery list and task list… isolated from the broader family
-         * group." Grocery items ARE tasks (type:"list", listName:"Groceries"), so scoping
-         * tasks to a nest gives him both lists in one move. Membership is checked here:
-         * naming a nest you aren't in doesn't put your task in it, it just makes it yours. */
-        ...tkVis,
-        listName: body.listName ?? undefined,
-        startAt: body.startAt ?? null, endAt: body.endAt ?? null,
-        remindMinutesBefore: body.remindMinutesBefore ?? (Array.isArray(body.remindOffsets) && body.remindOffsets.length ? body.remindOffsets[0] : null),
-        remindOffsets: Array.isArray(body.remindOffsets) ? [...new Set(body.remindOffsets)] : undefined,
-        remindersSent: [], reminderSentAt: null,
-        notes: body.notes ?? "", source: "user", createdBy: g.session.actorId,
-        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      });
-      audit({ type: "task.create", taskId: tk.id, ok: true }, req, g.session);
-      return json(res, 200, { task: tk }, req);
-    }
+    /* POST /api/tasks is a DECLARED action (server/actions/tasks.mjs), answered by
+     * handleActionRoutes at the top of this chain with via:"user" — the same run the
+     * homeops.create_task tool uses. action-routes-tasks.test.mjs forbids a copy here. */
     const taskOne = path.match(/^\/api\/tasks\/([^/]+)$/);
     if (taskOne && (method === "PATCH" || method === "POST")) {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);

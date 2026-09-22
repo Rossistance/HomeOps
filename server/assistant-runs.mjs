@@ -370,7 +370,8 @@ export function buildResultLinks(run) {
   const links = [];
   for (const s of run.steps ?? []) {
     if (!SUCCESS_STATUSES.includes(s.status)) continue;
-    const id = s.result?.id;
+    // A declared action returns the whole record ({ task }); the older tools a flat id.
+    const id = s.result?.id ?? s.result?.task?.id;
     if (!id || typeof id !== "string") continue;
     if (Object.prototype.hasOwnProperty.call(TASK_LINK_LABEL, s.toolId)) {
       links.push({ kind: "task", id, label: TASK_LINK_LABEL[s.toolId] });

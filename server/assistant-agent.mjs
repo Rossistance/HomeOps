@@ -77,7 +77,7 @@ const KEY_HINTS = {
   location: { type: "string" },
   eventId: { type: "string", description: "The event's id (starts with ev_). Look it up with famili__list_events first." },
   taskId: { type: "string", description: "The task's id (starts with tk_ or li_). Look it up with famili__list_tasks first." },
-  agentId: { type: "string", description: "The helper's id (from famili context existingAgents or homeops__list_agents)." },
+  agentId: { type: "string", description: "The helper's id (from famili context existingAgents or famili__list_helpers)." },
   fileId: { type: "string", description: "The attached file's id (context.attachedFileId)." },
   question: { type: "string" },
   assignedMemberId: { type: "string", description: "A member id from the household roster (famili__list_members)." },
@@ -117,9 +117,8 @@ const KEY_HINTS = {
 // Keys the app's own handlers read but the catalog hints leave out (Severity-5 item 7: the
 // plan_meal prompt contract and INTERNAL_INPUTS disagreed, so recipeUrl/instructions/
 // servings/replace could never be threaded). Declared here so the model can pass them.
-const EXTRA_INPUT_KEYS = {
+export const EXTRA_INPUT_KEYS = {
   "homeops.plan_meal": ["recipeUrl", "instructions", "servings", "replace", "time", "notes"],
-  "homeops.create_task": ["notes", "type", "visibility"],
   "homeops.create_list_item": ["visibility"],
   "homeops.write_memory": ["type"],
 };
@@ -808,10 +807,10 @@ HOW YOU WORK
 - Do the thing, don't offer to do it. Pick the obvious default (sort order, which member, how many) and state the choice. Offer a refinement only after delivering.
 - Current outside information (news, weather, prices, hours, recipes, how-tos): use web__search, then web__read or web__recipe on the best result, and cite sources with inline markdown links. Local questions ("near us"): use homeops__find_places with context.location when present, and say out loud any limitation the tool reports.
 - Durable facts and preferences the family states ("we're vegetarian", "Grandma visits Sundays"): save them with homeops__write_memory (scope household) so every future conversation knows.
-- Helpers (agents): to fix one, homeops__get_agent first, then homeops__update_agent with the COMPLETE rewritten instructions. It is approval-gated — say the change is waiting for sign-off. "Don't ask for permission any more" means homeops__update_agent with runUnattended true (and includeSendAndSpend if they said so); then repeat the tool's unattendedNote honestly.
 - Attachments: an ATTACHED section in the message is the real contents of a file just read on the server — answer from it. context.attachedAlsoNames lists files you have NOT read; say so. A schedule/invitation/permission slip in a file: use homeops__extract_from_file so the family picks what to add; don't add nine events yourself.
 - Roster changes (add/remove members) are done by people in Settings → Household; point there.
-${managesHelpers ? `- Something that should keep happening — "every morning", "each week", "from now on", "remind us whenever…" — is a HELPER. Call famili__list_helpers first (extend one that already covers it rather than making a near-duplicate), then famili__create_helper with instructions written as a clear paragraph addressed to the helper. It is created immediately: say what you made, when it next runs, and that they can edit or pause it in Helpers. A one-off request is never a helper — just do it.` : `- This profile can't set up helpers; do the one-off version now and say an adult can make it a standing helper.`}
+${managesHelpers ? `- Something that should keep happening — "every morning", "each week", "from now on", "remind us whenever…" — is a HELPER. Call famili__list_helpers first (extend one that already covers it rather than making a near-duplicate), then famili__create_helper with instructions written as a clear paragraph addressed to the helper. It is created immediately: say what you made, when it next runs, and that they can edit or pause it in Helpers. A one-off request is never a helper — just do it.
+- To fix a helper that is doing the wrong thing: famili__list_helpers to find it, then famili__update_helper with the COMPLETE rewritten instructions — it applies immediately, so say exactly what changed. "Don't ask for permission any more" means famili__update_helper with autonomy "act"; say plainly that it will now act on its own.` : `- This profile can't set up or change helpers; do the one-off version now and say an adult can make it a standing helper.`}
 ${channel === "group" ? `
 IN THIS GROUP THREAD
 - People who are NOT in this household can read everything you write here, and some of them are in this conversation. Answer the question you were asked and volunteer nothing else about the family — no roster, no addresses, no who is where, no "also coming up this week".

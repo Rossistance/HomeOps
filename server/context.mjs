@@ -35,7 +35,6 @@ export const INTERNAL_INPUTS = {
   // remindMinutesBefore: "set a reminder" said in the same breath as "add a task" used to be
   // silently dropped — only the UPDATE tool could carry a lead, so a task created by Famili
   // never nudged anyone (2026-09-22: a "notification test" task that could not have fired).
-  "homeops.create_task": [{ key: "title", required: true }, { key: "dueAt" }, { key: "assignedMemberId" }, { key: "priority" }, { key: "notes" }, { key: "remindMinutesBefore" }],
   "homeops.create_list_item": [{ key: "text", required: true }, { key: "listName" }],
   // The prompt contract and this schema used to disagree: recipeUrl/instructions/servings/
   // replace were read by the handler and named in the prompt, but never declared here — so
@@ -54,15 +53,12 @@ export const INTERNAL_INPUTS = {
   "homeops.extract_from_file": [{ key: "fileId", required: true }],
   // K4 — real places, with the family's coordinates when the app supplied them.
   "homeops.find_places": [{ key: "query", required: true }, { key: "lat" }, { key: "lng" }, { key: "limit" }],
-  // Helper inspection + iteration — the whole point of having a model behind this.
-  "homeops.list_agents": [],
-  "homeops.get_agent": [{ key: "agentId", required: true }],
-  "homeops.update_agent": [
-    { key: "agentId", required: true }, { key: "name" }, { key: "purpose" }, { key: "instructions" }, { key: "status" },
-    // G5: "don't ask for permission, you have approval" — said in chat, so it has to be
-    // reachable from chat. includeSendAndSpend only lands for an Owner/Adult Admin.
-    { key: "runUnattended" }, { key: "includeSendAndSpend" },
-  ],
+  /* Helper inspection + iteration is NOT here. It lives as the native famili.list_helpers /
+   * create_helper / update_helper / run_helper tools in assistant-agent.mjs (adult-gated,
+   * personal channel). Three rows for homeops.list_agents / get_agent / update_agent sat
+   * here for months naming tools that did not exist in INTERNAL_FUNCTIONS, and the prompt
+   * told the model to call them; tool-registry-consistency.test.mjs now refuses a row
+   * without a tool. */
 };
 
 export const ICONS = ["Bot", "Sun", "Mail", "Inbox", "Calendar", "Receipt", "CreditCard", "UtensilsCrossed", "Plane", "Stethoscope", "Wrench", "HeartHandshake", "FolderOpen", "PawPrint", "Gift", "Search", "ShoppingCart", "Bell", "ShieldCheck", "FileText", "Globe", "MessageSquare", "ListChecks"];

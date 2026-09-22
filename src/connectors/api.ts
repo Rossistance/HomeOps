@@ -424,12 +424,11 @@ export interface AssistantResult {
  * no screen import changes. */
 import type { EventRecord } from "@/generated/actions";
 export type ServerEvent = EventRecord;
-export interface ServerTask {
-  id: string; householdId: string; title: string; type: string; status: string; dueAt: string | null;
-  assignedMemberId: string | null; spaceId: string; priority: string; amount: number | null;
-  visibility: string; notes: string; listName?: string; source: string; createdBy: string;
-  createdAt: string; updatedAt: string; mealId?: string | null;
-}
+/* Generated from server/actions/schemas/task.mjs, like ServerEvent. The hand-written
+ * interface said dueAt/assignedMemberId/amount/notes were always present; a list item
+ * never had them. */
+import type { TaskRecord } from "@/generated/actions";
+export type ServerTask = TaskRecord;
 export interface ServerMember { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean; color?: string | null; photoFileId?: string | null; aiEnabled?: boolean }
 export interface CalendarSubscription { id: string; name: string; url: string | null; source: string; lastSyncAt: number | null; lastResult: { imported?: number; updated?: number; removed?: number; error?: string } | null; eventCount: number; createdAt: number; accountId?: string | null; accountEmail?: string | null; ownerActorId?: string | null; ownerName?: string | null }
 export interface CalendarSync { ok: boolean; imported?: number; updated?: number; removed?: number; total?: number; error?: string }
