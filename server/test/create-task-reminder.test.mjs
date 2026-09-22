@@ -23,7 +23,7 @@ process.on("exit", () => { try { fs.rmSync(process.env.HOMEOPS_DATA_DIR, { recur
 const { INTERNAL_FUNCTIONS } = await import("../internal-functions.mjs");
 const { INTERNAL_INPUTS } = await import("../context.mjs");
 const { sweepTaskReminders } = await import("../reminders.mjs");
-const { getTask, addPushToken, runWithTenant } = await import("../store.mjs");
+const { getTask, addPushToken, runWithTenant, readAudit } = await import("../store.mjs");
 
 const HH = "local";
 const T = (fn) => runWithTenant(HH, fn);
@@ -98,6 +98,22 @@ test("a lead with no time to count back from is refused with a reason the model 
   const r = await create({ title: "No time", remindMinutesBefore: 15 });
   assert.equal(r.ok, false);
   assert.equal(r.error, "reminder_needs_time");
+});
+
+test("A REMINDER NOBODY COULD RECEIVE IS WRITTEN DOWN, WITH WHY — the sweep no longer fails silently", async () => {
+  /* The other half of the 2026-09-22 investigation: the first question was whether a push
+   * had been attempted at all, and the server could not answer it — a failed send was
+   * swallowed into `skipped`. Now it is an audit row a person can read. */
+  const dueAt = new Date(Date.now() + 20 * 60_000).toISOString();
+  const r = await create({ title: "Pick up the dry cleaning", dueAt, remindMinutesBefore: 30, assignedMemberId: "m-nobody-with-a-phone" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const out = await T(() => sweepTaskReminders());
+  assert.ok(out.skipped >= 1, JSON.stringify(out));
+  const rows = await T(() => readAudit(50));
+  const row = rows.find((a) => a.type === "reminder.push_failed" && a.taskId === r.result.id);
+  assert.ok(row, `an audit row names the task: ${JSON.stringify(rows.map((a) => a.type))}`);
+  assert.equal(row.reason, "no_tokens", "and says the actual reason — this member has no registered device");
+  assert.equal(row.actorId, "m-nobody-with-a-phone");
 });
 
 test("a task without a reminder is unchanged: no offsets, no lead, still created", async () => {
