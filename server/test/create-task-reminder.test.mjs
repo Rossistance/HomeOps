@@ -24,8 +24,11 @@ const { INTERNAL_FUNCTIONS } = await import("../internal-functions.mjs");
 const { INTERNAL_INPUTS } = await import("../context.mjs");
 const { sweepTaskReminders } = await import("../reminders.mjs");
 const { getTask, addPushToken, runWithTenant, readAudit } = await import("../store.mjs");
+const { seedDefaults } = await import("../seed.mjs");
 
 const HH = "local";
+// The create tool refuses an assignee who is not on the roster; seed the roster it checks.
+await runWithTenant(HH, () => seedDefaults());
 const T = (fn) => runWithTenant(HH, fn);
 const ctx = { householdId: HH, actorId: "m-alex", runId: "run_test" };
 const create = (input) => T(() => INTERNAL_FUNCTIONS["homeops.create_task"].run(ctx, input));
@@ -105,7 +108,8 @@ test("A REMINDER NOBODY COULD RECEIVE IS WRITTEN DOWN, WITH WHY — the sweep no
    * had been attempted at all, and the server could not answer it — a failed send was
    * swallowed into `skipped`. Now it is an audit row a person can read. */
   const dueAt = new Date(Date.now() + 20 * 60_000).toISOString();
-  const r = await create({ title: "Pick up the dry cleaning", dueAt, remindMinutesBefore: 30, assignedMemberId: "m-nobody-with-a-phone" });
+  // Lily is on the roster but has never registered a device.
+  const r = await create({ title: "Pick up the dry cleaning", dueAt, remindMinutesBefore: 30, assignedMemberId: "m-lily" });
   assert.equal(r.ok, true, JSON.stringify(r));
   const out = await T(() => sweepTaskReminders());
   assert.ok(out.skipped >= 1, JSON.stringify(out));
@@ -113,7 +117,7 @@ test("A REMINDER NOBODY COULD RECEIVE IS WRITTEN DOWN, WITH WHY — the sweep no
   const row = rows.find((a) => a.type === "reminder.push_failed" && a.taskId === r.result.id);
   assert.ok(row, `an audit row names the task: ${JSON.stringify(rows.map((a) => a.type))}`);
   assert.equal(row.reason, "no_tokens", "and says the actual reason — this member has no registered device");
-  assert.equal(row.actorId, "m-nobody-with-a-phone");
+  assert.equal(row.actorId, "m-lily");
 });
 
 test("a task without a reminder is unchanged: no offsets, no lead, still created", async () => {

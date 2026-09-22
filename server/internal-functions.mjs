@@ -21,6 +21,19 @@ const nowISO = () => new Date().toISOString();
 const badStamp = (v) => v != null && v !== "" && Number.isNaN(+new Date(v));
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MEMORY_SCOPES = ["household", "personal", "nest"];
+const PRIORITIES = ["low", "medium", "high"];
+const MEAL_SLOTS = ["breakfast", "lunch", "dinner", "snack"];
+/* A member id the model made up used to be stored as-is — an event with a participant
+ * nobody can see, a task assigned to a ghost, a driver who does not exist (found by the
+ * App QA helper, 2026-09-22, alongside priority "urgent" and meal slot "brunch", all
+ * accepted without a word). The roster is the only source of ids (famili__list_members);
+ * an id that is not on it is refused with a reason the model can act on. */
+const unknownMember = (id) => {
+  if (id == null || id === "") return null;
+  const m = getMember(String(id));
+  return m && !m.archived ? null : String(id);
+};
+const ghostMessage = (id) => `No household member has the id "${id}" — list members to find the right one.`;
 
 export const INTERNAL_FUNCTIONS = {
   /* ---- Helper (agent) inspection + iteration --------------------------------------
@@ -237,6 +250,11 @@ export const INTERNAL_FUNCTIONS = {
       if (!title) return { ok: false, error: "empty_title", message: "An event needs a title." };
       if (badStamp(input?.startAt)) return { ok: false, error: "invalid_startAt", message: "startAt isn't a valid date/time — use ISO 8601 (e.g. 2026-09-14T17:00:00-04:00) or YYYY-MM-DD for an all-day event." };
       if (badStamp(input?.endAt)) return { ok: false, error: "invalid_endAt", message: "endAt isn't a valid date/time." };
+      for (const id of Array.isArray(input?.participantIds) ? input.participantIds : []) {
+        const ghost = unknownMember(id);
+        if (ghost) return { ok: false, error: "unknown_member", message: ghostMessage(ghost) };
+      }
+      { const ghost = unknownMember(input?.driverId); if (ghost) return { ok: false, error: "unknown_member", message: ghostMessage(ghost) }; }
       const tz = householdTimeZone(ctx.householdId);
       // A date-only start means "that whole day" — an all-day event anchored to the
       // household's midnight, never the server's (which is how a US family's all-day
@@ -245,6 +263,10 @@ export const INTERNAL_FUNCTIONS = {
       const allDay = input?.allDay === true || dateOnly;
       const startAt = dateOnly ? localMidnightISO(input.startAt, tz) : (input?.startAt ?? null);
       const endAt = input?.endAt ? (DATE_ONLY_RE.test(String(input.endAt)) ? localMidnightISO(input.endAt, tz) : input.endAt) : null;
+      // An end BEFORE the start used to be dropped to null without a word; the model then
+      // told the family the event ran 3–5 when it had no end at all. (Equal is still
+      // treated as "no end" — a same-day all-day event arrives that way.)
+      if (endAt && startAt && Date.parse(endAt) < Date.parse(startAt)) return { ok: false, error: "end_before_start", message: "endAt is before startAt — give the end time after the start, or leave it out." };
       const rec = putEvent({
         id: eid("ev"), householdId: ctx.householdId, title,
         startAt, endAt: endAt && startAt && Date.parse(endAt) > Date.parse(startAt) ? endAt : null, allDay,
@@ -332,6 +354,8 @@ export const INTERNAL_FUNCTIONS = {
       const title = String(input?.title ?? "").trim();
       if (!title) return { ok: false, error: "empty_title", message: "A task needs a title." };
       if (badStamp(input?.dueAt)) return { ok: false, error: "invalid_dueAt", message: "dueAt isn't a valid date/time — use ISO 8601 or YYYY-MM-DD." };
+      if (input?.priority != null && input.priority !== "" && !PRIORITIES.includes(input.priority)) return { ok: false, error: "bad_priority", message: "priority must be low, medium or high." };
+      { const ghost = unknownMember(input?.assignedMemberId); if (ghost) return { ok: false, error: "unknown_member", message: ghostMessage(ghost) }; }
       /* A reminder set at creation. The sweep (reminders.mjs) reads remindOffsets, so the
        * same shape POST /api/tasks writes is written here — a lead the app does not offer is
        * refused rather than stored as a nudge that never fires, and a lead with nothing to
@@ -374,6 +398,9 @@ export const INTERNAL_FUNCTIONS = {
     async run(ctx, input) {
       const title = String(input?.title ?? "").trim();
       if (!title) return { ok: false, error: "empty_title", message: "A meal needs a title." };
+      // "brunch" used to become dinner and servings:0 used to become null, both silently.
+      if (input?.slot != null && input.slot !== "" && !MEAL_SLOTS.includes(input.slot)) return { ok: false, error: "bad_slot", message: "slot must be breakfast, lunch, dinner or snack." };
+      if (input?.servings != null && input.servings !== "" && !(Number.isFinite(+input.servings) && +input.servings > 0)) return { ok: false, error: "bad_servings", message: "servings must be a whole number greater than zero." };
       const now = nowISO();
       let ingredients = (Array.isArray(input?.ingredients) ? input.ingredients : [])
         .map((i) => (typeof i === "string" ? { item: i.trim(), have: false } : { item: String(i.item ?? "").trim(), have: !!i.have }))
