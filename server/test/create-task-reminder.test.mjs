@@ -36,10 +36,13 @@ const create = (input) => T(() => INTERNAL_FUNCTIONS["homeops.create_task"].run(
 // Capture what would have gone to Expo instead of sending it.
 const realFetch = globalThis.fetch;
 let sent = [];
+/** What "Expo" replies. `{}` carries no tickets — nothing to judge; a test that wants a
+ *  verdict sets `{ data: [{ status, message, details }] }`, Expo's real shape. */
+let expoReply = {};
 before(() => {
   globalThis.fetch = async (_url, init) => {
     sent.push(JSON.parse(init.body));
-    return { ok: true, status: 200, headers: { get: () => null }, body: null, text: async () => "{}" };
+    return { ok: true, status: 200, headers: { get: () => null }, body: null, text: async () => "{}", json: async () => expoReply };
   };
 });
 after(() => { globalThis.fetch = realFetch; });
@@ -118,6 +121,41 @@ test("A REMINDER NOBODY COULD RECEIVE IS WRITTEN DOWN, WITH WHY — the sweep no
   assert.ok(row, `an audit row names the task: ${JSON.stringify(rows.map((a) => a.type))}`);
   assert.equal(row.reason, "no_tokens", "and says the actual reason — this member has no registered device");
   assert.equal(row.actorId, "m-lily");
+});
+
+test("EXPO'S VERDICT IS READ: a token Expo rejects is a failed push, named in the audit, and forgotten", async () => {
+  /* Build 76, 2026-09-22: two reminders with valid leads, the sweep counted both as sent,
+   * nothing arrived, and nothing on the server could say why — the reply from Expo was
+   * discarded unread. This is the shape that would have answered the question in one glance. */
+  const { getPushTokens } = await import("../store.mjs");
+  await T(() => addPushToken("ExponentPushToken[dead]", { householdId: HH, actorId: "m-morgan" }));
+  const dueAt = new Date(Date.now() + 20 * 60_000).toISOString();
+  const r = await create({ title: "Renew the tags", dueAt, remindMinutesBefore: 30, assignedMemberId: "m-morgan" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  expoReply = { data: [{ status: "error", message: "\"ExponentPushToken[dead]\" is not a registered push notification recipient", details: { error: "DeviceNotRegistered" } }] };
+  try {
+    sent = [];
+    const out = await T(() => sweepTaskReminders());
+    assert.equal(sent.length, 1, "the push was attempted");
+    assert.equal(out.sent, 0, `…but Expo's rejection makes it a failure, not a send: ${JSON.stringify(out)}`);
+    const rows = await T(() => readAudit(100));
+    const rejected = rows.find((a) => a.type === "push.rejected" && a.error === "DeviceNotRegistered");
+    assert.ok(rejected, `Expo's own reason is in the audit: ${JSON.stringify(rows.map((a) => a.type))}`);
+    assert.equal(rejected.tokenTail, "en[dead]", "which device, without the whole token");
+    const failed = rows.find((a) => a.type === "reminder.push_failed" && a.taskId === r.result.id);
+    assert.equal(failed?.reason, "expo_rejected:DeviceNotRegistered", "and the reminder row carries it up");
+    assert.ok(!(await T(() => getPushTokens())).some((t) => t.token === "ExponentPushToken[dead]"), "a device Expo says is gone is forgotten");
+  } finally { expoReply = {}; }
+});
+
+test("a reply with no tickets is 'nothing to judge', not a failure — the sweep's own tests rely on that", async () => {
+  await T(() => addPushToken("ExponentPushToken[alex]", { householdId: HH, actorId: "m-alex" }));
+  const dueAt = new Date(Date.now() + 20 * 60_000).toISOString();
+  const r = await create({ title: "Sharpen the mower", dueAt, remindMinutesBefore: 30 });
+  assert.equal(r.ok, true);
+  expoReply = {};
+  const out = await T(() => sweepTaskReminders());
+  assert.ok(out.sent >= 1, JSON.stringify(out));
 });
 
 test("a task without a reminder is unchanged: no offsets, no lead, still created", async () => {
