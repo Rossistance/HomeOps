@@ -340,7 +340,15 @@ export default function CalendarScreen() {
     }
     return map;
   }, [upcoming, todayKey, householdTz]);
-  const dayKeys = useMemo(() => Object.keys(byDay).filter((k) => k !== "undated").sort(), [byDay]);
+  /* H6, the half that was missing. The day list came from EVENTS alone, so a dated task on a
+   * day with no event rendered nowhere: the agenda said "Nothing on the calendar" over three
+   * tasks due that morning, and "tasks only show on the calendar if tied to an event" got
+   * offered as an explanation (2026-09-22). A day that holds only tasks is a day with plans. */
+  const dayKeys = useMemo(() => {
+    const keys = new Set(Object.keys(byDay).filter((k) => k !== "undated"));
+    for (const k of Object.keys(tasksByDay)) if (k >= todayKey) keys.add(k);
+    return [...keys].sort();
+  }, [byDay, tasksByDay, todayKey]);
   const strip = useMemo(() => Array.from({ length: STRIP_DAYS }, (_, i) => {
     const d = new Date(); d.setDate(d.getDate() + i); return d;
   }), []);
@@ -537,7 +545,7 @@ export default function CalendarScreen() {
             const k = dayKey(d);
             const isToday = k === todayKey;
             const isSelected = k === selectedDay;
-            const hasEvents = (byDay[k]?.length ?? 0) > 0;
+            const hasEvents = (byDay[k]?.length ?? 0) > 0 || (tasksByDay[k]?.length ?? 0) > 0;
             const bg = isSelected ? colors.ember : isToday ? colors.emberBg : colors.surface;
             const fg = isSelected ? colors.onEmber : isToday ? colors.ember : colors.textSecondary;
             return (
@@ -748,7 +756,7 @@ export default function CalendarScreen() {
               ) : null}
               <SectionHeader title={dayTitle(k, todayKey)} />
               <View style={{ gap: spacing.sm }}>
-                {byDay[k].map((e) => (
+                {(byDay[k] ?? []).map((e) => (
                   <EventItem
                     key={e.id}
                     e={e}
