@@ -22,20 +22,15 @@ const PRIORITIES = ["low", "medium", "high"];
 const MEAL_SLOTS = ["breakfast", "lunch", "dinner", "snack"];
 
 export const INTERNAL_FUNCTIONS = {
-  /* ---- Helper (agent) inspection + iteration --------------------------------------
-   * The assistant could not read or change a helper. It had 13 tools and all of them
-   * moved DATA — not one touched an agent. So when a family asked it to fix the briefing
-   * helper, it answered "Update agent · ag-briefing", said the change was made, and
-   * nothing happened: there was no such capability to call. Ten minutes of a recorded
-   * session went into iterating against a control that did not exist.
-   *
-   * That is the whole point of connecting a model: the intelligence layer is supposed to
-   * be able to look at a helper, understand what it is doing wrong, and change it. These
-   * three tools give it eyes and hands on the helpers themselves.
-   *
-   * Editing a helper's standing instructions changes what it will do UNATTENDED later, so
-   * update is approval-gated — the family sees the before/after and signs off. Reading is
-   * free.
+  /* ---- Helper (agent) inspection + iteration is NOT in this registry ----------------
+   * The assistant once could not read or change a helper: it had 13 tools and all of them
+   * moved DATA, so when a family asked it to fix the briefing helper it answered "Update
+   * agent · ag-briefing", said the change was made, and nothing happened. The fix landed
+   * as the native famili.list_helpers / create_helper / update_helper / run_helper tools in
+   * assistant-agent.mjs (adult-gated, personal channel) — but a comment here, three
+   * INTERNAL_INPUTS rows and a prompt line kept describing a homeops.* trio that never
+   * existed, and the model was still being told to call it. Those are gone;
+   * tool-registry-consistency.test.mjs keeps them gone.
    */
   "homeops.find_places": {
     id: "homeops.find_places",
