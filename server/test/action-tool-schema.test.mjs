@@ -44,12 +44,13 @@ test("the catalog row carries the action's description, so the model reads it", 
 });
 
 test("an undeclared tool still takes the legacy join, unchanged", () => {
-  const row = catalogRow("homeops.create_task");
+  // create_list_item is the next rung on the ladder and still hand-written.
+  const row = catalogRow("homeops.create_list_item");
   const schema = inputSchemaForCatalogTool(row);
   assert.equal(schema.type, "object");
   assert.equal(schema.additionalProperties, false);
-  assert.ok(schema.properties.title, "INTERNAL_INPUTS key");
-  assert.ok(schema.properties.notes, "EXTRA_INPUT_KEYS key");
-  assert.equal(schema.properties.priority.enum?.length, 3, "KEY_HINTS meaning");
+  assert.ok(schema.properties.text, "INTERNAL_INPUTS key");
+  assert.ok(schema.properties.visibility, "EXTRA_INPUT_KEYS key");
+  assert.equal(schema.properties.visibility.enum?.length, 4, "KEY_HINTS meaning");
   assert.equal(row.description, undefined, "and no description, because nothing declares one yet");
 });

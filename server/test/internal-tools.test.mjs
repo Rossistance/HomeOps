@@ -43,7 +43,7 @@ test("update_event_checklist and assign_what_to_bring mutate the event", async (
 test("create_task and create_list_item write durable tasks", async () => {
   const t = await run("homeops.create_task", { title: "Pay water bill", type: "bill", amount: 80 });
   assert.equal(t.ok, true);
-  assert.equal(store.getTask(t.result.id).type, "bill");
+  assert.equal(store.getTask(t.result.task.id).type, "bill");
   const li = await run("homeops.create_list_item", { text: "Milk", listName: "Groceries" });
   assert.equal(store.getTask(li.result.id).listName, "Groceries");
 });
@@ -58,7 +58,11 @@ test("send_notification_draft produces a draft artifact (never sends)", async ()
 
 test("empty inputs are rejected (no junk writes)", async () => {
   assert.equal((await run("homeops.create_event_draft", { title: "" })).error, "empty_title");
-  assert.equal((await run("homeops.create_task", {})).error, "empty_title");
+  // A declared action's schema names title as required, so a MISSING title is a shape
+  // error that says which field; a blank one still reaches run and is empty_title.
+  const missing = await run("homeops.create_task", {});
+  assert.equal(missing.error, "invalid_input"); assert.equal(missing.field, "title");
+  assert.equal((await run("homeops.create_task", { title: "  " })).error, "empty_title");
 });
 
 test("plan_meal wires one approved meal end-to-end: planner + groceries + calendar body", async () => {

@@ -138,7 +138,7 @@ test("a run that creates an undated task carries a task link on the run_result m
   // The run_result hook fires after the run's steps are recorded, so by now the
   // engine's own step result is the source of truth for the id the link must carry.
   const finished = await owner.req(`/api/runs/${result.runId}`);
-  const taskId = finished.data.run.steps[0]?.result?.id;
+  const taskId = finished.data.run.steps[0]?.result?.task?.id; // a declared action returns the record
   assert.ok(taskId, "the run must have actually recorded a created task id");
   assert.ok(Array.isArray(result.links), "links[] must be present on the message");
   assert.deepEqual(result.links, [{ kind: "task", id: taskId, label: "View task" }]);
@@ -158,7 +158,7 @@ test("a run with create_task + send_notification_draft carries both links, and W
   assert.equal(started.status, 200);
   const result = await waitFor(async () => (await messagesOf(conv.id)).find((m) => m.kind === "run_result"));
   const finished = await owner.req(`/api/runs/${result.runId}`);
-  const taskId = finished.data.run.steps[0]?.result?.id;
+  const taskId = finished.data.run.steps[0]?.result?.task?.id; // a declared action returns the record
   const artifactId = finished.data.run.steps[1]?.result?.id;
   assert.ok(taskId && artifactId, "both steps must have recorded real ids");
   assert.deepEqual(result.links, [

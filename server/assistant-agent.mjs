@@ -119,7 +119,6 @@ const KEY_HINTS = {
 // servings/replace could never be threaded). Declared here so the model can pass them.
 export const EXTRA_INPUT_KEYS = {
   "homeops.plan_meal": ["recipeUrl", "instructions", "servings", "replace", "time", "notes"],
-  "homeops.create_task": ["notes", "type", "visibility"],
   "homeops.create_list_item": ["visibility"],
   "homeops.write_memory": ["type"],
 };

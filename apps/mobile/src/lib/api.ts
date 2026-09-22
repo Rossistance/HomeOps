@@ -246,30 +246,10 @@ export interface EventProvenance { googleEventId?: string; subscriptionId?: stri
 import type { EventRecord } from "@/generated/actions";
 export type EventRec = EventRecord;
 export interface AttendeeRec { memberId: string; status: "invited" | "accepted" | "declined"; respondedAt: string | null }
-export interface TaskRec {
-  id: string; title: string; type: string; status: string; dueAt: string | null;
-  assignedMemberId: string | null; priority: string; amount: number | null; visibility: string;
-  listName?: string;
-  // H2/H4/H5/H7 — a task is a scheduled item: it has a start and an end like a calendar
-  // entry, a description that doesn't have to fit in the title, a reminder that produces a
-  // real notification, and (once dated) a place on the calendar.
-  startAt?: string | null;
-  endAt?: string | null;
-  notes?: string;
-  /** 0 = at the time, 15, 30, 60, 1440. null = no reminder. */
-  remindMinutesBefore?: number | null;
-  /* Cluster N — several nudges per task ("the day before AND one hour before"). The single
-   * field stays for old readers; the array is the real plan. */
-  remindOffsets?: number[];
-  remindersSent?: number[];
-  completedAt?: string | null;
-  reminderSentAt?: string | null;
-  /** Set once the task has been added to the calendar. */
-  eventId?: string | null;
-  createdBy?: string | null;
-  /** T1: when visibility is "nest", the nest this task (or grocery item) belongs to. */
-  nestId?: string | null;
-}
+/* Generated from server/actions/schemas/task.mjs, like EventRec. The field notes that lived
+ * here (what remindOffsets is, when eventId is set) are the schema's descriptions now. */
+import type { TaskRecord } from "@/generated/actions";
+export type TaskRec = TaskRecord;
 // Meal plan + the read-only "linked" calendar layer (ICS/Google subscriptions) —
 // same shapes as the web client (src/connectors/api.ts).
 export interface MealIngredient { item: string; have?: boolean }

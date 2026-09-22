@@ -119,6 +119,48 @@ export interface EventRecord {
   };
 }
 
+export interface TaskRecord {
+  /** Starts with tk_ (task) or li_ (list item). */
+  id: string;
+  householdId: string;
+  title: string;
+  /** task, chore, bill, errand… or list for a list item. */
+  type: string;
+  /** todo, done, archived… */
+  status: string;
+  dueAt?: string | null;
+  startAt?: string | null;
+  endAt?: string | null;
+  assignedMemberId?: string | null;
+  spaceId: string;
+  priority: "low" | "medium" | "high";
+  /** For bills. */
+  amount?: number | null;
+  visibility: string;
+  nestId?: string | null;
+  /** Which list, for type list (Groceries, Shopping, Packing…). */
+  listName?: string;
+  notes?: string;
+  /** The first reminder lead; remindOffsets is the whole plan. */
+  remindMinutesBefore?: number | null;
+  /** Reminder leads in minutes before the time; the sweep reads this. */
+  remindOffsets?: Array<number>;
+  remindersSent?: Array<number>;
+  reminderSentAt?: string | null;
+  completedAt?: string | null;
+  /** Set once the task has been put on the calendar. */
+  eventId?: string | null;
+  /** For a grocery item, the meal it is for. */
+  mealId?: string | null;
+  source: string;
+  createdBy: string;
+  createdByAgentId?: string | null;
+  /** ISO 8601. */
+  createdAt: string;
+  /** ISO 8601. */
+  updatedAt: string;
+}
+
 /** Input of homeops.create_event_draft. Create a family calendar event. From chat it lands as a draft the family reviews on the calendar; from the app it is confirmed. Give startAt as YYYY-MM-DD for an all-day event. participantIds and driverId must be member ids from the household roster (famili__list_members). */
 export type CreateEventDraftInput = {
   /** Short human title. */
@@ -165,7 +207,53 @@ export type CreateEventDraftResult = {
 /** Error codes homeops.create_event_draft can return. */
 export type CreateEventDraftError = "invalid_input" | "empty_title" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_in_nest" | "bad_reminder" | "end_before_start";
 
+/** Input of homeops.create_task. Create a household task, chore, bill or errand. dueAt (or a startAt/endAt window) is ISO 8601 or YYYY-MM-DD. assignedMemberId must be a member id from the roster (famili__list_members). A reminder only fires once the task has a dueAt or startAt to count back from, so set one when you set a reminder. */
+export type CreateTaskInput = {
+  /** Short human title. */
+  title: string;
+  /** Kind of task: task, chore, bill, errand… Default task. */
+  type?: string;
+  /** Default todo. */
+  status?: string;
+  /** Due date-time, ISO 8601 with the household's UTC offset (or YYYY-MM-DD). */
+  dueAt?: string | null;
+  /** Start of a scheduled window, ISO 8601. */
+  startAt?: string | null;
+  /** End of a scheduled window, ISO 8601. */
+  endAt?: string | null;
+  /** A member id from the household roster (famili__list_members). */
+  assignedMemberId?: string | null;
+  /** Default medium. */
+  priority?: "low" | "medium" | "high";
+  /** For bills. */
+  amount?: number | null;
+  /** Who can see it. Default household. nest needs nestId. */
+  visibility?: "household" | "private" | "personal" | "adults" | "nest" | "childVisible";
+  /** The nest, when visibility is nest. */
+  nestId?: string | null;
+  /** For a list item: which list (Groceries, Shopping, Packing…). */
+  listName?: string;
+  /** Free-form notes. */
+  notes?: string;
+  /** Reminder lead in minutes before the task's time: 0 (at the time), 5, 10, 15, 30, 60 or 1440 (the day before). Fires once the task has a dueAt or startAt to count back from. This is what actually sends a push — priority alone does not. */
+  remindMinutesBefore?: number | null;
+  /** Several reminder leads at once, from the same offered list. */
+  remindOffsets?: Array<number>;
+  spaceId?: string;
+  /** The helper creating it, when one is. */
+  agentId?: string | null;
+};
+
+/** Result of homeops.create_task. */
+export type CreateTaskResult = {
+  task: TaskRecord;
+};
+
+/** Error codes homeops.create_task can return. */
+export type CreateTaskError = "invalid_input" | "empty_title" | "invalid_dueAt" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_in_nest" | "bad_reminder";
+
 /** Every declared action that answers over HTTP, by id. */
 export const ACTION_ROUTES = {
   "homeops.create_event_draft": { method: "POST", path: "/api/events" },
+  "homeops.create_task": { method: "POST", path: "/api/tasks" },
 } as const;

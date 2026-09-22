@@ -35,7 +35,9 @@ test("a task carries a real start, end, notes and reminder — H2, H4, H5", asyn
 test("an unparseable date is refused, not stored to render as \"Invalid Date\"", async () => {
   const r = await mkTask({ title: "Bad", startAt: "next tuesday-ish" });
   assert.equal(r.status, 400);
-  assert.equal(r.data.error, "bad_timestamp");
+  // Named per field now (invalid_startAt / invalid_endAt / invalid_dueAt), the way events
+  // always were — one vocabulary for both surfaces, from the declared action.
+  assert.equal(r.data.error, "invalid_startAt");
 });
 
 test("only the reminder offsets a screen can explain are storable", async () => {

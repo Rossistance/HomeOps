@@ -56,8 +56,8 @@ test("a task created with a lead carries it in the shape the sweep reads", async
   const dueAt = new Date(Date.now() + 2 * 3600e3).toISOString();
   const r = await create({ title: "Notification test", dueAt, priority: "high", remindMinutesBefore: 30 });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(r.result.remindMinutesBefore, 30, "the result says a reminder was set");
-  const t = await T(() => getTask(r.result.id));
+  assert.equal(r.result.task.remindMinutesBefore, 30, "the result says a reminder was set");
+  const t = await T(() => getTask(r.result.task.id));
   assert.deepEqual(t.remindOffsets, [30], "remindOffsets is what sweepTaskReminders reads");
   assert.equal(t.remindMinutesBefore, 30, "…and the legacy single value rides along");
   assert.deepEqual(t.remindersSent, []);
@@ -100,10 +100,16 @@ test("a lead the app does not offer is refused, not stored as a nudge that never
   assert.equal(r.error, "bad_reminder");
 });
 
-test("a lead with no time to count back from is refused with a reason the model can act on", async () => {
+test("a lead with no time to count back from is STORED ARMED, not refused — one rule with the route and the sheet", async () => {
+  /* The tool used to refuse this ("reminder_needs_time") while POST /api/tasks accepted
+   * it, and the task sheet sends remindOffsets before a day is picked. The declared action
+   * runs both doors, so it keeps the product's rule: the nudge waits for a time, the sweep
+   * counts back only once there is one, and re-dating re-arms it (task-scheduling.test). */
   const r = await create({ title: "No time", remindMinutesBefore: 15 });
-  assert.equal(r.ok, false);
-  assert.equal(r.error, "reminder_needs_time");
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.result.task.dueAt, null);
+  assert.deepEqual(r.result.task.remindOffsets, [15], "armed, waiting for a date");
+  assert.equal(r.result.task.reminderSentAt, null);
 });
 
 test("A REMINDER NOBODY COULD RECEIVE IS WRITTEN DOWN, WITH WHY — the sweep no longer fails silently", async () => {
@@ -117,7 +123,7 @@ test("A REMINDER NOBODY COULD RECEIVE IS WRITTEN DOWN, WITH WHY — the sweep no
   const out = await T(() => sweepTaskReminders());
   assert.ok(out.skipped >= 1, JSON.stringify(out));
   const rows = await T(() => readAudit(50));
-  const row = rows.find((a) => a.type === "reminder.push_failed" && a.taskId === r.result.id);
+  const row = rows.find((a) => a.type === "reminder.push_failed" && a.taskId === r.result.task.id);
   assert.ok(row, `an audit row names the task: ${JSON.stringify(rows.map((a) => a.type))}`);
   assert.equal(row.reason, "no_tokens", "and says the actual reason — this member has no registered device");
   assert.equal(row.actorId, "m-lily");
@@ -142,7 +148,7 @@ test("EXPO'S VERDICT IS READ: a token Expo rejects is a failed push, named in th
     const rejected = rows.find((a) => a.type === "push.rejected" && a.error === "DeviceNotRegistered");
     assert.ok(rejected, `Expo's own reason is in the audit: ${JSON.stringify(rows.map((a) => a.type))}`);
     assert.equal(rejected.tokenTail, "en[dead]", "which device, without the whole token");
-    const failed = rows.find((a) => a.type === "reminder.push_failed" && a.taskId === r.result.id);
+    const failed = rows.find((a) => a.type === "reminder.push_failed" && a.taskId === r.result.task.id);
     assert.equal(failed?.reason, "expo_rejected:DeviceNotRegistered", "and the reminder row carries it up");
     assert.ok(!(await T(() => getPushTokens())).some((t) => t.token === "ExponentPushToken[dead]"), "a device Expo says is gone is forgotten");
   } finally { expoReply = {}; }
@@ -161,7 +167,7 @@ test("a reply with no tickets is 'nothing to judge', not a failure — the sweep
 test("a task without a reminder is unchanged: no offsets, no lead, still created", async () => {
   const r = await create({ title: "Plain" });
   assert.equal(r.ok, true);
-  const t = await T(() => getTask(r.result.id));
+  const t = await T(() => getTask(r.result.task.id));
   assert.equal(t.remindMinutesBefore, null);
   assert.deepEqual(t.remindOffsets, []);
 });

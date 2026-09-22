@@ -34,10 +34,13 @@ const run = (id, input) => INTERNAL_FUNCTIONS[id].run(ctx, input);
 test("create_task: a priority the app does not have is refused, not stored", async () => {
   const bad = await run("homeops.create_task", { title: "Urgent thing", priority: "urgent" });
   assert.equal(bad.ok, false);
-  assert.equal(bad.error, "bad_priority");
+  // The action's schema declares priority as an enum, so the SHAPE gate refuses it first
+  // and names the field — same refusal, earlier, and the model sees the enum up front.
+  assert.equal(bad.error, "invalid_input");
+  assert.equal(bad.field, "priority");
   const ok = await run("homeops.create_task", { title: "High thing", priority: "high" });
   assert.equal(ok.ok, true, JSON.stringify(ok));
-  assert.equal(store.getTask(ok.result.id).priority, "high");
+  assert.equal(store.getTask(ok.result.task.id).priority, "high");
 });
 
 test("create_task: a made-up assignee is refused, and the refusal names the id", async () => {
@@ -47,7 +50,7 @@ test("create_task: a made-up assignee is refused, and the refusal names the id",
   assert.match(bad.message, /m-ghost/, "the model is told which id was wrong");
   const ok = await run("homeops.create_task", { title: "For Lily", assignedMemberId: "m-lily" });
   assert.equal(ok.ok, true, JSON.stringify(ok));
-  assert.equal(store.getTask(ok.result.id).assignedMemberId, "m-lily");
+  assert.equal(store.getTask(ok.result.task.id).assignedMemberId, "m-lily");
 });
 
 test("an ARCHIVED member is not a valid assignee either — the roster means the live roster", async () => {
@@ -122,7 +125,7 @@ test("a tool that is given nothing to validate still works exactly as before", a
   // No priority, no assignee, no slot, no servings: the defaults the app has always applied.
   const t = await run("homeops.create_task", { title: "Plain task" });
   assert.equal(t.ok, true);
-  assert.equal(store.getTask(t.result.id).priority, "medium");
+  assert.equal(store.getTask(t.result.task.id).priority, "medium");
   const m = await run("homeops.plan_meal", { title: "QA Plain meal", date: "2031-05-05", ingredients: ["salt"] });
   assert.equal(m.ok, true, JSON.stringify(m));
   assert.equal(m.result.slot, "dinner");

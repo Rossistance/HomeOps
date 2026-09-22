@@ -35,7 +35,6 @@ export const INTERNAL_INPUTS = {
   // remindMinutesBefore: "set a reminder" said in the same breath as "add a task" used to be
   // silently dropped — only the UPDATE tool could carry a lead, so a task created by Famili
   // never nudged anyone (2026-09-22: a "notification test" task that could not have fired).
-  "homeops.create_task": [{ key: "title", required: true }, { key: "dueAt" }, { key: "assignedMemberId" }, { key: "priority" }, { key: "notes" }, { key: "remindMinutesBefore" }],
   "homeops.create_list_item": [{ key: "text", required: true }, { key: "listName" }],
   // The prompt contract and this schema used to disagree: recipeUrl/instructions/servings/
   // replace were read by the handler and named in the prompt, but never declared here — so
