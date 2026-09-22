@@ -33,6 +33,7 @@ import { householdTimeZone, localMidnightISO } from "./household-time.mjs";
 import { createHelpRequest } from "./help-requests.mjs";
 import { postMessage, withThreadLock, isParentRole } from "./family-messages.mjs";
 import { newEventRecord } from "./actions/schemas/event.mjs";
+import { newTaskRecord } from "./actions/schemas/task.mjs";
 
 const MAX_SUGGESTIONS = 3;
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -200,12 +201,12 @@ async function applyCreate(s, session, tz, { threadId, messageId } = {}) {
     }, session));
     return { ok: true, result: { created: { type: "event", id: rec.id } }, line: `added “${rec.title}” to the calendar` };
   }
-  const rec = putTask({
-    id: eid("tk"), householdId: session.householdId, title: String(p.title ?? s.title).slice(0, 160), type: "task", status: "todo",
-    dueAt: stamp(p.dueAt, tz), assignedMemberId: p.assignedMemberId ? String(p.assignedMemberId) : null, spaceId: "sp-family",
-    priority: ["low", "medium", "high"].includes(p.priority) ? p.priority : "medium", amount: null, visibility: "household",
-    notes: typeof p.notes === "string" ? p.notes : "", source: "message_suggestion", createdBy: session.actorId, createdAt: nowISO(), updatedAt: nowISO(),
-  });
+  const rec = putTask(newTaskRecord({
+    title: String(p.title ?? s.title).slice(0, 160),
+    dueAt: stamp(p.dueAt, tz), assignedMemberId: p.assignedMemberId ? String(p.assignedMemberId) : null,
+    priority: ["low", "medium", "high"].includes(p.priority) ? p.priority : "medium",
+    notes: typeof p.notes === "string" ? p.notes : "", source: "message_suggestion",
+  }, session));
   return { ok: true, result: { created: { type: "task", id: rec.id } }, line: `added the task “${rec.title}”` };
 }
 

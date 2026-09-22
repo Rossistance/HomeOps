@@ -45,7 +45,7 @@ test("create_task and create_list_item write durable tasks", async () => {
   assert.equal(t.ok, true);
   assert.equal(store.getTask(t.result.task.id).type, "bill");
   const li = await run("homeops.create_list_item", { text: "Milk", listName: "Groceries" });
-  assert.equal(store.getTask(li.result.id).listName, "Groceries");
+  assert.equal(store.getTask(li.result.task.id).listName, "Groceries");
 });
 
 test("send_notification_draft produces a draft artifact (never sends)", async () => {

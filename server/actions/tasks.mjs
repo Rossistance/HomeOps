@@ -13,8 +13,8 @@ import { resolveVisibility } from "../nests.mjs";
 import { isValidReminder, isValidReminderList } from "../reminders.mjs";
 import { roleAtLeast } from "../auth.mjs";
 import { defineAction } from "./define-action.mjs";
-import { eid, nowISO, badStamp, unknownMember, ghostMessage } from "./shared.mjs";
-import { TASK_RECORD } from "./schemas/task.mjs";
+import { badStamp, unknownMember, ghostMessage } from "./shared.mjs";
+import { TASK_RECORD, newTaskRecord } from "./schemas/task.mjs";
 
 const err = (error, message) => ({ ok: false, error, message });
 const str = { type: "string" };
@@ -92,20 +92,60 @@ export const createTask = defineAction({
     const remindOffsets = input.remindOffsets !== undefined ? [...new Set(input.remindOffsets)] : single === null ? [] : [single];
     const remindMinutesBefore = single ?? remindOffsets[0] ?? null;
 
-    const rec = putTask({
-      id: eid("tk"), householdId: ctx.householdId, title,
-      type: input.type ?? "task", status: input.status ?? "todo",
+    // Only what this door KNOWS; newTaskRecord fills every structural default for every
+    // writer, so the record has one author of its shape.
+    const rec = putTask(newTaskRecord({
+      title, type: input.type ?? "task", status: input.status ?? "todo",
       dueAt: input.dueAt ?? null, startAt: input.startAt ?? null, endAt: input.endAt ?? null,
       assignedMemberId: input.assignedMemberId ?? null, spaceId: input.spaceId ?? "sp-family",
       priority: input.priority ?? "medium", amount: input.amount ?? null,
       visibility: normalizeVisibility(vis.visibility), nestId: vis.nestId,
       ...(input.listName ? { listName: input.listName } : {}),
       notes: typeof input.notes === "string" ? input.notes : "",
-      remindMinutesBefore, remindOffsets, remindersSent: [], reminderSentAt: null,
-      source: via === "agent" ? "agent" : "user", createdBy: ctx.actorId,
+      remindMinutesBefore, remindOffsets,
+      source: via === "agent" ? "agent" : "user",
       ...(via === "agent" ? { createdByAgentId: input.agentId ?? ctx.agentId ?? null } : {}),
-      createdAt: nowISO(), updatedAt: nowISO(),
-    });
+    }, ctx));
     return { ok: true, result: { task: rec } };
+  },
+});
+
+/* A list item IS a task — type "list", on a named list, low priority, no date — and for a
+ * long time it was written by a second hand-rolled tool that spelled out its own idea of
+ * the record. Declared now, on the same run as create_task: the model keeps the contract
+ * it knows ("put milk on the grocery list" → text + listName), and the record comes from
+ * the one place that decides what a task looks like. No HTTP door of its own: a list item
+ * over HTTP is POST /api/tasks with type "list", which is the same run. */
+export const createListItem = defineAction({
+  id: "homeops.create_list_item",
+  name: "Add a list item",
+  description: "Add one item to a household list — Groceries, Shopping, Packing… A list item is a lightweight task of type list, so it shows up wherever tasks do. Check the list first (famili__list_tasks) so the same item is not added twice.",
+  action: "Write",
+  risk: "Low",
+  requiresApproval: false,
+  delivers: false,
+  input: {
+    type: "object",
+    properties: {
+      text: { ...str, description: "The item, as the family would write it on the list: Milk, AA batteries, sunscreen." },
+      listName: { ...str, description: "Which list (Groceries, Shopping, Packing…). Default Shopping." },
+      visibility: { type: "string", enum: ["household", "private", "personal", "adults", "nest", "childVisible"], description: "Who can see it. Default household. nest needs nestId." },
+      nestId: { ...strOrNull, description: "The nest, when visibility is nest." },
+      spaceId: str,
+    },
+    required: ["text"],
+    additionalProperties: false,
+  },
+  output: { type: "object", properties: { task: { $ref: "#/$defs/TaskRecord" } }, required: ["task"], additionalProperties: false },
+  $defs: { TaskRecord: TASK_RECORD },
+  errorCodes: [...createTask.errorCodes],
+
+  async run(ctx, input) {
+    return createTask.run(ctx, {
+      title: input.text, type: "list", listName: input.listName ?? "Shopping", priority: "low",
+      ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
+      ...(input.nestId !== undefined ? { nestId: input.nestId } : {}),
+      ...(input.spaceId !== undefined ? { spaceId: input.spaceId } : {}),
+    });
   },
 });
