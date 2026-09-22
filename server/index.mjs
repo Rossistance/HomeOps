@@ -97,6 +97,7 @@ import {
 import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, sendRecoveryCode, pushToMember } from "./notify.mjs";
 import { handleFamilyMessageRoutes } from "./family-messages-routes.mjs";
+import { handleActionRoutes } from "./actions/routes.mjs";
 import { createHelpRequest } from "./help-requests.mjs";
 import { postMessage as postFamilyMessage } from "./family-messages.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
@@ -801,6 +802,12 @@ const handleRequest = async (req, res) => {
         return json(res, 429, { error: "rate_limited", message: "Your household has sent a lot of messages in the last minute. Give it a moment and try again." }, req);
       }
     }
+
+    /* ---- Declared actions (ADR-003): one definition = tool + route + client type ----
+     * Dispatched FIRST, so a stale hand-written copy of a declared route is dead code
+     * rather than a silent winner (server/test/action-routes.test.mjs forbids one). After
+     * the rate limits on purpose: routing order is the firewall order. */
+    if (await handleActionRoutes({ req, res, path, method, url, gate, json, readBody, audit })) return;
 
     /* ---- Health (origin-allowed, no session; used to detect backend) ---- */
     if (path === "/api/health") {
@@ -2636,42 +2643,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       });
       return json(res, 200, { events: withEditable }, req);
     }
-    if (path === "/api/events" && method === "POST") {
-      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!String(body.title ?? "").trim()) return json(res, 400, { error: "title_required" }, req);
-      // ISS-105: fail loudly rather than storing an event that can never render. The mobile
-      // form already keeps the editor open and surfaces the server message on a non-2xx.
-      if (badTimestamp(body.startAt)) return json(res, 400, { error: "invalid_startAt", message: "That start date/time isn't a valid timestamp." }, req);
-      if (badTimestamp(body.endAt)) return json(res, 400, { error: "invalid_endAt", message: "That end date/time isn't a valid timestamp." }, req);
-      // Events reach nests the same way tasks and knowledge do. A raw visibility:"nest" with
-      // no nestId used to make the event invisible to everyone but its owner.
-      const evVis = resolveVisibility(body.visibility, body.nestId, g.session);
-      if (!evVis) return json(res, 403, { error: "not_in_nest", message: "You can only put this in a nest you're part of." }, req);
-      // Calendar reminders (Cluster N): the same offsets tasks offer, validated the same way.
-      if (body.remindOffsets !== undefined && !isValidReminderList(body.remindOffsets)) {
-        return json(res, 400, { error: "bad_reminder", message: "Pick reminder times from the offered list." }, req);
-      }
-      const ev = putEvent({
-        id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        title: String(body.title).trim(), startAt: body.startAt ?? null, endAt: body.endAt ?? null,
-        // WP-003/ISS-005: all-day is an explicit model concept (Google pushes use the `date` form).
-        allDay: body.allDay === true,
-        location: body.location ?? "", notes: typeof body.notes === "string" ? body.notes : "", spaceId: body.spaceId ?? "sp-family",
-        participantIds: Array.isArray(body.participantIds) ? body.participantIds : [],
-        driverId: body.driverId ?? null, ownerId: body.ownerId ?? g.session.actorId, backupOwnerId: body.backupOwnerId ?? null,
-        whatToBring: body.whatToBring ?? [], checklist: body.checklist ?? [], travel: body.travel ?? null,
-        reminders: body.reminders ?? [], attachments: [], comments: [], mealImpact: body.mealImpact ?? null,
-        remindOffsets: Array.isArray(body.remindOffsets) ? [...new Set(body.remindOffsets)] : undefined, remindersSent: [],
-        ...evVis, category: body.category ?? "Family",
-        layer: body.layer ?? "canonical", status: body.status ?? "confirmed",
-        source: body.source ?? "FamiliOS", provenance: { via: "user", actorId: g.session.actorId },
-        createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
-      });
-      audit({ type: "event.create", eventId: ev.id, ok: true }, req, g.session);
-      return json(res, 200, { event: ev }, req);
-    }
+    /* POST /api/events is a DECLARED action (server/actions/events.mjs) and is answered by
+     * handleActionRoutes at the top of this chain — the same run the agent tool uses, with
+     * via:"user". Nothing here may re-declare it; action-routes.test.mjs checks. */
     /* ---- E5/E6/E7: who's coming, told, and answering ----
      * [12:26] "Replace or augment 'note for driver' with WHO'S ATTENDING — let me pick GPop,
      *          Beannie, Melissa."
