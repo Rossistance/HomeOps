@@ -12,6 +12,7 @@ import { listEvents, putEvent, patchEvent, deleteEventRec, getAccountRaw, getSub
 import { householdTimeZone, serverTimeZone, localMidnightISO, localDateKey, stampToMs, toInstantISO } from "./household-time.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
+import { newEventRecord } from "./actions/schemas/event.mjs";
 
 // Normalize Google Calendar API items into the same intermediate shape parseICS produces,
 // so the upsert path is shared. Pure + unit-testable (no network).
@@ -254,15 +255,13 @@ export async function syncSubscription({ sub, icsText, session }) {
     }
     const other = othersByUid.get(uid) ?? othersByFp.get(fpOf(ev.title, ev.startAt, ev.allDay));
     if (other) { attachTo(other); seenAlso.add(other.id); merged++; continue; }
-    putEvent({
-      id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: hh,
-      ...fields, endAt: ev.endAt ?? null, spaceId: "sp-family", participantIds: [], driverId: null,
-      ownerId: ownerActorId, backupOwnerId: null, whatToBring: [], checklist: [], travel: null, reminders: [],
-      attachments: [], comments: [], mealImpact: null, visibility: "household", category: "Calendar",
-      layer: "linked", status: "confirmed", source: sub?.name ?? "Subscribed calendar",
+    // A mirrored event: only the feed's fields, its owner, its layer and where it came from.
+    // Everything else is the record's default, filled by the one helper every writer uses.
+    putEvent(newEventRecord({
+      ...fields, endAt: ev.endAt ?? null, ownerId: ownerActorId ?? null,
+      category: "Calendar", layer: "linked", source: sub?.name ?? "Subscribed calendar",
       provenance: { via: gprov ? "google" : "ics", subscriptionId: subId, uid, ...(gprov ?? {}) },
-      createdBy: session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
-    });
+    }, { householdId: hh, actorId: session.actorId }));
     imported++;
   }
   // This sub no longer sees events it previously attached to (invite withdrawn) —

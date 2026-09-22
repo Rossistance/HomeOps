@@ -98,3 +98,20 @@ test("a stored event is refused by the same validator when a writer invents a fi
   const v = validateInput(EVENT_RECORD, { ...created, colour: "teal" }, { unknown: "reject" });
   assert.equal(v.ok, false); assert.equal(v.field, "colour");
 });
+
+test("EVERY WRITER NOW SHARES ONE SET OF DEFAULTS — a synced event has the same keys as a typed one", async () => {
+  /* Before newEventRecord, an ICS mirror had no `notes`, no `nestId`, no `remindersSent`,
+   * and a task → calendar event had no `allDay`; each writer spelled out its own idea of
+   * the record. Now the structural keys are present on every event regardless of door. */
+  const events = ok200(await adult.req("/api/events"), "GET /api/events").events;
+  const structural = ["startAt", "endAt", "allDay", "notes", "location", "spaceId", "participantIds", "driverId", "ownerId", "backupOwnerId",
+    "whatToBring", "checklist", "travel", "reminders", "attachments", "comments", "mealImpact", "remindersSent", "visibility", "nestId",
+    "category", "layer", "status", "source", "provenance", "createdBy", "createdAt", "updatedAt"];
+  for (const ev of events) {
+    const missing = structural.filter((k) => !(k in ev));
+    assert.deepEqual(missing, [], `${ev.provenance?.via} (${ev.layer}) lacks ${missing.join(", ")}`);
+    assert.equal(typeof ev.createdAt, "number");
+  }
+  const linked = events.find((e) => e.layer === "linked");
+  assert.ok(linked && linked.notes === "" && linked.nestId === null && Array.isArray(linked.remindersSent), "the ICS mirror got the same defaults");
+});

@@ -15,6 +15,7 @@ import { isValidReminder } from "./reminders.mjs";
  * in one place, so a check tightened for one is tightened for both. */
 import { eid, nowISO, badStamp, DATE_ONLY_RE, unknownMember, ghostMessage } from "./actions/shared.mjs";
 import { ACTION_INTERNAL_FUNCTIONS } from "./actions/registry.mjs";
+import { newEventRecord } from "./actions/schemas/event.mjs";
 import crypto from "node:crypto";
 
 const MEMORY_SCOPES = ["household", "personal", "nest"];
@@ -430,15 +431,11 @@ export const INTERNAL_FUNCTIONS = {
         const existing = listEvents((e) => e.householdId === ctx.householdId && e.mealId === meal.id)[0];
         event = existing
           ? patchEvent(existing.id, { title: evTitle, startAt, notes })
-          : putEvent({
-              id: eid("ev"), householdId: ctx.householdId, title: evTitle, startAt, endAt: null,
-              location: "", notes, spaceId: "sp-family", participantIds: [], driverId: null,
-              ownerId: ctx.actorId, backupOwnerId: null, whatToBring: [], checklist: [], travel: null,
-              reminders: [], attachments: [], comments: [], mealImpact: null, mealId: meal.id,
-              visibility: "household", category: "Meal", layer: "canonical", status: "confirmed",
-              source: "FamiliOS Assistant", provenance: { via: "meal", runId: ctx.runId, actorId: ctx.actorId },
-              createdBy: ctx.actorId, createdAt: Date.now(), updatedAt: now,
-            });
+          : putEvent(newEventRecord({
+              title: evTitle, startAt, notes, ownerId: ctx.actorId, mealId: meal.id,
+              category: "Meal", source: "FamiliOS Assistant",
+              provenance: { via: "meal", runId: ctx.runId, actorId: ctx.actorId },
+            }, ctx));
       }
       // 4) Google push — only when the household pre-authorized it (calendar auto-sync).
       let google = { pushed: false };

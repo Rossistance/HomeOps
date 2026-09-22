@@ -16,8 +16,8 @@ import { householdTimeZone, localMidnightISO } from "../household-time.mjs";
 import { isValidReminderList } from "../reminders.mjs";
 import { roleAtLeast } from "../auth.mjs";
 import { defineAction } from "./define-action.mjs";
-import { eid, nowISO, badStamp, DATE_ONLY_RE, unknownMember, ghostMessage } from "./shared.mjs";
-import { EVENT_RECORD } from "./schemas/event.mjs";
+import { badStamp, DATE_ONLY_RE, unknownMember, ghostMessage } from "./shared.mjs";
+import { EVENT_RECORD, newEventRecord } from "./schemas/event.mjs";
 
 const err = (error, message) => ({ ok: false, error, message });
 const str = { type: "string" };
@@ -102,22 +102,21 @@ export const createEvent = defineAction({
       .filter(Boolean);
     const checklist = (input.checklist ?? []).map((c) => ({ text: String(c.text), done: c.done === true }));
 
-    const rec = putEvent({
-      id: eid("ev"), householdId: ctx.householdId, title,
-      startAt, endAt, allDay,
+    // Only what this door KNOWS; newEventRecord fills every structural default for every
+    // writer, so the record has one author of its shape.
+    const rec = putEvent(newEventRecord({
+      title, startAt, endAt, allDay,
       notes: typeof input.notes === "string" ? input.notes : "",
       location: input.location ?? "", spaceId: input.spaceId ?? "sp-family",
       participantIds,
       driverId: input.driverId ?? null, ownerId: input.ownerId ?? ctx.actorId, backupOwnerId: input.backupOwnerId ?? null,
-      whatToBring, checklist, travel: input.travel ?? null, reminders: [],
-      attachments: [], comments: [], mealImpact: input.mealImpact ?? null,
-      ...(input.remindOffsets !== undefined ? { remindOffsets: [...new Set(input.remindOffsets)] } : {}), remindersSent: [],
+      whatToBring, checklist, travel: input.travel ?? null, mealImpact: input.mealImpact ?? null,
+      ...(input.remindOffsets !== undefined ? { remindOffsets: [...new Set(input.remindOffsets)] } : {}),
       visibility: normalizeVisibility(vis.visibility), nestId: vis.nestId, category: input.category ?? "Family",
-      layer: "canonical", status: via === "agent" ? "draft" : "confirmed",
+      status: via === "agent" ? "draft" : "confirmed",
       source: via === "agent" ? "FamiliOS Assistant" : "FamiliOS",
       provenance: { via, actorId: ctx.actorId, ...(ctx.runId ? { runId: ctx.runId } : {}) },
-      createdBy: ctx.actorId, createdAt: Date.now(), updatedAt: nowISO(),
-    });
+    }, ctx));
     return { ok: true, result: { event: rec } };
   },
 });

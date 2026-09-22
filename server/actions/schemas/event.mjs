@@ -7,6 +7,9 @@
 // and the per-viewer decorations GET adds. The contract test in server/test asserts every
 // stored event fits it, so a new field written anywhere has to be declared here or CI says
 // so. Both clients' event types are generated from it — see scripts/generate-action-types.mjs.
+import { eid, nowISO } from "../shared.mjs";
+import { validateInput } from "../define-action.mjs";
+
 const str = { type: "string" };
 const strOrNull = { type: ["string", "null"] };
 const num = { type: "number" };
@@ -107,3 +110,56 @@ export const EVENT_RECORD = {
   ],
   additionalProperties: false,
 };
+
+/* ───────────────────────── one writer of the defaults ─────────────────────────
+ *
+ * Seven places used to build an event record by hand, each repeating ~20 fields, because
+ * putEvent is a blind upsert: whatever object it is handed is what the store holds. That
+ * is how a synced event came to lack `notes` while a typed one had it, and how the record
+ * could be declared above and still have no single place that promised to honour it.
+ *
+ * Every writer now passes only what it KNOWS — a title, a time, who owns it, why it
+ * exists — and this fills the rest, then checks the result against EVENT_RECORD with
+ * unknown keys rejected and THROWS if it does not fit. A writer that invents a field, or
+ * passes a number where the record says string, fails here, loudly, at the write — not in
+ * a client's type months later. `putEvent` itself stays dumb on purpose. */
+const HELPER_OWNED = Object.freeze(["id", "householdId", "createdBy", "createdAt", "updatedAt", "reminders", "attachments", "comments", "remindersSent"]);
+const KNOWN = new Set(Object.keys(EVENT_RECORD.properties));
+
+/**
+ * @param fields  what the writer knows; `provenance.via` is required — a record says how it got here
+ * @param ctx     { householdId, actorId } — a session or a tool ctx both satisfy it
+ */
+export function newEventRecord(fields, ctx) {
+  if (!ctx?.householdId || !ctx?.actorId) throw new Error("newEventRecord: ctx needs householdId and actorId");
+  if (!fields || typeof fields !== "object") throw new Error("newEventRecord: fields must be an object");
+  for (const k of Object.keys(fields)) {
+    if (fields[k] === undefined) continue;
+    if (HELPER_OWNED.includes(k)) throw new Error(`newEventRecord: "${k}" is decided here, not by the writer`);
+    if (!KNOWN.has(k)) throw new Error(`newEventRecord: "${k}" is not a field of EVENT_RECORD — declare it in schemas/event.mjs or do not write it`);
+  }
+  if (!fields.provenance?.via) throw new Error("newEventRecord: provenance.via is required — a record says how it got here");
+
+  const rec = {
+    id: eid("ev"), householdId: ctx.householdId,
+    title: String(fields.title ?? ""),
+    startAt: fields.startAt ?? null, endAt: fields.endAt ?? null, allDay: fields.allDay === true,
+    notes: typeof fields.notes === "string" ? fields.notes : "",
+    location: typeof fields.location === "string" ? fields.location : "",
+    spaceId: fields.spaceId ?? "sp-family",
+    participantIds: Array.isArray(fields.participantIds) ? fields.participantIds.map(String) : [],
+    driverId: fields.driverId ?? null, ownerId: fields.ownerId ?? null, backupOwnerId: fields.backupOwnerId ?? null,
+    whatToBring: fields.whatToBring ?? [], checklist: fields.checklist ?? [], travel: fields.travel ?? null,
+    reminders: [], attachments: [], comments: [], mealImpact: fields.mealImpact ?? null,
+    ...(fields.remindOffsets !== undefined ? { remindOffsets: fields.remindOffsets } : {}), remindersSent: [],
+    visibility: fields.visibility ?? "household", nestId: fields.nestId ?? null,
+    category: fields.category ?? "Family", layer: fields.layer ?? "canonical", status: fields.status ?? "confirmed",
+    source: fields.source ?? "FamiliOS",
+    ...(fields.mealId ? { mealId: fields.mealId } : {}), ...(fields.taskId ? { taskId: fields.taskId } : {}),
+    provenance: fields.provenance,
+    createdBy: ctx.actorId, createdAt: Date.now(), updatedAt: nowISO(),
+  };
+  const v = validateInput(EVENT_RECORD, rec, { unknown: "reject" });
+  if (!v.ok) throw new Error(`newEventRecord: ${v.field} — ${v.message}`);
+  return v.value;
+}
