@@ -65,7 +65,7 @@ import { AUTONOMY, SCHEDULE_KINDS } from "./helper-shape.mjs";
 import { nameConversation } from "./context.mjs";
 import { suggestAddresses, placesProvider } from "./places.mjs";
 import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
-import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, canSeeMemory, canForgetMemory, publicNest, nestLabel, listNests } from "./nests.mjs";
+import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, canSeeMemory, canForgetMemory, publicNest, nestLabel, listNests, resolveVisibility } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive, sweepEventReminders } from "./reminders.mjs";
 import { householdTimeZone, formatForHousehold, wallClockISO } from "./household-time.mjs";
@@ -97,6 +97,7 @@ import {
 import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, sendRecoveryCode, pushToMember } from "./notify.mjs";
 import { handleFamilyMessageRoutes } from "./family-messages-routes.mjs";
+import { handleActionRoutes } from "./actions/routes.mjs";
 import { createHelpRequest } from "./help-requests.mjs";
 import { postMessage as postFamilyMessage } from "./family-messages.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
@@ -368,31 +369,8 @@ function badTimestamp(v) {
   return v != null && v !== "" && isNaN(+new Date(v));
 }
 
-/* Who can see it — decided ONCE, for everything that offers the choice.
- *
- * "The privacy option needs to extend to tasks and lists, new or pre-existing… the actual
- *  logic of who sees what needs to extend throughout the app."
- *
- * It was written out separately per feature, and the copies had drifted: tasks understood
- * private/nest/household with a real nest-membership check, while knowledge clamped to
- * `personal | household` — a word the visibility gate doesn't know — so a knowledge item
- * couldn't be nest-scoped at all and its "Just me" wasn't private. One function now, so
- * every surface that offers Just me / My Nest / Everyone gets the same three answers and
- * the same refusal.
- *
- * Returns null when a nest was named that this person isn't in — the caller turns that into
- * a 403 rather than silently downgrading, because quietly filing something somewhere other
- * than where you asked is worse than refusing.
- */
-function resolveVisibility(requested, requestedNestId, session, current = {}) {
-  const vis = normalizeVisibility(requested ?? current.visibility);
-  if (vis !== "nest") return { visibility: vis, nestId: null };
-  // Falling back to the current nest lets "keep it where it is" be expressed by sending
-  // visibility alone, which is what an edit form does when only the scope changed.
-  const target = String(requestedNestId ?? current.nestId ?? "");
-  if (!canSeeNest(target, session.householdId, session.actorId)) return null;
-  return { visibility: "nest", nestId: target };
-}
+/* resolveVisibility — "who can see it, decided ONCE" — now lives in nests.mjs, because a
+ * declared action (actions/events.mjs) needs the same answer the routes get. Imported above. */
 
 /**
  * Which Library space does this document belong in, judged from what it SAYS?
@@ -824,6 +802,12 @@ const handleRequest = async (req, res) => {
         return json(res, 429, { error: "rate_limited", message: "Your household has sent a lot of messages in the last minute. Give it a moment and try again." }, req);
       }
     }
+
+    /* ---- Declared actions (ADR-003): one definition = tool + route + client type ----
+     * Dispatched FIRST, so a stale hand-written copy of a declared route is dead code
+     * rather than a silent winner (server/test/action-routes.test.mjs forbids one). After
+     * the rate limits on purpose: routing order is the firewall order. */
+    if (await handleActionRoutes({ req, res, path, method, url, gate, json, readBody, audit })) return;
 
     /* ---- Health (origin-allowed, no session; used to detect backend) ---- */
     if (path === "/api/health") {
@@ -2659,42 +2643,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       });
       return json(res, 200, { events: withEditable }, req);
     }
-    if (path === "/api/events" && method === "POST") {
-      const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
-      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      if (!String(body.title ?? "").trim()) return json(res, 400, { error: "title_required" }, req);
-      // ISS-105: fail loudly rather than storing an event that can never render. The mobile
-      // form already keeps the editor open and surfaces the server message on a non-2xx.
-      if (badTimestamp(body.startAt)) return json(res, 400, { error: "invalid_startAt", message: "That start date/time isn't a valid timestamp." }, req);
-      if (badTimestamp(body.endAt)) return json(res, 400, { error: "invalid_endAt", message: "That end date/time isn't a valid timestamp." }, req);
-      // Events reach nests the same way tasks and knowledge do. A raw visibility:"nest" with
-      // no nestId used to make the event invisible to everyone but its owner.
-      const evVis = resolveVisibility(body.visibility, body.nestId, g.session);
-      if (!evVis) return json(res, 403, { error: "not_in_nest", message: "You can only put this in a nest you're part of." }, req);
-      // Calendar reminders (Cluster N): the same offsets tasks offer, validated the same way.
-      if (body.remindOffsets !== undefined && !isValidReminderList(body.remindOffsets)) {
-        return json(res, 400, { error: "bad_reminder", message: "Pick reminder times from the offered list." }, req);
-      }
-      const ev = putEvent({
-        id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        title: String(body.title).trim(), startAt: body.startAt ?? null, endAt: body.endAt ?? null,
-        // WP-003/ISS-005: all-day is an explicit model concept (Google pushes use the `date` form).
-        allDay: body.allDay === true,
-        location: body.location ?? "", notes: typeof body.notes === "string" ? body.notes : "", spaceId: body.spaceId ?? "sp-family",
-        participantIds: Array.isArray(body.participantIds) ? body.participantIds : [],
-        driverId: body.driverId ?? null, ownerId: body.ownerId ?? g.session.actorId, backupOwnerId: body.backupOwnerId ?? null,
-        whatToBring: body.whatToBring ?? [], checklist: body.checklist ?? [], travel: body.travel ?? null,
-        reminders: body.reminders ?? [], attachments: [], comments: [], mealImpact: body.mealImpact ?? null,
-        remindOffsets: Array.isArray(body.remindOffsets) ? [...new Set(body.remindOffsets)] : undefined, remindersSent: [],
-        ...evVis, category: body.category ?? "Family",
-        layer: body.layer ?? "canonical", status: body.status ?? "confirmed",
-        source: body.source ?? "FamiliOS", provenance: { via: "user", actorId: g.session.actorId },
-        createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
-      });
-      audit({ type: "event.create", eventId: ev.id, ok: true }, req, g.session);
-      return json(res, 200, { event: ev }, req);
-    }
+    /* POST /api/events is a DECLARED action (server/actions/events.mjs) and is answered by
+     * handleActionRoutes at the top of this chain — the same run the agent tool uses, with
+     * via:"user". Nothing here may re-declare it; action-routes.test.mjs checks. */
     /* ---- E5/E6/E7: who's coming, told, and answering ----
      * [12:26] "Replace or augment 'note for driver' with WHO'S ATTENDING — let me pick GPop,
      *          Beannie, Melissa."

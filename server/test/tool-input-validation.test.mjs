@@ -72,7 +72,7 @@ test("create_event_draft: every participant and the driver must be on the roster
 
   const ok = await run("homeops.create_event_draft", { title: "Recital", participantIds: ["m-lily"], driverId: "m-morgan" });
   assert.equal(ok.ok, true, JSON.stringify(ok));
-  const ev = store.getEvent(ok.result.id);
+  const ev = store.getEvent(ok.result.event.id);
   assert.deepEqual(ev.participantIds, ["m-lily"]);
   assert.equal(ev.driverId, "m-morgan");
 });
@@ -85,11 +85,11 @@ test("create_event_draft: an end BEFORE the start is an error, not a silent null
   // Equal is still "no end" — a same-day all-day event arrives with end == start.
   const same = await run("homeops.create_event_draft", { title: "Same day", startAt: "2031-05-01", endAt: "2031-05-01" });
   assert.equal(same.ok, true, JSON.stringify(same));
-  assert.equal(store.getEvent(same.result.id).endAt, null);
+  assert.equal(store.getEvent(same.result.event.id).endAt, null);
 
   const ok = await run("homeops.create_event_draft", { title: "Forwards", startAt: "2031-05-01T15:00:00Z", endAt: "2031-05-01T16:00:00Z" });
   assert.equal(ok.ok, true, JSON.stringify(ok));
-  assert.equal(store.getEvent(ok.result.id).endAt, "2031-05-01T16:00:00Z", "a real end is kept");
+  assert.equal(store.getEvent(ok.result.event.id).endAt, "2031-05-01T16:00:00Z", "a real end is kept");
 });
 
 /* ---------------------------------- meals ---------------------------------- */

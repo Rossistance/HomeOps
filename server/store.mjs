@@ -660,7 +660,11 @@ export function canSeeEntity(entity, { role, actorId } = {}) {
   // a profile photo could upload successfully, save its id onto the member, and then silently
   // never render anywhere (the avatar fell back to initials and nothing reported a failure).
   const isOwner = entity.ownerId === actorId || entity.createdBy === actorId || entity.uploadedBy === actorId;
-  const members = entity.participantIds ?? entity.memberIds ?? [];
+  // `memberIds` was never a stored field on any entity — it is only the attendees route's
+  // REQUEST-body name (index.mjs, POST /api/events/:id/attendees), written to the record as
+  // participantIds. The old `?? entity.memberIds` branch here was unreachable, and read as
+  // if two spellings were live. One participant field: participantIds.
+  const members = entity.participantIds ?? [];
   const isParticipant = (Array.isArray(members) && members.includes(actorId)) || entity.assignedMemberId === actorId;
   if (isOwner || isParticipant) return true;
   const vis = normalizeVisibility(entity.visibility);

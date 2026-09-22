@@ -14,14 +14,21 @@ import { providerChat, providerChatStream, providerChatWithFallback, aiProviderB
 import { scheduleText, autonomyText, helperVisibleTo } from "./helper-shape.mjs";
 import { getSettings, listEvents, listTasks, listMemory, listMembers, listMeals, canSeeEntity, canSeeEntityInChannel, listAgents, listConversations, getRiskOverride, recordAiUsage, aiBudgetExhausted } from "./store.mjs";
 import { listInternalFunctions } from "./internal-functions.mjs";
+import { ACTION_INPUTS } from "./actions/registry.mjs";
 import { searchWeb, readPage } from "./web.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
 import { householdTimeZone, localDayBounds, localDateKey, stampToMs } from "./household-time.mjs";
 
 // Input hints for the internal family-data tools, so the planner knows how to fill
 // them (and the engine knows which fields require threading — see toolInputSchema).
+//
+// A DECLARED action's row is not written here — it is derived from the action's own input
+// schema (ACTION_INPUTS) so the planner's idea of a tool's fields can never drift from what
+// the tool accepts. That drift is real: this table once named three helper tools
+// (list_agents / get_agent / update_agent) that did not exist in INTERNAL_FUNCTIONS at all.
+// The hand-written rows below are the tools that have not been declared yet.
 export const INTERNAL_INPUTS = {
-  "homeops.create_event_draft": [{ key: "title", required: true }, { key: "startAt" }, { key: "endAt" }, { key: "allDay" }, { key: "location" }, { key: "notes" }, { key: "participantIds" }, { key: "driverId" }, { key: "visibility" }],
+  ...ACTION_INPUTS,
   "homeops.update_event_checklist": [{ key: "eventId", required: true }, { key: "items", required: true }],
   "homeops.assign_driver": [{ key: "eventId", required: true }, { key: "driverId", required: true }],
   "homeops.assign_what_to_bring": [{ key: "eventId", required: true }, { key: "items", required: true }],
@@ -148,7 +155,7 @@ export function toolCatalog(session) {
   // planner grounds family work on real server-owned events/tasks/memory rather than
   // reaching for unconnected external apps.
   for (const f of listInternalFunctions()) {
-    out.push({ toolId: f.id, name: f.name, action: f.action, risk: f.risk, requiresApproval: !!f.requiresApproval, connectorId: f.connectorId, connectorName: f.connectorName, source: "internal", connected: true, inputs: mapInputs(INTERNAL_INPUTS[f.id] ?? []) });
+    out.push({ toolId: f.id, name: f.name, action: f.action, risk: f.risk, requiresApproval: !!f.requiresApproval, connectorId: f.connectorId, connectorName: f.connectorName, source: "internal", connected: true, inputs: mapInputs(INTERNAL_INPUTS[f.id] ?? []), ...(f.description ? { description: f.description } : {}) });
   }
   // Household risk overrides (item 9): the catalog reports EFFECTIVE values so the
   // planner and every UI reflect the same reality the engine enforces. Defaults are

@@ -189,7 +189,7 @@ export default function HouseholdScreen() {
   const spaces = useMemo(() => {
     const map: Record<string, SpaceItem[]> = {};
     const put = (id: string | undefined, item: SpaceItem) => { (map[id || "sp-family"] ??= []).push(item); };
-    for (const e of events) put((e as EventRec & { spaceId?: string }).spaceId, { kind: "event", title: e.title });
+    for (const e of events) put(e.spaceId, { kind: "event", title: e.title });
     for (const t of tasks) put((t as TaskRec & { spaceId?: string }).spaceId, { kind: "task", title: t.title });
     for (const m of meals) put(undefined, { kind: "meal", title: m.title });
     for (const f of files) put(f.spaceId, { kind: "file", title: f.name });

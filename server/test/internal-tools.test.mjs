@@ -23,15 +23,15 @@ const run = (id, input) => INTERNAL_FUNCTIONS[id].run(ctx, input);
 test("create_event_draft writes a durable draft event", async () => {
   const r = await run("homeops.create_event_draft", { title: "Dentist — Lily", participantIds: ["m-lily"], driverId: "m-morgan" });
   assert.equal(r.ok, true);
-  assert.equal(r.result.status, "draft");
-  const ev = store.getEvent(r.result.id);
+  assert.equal(r.result.event.status, "draft");
+  const ev = store.getEvent(r.result.event.id);
   assert.equal(ev.title, "Dentist — Lily");
   assert.equal(ev.driverId, "m-morgan");
   assert.equal(ev.provenance.via, "agent");
 });
 
 test("update_event_checklist and assign_what_to_bring mutate the event", async () => {
-  const ev = (await run("homeops.create_event_draft", { title: "Camping trip" })).result;
+  const ev = (await run("homeops.create_event_draft", { title: "Camping trip" })).result.event;
   await run("homeops.update_event_checklist", { eventId: ev.id, items: ["Tent", "Sleeping bags"] });
   await run("homeops.assign_what_to_bring", { eventId: ev.id, items: [{ item: "Marshmallows", memberId: "m-noah" }] });
   const fresh = store.getEvent(ev.id);
