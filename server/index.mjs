@@ -36,6 +36,7 @@ import {
   listHelpRequests, getHelpRequest, putHelpRequest, patchHelpRequest,
   addNotification, getAccountRaw,
   clearCollection,
+  assistantTurnKey, claimAssistantTurn, finishAssistantTurn, releaseAssistantTurn,
 } from "./store.mjs";
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases } from "./engine.mjs";
 import { createBackup, listBackups, readBackup, restoreBackup, backupTick, deleteBackupsFor, listLegacyBackups, readLegacyBackup, restoreLegacyBundle } from "./backup.mjs";
@@ -64,7 +65,7 @@ import { AUTONOMY, SCHEDULE_KINDS } from "./helper-shape.mjs";
 import { nameConversation } from "./context.mjs";
 import { suggestAddresses, placesProvider } from "./places.mjs";
 import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
-import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel, listNests } from "./nests.mjs";
+import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, canSeeMemory, publicNest, nestLabel, listNests } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive, sweepEventReminders } from "./reminders.mjs";
 import { householdTimeZone, formatForHousehold, wallClockISO } from "./household-time.mjs";
@@ -125,6 +126,14 @@ function assistantTurnMessage(out, at) {
     ...(out.degraded ? { degraded: true, fellBackFrom: out.fellBackFrom ?? null } : {}),
   };
 }
+/* A client names a turn with `clientTurnId`; the name is scoped to the session and the
+ * conversation, so two people (or two threads) reusing an id can never collide. An unnamed
+ * turn is unguarded — a caller that wants at-most-once has to ask for it. */
+function assistantTurnKeyFor(session, body) {
+  const id = typeof body?.clientTurnId === "string" ? body.clientTurnId.trim().slice(0, 80) : "";
+  return id ? assistantTurnKey(session, body?.conversationId ?? null, id) : null;
+}
+const TURN_IN_PROGRESS = { ok: false, error: "turn_in_progress", message: "That message is still being handled — it will show up in the thread in a moment." };
 // An agent turn that queued an approval-gated step reports the durable run the way a
 // legacy plan did, so both clients attach to it and watch it to a terminal state.
 function attachAgentRun(out) {
@@ -498,14 +507,8 @@ function nextSubscriptionColor(householdId) {
 // Chat spaces: a conversation lives in its creator's PERSONAL space (private to
 // them — the long-standing behavior and the default) or in the FAMILY space
 // (visibility "household"), where any household member can read and continue it.
-/* Personal memory belongs to its author ALONE; nest memory to the nest; household memory to
- * everyone. One predicate for GET and DELETE, so the two can never disagree again. */
-function canSeeMemory(m, session) {
-  if (!m) return false;
-  if (m.scope === "personal") return m.source?.actorId === session.actorId;
-  if (m.scope === "nest") return canSeeNest(m.nestId, session.householdId, session.actorId);
-  return true;
-}
+// canSeeMemory lives in nests.mjs now — ONE predicate for the API's GET and DELETE and for
+// the assistant's delete tool, so a tool can never touch a memory a route would hide.
 function canSeeConversation(c, session) {
   if (!c || c.householdId !== session.householdId) return false;
   if (c.actorId === session.actorId) return true;
@@ -5216,6 +5219,18 @@ function mayWriteAgent(session, agent, nextVisibility) {
        * A file we genuinely can't read reports why, in the reply, instead of the assistant
        * apologising for an emptiness it can't explain. */
       await attachFileContext(body, g.session);
+      /* AT-MOST-ONCE for a named turn (claimAssistantTurn, store.mjs). The phone re-sends
+       * a turn to THIS route whenever its stream fails — including after that stream has
+       * already run the tools. A finished twin gets the first answer; nothing runs twice. */
+      const turnKey = assistantTurnKeyFor(g.session, body);
+      if (turnKey) {
+        const claim = claimAssistantTurn(turnKey);
+        if (claim.state === "done") {
+          audit({ type: "assistant.respond", ok: claim.result?.ok, kind: claim.result?.kind, model: claim.result?.model, replayed: true }, req, g.session);
+          return json(res, claim.result?.ok ? 200 : 422, { ...claim.result, replayed: true }, req);
+        }
+        if (claim.state === "running") return json(res, 409, TURN_IN_PROGRESS, req);
+      }
 
       // Prior turns from the durable conversation ride into the model call —
       // otherwise the assistant forgets facts stated one message earlier.
@@ -5237,8 +5252,15 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // never shrunk — only a household's explicit DENY reaches the model's menu, and a
       // local provider additionally gets the relevance-ranked, budget-capped catalog.
       const actingAgent = ensureDefaultHelper();
-      const out = await runAssistantAgent({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) });
+      let out;
+      try {
+        out = await runAssistantAgent({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) });
+      } catch (e) {
+        if (turnKey) releaseAssistantTurn(turnKey);
+        throw e;
+      }
       attachAgentRun(out);
+      if (turnKey) finishAssistantTurn(turnKey, out);
       // Server-durable thread: if a conversation is named, persist the turn so history
       // survives refresh and is owned by the server, not the client. Failed turns are
       // persisted too — the user saw their question and the honest error, so a refresh
@@ -5266,7 +5288,23 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // Same as POST /api/assistant — and this is the route the app really uses, so an
       // attachment that only worked on the non-streaming path would still look broken.
       await attachFileContext(body, g.session);
+      /* The same at-most-once guard as POST /api/assistant, checked BEFORE the stream opens
+       * so a refusal can still be a plain JSON 409 — which is exactly what makes the phone
+       * fall back to the non-streaming route, where it is refused again instead of run
+       * twice. A finished twin is answered as a one-frame stream, so the happy path stays SSE. */
+      const turnKey = assistantTurnKeyFor(g.session, body);
+      let claimed = null;
+      if (turnKey) {
+        claimed = claimAssistantTurn(turnKey);
+        if (claimed.state === "running") return json(res, 409, TURN_IN_PROGRESS, req);
+      }
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", ...corsHeaders(req) });
+      if (claimed?.state === "done") {
+        audit({ type: "assistant.stream", ok: claimed.result?.ok, kind: claimed.result?.kind, model: claimed.result?.model, replayed: true }, req, g.session);
+        res.write(`data: ${JSON.stringify({ type: "done", result: { ...claimed.result, replayed: true } })}\n\n`);
+        res.end();
+        return;
+      }
       // The first honest word BEFORE the first model round-trip — the client had nothing
       // truthful to show for the slowest seconds of the turn (Severity-5 item 6).
       try { res.write(`data: ${JSON.stringify({ type: "phase", phase: "thinking" })}\n\n`); } catch { /* client hung up */ }
@@ -5301,6 +5339,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
           { onToken, onPhase, onEvent: (ev) => sse(ev) },
         );
         attachAgentRun(out);
+        if (turnKey) finishAssistantTurn(turnKey, out);
 
         if (conv) {
           appendConversationMessage(conv.id, assistantTurnMessage(out, new Date().toISOString()));
@@ -5316,6 +5355,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         audit({ type: "assistant.stream", ok: out.ok, kind: out.kind, model: out.model, error: out.ok ? undefined : out.error }, req, g.session);
         res.write(`data: ${JSON.stringify({ type: "done", result: out })}\n\n`);
       } catch (e) {
+        if (turnKey) releaseAssistantTurn(turnKey);
         res.write(`data: ${JSON.stringify({ type: "done", result: { ok: false, error: "stream_error" } })}\n\n`);
       }
       res.end();

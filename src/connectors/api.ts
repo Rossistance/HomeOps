@@ -739,14 +739,16 @@ export const backend = {
     try { return await req("/miniapps/generate", { method: "POST", body: JSON.stringify(input), mutation: true }); } catch { return { ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }; }
   },
   /* ---- assistant (the conversational loop; a PLAN starts a durable server run) ---- */
-  async assistant(message: string, context?: Record<string, unknown>, providerId?: string, conversationId?: string): Promise<AssistantResult> {
-    try { return await req("/assistant", { method: "POST", body: JSON.stringify({ message, context, providerId, conversationId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }; }
+  // clientTurnId names the turn so the server runs it at most once, however many times the
+  // request reaches it (a retry after a dropped stream must not execute the tools twice).
+  async assistant(message: string, context?: Record<string, unknown>, providerId?: string, conversationId?: string, clientTurnId?: string): Promise<AssistantResult> {
+    try { return await req("/assistant", { method: "POST", body: JSON.stringify({ message, context, providerId, conversationId, clientTurnId }), mutation: true }); } catch { return { ok: false, error: "backend_unreachable", message: "Backend runtime is not reachable." }; }
   },
   // SSE streaming assistant — fires onProgress with a token count while the AI is
   // generating, onDelta with each slice of reply text, onTool as the engine starts /
   // finishes each tool, then resolves with the final parsed AssistantResult.
   streamAssistant(
-    body: { message: string; context?: Record<string, unknown>; providerId?: string; conversationId?: string },
+    body: { message: string; context?: Record<string, unknown>; providerId?: string; conversationId?: string; clientTurnId?: string },
     onProgress?: (tokens: number) => void,
     onPhase?: (phase: string) => void,
     onDelta?: (text: string) => void,

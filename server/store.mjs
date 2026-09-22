@@ -221,7 +221,7 @@ const _dataRevByTenant = new Map(); // tenantId -> rev
  * writes a row per inbound message and a row per triage pass, and no client renders
  * either — bumping dataRev for them would make every phone in the household refetch the
  * world because someone else's group chat was busy. */
-const REV_EXCLUDE = new Set(["sessions.json", "idempotency.json", "health.json", "oauth_states.json", "contact_verifications.json", "imessage_messages.json", "chat_decisions.json"]);
+const REV_EXCLUDE = new Set(["sessions.json", "idempotency.json", "health.json", "oauth_states.json", "contact_verifications.json", "imessage_messages.json", "chat_decisions.json", "assistant_turns.json"]);
 function ensureRev(tenant) {
   if (!_dataRevByTenant.has(tenant)) _dataRevByTenant.set(tenant, Date.now());
   return _dataRevByTenant.get(tenant);
@@ -303,6 +303,69 @@ export function recordIdempotency(key, value) {
   all[key] = { at: Date.now(), ...value };
   writeJSON("idempotency.json", all);
   return all[key];
+}
+
+/* ---- Assistant turn idempotency (at-most-once for a CHAT turn) --------------------
+ *
+ * A chat turn is not a run step: it is one HTTP request that, inside runAssistantAgent,
+ * performs real writes — creates a task, flips a helper, sends a text. The phone streams
+ * the turn and, on ANY stream failure, re-sends the same message to the non-streaming
+ * route ("the server persists the turn either way"). Production, 2026-09-22 05:04–05:07Z:
+ * the stream completed a five-tool turn; the same message arrived again three minutes
+ * later, its stream failed in 3s, the client fell back, and the server ran all five tools
+ * a second time — two test tasks, four helpers flipped twice, two "Done" answers for one
+ * request. runAssistantAgent's own retry guards never fired: to them each request was a
+ * fresh turn.
+ *
+ * So a client may NAME its turn (`clientTurnId`), and a named turn executes at most once
+ * per (household, actor, conversation, id). The second arrival gets the FIRST answer
+ * back, not a second execution. A twin that arrives while the turn is still running is
+ * refused (turn_in_progress) rather than waited on — a client that already gave up on
+ * one connection is not going to hold a second open for two minutes.
+ *
+ * The lease exists because this deployment restarts on every deploy: a "running" claim
+ * with no process behind it would otherwise refuse that message forever. TURN_TIMEOUT_MS
+ * in assistant-agent is 240s; a lease well past that belongs to a dead process.
+ *
+ * Its own collection, not idempotency.json: that is the run engine's at-most-once ledger
+ * and is never pruned. A turn result carries the whole answer and its tool calls, and it
+ * only matters for as long as a client could plausibly retry, so it is swept at 24h. */
+export const ASSISTANT_TURN_LEASE_MS = 10 * 60_000;
+const ASSISTANT_TURN_KEEP_MS = 24 * 60 * 60_000;
+export function assistantTurnKey(session, conversationId, clientTurnId) {
+  return idempotencyKey("assistant-turn", session?.householdId ?? "", session?.actorId ?? "", conversationId ?? "", clientTurnId);
+}
+/** Pure: what a claim record means right now. Exported so the lease rule can be tested
+ *  without a server. `failed`, and a `running` lease that has expired, both read as free. */
+export function turnClaimState(rec, now = Date.now(), leaseMs = ASSISTANT_TURN_LEASE_MS) {
+  if (!rec) return "free";
+  if (rec.status === "done") return "done";
+  if (rec.status === "running" && now - Number(rec.at ?? 0) < leaseMs) return "running";
+  return "free";
+}
+/** Take the turn if nobody holds it. A synchronous read-then-write on purpose: Node runs
+ *  one handler at a time between awaits, so two twins can never both observe "free". */
+export function claimAssistantTurn(key, now = Date.now()) {
+  const all = readJSON("assistant_turns.json", {});
+  for (const k of Object.keys(all)) if (now - Number(all[k]?.at ?? 0) > ASSISTANT_TURN_KEEP_MS) delete all[k];
+  const state = turnClaimState(all[key], now);
+  if (state === "free") {
+    all[key] = { status: "running", at: now };
+    writeJSON("assistant_turns.json", all);
+    return { state };
+  }
+  return { state, result: all[key].result ?? null };
+}
+export function finishAssistantTurn(key, result) {
+  const all = readJSON("assistant_turns.json", {});
+  all[key] = { status: "done", at: Date.now(), result };
+  writeJSON("assistant_turns.json", all);
+}
+/** The turn threw before it could be trusted to have finished; let a retry try again. */
+export function releaseAssistantTurn(key) {
+  const all = readJSON("assistant_turns.json", {});
+  all[key] = { status: "failed", at: Date.now() };
+  writeJSON("assistant_turns.json", all);
 }
 
 /* ---- Connector configuration (non-secret fields kept plain; secret fields encrypted) ---- */

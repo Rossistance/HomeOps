@@ -11,6 +11,10 @@ process.env.HOMEOPS_SECRET_KEY = "test-secret-key-test-secret-key-32";
 
 const { INTERNAL_FUNCTIONS } = await import("../internal-functions.mjs");
 const store = await import("../store.mjs");
+// The tools now refuse a participant/driver/assignee who is not on the roster, so the
+// roster the spawned server would have seeded is seeded here too.
+const { seedDefaults } = await import("../seed.mjs");
+seedDefaults();
 after(() => { try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 const ctx = { householdId: "local", actorId: "m-alex", runId: "run_test" };

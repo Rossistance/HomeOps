@@ -1164,7 +1164,10 @@ export const useStore = create<Store>((set, get) => {
         const m = d.conversations?.find((x) => x.id === conversationId)?.messages.find((x) => x.id === aMsgId);
         if (m) fn(m);
       });
-      const r = await backend.streamAssistant({ message: t, context: ctx, conversationId }, (tokens) => {
+      // Names the turn: the server runs a named turn at most once, so a retried request
+      // can never execute the turn's tools a second time.
+      const clientTurnId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const r = await backend.streamAssistant({ message: t, context: ctx, conversationId, clientTurnId }, (tokens) => {
         if (tokens === 4 && !phaseLocked) patchMsg((m) => { m.status = "streaming"; });
       }, (phase) => {
         phaseLocked = true;

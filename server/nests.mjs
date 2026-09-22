@@ -63,6 +63,17 @@ export function canSeeNest(nestId, householdId, actorId) {
   return actorInNest(nestId, householdId, actorId);
 }
 
+/* Personal memory belongs to its author ALONE; nest memory to the nest; household memory to
+ * everyone. ONE predicate for the API's GET and DELETE and for the assistant's delete tool,
+ * so the three can never disagree — it lived in index.mjs until the tool needed it too, and a
+ * second copy is exactly how an `|| isAdultRole(...)` bypass crept into DELETE once before. */
+export function canSeeMemory(m, session) {
+  if (!m) return false;
+  if (m.scope === "personal") return m.source?.actorId === session.actorId;
+  if (m.scope === "nest") return canSeeNest(m.nestId, session.householdId, session.actorId);
+  return true;
+}
+
 /** A display name for the space switcher: "GPop + Beannie", in his own example. */
 export function nestLabel(nest, roster) {
   if (nest?.name) return nest.name;

@@ -59,6 +59,10 @@ interface StreamEvent { type?: string; tokens?: number; text?: string; tool?: st
 export interface StreamAssistantOpts {
   conversationId?: string;
   context?: Record<string, unknown>;
+  /** Names this turn, so the non-streaming re-send that follows a failed stream is
+   *  recognised by the server as the SAME turn and answered from its result — not run
+   *  again. Without it, a stream that dropped after the tools ran executed them twice. */
+  clientTurnId?: string;
   /** Fires with the running token count each time the server pings progress. */
   onProgress?: (tokens: number) => void;
   /** Fires with each piece of reply text as it streams, in order. */
@@ -81,7 +85,7 @@ export async function streamAssistant(message: string, opts?: StreamAssistantOpt
   const res = await expoFetch(`${API_URL}/api/assistant/stream`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ message, context: opts?.context, conversationId: opts?.conversationId }),
+    body: JSON.stringify({ message, context: opts?.context, conversationId: opts?.conversationId, clientTurnId: opts?.clientTurnId }),
     signal: opts?.signal,
   });
   if (!res.ok) throw new Error(`assistant_stream_http_${res.status}`);

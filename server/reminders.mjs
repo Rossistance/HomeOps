@@ -12,7 +12,7 @@
 // Fired exactly once per task: `reminderSentAt` is stamped BEFORE the send, so a slow push or
 // a restart mid-sweep can't produce the same nudge twice. A reminder that failed to send is a
 // smaller harm than one that arrives four times.
-import { listTasks, patchTask, getMember, listEvents, patchEvent } from "./store.mjs";
+import { listTasks, patchTask, getMember, listEvents, patchEvent, appendAudit } from "./store.mjs";
 import { pushToMember } from "./notify.mjs";
 import { householdTimeZone, formatInZone, stampToMs } from "./household-time.mjs";
 
@@ -105,7 +105,15 @@ export async function sweepTaskReminders(now = Date.now()) {
         patchTask(task.id, { remindersSent: [...sent], reminderSentAt: new Date().toISOString() });
         if (stale) { out.skipped++; continue; }
         const actorId = task.assignedMemberId || task.createdBy;
-        if (!actorId) { out.skipped++; continue; }
+        /* A reminder that could not be delivered used to vanish right here. The family read
+         * "no notification" and the server had nothing to say about it — 2026-09-22, the
+         * first question was whether a push had been ATTEMPTED, and nothing could answer it.
+         * The reason now lands in the audit trail, where a person can see it. */
+        if (!actorId) {
+          out.skipped++;
+          appendAudit({ type: "reminder.push_failed", taskId: task.id, reason: "no_recipient", householdId: task.householdId });
+          continue;
+        }
         const r = await pushToMember({
           householdId: task.householdId,
           actorId,
@@ -115,8 +123,15 @@ export async function sweepTaskReminders(now = Date.now()) {
           // "The priority to get this notification needs to be on high." Reminders only.
           timeSensitive: true,
         });
-        if (r?.ok) out.sent++; else out.skipped++;
-      } catch { out.skipped++; }
+        if (r?.ok) out.sent++;
+        else {
+          out.skipped++;
+          appendAudit({ type: "reminder.push_failed", taskId: task.id, actorId, reason: r?.reason ?? "unknown", householdId: task.householdId });
+        }
+      } catch (e) {
+        out.skipped++;
+        try { appendAudit({ type: "reminder.push_failed", taskId: task.id, reason: "threw", detail: String(e?.message ?? e).slice(0, 200), householdId: task.householdId }); } catch { /* the audit must never be the thing that fails */ }
+      }
     }
   }
   return out;
@@ -179,6 +194,7 @@ export async function sweepEventReminders(now = Date.now()) {
           : formatInZone(new Date(anchorMs).toISOString(), tz, { hour: "numeric", minute: "2-digit" });
         const lead = mins === 0 ? "Starting now" : mins === 24 * 60 ? "Tomorrow" : mins >= 60 ? `In ${Math.round(mins / 60)} hour${mins >= 120 ? "s" : ""}` : `In ${mins} minutes`;
         let delivered = 0;
+        const misses = [];
         for (const actorId of people) {
           const r = await pushToMember({
             householdId: ev.householdId, actorId,
@@ -187,10 +203,18 @@ export async function sweepEventReminders(now = Date.now()) {
             data: { type: "event", id: ev.id },
             timeSensitive: true,
           });
-          if (r?.ok) delivered++;
+          if (r?.ok) delivered++; else misses.push({ actorId, reason: r?.reason ?? "unknown" });
         }
-        if (delivered) out.sent++; else out.skipped++;
-      } catch { out.skipped++; }
+        if (delivered) out.sent++;
+        else {
+          out.skipped++;
+          // Same rule as tasks: a reminder nobody received is written down, with why.
+          appendAudit({ type: "reminder.push_failed", eventId: ev.id, reason: people.size ? "no_recipient_reached" : "no_recipient", misses, householdId: ev.householdId });
+        }
+      } catch (e) {
+        out.skipped++;
+        try { appendAudit({ type: "reminder.push_failed", eventId: ev.id, reason: "threw", detail: String(e?.message ?? e).slice(0, 200), householdId: ev.householdId }); } catch { /* never the thing that fails */ }
+      }
     }
   }
   return out;
