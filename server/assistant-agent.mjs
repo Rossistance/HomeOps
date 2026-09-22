@@ -89,6 +89,7 @@ const KEY_HINTS = {
   replace: { type: "boolean", description: "true to replace whatever is already planned in that slot (only when the family said so)." },
   visibility: { type: "string", enum: ["household", "personal", "adults", "private"], description: "Who can see it. Default household." },
   priority: { type: "string", enum: ["low", "medium", "high"] },
+  remindMinutesBefore: { type: "number", enum: [0, 15, 30, 60, 1440], description: "Reminder lead in minutes before the task's time: 0 (at the time), 15, 30, 60 or 1440 (the day before). Needs a dueAt to count back from. This is what actually sends a push — priority alone does not." },
   type: { type: "string", description: "Kind of task: task, chore, bill, errand… Default task." },
   listName: { type: "string", description: "Which list (Groceries, Shopping, Packing…)." },
   scope: { type: "string", enum: ["household", "personal"], description: "household = everyone can use it later; personal = only the person who said it." },
@@ -407,7 +408,7 @@ function nativeTools(ctx) {
 
   add("famili.update_task", "Change or complete a task",
     "Update a task or list item: mark done (status \"done\") or reopen (\"todo\"), rename, change due date, assignee, priority, notes, or list. Look the task up first.",
-    { type: "object", properties: { taskId: KEY_HINTS.taskId, title: KEY_HINTS.title, status: { type: "string", enum: ["todo", "in_progress", "done"] }, dueAt: KEY_HINTS.dueAt, assignedMemberId: KEY_HINTS.assignedMemberId, priority: KEY_HINTS.priority, notes: KEY_HINTS.notes, listName: KEY_HINTS.listName, remindMinutesBefore: { type: "number", description: "Reminder lead in minutes (15, 30, 60, 1440…)." } }, required: ["taskId"], additionalProperties: false },
+    { type: "object", properties: { taskId: KEY_HINTS.taskId, title: KEY_HINTS.title, status: { type: "string", enum: ["todo", "in_progress", "done"] }, dueAt: KEY_HINTS.dueAt, assignedMemberId: KEY_HINTS.assignedMemberId, priority: KEY_HINTS.priority, notes: KEY_HINTS.notes, listName: KEY_HINTS.listName, remindMinutesBefore: KEY_HINTS.remindMinutesBefore }, required: ["taskId"], additionalProperties: false },
     async (input) => {
       if (!canWrite) return readOnly();
       const tk = getTask(String(input?.taskId ?? ""));
