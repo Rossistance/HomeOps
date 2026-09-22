@@ -11,29 +11,15 @@ import { extractStructured } from "./file-extract.mjs";
 import { deliverNotification, deliverInAppFallback } from "./notify.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
 import { isValidReminder } from "./reminders.mjs";
+/* The helpers the hand-written tools share with the DECLARED actions (actions/*.mjs) live
+ * in one place, so a check tightened for one is tightened for both. */
+import { eid, nowISO, badStamp, DATE_ONLY_RE, unknownMember, ghostMessage } from "./actions/shared.mjs";
+import { ACTION_INTERNAL_FUNCTIONS } from "./actions/registry.mjs";
 import crypto from "node:crypto";
 
-const eid = (p) => p + "_" + crypto.randomBytes(8).toString("hex");
-const nowISO = () => new Date().toISOString();
-// The HTTP create routes refuse an unparseable stamp (ISS-105) so an event can never be
-// stored on no day; these tools took the model's string verbatim, which is how "tomorrow"
-// became a row that rendered nowhere and a run that still reported ok:true.
-const badStamp = (v) => v != null && v !== "" && Number.isNaN(+new Date(v));
-const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MEMORY_SCOPES = ["household", "personal", "nest"];
 const PRIORITIES = ["low", "medium", "high"];
 const MEAL_SLOTS = ["breakfast", "lunch", "dinner", "snack"];
-/* A member id the model made up used to be stored as-is — an event with a participant
- * nobody can see, a task assigned to a ghost, a driver who does not exist (found by the
- * App QA helper, 2026-09-22, alongside priority "urgent" and meal slot "brunch", all
- * accepted without a word). The roster is the only source of ids (famili__list_members);
- * an id that is not on it is refused with a reason the model can act on. */
-const unknownMember = (id) => {
-  if (id == null || id === "") return null;
-  const m = getMember(String(id));
-  return m && !m.archived ? null : String(id);
-};
-const ghostMessage = (id) => `No household member has the id "${id}" — list members to find the right one.`;
 
 export const INTERNAL_FUNCTIONS = {
   /* ---- Helper (agent) inspection + iteration --------------------------------------
@@ -235,56 +221,11 @@ export const INTERNAL_FUNCTIONS = {
   /* ---- Family-data tools (P1.2 / P4.1): real, server-owned writes ----
    * The assistant/agents draft rich family events and tasks here. These are the
    * canonical household graph — review-first (events land as drafts), durable, and
-   * role-scoped via the entity's visibility. No external side effects. */
-  "homeops.create_event_draft": {
-    id: "homeops.create_event_draft",
-    name: "Draft a family event",
-    action: "Write",
-    risk: "Low",
-    requiresApproval: false,
-    delivers: false,
-    connectorId: "homeops",
-    connectorName: "FamiliOS",
-    async run(ctx, input) {
-      const title = String(input?.title ?? "").trim();
-      if (!title) return { ok: false, error: "empty_title", message: "An event needs a title." };
-      if (badStamp(input?.startAt)) return { ok: false, error: "invalid_startAt", message: "startAt isn't a valid date/time — use ISO 8601 (e.g. 2026-09-14T17:00:00-04:00) or YYYY-MM-DD for an all-day event." };
-      if (badStamp(input?.endAt)) return { ok: false, error: "invalid_endAt", message: "endAt isn't a valid date/time." };
-      for (const id of Array.isArray(input?.participantIds) ? input.participantIds : []) {
-        const ghost = unknownMember(id);
-        if (ghost) return { ok: false, error: "unknown_member", message: ghostMessage(ghost) };
-      }
-      { const ghost = unknownMember(input?.driverId); if (ghost) return { ok: false, error: "unknown_member", message: ghostMessage(ghost) }; }
-      const tz = householdTimeZone(ctx.householdId);
-      // A date-only start means "that whole day" — an all-day event anchored to the
-      // household's midnight, never the server's (which is how a US family's all-day
-      // events began the evening before).
-      const dateOnly = DATE_ONLY_RE.test(String(input?.startAt ?? ""));
-      const allDay = input?.allDay === true || dateOnly;
-      const startAt = dateOnly ? localMidnightISO(input.startAt, tz) : (input?.startAt ?? null);
-      const endAt = input?.endAt ? (DATE_ONLY_RE.test(String(input.endAt)) ? localMidnightISO(input.endAt, tz) : input.endAt) : null;
-      // An end BEFORE the start used to be dropped to null without a word; the model then
-      // told the family the event ran 3–5 when it had no end at all. (Equal is still
-      // treated as "no end" — a same-day all-day event arrives that way.)
-      if (endAt && startAt && Date.parse(endAt) < Date.parse(startAt)) return { ok: false, error: "end_before_start", message: "endAt is before startAt — give the end time after the start, or leave it out." };
-      const rec = putEvent({
-        id: eid("ev"), householdId: ctx.householdId, title,
-        startAt, endAt: endAt && startAt && Date.parse(endAt) > Date.parse(startAt) ? endAt : null, allDay,
-        notes: typeof input?.notes === "string" ? input.notes : "",
-        location: input?.location ?? "", spaceId: input?.spaceId ?? "sp-family",
-        participantIds: Array.isArray(input?.participantIds) ? input.participantIds : [],
-        driverId: input?.driverId ?? null, ownerId: input?.ownerId ?? ctx.actorId, backupOwnerId: null,
-        whatToBring: Array.isArray(input?.whatToBring) ? input.whatToBring : [],
-        checklist: [], travel: input?.travel ?? null, reminders: [],
-        attachments: [], comments: [], mealImpact: input?.mealImpact ?? null,
-        visibility: input?.visibility ?? "household", category: input?.category ?? "Family",
-        layer: "canonical", status: "draft",
-        source: "FamiliOS Assistant", provenance: { via: "agent", runId: ctx.runId, actorId: ctx.actorId },
-        createdBy: ctx.actorId, createdAt: Date.now(), updatedAt: nowISO(),
-      });
-      return { ok: true, result: { id: rec.id, title: rec.title, status: rec.status, startAt: rec.startAt, endAt: rec.endAt, allDay: rec.allDay === true } };
-    },
-  },
+   * role-scoped via the entity's visibility. No external side effects.
+   *
+   * `homeops.create_event_draft` is no longer written here: it is a DECLARED action
+   * (actions/events.mjs) and arrives through the ...ACTION_INTERNAL_FUNCTIONS spread at
+   * the bottom of this object, the same entry shape as everything above and below it. */
 
   "homeops.update_event_checklist": {
     id: "homeops.update_event_checklist",
@@ -724,6 +665,12 @@ export const INTERNAL_FUNCTIONS = {
       return { ok: true, result: { delivered: true, channel: out.channel, methodId, message: out.message } };
     },
   },
+
+  /* Declared actions (ADR-003). Each is one definition that ALSO yields its HTTP route and
+   * the clients' TypeScript; this spread is how the run engine and the chat loop see it,
+   * unchanged in shape from the hand-written entries above. Last on purpose: a declared
+   * action wins over a stale copy of itself. */
+  ...ACTION_INTERNAL_FUNCTIONS,
 };
 
 export function getInternalFunction(id) {

@@ -228,7 +228,9 @@ function deterministicFill(run, stepIndex, step, schema) {
       for (let j = stepIndex - 1; j >= 0; j--) {
         const s = run.steps[j];
         if (s?.status !== "succeeded" || !s.result) continue;
-        const id = s.result.eventId ?? s.result.id;
+        // A declared action returns the whole record ({ event }); the older tools return
+        // a flat id. Both thread.
+        const id = s.result.eventId ?? s.result.id ?? s.result.event?.id;
         if (id && String(id).startsWith("ev_")) { filled[f.key] = String(id); changed = true; break; }
       }
     } else if (/(query|q$|search|topic|text|goal)/i.test(f.key)) {

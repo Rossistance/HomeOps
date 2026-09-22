@@ -26,7 +26,7 @@
 //   Leaving does not delete. A thread or a list someone made stays with the nest for whoever
 //   is left; if the nest empties out it is archived, not erased.
 import crypto from "node:crypto";
-import { listNests, getNest, putNest, deleteNestRec, listMembers, appendAudit, actorInNest , getMember, isAdultRole } from "./store.mjs";
+import { listNests, getNest, putNest, deleteNestRec, listMembers, appendAudit, actorInNest , getMember, isAdultRole, normalizeVisibility } from "./store.mjs";
 
 const nid = () => "nest_" + crypto.randomBytes(8).toString("hex");
 const now = () => new Date().toISOString();
@@ -61,6 +61,35 @@ export function canSeeNest(nestId, householdId, actorId) {
   // One definition, in store.mjs beside the visibility gate that also depends on it — so a
   // nest can never mean one thing to a route and another to the store.
   return actorInNest(nestId, householdId, actorId);
+}
+
+/* Who can see it — decided ONCE, for everything that offers the choice.
+ *
+ * "The privacy option needs to extend to tasks and lists, new or pre-existing… the actual
+ *  logic of who sees what needs to extend throughout the app."
+ *
+ * It was written out separately per feature, and the copies had drifted: tasks understood
+ * private/nest/household with a real nest-membership check, while knowledge clamped to
+ * `personal | household` — a word the visibility gate doesn't know — so a knowledge item
+ * couldn't be nest-scoped at all and its "Just me" wasn't private. One function now, so
+ * every surface that offers Just me / My Nest / Everyone gets the same three answers and
+ * the same refusal.
+ *
+ * Returns null when a nest was named that this person isn't in — the caller turns that into
+ * a 403 rather than silently downgrading, because quietly filing something somewhere other
+ * than where you asked is worse than refusing.
+ *
+ * Lived in index.mjs until a declared action (actions/events.mjs) needed it too; `session`
+ * only has to carry householdId and actorId, so a tool's ctx satisfies it.
+ */
+export function resolveVisibility(requested, requestedNestId, session, current = {}) {
+  const vis = normalizeVisibility(requested ?? current.visibility);
+  if (vis !== "nest") return { visibility: vis, nestId: null };
+  // Falling back to the current nest lets "keep it where it is" be expressed by sending
+  // visibility alone, which is what an edit form does when only the scope changed.
+  const target = String(requestedNestId ?? current.nestId ?? "");
+  if (!canSeeNest(target, session.householdId, session.actorId)) return null;
+  return { visibility: "nest", nestId: target };
 }
 
 /* Personal memory belongs to its author ALONE; nest memory to the nest; household memory to

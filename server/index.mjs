@@ -65,7 +65,7 @@ import { AUTONOMY, SCHEDULE_KINDS } from "./helper-shape.mjs";
 import { nameConversation } from "./context.mjs";
 import { suggestAddresses, placesProvider } from "./places.mjs";
 import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
-import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, canSeeMemory, canForgetMemory, publicNest, nestLabel, listNests } from "./nests.mjs";
+import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, canSeeMemory, canForgetMemory, publicNest, nestLabel, listNests, resolveVisibility } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive, sweepEventReminders } from "./reminders.mjs";
 import { householdTimeZone, formatForHousehold, wallClockISO } from "./household-time.mjs";
@@ -368,31 +368,8 @@ function badTimestamp(v) {
   return v != null && v !== "" && isNaN(+new Date(v));
 }
 
-/* Who can see it — decided ONCE, for everything that offers the choice.
- *
- * "The privacy option needs to extend to tasks and lists, new or pre-existing… the actual
- *  logic of who sees what needs to extend throughout the app."
- *
- * It was written out separately per feature, and the copies had drifted: tasks understood
- * private/nest/household with a real nest-membership check, while knowledge clamped to
- * `personal | household` — a word the visibility gate doesn't know — so a knowledge item
- * couldn't be nest-scoped at all and its "Just me" wasn't private. One function now, so
- * every surface that offers Just me / My Nest / Everyone gets the same three answers and
- * the same refusal.
- *
- * Returns null when a nest was named that this person isn't in — the caller turns that into
- * a 403 rather than silently downgrading, because quietly filing something somewhere other
- * than where you asked is worse than refusing.
- */
-function resolveVisibility(requested, requestedNestId, session, current = {}) {
-  const vis = normalizeVisibility(requested ?? current.visibility);
-  if (vis !== "nest") return { visibility: vis, nestId: null };
-  // Falling back to the current nest lets "keep it where it is" be expressed by sending
-  // visibility alone, which is what an edit form does when only the scope changed.
-  const target = String(requestedNestId ?? current.nestId ?? "");
-  if (!canSeeNest(target, session.householdId, session.actorId)) return null;
-  return { visibility: "nest", nestId: target };
-}
+/* resolveVisibility — "who can see it, decided ONCE" — now lives in nests.mjs, because a
+ * declared action (actions/events.mjs) needs the same answer the routes get. Imported above. */
 
 /**
  * Which Library space does this document belong in, judged from what it SAYS?

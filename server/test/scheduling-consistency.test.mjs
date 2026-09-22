@@ -120,8 +120,8 @@ describe("meals, tasks and their calendar mirrors", () => {
     assert.match(String(bad.steps[0].detail), /valid date/i);
     const ok = await runTool(adult, "homeops.create_event_draft", { title: "Field day", startAt: "2030-05-05" });
     assert.equal(ok.status, "completed");
-    assert.equal(ok.steps[0].result.allDay, true);
-    assert.match(ok.steps[0].result.startAt, /^2030-05-05T\d\d:00:00\.000Z$/, "anchored to a real midnight");
+    assert.equal(ok.steps[0].result.event.allDay, true);
+    assert.match(ok.steps[0].result.event.startAt, /^2030-05-05T\d\d:00:00\.000Z$/, "anchored to a real midnight");
   });
 });
 
