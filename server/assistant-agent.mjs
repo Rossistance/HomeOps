@@ -35,7 +35,7 @@ import {
   getMemoryEntry, deleteMemoryEntry, getMember, isAdultRole,
   recordAiUsage, aiBudgetExhausted, getSettings, appendAudit,
 } from "./store.mjs";
-import { canSeeMemory } from "./nests.mjs";
+import { canSeeMemory, canForgetMemory } from "./nests.mjs";
 import { roleAtLeast } from "./auth.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
 import { isEditableLinkedGoogle, editLinkedGoogleEvent, pushEventToGoogle, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
@@ -91,7 +91,7 @@ const KEY_HINTS = {
   replace: { type: "boolean", description: "true to replace whatever is already planned in that slot (only when the family said so)." },
   visibility: { type: "string", enum: ["household", "personal", "adults", "private"], description: "Who can see it. Default household." },
   priority: { type: "string", enum: ["low", "medium", "high"] },
-  remindMinutesBefore: { type: "number", enum: [0, 15, 30, 60, 1440], description: "Reminder lead in minutes before the task's time: 0 (at the time), 15, 30, 60 or 1440 (the day before). Needs a dueAt to count back from. This is what actually sends a push — priority alone does not." },
+  remindMinutesBefore: { type: "number", enum: [0, 5, 10, 15, 30, 60, 1440], description: "Reminder lead in minutes before the task's time: 0 (at the time), 5, 10, 15, 30, 60 or 1440 (the day before). Needs a dueAt to count back from. This is what actually sends a push — priority alone does not." },
   type: { type: "string", description: "Kind of task: task, chore, bill, errand… Default task." },
   listName: { type: "string", description: "Which list (Groceries, Shopping, Packing…)." },
   scope: { type: "string", enum: ["household", "personal"], description: "household = everyone can use it later; personal = only the person who said it." },
@@ -234,6 +234,14 @@ function publicTask(hh, t) {
     id: t.id, title: t.title, type: t.type ?? "task", status: t.status ?? "todo", listName: t.listName ?? undefined,
     dueAt: t.dueAt ?? null, startAt: t.startAt ?? undefined, priority: t.priority ?? undefined,
     assignedTo: memberName(hh, t.assignedMemberId), notes: t.notes ? short(t.notes, 200) : undefined, visibility: t.visibility ?? "household",
+    /* The reminder, echoed back. Without it neither the model nor the person could tell
+     * whether a nudge was attached (2026-09-22: "the task record doesn't echo
+     * remindMinutesBefore, so this took two tests instead of one glance"). remindersSent is
+     * the receipt: the sweep stamps it BEFORE pushing, so its presence proves the reminder
+     * was attempted even when nothing arrived — and the audit then says why. */
+    ...(t.remindMinutesBefore != null ? { remindMinutesBefore: t.remindMinutesBefore } : {}),
+    ...(Array.isArray(t.remindOffsets) && t.remindOffsets.length ? { remindOffsets: t.remindOffsets } : {}),
+    ...(Array.isArray(t.remindersSent) && t.remindersSent.length ? { remindersSent: t.remindersSent } : {}),
   };
 }
 
@@ -315,11 +323,25 @@ function nativeTools(ctx) {
       const health = await memoryProvider.health();
       if (health.ok) {
         const r = await memoryProvider.search(q, { containerTag: hh, limit: 10 });
-        // `id` rides along so famili__delete_memory has something to name. Before, a wrong
-        // memory could be found but never pointed at.
-        // The provider indexes a row as `sm_mem_<store id>` (write_memory's dual write); the
-        // store id is the one every route and the delete tool answer to, so that is the one shown.
-        if (r.ok) return { ok: true, result: { memories: (r.results ?? []).filter(visible).map((m) => ({ ...(m.id ? { id: String(m.id).replace(/^sm_mem_/, "") } : {}), text: m.text, scope: m.scope })), degraded: !!r.degraded } };
+        /* `id` rides along so famili__delete_memory has something to name — before, a wrong
+         * memory could be found but never pointed at. The index row is `sm_mem_<store id>`
+         * and it is a COPY: its scope and author are whatever was passed at write time.
+         * Visibility is therefore decided on the STORE row when there is one — the same
+         * record and predicate the app and the delete tool use — so search can never show an
+         * entry that "Forget" then refuses (2026-09-22: found on every search,
+         * memory_not_found on every delete). The index's own fields are consulted only for a
+         * row the store no longer has. */
+        const judged = (m) => {
+          const id = m.id ? String(m.id).replace(/^sm_mem_/, "") : null;
+          const row = id ? getMemoryEntry(id) : null;
+          if (row) {
+            if (row.householdId !== hh) return null;
+            if (!(channel === "group" ? row.scope !== "personal" : canSeeMemory(row, session))) return null;
+            return { id: row.id, text: row.text, scope: row.scope };
+          }
+          return visible(m) ? { ...(id ? { id } : {}), text: m.text, scope: m.scope } : null;
+        };
+        if (r.ok) return { ok: true, result: { memories: (r.results ?? []).map(judged).filter(Boolean), degraded: !!r.degraded } };
       }
       const rows = listMemory({ householdId: hh, limit: 200 }).filter(visible).filter((m) => matches(q, m.text)).slice(0, 10);
       return { ok: true, result: { memories: rows.map((m) => ({ id: m.id, text: m.text, scope: m.scope })), degraded: true } };
@@ -512,8 +534,9 @@ function nativeTools(ctx) {
       if (!canWrite) return readOnly();
       // Either spelling of the id is accepted — the store's, or the provider's prefixed copy.
       const m = getMemoryEntry(String(input?.memoryId ?? "").replace(/^sm_mem_/, ""));
-      // EXACTLY the API's GET/DELETE rule: a memory this person cannot read does not exist for them.
-      if (!m || m.householdId !== hh || !canSeeMemory(m, session)) return { ok: false, error: "memory_not_found", message: "No such memory entry — search memory to find the right id." };
+      // EXACTLY the API's DELETE rule (nests.mjs canForgetMemory): what this person cannot
+      // read does not exist for them — except an orphaned personal memory, which an adult may clear.
+      if (!m || m.householdId !== hh || !canForgetMemory(m, session)) return { ok: false, error: "memory_not_found", message: "No such memory entry — search memory to find the right id." };
       deleteMemoryEntry(m.id);
       appendAudit({ type: "memory.delete", memoryId: m.id, via: "assistant", householdId: hh, actorId: session.actorId });
       return { ok: true, result: { deleted: true, text: short(m.text ?? "", 80) } };

@@ -65,7 +65,7 @@ import { AUTONOMY, SCHEDULE_KINDS } from "./helper-shape.mjs";
 import { nameConversation } from "./context.mjs";
 import { suggestAddresses, placesProvider } from "./places.mjs";
 import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
-import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, canSeeMemory, publicNest, nestLabel, listNests } from "./nests.mjs";
+import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, canSeeMemory, canForgetMemory, publicNest, nestLabel, listNests } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive, sweepEventReminders } from "./reminders.mjs";
 import { householdTimeZone, formatForHousehold, wallClockISO } from "./household-time.mjs";
@@ -4103,7 +4103,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // EXACTLY the GET rule. This used to carry an `|| isAdultRole(...)` bypass the GET had
       // deliberately removed — an adult could delete a personal memory they could not read,
       // and anyone could delete a nest memory outside their nest.
-      if (!canSeeMemory(m, g.session)) return json(res, 404, { error: "not_found" }, req); // don't leak existence
+      // canForgetMemory = canSeeMemory, plus one case: a PERSONAL memory whose author is not a
+      // live member (an agent, the scheduler, someone who left) is personal to nobody, and an
+      // adult may clear it. The assistant's delete tool uses the same predicate — nests.mjs.
+      if (!canForgetMemory(m, g.session)) return json(res, 404, { error: "not_found" }, req); // don't leak existence
       deleteMemoryEntry(m.id);
       audit({ type: "memory.delete", memoryId: m.id, ok: true }, req, g.session);
       return json(res, 200, { ok: true }, req);
