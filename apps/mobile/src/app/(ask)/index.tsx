@@ -571,6 +571,11 @@ export default function AskScreen() {
     // A photo with no words still needs a message body, or the turn has nothing to persist.
     const t = ready.length ? (t0 ? `[Attached: ${names}]\n${t0}` : `[Attached: ${names}]`) : t0;
     const uid = String(Date.now());
+    /* One name for this turn, shared by the stream and the fallback below. The server runs a
+     * named turn once: if the stream dies AFTER the tools ran (2026-09-22: four helpers
+     * flipped twice, two test tasks), the fallback gets that run's answer back instead of a
+     * second run. */
+    const clientTurnId = `${uid}-${Math.random().toString(36).slice(2, 8)}`;
     setText("");
     /* M1/M2/M4 — "the assistant's response is hidden down here… when I send this, this entire
      * section of keyboard needs to come all the way down. I just need to see 'Message Famili'.
@@ -631,6 +636,7 @@ export default function AskScreen() {
       r = await streamAssistant(t, {
         conversationId: convId ?? undefined,
         context,
+        clientTurnId,
         onProgress: () => { if (!phaseLockedRef.current) setPhase("writing"); },
         onDelta: (piece) => {
           streamed += piece;
@@ -644,7 +650,7 @@ export default function AskScreen() {
       // Any stream failure (transport, auth, parse) → non-streaming call, so
       // behavior never regresses. The server persists the turn either way.
       if (streamed) { streamed = ""; setMsgs((m) => m.filter((x) => x.id !== aid)); }
-      r = await api.assistant(t, { conversationId: convId ?? undefined, context });
+      r = await api.assistant(t, { conversationId: convId ?? undefined, context, clientTurnId });
     }
     setBusy(false);
     setWorking(null);
@@ -673,6 +679,13 @@ export default function AskScreen() {
       // Runs already executing server-side — watch each live; their results (and any
       // self-repair) come back into this thread.
       if (convId) for (const id of runIds) watchServerRun(id, convId);
+    } else if (r.error === "turn_in_progress" && convId) {
+      /* The stream dropped, but the server is still working this turn — the fallback was
+       * refused rather than run twice. The answer lands in the durable thread on its own;
+       * pull the thread a few times so it appears here without the person having to leave. */
+      const cid = convId;
+      upsertMsg({ id: aid, role: "assistant", text: "Still working on that — it'll show up here in a moment." });
+      for (const ms of [4000, 12000, 30000]) setTimeout(() => { void refreshConversation(cid); }, ms);
     } else {
       upsertMsg({
         id: aid, role: "assistant", error: true,
@@ -681,7 +694,7 @@ export default function AskScreen() {
           : (r.message || "I couldn't reach the AI provider just now."),
       });
     }
-  }, [attached, busy, conversationId, flushReveal, revealInto, space, text, upsertMsg, watchServerRun]);
+  }, [attached, busy, conversationId, flushReveal, refreshConversation, revealInto, space, text, upsertMsg, watchServerRun]);
 
   /* ---------- attachments ----------
    * The bubble appears the moment you pick, carrying its own spinner, and resolves on its own.

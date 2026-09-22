@@ -130,6 +130,8 @@ export interface AssistantToolCall {
 export interface AssistantResult {
   ok: boolean; kind?: "answer"; answer?: string; run?: RunRec; model?: string; error?: string; message?: string;
   toolCalls?: AssistantToolCall[]; runId?: string; runIds?: string[];
+  /** True when the server answered from an earlier execution of this same named turn. */
+  replayed?: boolean;
 }
 // Server-durable assistant conversations — same records the web client uses, so a chat
 // started on the phone shows up on the web (and vice versa) and survives app restarts.
@@ -621,8 +623,11 @@ export const api = {
   },
   // conversationId (optional) makes the turn server-durable: both messages persist on
   // the conversation, so history survives app restarts and shows up on the web too.
-  async assistant(message: string, opts?: { context?: Record<string, unknown>; conversationId?: string }): Promise<AssistantResult> {
-    const r = await req<AssistantResult>("/assistant", { method: "POST", body: JSON.stringify({ message, context: opts?.context, conversationId: opts?.conversationId }) });
+  // clientTurnId names the turn: the server runs a named turn at most once, so this call
+  // is safe to make AFTER a stream of the same turn failed — it returns that stream's
+  // answer instead of executing the tools a second time.
+  async assistant(message: string, opts?: { context?: Record<string, unknown>; conversationId?: string; clientTurnId?: string }): Promise<AssistantResult> {
+    const r = await req<AssistantResult>("/assistant", { method: "POST", body: JSON.stringify({ message, context: opts?.context, conversationId: opts?.conversationId, clientTurnId: opts?.clientTurnId }) });
     return r.data ?? { ok: false, error: "network" };
   },
   /* ---- Family Messages ---- */

@@ -4,6 +4,7 @@
 // `state.script` is a queue of turns; each request pops one:
 //   { toolCalls: [{ name, args }] }   — the model calls tools
 //   { text: "…" }                     — the model answers
+//   { …, delayMs: n }                 — hold that reply for n ms (a turn "still running")
 // Both the streaming and non-streaming bodies are implemented, because the agent streams
 // its turn while other callers generate. Every request body is recorded so a test can
 // assert what the model was actually shown (tool results, history, its system prompt).
@@ -56,23 +57,27 @@ export function fakeModelServer() {
       }));
       const finish = toolCalls.length ? "tool_calls" : "stop";
 
-      if (parsed.stream) {
-        res.writeHead(200, { "content-type": "text/event-stream" });
-        const chunk = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({
-          id: "c1", object: "chat.completion.chunk", created: 0, model: "fake-model",
-          choices: [{ index: 0, delta, finish_reason }],
-        })}\n\n`);
-        if (toolCalls.length) chunk({ role: "assistant", content: null, tool_calls: toolCalls });
-        else for (const piece of String(turn.text ?? "").match(/.{1,12}/g) ?? [""]) chunk({ role: "assistant", content: piece });
-        chunk({}, finish);
-        res.write("data: [DONE]\n\n");
-        res.end();
-        return;
-      }
-      json(res, {
-        content: toolCalls.length ? null : String(turn.text ?? ""),
-        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
-      }, finish);
+      const respond = () => {
+        if (parsed.stream) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          const chunk = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({
+            id: "c1", object: "chat.completion.chunk", created: 0, model: "fake-model",
+            choices: [{ index: 0, delta, finish_reason }],
+          })}\n\n`);
+          if (toolCalls.length) chunk({ role: "assistant", content: null, tool_calls: toolCalls });
+          else for (const piece of String(turn.text ?? "").match(/.{1,12}/g) ?? [""]) chunk({ role: "assistant", content: piece });
+          chunk({}, finish);
+          res.write("data: [DONE]\n\n");
+          res.end();
+          return;
+        }
+        json(res, {
+          content: toolCalls.length ? null : String(turn.text ?? ""),
+          ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+        }, finish);
+      };
+      // A held reply is how a test makes a turn genuinely "still running" when its twin arrives.
+      if (turn.delayMs) setTimeout(respond, turn.delayMs); else respond();
     });
   });
 
