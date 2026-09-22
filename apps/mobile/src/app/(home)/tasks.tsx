@@ -26,6 +26,8 @@ const TYPE_GROUP: Record<string, string> = {
 /* Cluster N — the same offsets the server validates (reminders.mjs REMINDER_CHOICES). */
 const CREATE_REMINDERS: { minutes: number; label: string }[] = [
   { minutes: 0, label: "At the time" },
+  { minutes: 5, label: "5 min" },
+  { minutes: 10, label: "10 min" },
   { minutes: 15, label: "15 min" },
   { minutes: 30, label: "30 min" },
   { minutes: 60, label: "1 hour" },

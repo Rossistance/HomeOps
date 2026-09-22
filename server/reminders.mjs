@@ -19,6 +19,11 @@ import { householdTimeZone, formatInZone, stampToMs } from "./household-time.mjs
 /** The minute-offsets a family can choose. "None" is null, not 0 — 0 means "at the time". */
 export const REMINDER_CHOICES = [
   { minutes: 0, label: "At the time" },
+  // 5 and 10: "a five minute reminder" was the first thing asked for on build 76, and the
+  // nearest answer the app had was "at the time" — a short lead is the common case for a
+  // quick errand, not an edge case.
+  { minutes: 5, label: "5 minutes before" },
+  { minutes: 10, label: "10 minutes before" },
   { minutes: 15, label: "15 minutes before" },
   { minutes: 30, label: "30 minutes before" },
   { minutes: 60, label: "1 hour before" },
