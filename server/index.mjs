@@ -98,6 +98,7 @@ import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, sendRecoveryCode, pushToMember } from "./notify.mjs";
 import { handleFamilyMessageRoutes } from "./family-messages-routes.mjs";
 import { handleActionRoutes } from "./actions/routes.mjs";
+import { newEventRecord } from "./actions/schemas/event.mjs";
 import { createHelpRequest } from "./help-requests.mjs";
 import { postMessage as postFamilyMessage } from "./family-messages.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
@@ -3225,17 +3226,12 @@ function mayWriteAgent(session, agent, nextVisibility) {
         audit({ type: "task.to_calendar", taskId: tk.id, eventId: existing.id, action: "updated", ok: true }, req, g.session);
         return json(res, 200, { ok: true, event: updated, action: "updated" }, req);
       }
-      const ev = putEvent({
-        id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        ...fields, allDay: false, location: "", spaceId: tk.spaceId ?? "sp-family",
+      const ev = putEvent(newEventRecord({
+        ...fields, allDay: false, spaceId: tk.spaceId ?? "sp-family",
         participantIds: tk.assignedMemberId ? [tk.assignedMemberId] : [],
-        driverId: null, ownerId: owner, backupOwnerId: null,
-        whatToBring: [], checklist: [], travel: null, reminders: [], attachments: [], comments: [],
-        mealImpact: null, taskId: tk.id, visibility: tk.visibility ?? "household", category: "Task",
-        layer: "canonical", status: "confirmed", source: "FamiliOS",
+        ownerId: owner, taskId: tk.id, visibility: tk.visibility ?? "household", category: "Task",
         provenance: { via: "task", actorId: g.session.actorId },
-        createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
-      });
+      }, g.session));
       patchTask(tk.id, { eventId: ev.id });   // so the task row can say it's on the calendar
       audit({ type: "task.to_calendar", taskId: tk.id, eventId: ev.id, action: "created", ok: true }, req, g.session);
       return json(res, 200, { ok: true, event: ev, action: "created" }, req);
@@ -3527,16 +3523,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
         audit({ type: "meal.to_calendar", mealId: m.id, eventId: existing.id, action: "updated", ok: true }, req, g.session);
         return json(res, 200, { ok: true, event: updated, action: "updated" }, req);
       }
-      const ev = putEvent({
-        id: "ev_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        title, startAt, endAt: null, location: "", notes, spaceId: "sp-family",
-        participantIds: [], driverId: null, ownerId: g.session.actorId, backupOwnerId: null,
-        whatToBring: [], checklist: [], travel: null, reminders: [], attachments: [], comments: [],
-        mealImpact: null, mealId: m.id, visibility: m.visibility ?? "household", category: "Meal",
-        layer: "canonical", status: "confirmed", source: "FamiliOS",
+      const ev = putEvent(newEventRecord({
+        title, startAt, notes, ownerId: g.session.actorId, mealId: m.id,
+        visibility: m.visibility ?? "household", category: "Meal",
         provenance: { via: "meal", actorId: g.session.actorId },
-        createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
-      });
+      }, g.session));
       audit({ type: "meal.to_calendar", mealId: m.id, eventId: ev.id, action: "created", ok: true }, req, g.session);
       return json(res, 200, { ok: true, event: ev, action: "created" }, req);
     }

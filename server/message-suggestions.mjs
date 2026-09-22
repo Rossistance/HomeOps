@@ -32,6 +32,7 @@ import { providerChatWithFallback } from "./ai.mjs";
 import { householdTimeZone, localMidnightISO } from "./household-time.mjs";
 import { createHelpRequest } from "./help-requests.mjs";
 import { postMessage, withThreadLock, isParentRole } from "./family-messages.mjs";
+import { newEventRecord } from "./actions/schemas/event.mjs";
 
 const MAX_SUGGESTIONS = 3;
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -190,16 +191,13 @@ async function applyCreate(s, session, tz, { threadId, messageId } = {}) {
     const startAt = stamp(p.startAt, tz);
     if (!startAt) return { ok: false, error: "invalid_startAt", message: "The suggested event has no usable date." };
     const endAt = stamp(p.endAt, tz);
-    const rec = putEvent({
-      id: eid("ev"), householdId: session.householdId, title: String(p.title ?? s.title).slice(0, 160),
+    const rec = putEvent(newEventRecord({
+      title: String(p.title ?? s.title).slice(0, 160),
       startAt, endAt: endAt && Date.parse(endAt) > Date.parse(startAt) ? endAt : null, allDay: p.allDay === true || DATE_ONLY_RE.test(String(p.startAt ?? "")),
-      notes: typeof p.notes === "string" ? p.notes : "", location: typeof p.location === "string" ? p.location : "", spaceId: "sp-family",
-      participantIds: Array.isArray(p.participantIds) ? p.participantIds.map(String) : [], driverId: null, ownerId: session.actorId, backupOwnerId: null,
-      whatToBring: [], checklist: [], travel: null, reminders: [], attachments: [], comments: [], mealImpact: null,
-      visibility: "household", category: "Family", layer: "canonical", status: "confirmed",
+      notes: typeof p.notes === "string" ? p.notes : "", location: typeof p.location === "string" ? p.location : "",
+      participantIds: Array.isArray(p.participantIds) ? p.participantIds.map(String) : [], ownerId: session.actorId,
       source: "Family Messages", provenance: { via: "message_suggestion", actorId: session.actorId },
-      createdBy: session.actorId, createdAt: Date.now(), updatedAt: nowISO(),
-    });
+    }, session));
     return { ok: true, result: { created: { type: "event", id: rec.id } }, line: `added “${rec.title}” to the calendar` };
   }
   const rec = putTask({

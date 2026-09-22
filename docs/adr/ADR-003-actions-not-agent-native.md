@@ -122,9 +122,13 @@ record is why.
    deleted (the real tools are the native `famili.*_helper` set), and
    `tool-registry-consistency.test.mjs` now refuses any tool name in the prompt or the hint
    tables that does not resolve to a registry entry or a native tool.
-2. **The other event writers** — `calendar.mjs` (ICS/Google sync), task → calendar, meal →
-   calendar, `plan_meal`, `message-suggestions.mjs` — onto one `newEventRecord(fields, ctx)`
-   so `EVENT_RECORD` has one writer of its defaults; `putEvent` stays a blind upsert.
+2. ~~**The other event writers**~~ — **Done, 2026-09-22.** All six writers (the action, the
+   ICS/Google sync, task → calendar, meal → calendar, `plan_meal`, a message suggestion)
+   go through `newEventRecord(fields, ctx)` in `server/actions/schemas/event.mjs`: a writer
+   passes what it knows, the helper fills every structural default, validates against
+   `EVENT_RECORD` with unknown keys rejected, and throws. `putEvent` stays a blind upsert;
+   `event-record-defaults.test.mjs` reads the server as text and refuses any `putEvent(`
+   that does not go through the helper.
 3. **Next surfaces**: ~~tasks~~ — **`homeops.create_task` + `POST /api/tasks` done,
    2026-09-22** (`server/actions/tasks.mjs`, `TASK_RECORD`, `TaskRecord` generated for both
    clients; one rule for reminders-before-a-date, the product's). Still to do: meals, list
