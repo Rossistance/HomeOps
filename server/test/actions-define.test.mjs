@@ -65,7 +65,7 @@ test("a declared action is frozen, schema included", () => {
   const a = getAction(ID);
   assert.ok(Object.isFrozen(a) && Object.isFrozen(a.input) && Object.isFrozen(a.input.properties.title), "the declaration cannot drift after load");
   assert.equal(actionForRoute("POST", "/api/events"), a);
-  assert.equal(actionForRoute("GET", "/api/events"), null, "GET is still the hand-written route");
+  assert.equal(actionForRoute("GET", "/api/events")?.id, "homeops.list_events", "GET is a declared read (action-reads.test.mjs)");
 });
 
 /* ───────────────────────── the validator ───────────────────────── */

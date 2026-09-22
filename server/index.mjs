@@ -2596,55 +2596,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
     /* ---- Family data: server-owned events & tasks (P1.2 / P4.1) ----
      * Reads are object-level filtered by role/visibility (children/guests see only
      * household/childVisible items + their own); writes require Limited Member+. */
-    if (path === "/api/events" && method === "GET") {
-      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const visible = listEvents((e) => e.householdId === g.session.householdId).filter((e) => canSeeEntity(e, g.session));
-      // Per-event edit affordance for the clients: a canonical (FamiliOS-owned) event is
-      // editable by an adult or its owner; a linked Google event is editable ONLY by the
-      // member who connected that Google account (edit-own-calendar-only). Everything else
-      // (ICS mirrors, other members' synced events) is read-only.
-      // ISS-121: an account that can no longer refresh must not go on contributing events
-      // that LOOK current. Resolve each synced event's source account once per request and
-      // flag the affected ones, so a disconnected calendar can never contribute SILENTLY.
-      // Marked, not hidden: quietly removing a family's events would be a worse lie than
-      // showing them with an honest "this calendar can't refresh" flag, and the clients
-      // pair the flag with a reconnect action.
-      const STALE_ACCOUNT_STATUS = new Set(["needs_reconnect", "revoked", "expired"]);
-      const acctStatus = accountStatusById(g.session.householdId);
-      const subToAccount = new Map();
-      for (const s of listSubscriptions((s) => s.householdId === g.session.householdId)) {
-        if (s.accountId) subToAccount.set(s.id, s.accountId);
-      }
-      const staleSourceOf = (e) => {
-        const accountId = e.provenance?.googleAccountId ?? subToAccount.get(e.provenance?.subscriptionId) ?? null;
-        if (!accountId) return null;
-        const a = acctStatus.get(accountId);
-        if (!a || !STALE_ACCOUNT_STATUS.has(a.status)) return null;
-        return { accountId, status: a.status, provider: a.provider, connectedByActorId: a.connectedByActorId };
-      };
-      const withEditable = visible.map((e) => {
-        const staleSource = staleSourceOf(e);
-        /* Cluster D — "This is his item and I should not be able to edit any of the
-         * information." Editing an event now belongs to the person whose event it IS, not
-         * to a role. The household Owner was the one demonstrating the bug — logged in as
-         * Owner, editing GPop's schedule — so isAdultRole is exactly the wrong test here. */
-        const mine = e.ownerId === g.session.actorId || e.createdBy === g.session.actorId;
-        return {
-          ...e,
-          editable: e.layer === "canonical" ? mine : isEditableLinkedGoogle(e, g.session.householdId, g.session.actorId),
-          /* Anyone who can SEE an event can keep their own private margin on it — that is
-           * what appendable now means. The shared halves (attendees, driver, what to bring)
-           * moved behind the owner + the request flow. */
-          appendable: true,
-          /* The viewer's own margin, theirs alone. The owner's shared notes stay on the
-           * event record; this is everyone's private half — including the owner's, who may
-           * also keep notes on their own event that nobody else needs to read. */
-          myNotes: getViewerNote(e.id, g.session.actorId),
-          ...(staleSource ? { staleSource } : {}),
-        };
-      });
-      return json(res, 200, { events: withEditable }, req);
-    }
+    /* GET /api/events is a DECLARED READ (server/actions/reads.mjs), answered by
+     * handleActionRoutes at the top of this chain: the per-viewer decorations (editable,
+     * appendable, myNotes, staleSource) and the ISS-121 stale-source rule live there, as
+     * does the output schema both clients' event types are generated from. */
     /* POST /api/events is a DECLARED action (server/actions/events.mjs) and is answered by
      * handleActionRoutes at the top of this chain — the same run the agent tool uses, with
      * via:"user". Nothing here may re-declare it; action-routes.test.mjs checks. */
@@ -3101,11 +3056,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
       audit({ type: "tasklist.delete", listId: l.id, name: l.name, tasksRemoved: doomed.length, ok: true }, req, g.session);
       return json(res, 200, { ok: true, tasksRemoved: doomed.length }, req);
     }
-    if (path === "/api/tasks" && method === "GET") {
-      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const visible = listTasks((t) => t.householdId === g.session.householdId).filter((t) => canSeeEntity(t, g.session));
-      return json(res, 200, { tasks: visible }, req);
-    }
+    /* GET /api/tasks is a DECLARED READ (server/actions/reads.mjs), answered by
+     * handleActionRoutes at the top of this chain. */
     /* POST /api/tasks is a DECLARED action (server/actions/tasks.mjs), answered by
      * handleActionRoutes at the top of this chain with via:"user" — the same run the
      * homeops.create_task tool uses. action-routes-tasks.test.mjs forbids a copy here. */

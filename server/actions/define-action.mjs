@@ -152,6 +152,11 @@ export function defineAction(def) {
     if (def.http.audit !== undefined && typeof def.http.audit !== "function") throw new Error(`${where}: http.audit must be a function`);
   }
   if (def.authorize !== undefined && typeof def.authorize !== "function") throw new Error(`${where}: authorize must be a function`);
+  /* agent:false is an HTTP-only action — a declared READ the clients call, that the model
+   * is deliberately not shown (it has its own windowed, channel-scoped native read). It is
+   * kept out of the registry and the catalog, so it must have a door of its own. */
+  const agent = def.agent !== false;
+  if (!agent && def.http === undefined) throw new Error(`${where}: an action with agent:false must have an http door, or nothing can reach it`);
   const errors = def.errors ?? {};
   for (const [code, status] of Object.entries(errors)) {
     if (!def.errorCodes.includes(code)) throw new Error(`${where}: errors.${code} is not in errorCodes`);
@@ -164,7 +169,7 @@ export function defineAction(def) {
     ...def,
     requiresApproval: !!def.requiresApproval, delivers: !!def.delivers,
     connectorId: def.connectorId ?? "homeops", connectorName: def.connectorName ?? "FamiliOS",
-    $defs: defs, errors,
+    $defs: defs, errors, agent,
     async invoke(ctx, raw) {
       const v = validateInput(def.input, raw ?? {}, { unknown: "strip", coerce: true, defs });
       if (!v.ok) return v;
@@ -172,9 +177,24 @@ export function defineAction(def) {
         const key = `${def.id}:${k}`;
         if (!warned.has(key)) { warned.add(key); console.warn(`[actions] ${def.id}: ignoring undeclared input field "${k}"`); }
       }
-      return def.run(ctx, v.value);
+      const out = await def.run(ctx, v.value);
+      /* The declared output is checked on the way out — and only WARNED about, once per
+       * field per process. Writers are held to the schema at the write (newEventRecord /
+       * newTaskRecord throw); a read may meet rows written years before the schema existed,
+       * and refusing to load a family's calendar over a stray key would be the wrong
+       * failure. The log names the key so the schema can be extended; the contract tests,
+       * on fresh data, reject. */
+      if (def.output && out?.ok && out.result !== undefined) {
+        const o = validateInput(def.output, out.result, { unknown: "reject", defs });
+        if (!o.ok) {
+          const key = `${def.id}:out:${o.field}`;
+          if (!warned.has(key)) { warned.add(key); console.warn(`[actions] ${def.id}: result does not fit its declared output — ${o.field}: ${o.message}`); }
+        }
+      }
+      return out;
     },
     toInternalFunction() {
+      if (!agent) throw new Error(`${def.id} is HTTP-only (agent:false) and has no registry entry`);
       return Object.freeze({
         id: def.id, name: def.name, description: def.description, action: def.action, risk: def.risk,
         requiresApproval: action.requiresApproval, delivers: action.delivers,
@@ -183,6 +203,7 @@ export function defineAction(def) {
       });
     },
     toInternalInputs() {
+      if (!agent) throw new Error(`${def.id} is HTTP-only (agent:false) and has no planner row`);
       const required = new Set(def.input.required ?? []);
       return Object.freeze(Object.entries(def.input.properties ?? {}).map(([key, s]) =>
         Object.freeze({ key, required: required.has(key), ...(s.description ? { label: s.description } : {}) })));

@@ -84,4 +84,5 @@ test("A REMINDER BEFORE A DATE IS STORED ARMED — the tool used to refuse it; t
 test("the route cannot be re-declared by hand", async () => {
   const src = await fs.promises.readFile(new URL("../index.mjs", import.meta.url), "utf8");
   assert.equal(src.includes('path === "/api/tasks" && method === "POST"'), false);
+  assert.equal(src.includes('path === "/api/tasks" && method === "GET"'), false, "…and the same for the declared read");
 });

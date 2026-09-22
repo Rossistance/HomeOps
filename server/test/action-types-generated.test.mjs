@@ -48,6 +48,11 @@ test("the event record and the create action are in the file the clients import"
   assert.match(ts, /export type CreateEventDraftInput = \{/);
   assert.match(ts, /export type CreateEventDraftResult = \{\n  event: EventRecord;\n\};/);
   assert.match(ts, /"homeops\.create_event_draft": \{ method: "POST", path: "\/api\/events" \},/);
+  // The declared reads: what GET returns is a generated type too, and takes no input.
+  assert.match(ts, /export type ListEventsInput = Record<string, never>;/);
+  assert.match(ts, /export type ListEventsResult = \{\n  events: Array<EventRecord>;\n\};/);
+  assert.match(ts, /export type ListTasksResult = \{\n  tasks: Array<TaskRecord>;\n\};/);
+  assert.match(ts, /"homeops\.list_events": \{ method: "GET", path: "\/api\/events" \},/);
 });
 
 /* ───────────────── the renderer, keyword by keyword ───────────────── */

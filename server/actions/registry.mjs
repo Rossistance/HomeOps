@@ -9,6 +9,7 @@
 // half-built. The import-order smoke test in server/test/actions-define.test.mjs pins this.
 import { createEvent } from "./events.mjs";
 import { createTask, createListItem } from "./tasks.mjs";
+import { readEvents, readTasks } from "./reads.mjs";
 
 export function buildRegistry(actions) {
   const byId = new Map(), byRoute = new Map();
@@ -24,13 +25,16 @@ export function buildRegistry(actions) {
   return { byId, byRoute };
 }
 
-export const ACTIONS = Object.freeze([createEvent, createTask, createListItem]);
+export const ACTIONS = Object.freeze([createEvent, createTask, createListItem, readEvents, readTasks]);
 const { byId, byRoute } = buildRegistry(ACTIONS);
 
 export const getAction = (id) => byId.get(id) ?? null;
 export const actionForRoute = (method, path) => byRoute.get(`${method} ${path}`) ?? null;
 
+/* Only actions the model may call reach the planner and the engine. An HTTP-only read
+ * (agent:false) answers its route and nothing else — the model has its own native read. */
+const AGENT_ACTIONS = ACTIONS.filter((a) => a.agent);
 /** Spread into INTERNAL_INPUTS (context.mjs) — the planner's input rows, derived. */
-export const ACTION_INPUTS = Object.freeze(Object.fromEntries(ACTIONS.map((a) => [a.id, a.toInternalInputs()])));
+export const ACTION_INPUTS = Object.freeze(Object.fromEntries(AGENT_ACTIONS.map((a) => [a.id, a.toInternalInputs()])));
 /** Spread into INTERNAL_FUNCTIONS (internal-functions.mjs) — the engine's entries, derived. */
-export const ACTION_INTERNAL_FUNCTIONS = Object.freeze(Object.fromEntries(ACTIONS.map((a) => [a.id, a.toInternalFunction()])));
+export const ACTION_INTERNAL_FUNCTIONS = Object.freeze(Object.fromEntries(AGENT_ACTIONS.map((a) => [a.id, a.toInternalFunction()])));
