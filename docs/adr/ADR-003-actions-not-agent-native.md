@@ -141,7 +141,13 @@ record is why.
    generated from and what the contract tests validate the whole response against. The
    model keeps its own windowed, channel-scoped `famili.list_*` reads. Output validation
    at runtime warns once per field and never refuses — a family's years-old rows may carry
-   a key the schema does not know. Still to do on this rung: meals.
+   a key the schema does not know. ~~Meals~~ — **done, 2026-09-22** (`server/actions/meals.mjs`,
+   `MEAL_RECORD`, `newMealRecord`, `MealRecord` generated for both clients): `POST /api/meals`
+   and `GET /api/meals` are declared and HTTP-only, because the model's meal tool,
+   `plan_meal`, is a different intent (de-dupe, groceries, calendar, Google) rather than a
+   drifted copy; it writes its meal through the same helper and its groceries through the
+   same `syncMealGroceries`. **Rung 3 is complete.** Whether `plan_meal` becomes a declared
+   composite belongs to rung 4's conversation.
 4. **Native `famili.*` tools bypass the policy ladder** (`assistant-agent.mjs`, the second
    loop in `buildToolSet`) while registry tools go through `executeToolForChat`. Decide
    whether native tools become actions — the next real architectural decision.

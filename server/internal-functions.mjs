@@ -17,6 +17,7 @@ import { eid, nowISO, badStamp, DATE_ONLY_RE, unknownMember, ghostMessage } from
 import { ACTION_INTERNAL_FUNCTIONS } from "./actions/registry.mjs";
 import { newEventRecord } from "./actions/schemas/event.mjs";
 import { newTaskRecord } from "./actions/schemas/task.mjs";
+import { newMealRecord } from "./actions/schemas/meal.mjs";
 import crypto from "node:crypto";
 
 const MEMORY_SCOPES = ["household", "personal", "nest"];
@@ -394,14 +395,14 @@ export const INTERNAL_FUNCTIONS = {
         date = meal.date ?? date;
         scheduleNote = scheduleNote || `${meal.title} was already planned — updated it instead of adding a duplicate.`;
       } else {
-        meal = putMeal({
-          id: eid("meal"), householdId: ctx.householdId, title, date, slot,
+        meal = putMeal(newMealRecord({
+          title, date, slot,
           time: typeof input?.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(input.time) ? input.time : null,
           notes: String(input?.notes ?? ""), ingredients, instructions,
           servings: Number.isFinite(+input?.servings) && +input.servings > 0 ? Math.floor(+input.servings) : null,
           recipeUrl: typeof input?.recipeUrl === "string" ? input.recipeUrl.trim() : "",
-          visibility: input?.visibility ?? "household", source: "assistant", createdBy: ctx.actorId, createdAt: now, updatedAt: now,
-        });
+          visibility: input?.visibility ?? "household", source: "assistant",
+        }, ctx));
       }
       if (enrichmentNote) scheduleNote = [scheduleNote, enrichmentNote].filter(Boolean).join(" ");
       // 2) Groceries — every not-yet-have ingredient, linked by mealId. Items

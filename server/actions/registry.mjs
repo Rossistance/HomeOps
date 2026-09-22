@@ -10,6 +10,7 @@
 import { createEvent } from "./events.mjs";
 import { createTask, createListItem } from "./tasks.mjs";
 import { readEvents, readTasks } from "./reads.mjs";
+import { createMeal, readMeals } from "./meals.mjs";
 
 export function buildRegistry(actions) {
   const byId = new Map(), byRoute = new Map();
@@ -25,7 +26,7 @@ export function buildRegistry(actions) {
   return { byId, byRoute };
 }
 
-export const ACTIONS = Object.freeze([createEvent, createTask, createListItem, readEvents, readTasks]);
+export const ACTIONS = Object.freeze([createEvent, createTask, createListItem, readEvents, readTasks, createMeal, readMeals]);
 const { byId, byRoute } = buildRegistry(ACTIONS);
 
 export const getAction = (id) => byId.get(id) ?? null;
