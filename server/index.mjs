@@ -65,7 +65,7 @@ import { AUTONOMY, SCHEDULE_KINDS } from "./helper-shape.mjs";
 import { nameConversation } from "./context.mjs";
 import { suggestAddresses, placesProvider } from "./places.mjs";
 import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
-import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, publicNest, nestLabel, listNests } from "./nests.mjs";
+import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, canSeeMemory, publicNest, nestLabel, listNests } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive, sweepEventReminders } from "./reminders.mjs";
 import { householdTimeZone, formatForHousehold, wallClockISO } from "./household-time.mjs";
@@ -507,14 +507,8 @@ function nextSubscriptionColor(householdId) {
 // Chat spaces: a conversation lives in its creator's PERSONAL space (private to
 // them — the long-standing behavior and the default) or in the FAMILY space
 // (visibility "household"), where any household member can read and continue it.
-/* Personal memory belongs to its author ALONE; nest memory to the nest; household memory to
- * everyone. One predicate for GET and DELETE, so the two can never disagree again. */
-function canSeeMemory(m, session) {
-  if (!m) return false;
-  if (m.scope === "personal") return m.source?.actorId === session.actorId;
-  if (m.scope === "nest") return canSeeNest(m.nestId, session.householdId, session.actorId);
-  return true;
-}
+// canSeeMemory lives in nests.mjs now — ONE predicate for the API's GET and DELETE and for
+// the assistant's delete tool, so a tool can never touch a memory a route would hide.
 function canSeeConversation(c, session) {
   if (!c || c.householdId !== session.householdId) return false;
   if (c.actorId === session.actorId) return true;

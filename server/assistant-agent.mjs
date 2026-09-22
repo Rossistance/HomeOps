@@ -31,9 +31,11 @@ import { executeToolForChat } from "./engine.mjs";
 import { orchestrate } from "./orchestrator.mjs";
 import {
   getRun, listEvents, getEvent, patchEvent, deleteEventRec, listTasks, getTask, patchTask, deleteTaskRec,
-  listMeals, listMembers, canSeeEntity, canSeeEntityInChannel, listApprovals, listMemory, getMember, isAdultRole,
+  listMeals, getMeal, deleteMealRec, listMembers, canSeeEntity, canSeeEntityInChannel, listApprovals, listMemory,
+  getMemoryEntry, deleteMemoryEntry, getMember, isAdultRole,
   recordAiUsage, aiBudgetExhausted, getSettings, appendAudit,
 } from "./store.mjs";
+import { canSeeMemory } from "./nests.mjs";
 import { roleAtLeast } from "./auth.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
 import { isEditableLinkedGoogle, editLinkedGoogleEvent, pushEventToGoogle, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
@@ -313,10 +315,14 @@ function nativeTools(ctx) {
       const health = await memoryProvider.health();
       if (health.ok) {
         const r = await memoryProvider.search(q, { containerTag: hh, limit: 10 });
-        if (r.ok) return { ok: true, result: { memories: (r.results ?? []).filter(visible).map((m) => ({ text: m.text, scope: m.scope })), degraded: !!r.degraded } };
+        // `id` rides along so famili__delete_memory has something to name. Before, a wrong
+        // memory could be found but never pointed at.
+        // The provider indexes a row as `sm_mem_<store id>` (write_memory's dual write); the
+        // store id is the one every route and the delete tool answer to, so that is the one shown.
+        if (r.ok) return { ok: true, result: { memories: (r.results ?? []).filter(visible).map((m) => ({ ...(m.id ? { id: String(m.id).replace(/^sm_mem_/, "") } : {}), text: m.text, scope: m.scope })), degraded: !!r.degraded } };
       }
       const rows = listMemory({ householdId: hh, limit: 200 }).filter(visible).filter((m) => matches(q, m.text)).slice(0, 10);
-      return { ok: true, result: { memories: rows.map((m) => ({ text: m.text, scope: m.scope })), degraded: true } };
+      return { ok: true, result: { memories: rows.map((m) => ({ id: m.id, text: m.text, scope: m.scope })), degraded: true } };
     });
 
   add("famili.list_approvals", "List pending approvals",
@@ -341,6 +347,16 @@ function nativeTools(ctx) {
       for (const k of Object.keys(patch)) if (patch[k] === undefined) delete patch[k];
       if (badStamp(patch.startAt)) return { ok: false, error: "invalid_startAt", message: "startAt isn't a valid timestamp." };
       if (badStamp(patch.endAt)) return { ok: false, error: "invalid_endAt", message: "endAt isn't a valid timestamp." };
+      // A made-up member id is refused here for the same reason as at creation: an event
+      // with a participant nobody can see is a record the family cannot reason about.
+      for (const id of Array.isArray(patch.participantIds) ? patch.participantIds : []) {
+        const m = getMember(String(id));
+        if (!m || m.archived) return { ok: false, error: "unknown_member", message: `No household member has the id "${id}" — list members to find the right one.` };
+      }
+      if (patch.driverId != null && patch.driverId !== "") {
+        const m = getMember(String(patch.driverId));
+        if (!m || m.archived) return { ok: false, error: "unknown_member", message: `No household member has the id "${patch.driverId}" — list members to find the right one.` };
+      }
       const linkedGoogle = ev.layer === "linked" && isEditableLinkedGoogle(ev, hh, session.actorId);
       const ownerMember = ev.ownerId ? getMember(ev.ownerId) : null;
       const isOwner = ownerMember ? (ev.ownerId === session.actorId || linkedGoogle) : (ev.createdBy === session.actorId || linkedGoogle || isAdultRole(session.role));
@@ -420,6 +436,12 @@ function nativeTools(ctx) {
       const mayEdit = isAdultRole(session.role) || tk.createdBy === session.actorId || (onlyStatus && tk.assignedMemberId === session.actorId);
       if (!mayEdit) return { ok: false, error: "forbidden", message: "Only an adult, the person who created it, or (to complete it) the person it's assigned to can change this task." };
       if (badStamp(patch.dueAt)) return { ok: false, error: "bad_timestamp", message: "dueAt isn't a valid date and time." };
+      // The schema's enum is only as good as the provider's schema support; the handler checks too.
+      if ("priority" in patch && !["low", "medium", "high"].includes(patch.priority)) return { ok: false, error: "bad_priority", message: "priority must be low, medium or high." };
+      if ("assignedMemberId" in patch && patch.assignedMemberId != null && patch.assignedMemberId !== "") {
+        const m = getMember(String(patch.assignedMemberId));
+        if (!m || m.archived) return { ok: false, error: "unknown_member", message: `No household member has the id "${patch.assignedMemberId}" — list members to find the right one.` };
+      }
       if ("remindMinutesBefore" in patch && !isValidReminder(patch.remindMinutesBefore)) return { ok: false, error: "bad_reminder", message: "Pick a reminder lead the app offers (e.g. 15, 30, 60, 1440 minutes)." };
       if ("remindMinutesBefore" in patch && !isValidReminderList([patch.remindMinutesBefore])) return { ok: false, error: "bad_reminder", message: "That reminder lead isn't supported." };
       const timingChanged = ["dueAt", "remindMinutesBefore"].some((k) => k in patch && JSON.stringify(patch[k]) !== JSON.stringify(tk[k]));
@@ -443,6 +465,58 @@ function nativeTools(ctx) {
       deleteTaskRec(tk.id);
       appendAudit({ type: "task.delete", taskId: tk.id, via: "assistant", householdId: hh, actorId: session.actorId });
       return { ok: true, result: { deleted: true, title: tk.title } };
+    }, { action: "Write" });
+
+  /* The App QA helper (2026-09-22) left four test meals and a test memory behind and said,
+   * truthfully, that it had no way to remove them: the API could, the assistant could not.
+   * Anything the assistant can plant it must be able to pull — under the same ownership
+   * rules as the API's DELETE routes, writing the same audit rows. */
+  add("famili.delete_meal", "Remove a planned meal",
+    "Take a meal off the planner — the person who planned it, or any adult. Its calendar event goes with it (and its Google copy, best effort); grocery items it added stay on the list but are no longer linked to it. List meals first to get the id.",
+    { type: "object", properties: { mealId: { type: "string", description: "The meal's id (starts with meal_), from famili__list_meals." } }, required: ["mealId"], additionalProperties: false },
+    async (input) => {
+      if (!canWrite) return readOnly();
+      const m = getMeal(String(input?.mealId ?? ""));
+      if (!m || m.householdId !== hh || m.archived) return { ok: false, error: "meal_not_found", message: "No such meal — list meals to find the right id." };
+      if (!isAdultRole(session.role) && m.createdBy !== session.actorId) return { ok: false, error: "forbidden", message: "Only an adult or the person who planned it can remove this meal." };
+      deleteMealRec(m.id);
+      // Grocery items carry a real mealId back-reference: unlinked, never deleted — a
+      // still-wanted item outlives the meal that put it on the list.
+      let unlinked = 0;
+      for (const t of listTasks((t) => t.householdId === hh && t.mealId === m.id)) {
+        patchTask(t.id, { mealId: null, notes: t.notes === `For ${m.title}` ? "" : t.notes });
+        unlinked++;
+      }
+      const external = getSettings(hh).externalActionsEnabled !== false;
+      let events = 0;
+      let google = null;
+      for (const e of listEvents((e) => e.householdId === hh && e.mealId === m.id)) {
+        if (e.provenance?.googleEventId) {
+          if (!external) google = "kept (external actions paused)";
+          else {
+            const r = await deleteGoogleCopy({ ev: e, householdId: hh, actorId: session.actorId }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
+            google = r.ok ? "deleted" : `kept (${r.error ?? "google error"})`;
+          }
+        }
+        deleteEventRec(e.id);
+        events++;
+      }
+      appendAudit({ type: "meal.delete", mealId: m.id, via: "assistant", events, unlinked, ...(google ? { google } : {}), householdId: hh, actorId: session.actorId });
+      return { ok: true, result: { deleted: true, title: m.title, eventsRemoved: events, groceryItemsUnlinked: unlinked, ...(google ? { google } : {}) } };
+    }, { action: "Write" });
+
+  add("famili.delete_memory", "Forget a remembered fact",
+    "Delete one entry from family memory — something remembered wrongly, or a test note. Search memory first to get its id. A personal memory can only be forgotten by the person it belongs to; to anyone else it does not exist.",
+    { type: "object", properties: { memoryId: { type: "string", description: "The memory entry's id, from famili__search_memory." } }, required: ["memoryId"], additionalProperties: false },
+    async (input) => {
+      if (!canWrite) return readOnly();
+      // Either spelling of the id is accepted — the store's, or the provider's prefixed copy.
+      const m = getMemoryEntry(String(input?.memoryId ?? "").replace(/^sm_mem_/, ""));
+      // EXACTLY the API's GET/DELETE rule: a memory this person cannot read does not exist for them.
+      if (!m || m.householdId !== hh || !canSeeMemory(m, session)) return { ok: false, error: "memory_not_found", message: "No such memory entry — search memory to find the right id." };
+      deleteMemoryEntry(m.id);
+      appendAudit({ type: "memory.delete", memoryId: m.id, via: "assistant", householdId: hh, actorId: session.actorId });
+      return { ok: true, result: { deleted: true, text: short(m.text ?? "", 80) } };
     }, { action: "Write" });
 
   /* ------------------------------ helpers ------------------------------------
