@@ -416,24 +416,14 @@ export interface AssistantResult {
   error?: string; message?: string;
 }
 /* ---- server-owned family data (P1/P4) ---- */
-export interface ServerEvent {
-  id: string; householdId: string; title: string; startAt: string | null; endAt: string | null;
-  /** All-day: startAt/endAt are date-only local days and the event has no clock time. */
-  allDay?: boolean;
-  location: string; notes?: string; spaceId: string; participantIds: string[]; driverId: string | null;
-  ownerId: string | null; backupOwnerId: string | null;
-  /** May the CURRENT member edit this event? (canonical → adult/owner; linked Google →
-   *  only the member who connected that account). Server-computed per session. */
-  editable?: boolean;
-  /** ISS-121: set when this event came from a connected account that can no longer
-   *  refresh (needs_reconnect / revoked / expired), so a disconnected calendar can never
-   *  contribute silently. Server-derived per request — it clears itself on reconnect. */
-  staleSource?: { accountId: string; status: string; provider: string; connectedByActorId: string | null };
-  whatToBring: { item: string; memberId: string | null }[]; checklist: { text: string; done: boolean }[];
-  travel: unknown; reminders: unknown[]; attachments: unknown[]; comments: unknown[]; mealImpact: unknown;
-  visibility: string; category: string; layer: "canonical" | "linked" | "public"; status: string;
-  source: string; provenance?: Record<string, unknown>; createdBy: string; createdAt: number; updatedAt: string;
-}
+/* The event record is GENERATED from the server's own declaration
+ * (server/actions/schemas/event.mjs → src/generated/actions.ts): one shape for the web
+ * client, the mobile client and the API, kept equal by CI. The hand-written interface this
+ * replaces lacked appendable / myNotes / remindOffsets — fields GET /api/events had been
+ * returning all along — and typed provenance as an opaque record. Alias, not rename, so
+ * no screen import changes. */
+import type { EventRecord } from "@/generated/actions";
+export type ServerEvent = EventRecord;
 export interface ServerTask {
   id: string; householdId: string; title: string; type: string; status: string; dueAt: string | null;
   assignedMemberId: string | null; spaceId: string; priority: string; amount: number | null;

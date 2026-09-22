@@ -36,8 +36,10 @@ export const EVENT_RECORD = {
     driverId: strOrNull,
     ownerId: strOrNull,
     backupOwnerId: strOrNull,
-    whatToBring: { type: "array", items: { type: "object", properties: { item: str, memberId: strOrNull }, required: ["item"], additionalProperties: true } },
-    checklist: { type: "array", items: { type: "object", properties: { text: str, done: bool }, required: ["text"], additionalProperties: true } },
+    /* Every writer sets memberId (null when unassigned) and done (false when new): the
+     * clients rely on that, so the schema says so. Optional here would be the drift. */
+    whatToBring: { type: "array", items: { type: "object", properties: { item: str, memberId: strOrNull }, required: ["item", "memberId"], additionalProperties: false } },
+    checklist: { type: "array", items: { type: "object", properties: { text: str, done: bool }, required: ["text", "done"], additionalProperties: false } },
     travel: {},
     reminders: anyList,
     attachments: anyList,
@@ -62,6 +64,7 @@ export const EVENT_RECORD = {
             at: num, googleUpdated: strOrNull,
             google: { type: "object", properties: { title: str, startAt: strOrNull, endAt: strOrNull, location: str }, additionalProperties: true },
           },
+          required: ["at", "googleUpdated", "google"],
           additionalProperties: true,
         },
       },
@@ -69,13 +72,13 @@ export const EVENT_RECORD = {
     },
     remindOffsets: { type: "array", items: num, description: "Reminder leads in minutes before the start." },
     remindersSent: anyList,
-    attendees: { type: "array", items: { type: "object", properties: { memberId: str, status: { type: "string", enum: ["invited", "accepted", "declined"] }, respondedAt: strOrNull }, required: ["memberId", "status"], additionalProperties: true } },
+    attendees: { type: "array", items: { type: "object", properties: { memberId: str, status: { type: "string", enum: ["invited", "accepted", "declined"] }, respondedAt: strOrNull }, required: ["memberId", "status", "respondedAt"], additionalProperties: false } },
     requests: {
       type: "object",
       properties: {
-        attend: { type: "array", items: { type: "object", properties: { actorId: str, at: str }, required: ["actorId"], additionalProperties: true } },
-        drive: { type: "array", items: { type: "object", properties: { actorId: str, at: str }, required: ["actorId"], additionalProperties: true } },
-        bring: { type: "array", items: { type: "object", properties: { actorId: str, item: str, at: str }, required: ["actorId"], additionalProperties: true } },
+        attend: { type: "array", items: { type: "object", properties: { actorId: str, at: str }, required: ["actorId", "at"], additionalProperties: false } },
+        drive: { type: "array", items: { type: "object", properties: { actorId: str, at: str }, required: ["actorId", "at"], additionalProperties: false } },
+        bring: { type: "array", items: { type: "object", properties: { actorId: str, item: str, at: str }, required: ["actorId", "at"], additionalProperties: false } },
       },
       additionalProperties: false,
     },

@@ -235,44 +235,16 @@ export interface SyncConflict {
 }
 // Sync bookkeeping carried on a canonical event (mirrors the web's event.provenance).
 export interface EventProvenance { googleEventId?: string; subscriptionId?: string; alsoSubscriptionIds?: string[]; conflict?: SyncConflict; [k: string]: unknown }
-export interface EventRec {
-  id: string; title: string; startAt: string | null; endAt: string | null; location: string;
-  driverId: string | null; participantIds: string[]; whatToBring: { item: string; memberId: string | null }[];
-  checklist: { text: string; done: boolean }[]; visibility: string; layer: "canonical" | "linked" | "public"; category: string;
-  notes?: string; source?: string; provenance?: EventProvenance;
-  /** WP-003/ISS-005: all-day events — no times shown; Google push uses the `date` form.
-   *  startAt/endAt stay local-midnight ISO timestamps so existing sort/render paths hold. */
-  allDay?: boolean;
-  /** Linked Google events: the member who connected that calendar (colors + free/busy). */
-  ownerId?: string | null;
-  /** Server-computed: may the current member edit this event? Canonical → adult/owner;
-   *  linked Google → only the member who connected that account (edit-own-calendar-only). */
-  editable?: boolean;
-  /** Q2: may the current member ADD to this event? A different question from `editable` —
-   *  a mirrored event's time and place belong to the calendar it came from, but who's
-   *  coming, what to bring and your own notes are FamiliOS's and are always appendable. */
-  appendable?: boolean;
-  /** Q2: the household's own note on this event. Never sent to Google or any source
-   *  calendar — unlike `notes`, which IS the event's description. */
-  localNotes?: string;
-  /** ISS-121: set when this event came from a connected account that can no longer refresh
-   *  (needs_reconnect / revoked / expired), so a disconnected calendar can never contribute
-   *  silently. Server-derived per request — it clears itself once the account reconnects. */
-  staleSource?: { accountId: string; status: string; provider: string; connectedByActorId: string | null };
-  /** E5/E7 — who's on the event and what they said. Absent on events created before this
-   *  feature, which carry `participantIds` only; those read as "invited", never as accepted. */
-  attendees?: AttendeeRec[];
-  /* Cluster D — the polite doors. Pending asks live ON the event (owner answers them);
-   * myNotes is the requester's own private margin, merged per-viewer by the server. */
-  createdBy?: string | null;
-  requests?: { attend?: { actorId: string; at: string }[]; drive?: { actorId: string; at: string }[]; bring?: { actorId: string; item: string; at: string }[] };
-  myNotes?: { note: string; bring: { item: string }[] } | null;
-  /** H7 — set when this event was created from a task. */
-  taskId?: string | null;
-  /** Minutes before the start to nudge — same choice list as tasks (reminders.mjs
-   *  REMINDER_CHOICES). Empty/absent = no reminder. */
-  remindOffsets?: number[];
-}
+/* EventRec is GENERATED from the server's own declaration
+ * (server/actions/schemas/event.mjs → src/generated/actions.ts): the same shape the web
+ * client and the API use, kept equal by CI. The hand-written interface this replaces
+ * lacked spaceId (household.tsx cast around it) while the web's lacked appendable /
+ * myNotes / remindOffsets — neither was what GET /api/events returned. The field-level
+ * notes that lived here (what `appendable` means, why `localNotes` never reaches Google)
+ * are the schema's descriptions now, and arrive as JSDoc. Alias, not rename, so no screen
+ * import changes. */
+import type { EventRecord } from "@/generated/actions";
+export type EventRec = EventRecord;
 export interface AttendeeRec { memberId: string; status: "invited" | "accepted" | "declined"; respondedAt: string | null }
 export interface TaskRec {
   id: string; title: string; type: string; status: string; dueAt: string | null;
