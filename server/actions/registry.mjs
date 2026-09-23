@@ -7,10 +7,18 @@
 // use. It must never import context.mjs or internal-functions.mjs, because both of those
 // import it (context → internal-functions → here), and a cycle would leave INTERNAL_INPUTS
 // half-built. The import-order smoke test in server/test/actions-define.test.mjs pins this.
+// The native tools keep to the same rule: native/helpers.mjs reaches helpers.mjs (which
+// reaches the engine) only when a tool runs, never at load.
 import { createEvent } from "./events.mjs";
 import { createTask, createListItem } from "./tasks.mjs";
 import { readEvents, readTasks } from "./reads.mjs";
 import { createMeal, readMeals, planMeal } from "./meals.mjs";
+import { familiListEvents, familiListTasks, familiListMeals, familiListMembers, familiSearchMemory, familiListApprovals } from "./native/reads.mjs";
+import { familiUpdateEvent, familiDeleteEvent } from "./native/events.mjs";
+import { familiUpdateTask, familiDeleteTask } from "./native/tasks.mjs";
+import { familiDeleteMeal } from "./native/meals.mjs";
+import { familiDeleteMemory } from "./native/memory.mjs";
+import { familiListHelpers, familiCreateHelper, familiUpdateHelper, familiRunHelper } from "./native/helpers.mjs";
 
 export function buildRegistry(actions) {
   const byId = new Map(), byRoute = new Map();
@@ -26,15 +34,26 @@ export function buildRegistry(actions) {
   return { byId, byRoute };
 }
 
-export const ACTIONS = Object.freeze([createEvent, createTask, createListItem, readEvents, readTasks, createMeal, readMeals, planMeal]);
+/** The chat loop's native famili.* tools (ADR-004 Stage 1), in the order the model has
+ *  always been shown them. They are in ACTIONS — so getAction, the duplicate-id check and
+ *  the generated types cover them — but never in the planner rows or the engine's entries
+ *  below: the chat loop dispatches them itself (engine.mjs runNativeAction), because their
+ *  ctx carries the session and the channel, which the catalog path cannot supply. */
+export const NATIVE_ACTIONS = Object.freeze([
+  familiListEvents, familiListTasks, familiListMeals, familiListMembers, familiSearchMemory, familiListApprovals,
+  familiUpdateEvent, familiDeleteEvent, familiUpdateTask, familiDeleteTask, familiDeleteMeal, familiDeleteMemory,
+  familiListHelpers, familiCreateHelper, familiUpdateHelper, familiRunHelper,
+]);
+export const ACTIONS = Object.freeze([createEvent, createTask, createListItem, readEvents, readTasks, createMeal, readMeals, planMeal, ...NATIVE_ACTIONS]);
 const { byId, byRoute } = buildRegistry(ACTIONS);
 
 export const getAction = (id) => byId.get(id) ?? null;
 export const actionForRoute = (method, path) => byRoute.get(`${method} ${path}`) ?? null;
 
 /* Only actions the model may call reach the planner and the engine. An HTTP-only read
- * (agent:false) answers its route and nothing else — the model has its own native read. */
-const AGENT_ACTIONS = ACTIONS.filter((a) => a.agent);
+ * (agent:false) answers its route and nothing else — the model has its own native read —
+ * and a native-lane tool is offered by the chat loop, never as a catalog tool. */
+const AGENT_ACTIONS = ACTIONS.filter((a) => a.agent && a.lane !== "native");
 /** Spread into INTERNAL_INPUTS (context.mjs) — the planner's input rows, derived. */
 export const ACTION_INPUTS = Object.freeze(Object.fromEntries(AGENT_ACTIONS.map((a) => [a.id, a.toInternalInputs()])));
 /** Spread into INTERNAL_FUNCTIONS (internal-functions.mjs) — the engine's entries, derived. */

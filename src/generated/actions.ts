@@ -430,6 +430,352 @@ export type PlanMealResult = {
 /** Error codes homeops.plan_meal can return. */
 export type PlanMealError = "invalid_input" | "empty_title" | "bad_servings" | "not_in_nest";
 
+/** Input of famili.list_events. List the household's calendar events the asker can see. Defaults to today through the next 30 days. Use it before answering any question about what is scheduled, before moving or deleting an event, and to check for conflicts before adding one. */
+export type FamiliListEventsInput = {
+  /** Range start (ISO or YYYY-MM-DD). Default: start of today. */
+  from?: string;
+  /** Range end (ISO or YYYY-MM-DD). Default: 30 days after from. */
+  to?: string;
+  /** Only events whose title or location contains this. */
+  query?: string;
+  limit?: number;
+};
+
+/** Result of famili.list_events. */
+export type FamiliListEventsResult = {
+  events: Array<Record<string, unknown>>;
+  count: number;
+  range: {
+    from: string;
+    to: string | null;
+  };
+};
+
+/** Error codes famili.list_events can return. */
+export type FamiliListEventsError = "invalid_input";
+
+/** Input of famili.list_tasks. List the household's tasks, chores and list items (groceries, shopping, packing) the asker can see. Use it before answering about what is due or to find a task's id before completing, changing or deleting it. */
+export type FamiliListTasksInput = {
+  /** Default open. */
+  status?: "open" | "done" | "all";
+  /** Only items on this list (e.g. Groceries). */
+  listName?: string;
+  assignedMemberId?: string;
+  /** Only tasks whose title contains this. */
+  query?: string;
+  limit?: number;
+};
+
+/** Result of famili.list_tasks. */
+export type FamiliListTasksResult = {
+  tasks: Array<Record<string, unknown>>;
+  count: number;
+};
+
+/** Error codes famili.list_tasks can return. */
+export type FamiliListTasksError = "invalid_input";
+
+/** Input of famili.list_meals. List the meal plan for a date range (default: today through 14 days). Use it before planning meals so you never double-book a slot. */
+export type FamiliListMealsInput = {
+  /** YYYY-MM-DD */
+  from?: string;
+  /** YYYY-MM-DD */
+  to?: string;
+};
+
+/** Result of famili.list_meals. */
+export type FamiliListMealsResult = {
+  meals: Array<{
+    id: string;
+    date?: string | null;
+    slot?: string;
+    title: string;
+    servings: number | null;
+    ingredientCount: number;
+    recipeUrl?: string;
+  }>;
+  count: number;
+};
+
+/** Error codes famili.list_meals can return. */
+export type FamiliListMealsError = "invalid_input";
+
+/** Input of famili.list_members. The household roster with member ids, roles and relationships. Use it to resolve a name to the id that assign/driver/participant fields need. */
+export type FamiliListMembersInput = Record<string, never>;
+
+/** Result of famili.list_members. */
+export type FamiliListMembersResult = {
+  members: Array<{
+    id: string;
+    name?: string;
+    role: string;
+    relationship: string | null;
+    isYou: boolean;
+  }>;
+  count: number;
+};
+
+/** Error codes famili.list_members can return. */
+export type FamiliListMembersError = "invalid_input";
+
+/** Input of famili.search_memory. Search what the family has told Famili to remember (preferences, routines, facts) and past conversation knowledge. Use it when a request depends on something the family may have said before. */
+export type FamiliSearchMemoryInput = {
+  query: string;
+};
+
+/** Result of famili.search_memory. */
+export type FamiliSearchMemoryResult = {
+  memories: Array<{
+    id?: string;
+    text?: string | null;
+    scope?: string | null;
+  }>;
+  degraded: boolean;
+};
+
+/** Error codes famili.search_memory can return. */
+export type FamiliSearchMemoryError = "invalid_input" | "query_required";
+
+/** Input of famili.list_approvals. Approvals the household still has to decide on (things waiting before they can send or run). */
+export type FamiliListApprovalsInput = Record<string, never>;
+
+/** Result of famili.list_approvals. */
+export type FamiliListApprovalsResult = {
+  approvals: Array<{
+    id: string;
+    toolId: string;
+    preview?: string;
+    risk?: string;
+    expiresAt: string | null;
+  }>;
+  count: number;
+};
+
+/** Error codes famili.list_approvals can return. */
+export type FamiliListApprovalsError = "invalid_input";
+
+/** Input of famili.update_event. Move, rename, or edit a calendar event the asker owns (time, end, all-day, location, notes, participants, driver, status confirmed|draft). Look the event up first. Someone else's event, or one mirrored from an outside calendar, can't have its time/title changed here — the result says so. */
+export type FamiliUpdateEventInput = {
+  /** The event's id (starts with ev_). Look it up with famili__list_events first. */
+  eventId: string;
+  /** Short human title. */
+  title?: string;
+  /** Start date-time, ISO 8601 with the household's UTC offset, e.g. 2026-09-14T17:00:00-04:00. For an all-day item use the date only (YYYY-MM-DD). */
+  startAt?: string;
+  /** End date-time, same format as startAt. Omit if unknown. */
+  endAt?: string;
+  allDay?: boolean;
+  location?: string;
+  /** Free-form notes. */
+  notes?: string;
+  /** Member ids from the household roster. */
+  participantIds?: Array<string>;
+  /** A member id from the household roster. */
+  driverId?: string;
+  status?: "draft" | "confirmed" | "cancelled";
+};
+
+/** Result of famili.update_event. */
+export type FamiliUpdateEventResult = {
+  event: Record<string, unknown>;
+  localOnly?: boolean;
+  google?: string;
+};
+
+/** Error codes famili.update_event can return. */
+export type FamiliUpdateEventError = "invalid_input" | "read_only_profile" | "event_not_found" | "forbidden" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_event_owner" | "read_only_layer" | "external_actions_disabled" | "not_linked_google" | "needs_reconnect" | "google_error";
+
+/** Input of famili.delete_event. Remove a calendar event the asker owns (or any event, for an adult). Look it up first and confirm it is the right one. Events mirrored from an outside calendar can't be deleted here. */
+export type FamiliDeleteEventInput = {
+  /** The event's id (starts with ev_). Look it up with famili__list_events first. */
+  eventId: string;
+};
+
+/** Result of famili.delete_event. */
+export type FamiliDeleteEventResult = {
+  deleted: boolean;
+  title: string;
+  google?: string;
+};
+
+/** Error codes famili.delete_event can return. */
+export type FamiliDeleteEventError = "invalid_input" | "read_only_profile" | "event_not_found" | "forbidden" | "read_only_layer" | "external_actions_disabled" | "not_linked_google" | "needs_reconnect" | "google_error";
+
+/** Input of famili.update_task. Update a task or list item: mark done (status "done") or reopen ("todo"), rename, change due date, assignee, priority, notes, or list. Look the task up first. */
+export type FamiliUpdateTaskInput = {
+  /** The task's id (starts with tk_ or li_). Look it up with famili__list_tasks first. */
+  taskId: string;
+  /** Short human title. */
+  title?: string;
+  status?: "todo" | "in_progress" | "done";
+  /** Due date-time, ISO 8601 with the household's UTC offset (or YYYY-MM-DD). */
+  dueAt?: string;
+  /** A member id from the household roster (famili__list_members). */
+  assignedMemberId?: string;
+  priority?: "low" | "medium" | "high";
+  /** Free-form notes. */
+  notes?: string;
+  /** Which list (Groceries, Shopping, Packing…). */
+  listName?: string;
+  /** Reminder lead in minutes before the task's time: 0 (at the time), 5, 10, 15, 30, 60 or 1440 (the day before). Needs a dueAt to count back from. This is what actually sends a push — priority alone does not. */
+  remindMinutesBefore?: 0 | 5 | 10 | 15 | 30 | 60 | 1440;
+};
+
+/** Result of famili.update_task. */
+export type FamiliUpdateTaskResult = {
+  task: Record<string, unknown>;
+};
+
+/** Error codes famili.update_task can return. */
+export type FamiliUpdateTaskError = "invalid_input" | "read_only_profile" | "task_not_found" | "forbidden" | "bad_timestamp" | "bad_priority" | "unknown_member" | "bad_reminder";
+
+/** Input of famili.delete_task. Remove a task or list item for good. Prefer marking it done unless the family asked to delete it. */
+export type FamiliDeleteTaskInput = {
+  /** The task's id (starts with tk_ or li_). Look it up with famili__list_tasks first. */
+  taskId: string;
+};
+
+/** Result of famili.delete_task. */
+export type FamiliDeleteTaskResult = {
+  deleted: boolean;
+  title: string;
+};
+
+/** Error codes famili.delete_task can return. */
+export type FamiliDeleteTaskError = "invalid_input" | "read_only_profile" | "task_not_found" | "forbidden";
+
+/** Input of famili.delete_meal. Take a meal off the planner — the person who planned it, or any adult. Its calendar event goes with it (and its Google copy, best effort); grocery items it added stay on the list but are no longer linked to it. List meals first to get the id. */
+export type FamiliDeleteMealInput = {
+  /** The meal's id (starts with meal_), from famili__list_meals. */
+  mealId: string;
+};
+
+/** Result of famili.delete_meal. */
+export type FamiliDeleteMealResult = {
+  deleted: boolean;
+  title: string;
+  eventsRemoved: number;
+  groceryItemsUnlinked: number;
+  google?: string;
+};
+
+/** Error codes famili.delete_meal can return. */
+export type FamiliDeleteMealError = "invalid_input" | "read_only_profile" | "meal_not_found" | "forbidden";
+
+/** Input of famili.delete_memory. Delete one entry from family memory — something remembered wrongly, or a test note. Search memory first to get its id. A personal memory can only be forgotten by the person it belongs to; to anyone else it does not exist. */
+export type FamiliDeleteMemoryInput = {
+  /** The memory entry's id, from famili__search_memory. */
+  memoryId: string;
+};
+
+/** Result of famili.delete_memory. */
+export type FamiliDeleteMemoryResult = {
+  deleted: boolean;
+  text: string;
+};
+
+/** Error codes famili.delete_memory can return. */
+export type FamiliDeleteMemoryError = "invalid_input" | "read_only_profile" | "memory_not_found";
+
+/** Input of famili.list_helpers. List the helpers this household has, what each one does, when it runs and how it last went. Use it before creating one (so you extend an existing helper instead of making a near-duplicate) and to answer any question about what the helpers are doing. */
+export type FamiliListHelpersInput = Record<string, never>;
+
+/** Result of famili.list_helpers. */
+export type FamiliListHelpersResult = {
+  helpers: Array<Record<string, unknown>>;
+};
+
+/** Error codes famili.list_helpers can return. */
+export type FamiliListHelpersError = "invalid_input";
+
+/** Input of famili.create_helper. Create a standing helper that does a job over and over — "every morning…", "each week…", "from now on…", "remind us whenever…". The instructions you write ARE the helper: write them as a clear paragraph addressed to the helper, saying what to look at, what to do, what to leave alone, and how to report back. It is created immediately, so tell the family its name, when it next runs and that they can edit or pause it in Helpers. Never use this for a one-off request — just do that now. */
+export type FamiliCreateHelperInput = {
+  /** Short, plain name the family will recognise, e.g. "Morning Briefing". */
+  name: string;
+  /** One sentence: what it is for. */
+  purpose?: string;
+  /** The helper's standing instructions, in plain English, written to the helper. */
+  instructions: string;
+  /** When it runs. Leave it out for a helper the family runs by hand. */
+  schedule?: {
+    /** manual, hourly, daily or weekly. */
+    kind: "manual" | "hourly" | "daily" | "weekly";
+    /** Time of day on the household clock, 24-hour HH:MM. Needed for daily and weekly. */
+    time?: string;
+    /** 0 = Sunday … 6 = Saturday. Needed for weekly. */
+    weekday?: number;
+  };
+  /** ask = it checks with the family before doing anything; act = it does everyday things itself and still asks before sending or spending. Default ask. */
+  autonomy?: "ask" | "act";
+  /** household = the whole family, personal = just this person. Default household. */
+  visibility?: "household" | "personal";
+};
+
+/** Result of famili.create_helper. */
+export type FamiliCreateHelperResult = {
+  created: boolean;
+  helperId: string;
+  name: string;
+  schedule: string;
+  autonomy: string;
+  visibility: string;
+  note?: string;
+};
+
+/** Error codes famili.create_helper can return. */
+export type FamiliCreateHelperError = "invalid_input" | "name_required" | "instructions_required";
+
+/** Input of famili.update_helper. Change an existing helper: its instructions, name, schedule, autonomy, or pause/resume it. Use famili__list_helpers first to get its id. To fix a helper that is doing the wrong thing, rewrite the WHOLE instructions paragraph rather than appending a correction to it. */
+export type FamiliUpdateHelperInput = {
+  /** The helper's id (starts with agt_). */
+  helperId: string;
+  name?: string;
+  purpose?: string;
+  /** The complete replacement instructions. */
+  instructions?: string;
+  /** When it runs. Leave it out for a helper the family runs by hand. */
+  schedule?: {
+    /** manual, hourly, daily or weekly. */
+    kind: "manual" | "hourly" | "daily" | "weekly";
+    /** Time of day on the household clock, 24-hour HH:MM. Needed for daily and weekly. */
+    time?: string;
+    /** 0 = Sunday … 6 = Saturday. Needed for weekly. */
+    weekday?: number;
+  };
+  autonomy?: "ask" | "act";
+  /** false pauses it. */
+  enabled?: boolean;
+};
+
+/** Result of famili.update_helper. */
+export type FamiliUpdateHelperResult = {
+  updated: boolean;
+  helperId: string;
+  name: string;
+  schedule: string;
+  autonomy: string;
+  enabled: boolean;
+};
+
+/** Error codes famili.update_helper can return. */
+export type FamiliUpdateHelperError = "invalid_input" | "helper_not_found" | "household_helper";
+
+/** Input of famili.run_helper. Run one of the family's helpers immediately, instead of waiting for its schedule. Returns what it did. Use it when someone asks for a helper's output right now ("give me the morning briefing"). */
+export type FamiliRunHelperInput = {
+  /** The helper's id (starts with agt_). */
+  helperId: string;
+};
+
+/** Result of famili.run_helper. */
+export type FamiliRunHelperResult = {
+  ran: string;
+  said?: string;
+  did: number;
+};
+
+/** Error codes famili.run_helper can return. */
+export type FamiliRunHelperError = "invalid_input" | "helper_not_found" | "unknown_helper" | "helper_paused" | "no_instructions" | "helper_failed" | "empty_message" | "authentication_required" | "no_provider" | "ai_budget_exhausted" | "provider_error";
+
 /** Every declared action that answers over HTTP, by id. */
 export const ACTION_ROUTES = {
   "homeops.create_event_draft": { method: "POST", path: "/api/events" },

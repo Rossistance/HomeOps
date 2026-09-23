@@ -85,7 +85,11 @@ function fireRunParked(runId, { stepIndex, approvalId, expiresAt } = {}) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function withTimeout(promise, ms) {
-  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error("step_timeout")), ms))]);
+  // The timer is cleared however the race ends: left running, every call held a live timer
+  // for its whole limit (60 s a step, five minutes after a native run_helper).
+  let timer;
+  const limit = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("step_timeout")), ms); });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
 }
 function summarize(result) {
   if (result == null) return "ok";
@@ -388,36 +392,25 @@ export async function executeToolForChat({ toolId, input = {}, session, agent = 
   const resolved = resolveTool(toolId, householdId, actorId);
   if (!resolved) return { ok: false, error: "unknown_tool", message: `There is no tool called "${toolId}".` };
   const meta = () => ({ toolId, action: resolved.action, risk: resolved.risk, connectorId: resolved.connectorId ?? null, connectorName: resolved.connectorName ?? null, requiresApproval: !!resolved.requiresApproval });
-  if (agent) {
-    const verdict = isToolStepAllowed(agent, toolId, { householdId, actorId });
-    if (!verdict.ok) {
-      appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent.id, reason: verdict.reason, householdId, actorId, conversationId });
-      return { ok: false, error: `not_permitted_${verdict.reason}`, message: verdict.message ?? "Not permitted for this helper.", policyBlocked: true, resolved: meta() };
-    }
-    const baseApproval = resolved.baseRequiresApproval ?? resolved.requiresApproval;
-    const decision = resolveEffectivePolicy({
-      cap: {
-        id: toolId,
-        name: resolved.tool?.name ?? resolved.def?.name ?? toolId,
-        requiresApproval: baseApproval,
-        risk: resolved.risk,
-        action: resolved.action,
-        delivers: resolved.tool?.delivers ?? resolved.def?.delivers ?? false,
-        external: resolved.kind === "provider" || resolved.kind === "connector",
-      },
-      agent,
-      settings: getSettings(householdId),
-      override: getRiskOverride(householdId, toolId, actorId),
-      actorIsAdult,
-    });
-    if (decision.decision === BLOCKED) {
-      appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent.id, rule: decision.rule, reason: decision.reason, householdId, actorId, conversationId });
-      return { ok: false, error: `policy_${decision.rule}`, message: decision.reason, policyBlocked: true, resolved: meta() };
-    }
-    resolved.requiresApproval = decision.requiresApproval;
-    resolved.policy = decision;
+  const gate = gateToolCall({
+    cap: {
+      id: toolId,
+      name: resolved.tool?.name ?? resolved.def?.name ?? toolId,
+      requiresApproval: resolved.baseRequiresApproval ?? resolved.requiresApproval,
+      risk: resolved.risk,
+      action: resolved.action,
+      delivers: resolved.tool?.delivers ?? resolved.def?.delivers ?? false,
+      external: resolved.kind === "provider" || resolved.kind === "connector",
+    },
+    toolId, agent, householdId, actorId, conversationId, actorIsAdult,
+    requiresApproval: resolved.requiresApproval,
+  });
+  if (gate.blocked) return { ok: false, error: gate.error, message: gate.message, policyBlocked: true, resolved: meta() };
+  if (gate.decision) {
+    resolved.requiresApproval = gate.decision.requiresApproval;
+    resolved.policy = gate.decision;
   }
-  if (resolved.requiresApproval) return { ok: false, needsApproval: true, resolved: meta() };
+  if (gate.needsApproval) return { ok: false, needsApproval: true, resolved: meta() };
   // Kill switch for an UNATTRIBUTED chat turn — execResolved covers internal + provider
   // tools and executeTool covers connectors, so this mirrors the run path exactly.
   let out;
@@ -431,6 +424,92 @@ export async function executeToolForChat({ toolId, input = {}, session, agent = 
   if (!out) return { ok: false, error: "no_result", message: "The tool returned nothing.", resolved: meta() };
   if (out.ok) return { ok: true, result: out.result ?? null, resolved: meta() };
   return { ok: false, error: out.error ?? "tool_failed", message: out.message ?? out.error ?? "The tool failed.", waiting: out.waiting, needsSetup: out.needsSetup, resolved: meta() };
+}
+
+/* THE LADDER A CHAT TOOL CALL MEETS, as one function, so the two ways a chat turn calls a
+ * tool — the catalog (executeToolForChat, above) and the native famili.* lane
+ * (runNativeAction, below) — cannot drift apart: the agent's allow/deny lists
+ * (isToolStepAllowed), then resolveEffectivePolicy with the household's settings, its risk
+ * override and — in the group lane only — whether the person asking is an adult. A refusal
+ * writes the same assistant.tool_blocked row and names the same error either way.
+ *
+ * `cap.requiresApproval` is the capability's BASE gate, the one the policy reasons from;
+ * `requiresApproval` is the gate as it stands before the ladder (a household risk override
+ * may already have cleared it), which is all that decides when there is no acting agent —
+ * exactly as executeToolForChat always behaved. `decision` is null in that case.
+ *
+ * Returns { blocked, needsApproval, decision, error, message }. */
+export function gateToolCall({ cap, toolId, agent = null, householdId, actorId = null, conversationId = null, actorIsAdult = null, requiresApproval } = {}) {
+  // Not a boolean (absent, or null) → the capability's own gate; never "no gate" by accident.
+  const preLadder = typeof requiresApproval === "boolean" ? requiresApproval : !!cap?.requiresApproval;
+  if (!agent) return { blocked: false, needsApproval: preLadder, decision: null, error: null, message: null };
+  const verdict = isToolStepAllowed(agent, toolId, { householdId, actorId });
+  if (!verdict.ok) {
+    appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent.id, reason: verdict.reason, householdId, actorId, conversationId });
+    return { blocked: true, needsApproval: false, decision: null, error: `not_permitted_${verdict.reason}`, message: verdict.message ?? "Not permitted for this helper." };
+  }
+  const decision = resolveEffectivePolicy({
+    cap,
+    agent,
+    settings: getSettings(householdId),
+    override: getRiskOverride(householdId, toolId, actorId),
+    actorIsAdult,
+  });
+  if (decision.decision === BLOCKED) {
+    appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent.id, rule: decision.rule, reason: decision.reason, householdId, actorId, conversationId });
+    return { blocked: true, needsApproval: false, decision, error: `policy_${decision.rule}`, message: decision.reason };
+  }
+  return { blocked: false, needsApproval: !!decision.requiresApproval, decision, error: null, message: null };
+}
+
+/* ================= THE NATIVE LANE (ADR-004 Stage 1) =================
+ * The famili.* tools the chat loop offers itself (actions/native/*). They are declared
+ * actions, but not catalog tools: their bodies read the session and the channel, which
+ * execResolved's ctx cannot carry. What they now share with every catalog tool is the gate
+ * above, a per-action timeout and the engine's audit row. What the gate can actually do to a
+ * native tool in Stage 1 is narrower than "the ladder": a helper's allow/deny lists (rules
+ * 2/3) reach it for the first time, and "always ask me" / autoAllow (rules 4 and 6) refuse
+ * it, below. Rule 1 cannot fire — a native write is local, and its Google calls ask
+ * googleReachAllowed() inside run — and rules 4b and 5 act only on a capability that
+ * requires approval by default, which no native tool does until Stage 2.
+ *
+ * Every native action is requiresApproval:false, so the ladder's verdict is ALLOWED for every
+ * stance — with two exceptions an agent can still produce: "always ask me" (rule 4) and an
+ * autoAllow listed for a write (rule 6 refuses to relax a high-stakes step, and every Write
+ * is high-stakes there). Parking a native write for approval needs the run engine to resolve
+ * it, which is Stage 2. Until then such a call is REFUSED, honestly and in words the model can
+ * repeat — never executed, never silently dropped.
+ *
+ * Returns the action's own { ok, result } | { ok:false, error, message } — or, refused by
+ * policy, { ok:false, error, message, policyBlocked:true } with the errors
+ * executeToolForChat uses. */
+const NATIVE_APPROVAL_LATER = "This helper is set to ask before doing this, and approvals for this tool arrive in a later update — nothing was done.";
+export async function runNativeAction({ action, input = {}, session, agent = null, channel = "personal", conversationId = null, asHelper = false, actorIsAdult = null } = {}) {
+  const householdId = session?.householdId;
+  const actorId = session?.actorId ?? null;
+  if (!householdId) return { ok: false, error: "no_session", message: "No household session." };
+  const toolId = action.id;
+  const cap = { id: toolId, name: action.name, requiresApproval: false, risk: action.risk, action: action.action, delivers: false, external: false };
+  const gate = gateToolCall({ cap, toolId, agent, householdId, actorId, conversationId, actorIsAdult });
+  if (gate.blocked) return { ok: false, error: gate.error, message: gate.message, policyBlocked: true };
+  if (gate.needsApproval) {
+    /* One sentence of our own, not the ladder's reason: rule 6's says "…it still needs you",
+     * promising an ask that Stage 1 cannot make. The row keeps the ladder's reason, the same
+     * shape as every other assistant.tool_blocked row. */
+    const rule = gate.decision?.rule ?? "capability.requires_approval";
+    appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent?.id ?? null, rule, reason: gate.decision?.reason ?? null, householdId, actorId, conversationId });
+    return { ok: false, error: `policy_${rule}`, message: NATIVE_APPROVAL_LATER, policyBlocked: true };
+  }
+  const ctx = { householdId, actorId, role: session.role, channel, session, via: "agent", runId: null, agentId: agent?.id ?? null, asHelper: !!asHelper };
+  let out;
+  const t0 = Date.now();
+  try {
+    out = await withTimeout(action.invoke(ctx, input), action.timeoutMs);
+  } catch (e) {
+    out = { ok: false, error: e?.message === "step_timeout" ? "timeout" : "tool_failed", message: String(e?.message ?? e) };
+  }
+  appendAudit({ type: "assistant.tool", toolId, connectorId: action.connectorId ?? "homeops", ok: !!out?.ok, error: out?.ok ? undefined : out?.error, action: action.action, durationMs: Date.now() - t0, householdId, actorId, agentId: agent?.id ?? null, conversationId });
+  return out;
 }
 
 const WAITING_CONNECTOR_RE = /not_configured|not_connected|not_authorized|connector_|runtime_unavailable/;

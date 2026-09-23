@@ -25,6 +25,11 @@ const IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const key = (k) => (IDENT.test(k) ? k : JSON.stringify(k));
 const doc = (s, indent) => (s ? `${indent}/** ${String(s).replace(/\*\//g, "* /")} */\n` : "");
 export const pascal = (id) => String(id).split(".").pop().split("_").filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join("");
+/* The base of an action's type names. A native-lane action (ADR-004) carries its namespace —
+ * famili.list_events → FamiliListEvents — because the lane re-uses verbs the HTTP reads
+ * already hold, and two `ListEventsInput` exports would not compile. Every other action keeps
+ * the bare name it has always had. renderActionsTs refuses a collision rather than emit one. */
+export const typeBase = (a) => (a.lane === "native" ? pascal(String(a.id).split(".")[0]) : "") + pascal(a.id);
 
 function tsType(s, indent = "") {
   if (s.$ref) return s.$ref.slice("#/$defs/".length);
@@ -69,8 +74,11 @@ export function renderActionsTs(actions) {
       ? `${doc(s.description, "")}export interface ${n} ${objectType(s, "")}\n`
       : `${doc(s.description, "")}export type ${n} = ${tsType(s)};\n`);
   }
+  const bases = new Map();
   for (const a of actions) {
-    const base = pascal(a.id);
+    const base = typeBase(a);
+    if (bases.has(base) && bases.get(base) !== a.id) throw new Error(`emit-ts: ${a.id} and ${bases.get(base)} would both export ${base}Input — rename one`);
+    bases.set(base, a.id);
     out.push(`${doc(`Input of ${a.id}. ${a.description}`, "")}export type ${base}Input = ${tsType(a.input)};\n`);
     if (a.output) out.push(`${doc(`Result of ${a.id}.`, "")}export type ${base}Result = ${tsType(a.output)};\n`);
     out.push(`${doc(`Error codes ${a.id} can return.`, "")}export type ${base}Error = ${a.errorCodes.map((c) => JSON.stringify(c)).join(" | ")};\n`);

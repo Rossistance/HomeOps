@@ -25,11 +25,18 @@ process.on("exit", () => { try { fs.rmSync(process.env.HOMEOPS_DATA_DIR, { recur
 const { INTERNAL_FUNCTIONS } = await import("../internal-functions.mjs");
 const { INTERNAL_INPUTS } = await import("../context.mjs");
 const { EXTRA_INPUT_KEYS, toToolName } = await import("../assistant-agent.mjs");
-const { ACTION_INPUTS } = await import("../actions/registry.mjs");
+const { ACTION_INPUTS, NATIVE_ACTIONS } = await import("../actions/registry.mjs");
 
 const registryIds = new Set(Object.keys(INTERNAL_FUNCTIONS));
-const src = await fs.promises.readFile(new URL("../assistant-agent.mjs", import.meta.url), "utf8");
-const nativeIds = new Set([...src.matchAll(/add\("(famili\.[a-z_]+)"/g)].map((m) => m[1]));
+/* What the model reads: the prompt and the hint tables in assistant-agent.mjs, and — since
+ * the famili.* tools became declared actions (ADR-004) — their descriptions, schemas and the
+ * shared KEY_HINTS table in actions/native/. Native ids come from the registry itself, not
+ * from scraping `add("famili.…")` out of the source. */
+const nativeDir = new URL("../actions/native/", import.meta.url);
+const nativeSources = await Promise.all(fs.readdirSync(nativeDir).filter((f) => f.endsWith(".mjs")).sort()
+  .map((f) => fs.promises.readFile(new URL(f, nativeDir), "utf8")));
+const src = [await fs.promises.readFile(new URL("../assistant-agent.mjs", import.meta.url), "utf8"), ...nativeSources].join("\n");
+const nativeIds = new Set(NATIVE_ACTIONS.map((a) => a.id));
 
 test("EVERY INTERNAL_INPUTS ROW IS A REAL TOOL", () => {
   const phantoms = Object.keys(INTERNAL_INPUTS).filter((id) => !registryIds.has(id));
@@ -61,6 +68,21 @@ test("EVERY TOOL THE PROMPT OR A HINT NAMES EXISTS — homeops__* in the registr
   // The specific trio that was wrong, spelled out so a regression reads as what it is.
   for (const id of ["homeops.list_agents", "homeops.get_agent", "homeops.update_agent"]) {
     assert.equal(named.has(id), false, `${id} is named again — it does not exist; the helper tools are famili.*_helper`);
+  }
+});
+
+test("THE NATIVE TOOLS ARE DECLARED, AND NEVER CATALOG TOOLS", () => {
+  /* Sixteen, all on the native lane. Were one to reach INTERNAL_FUNCTIONS it would become a
+   * catalog tool too — a second copy on the menu under the same name, dispatched through a
+   * ctx with no session or channel, so every role, ownership and channel check inside it
+   * would read undefined. */
+  assert.equal(nativeIds.size, 16, `the native lane: ${[...nativeIds].join(", ")}`);
+  for (const a of NATIVE_ACTIONS) {
+    assert.ok(a.id.startsWith("famili."), `${a.id} keeps the name the model has always used`);
+    assert.equal(a.lane, "native", `${a.id} is on the native lane`);
+    assert.equal(INTERNAL_FUNCTIONS[a.id], undefined, `${a.id} must not be an INTERNAL_FUNCTIONS entry`);
+    assert.equal(INTERNAL_INPUTS[a.id], undefined, `${a.id} must not have an INTERNAL_INPUTS row`);
+    assert.equal(ACTION_INPUTS[a.id], undefined, `${a.id} must not be a derived planner row`);
   }
 });
 

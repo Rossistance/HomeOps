@@ -128,6 +128,10 @@ test("LANE 2: the full tool catalog, and NOT the asker's private calendar", asyn
   const tools = JSON.stringify(fake.state.requests[from]?.tools ?? []);
   assert.ok(tools.includes("famili__list_events"), `the catalog is real: ${tools.slice(0, 200)}`);
   assert.ok(tools.length > 500, "this is a full catalog, not four hardcoded ids");
+  /* 4. …WITH ONE NAMED EXCEPTION, now enforced where the prompt only said it (ADR-004): a
+   *    standing autonomous actor is not created, changed or run from a text a neighbour can
+   *    read, so the helper-management tools are not on the group's menu at all. */
+  assert.equal(tools.includes("famili__create_helper"), false, "helpers are not made from a group text");
 });
 
 test("the group system prompt names outsider text as REPORTED SPEECH", () => {
