@@ -85,7 +85,8 @@ test("EVERY WRITER NOW SHARES ONE SET OF DEFAULTS — a grocery item has the sam
   const inProcess = store.listTasks((t) => t.householdId === "local");
   assert.ok(viaHttp.length >= 2 && inProcess.length >= 3, "both halves wrote tasks");
   const sources = new Set([...viaHttp, ...inProcess].map((t) => t.source));
-  for (const s of ["user", "agent", "assistant"]) assert.ok(sources.has(s), `writer "${s}" is exercised: ${[...sources]}`);
+  for (const s of ["user", "agent"]) assert.ok(sources.has(s), `writer "${s}" is exercised: ${[...sources]}`);
+  assert.ok(sources.has("assistant"), `the "assistant" row is the seeded fixture above, not a writer this file exercises: ${[...sources]}`);
   for (const t of [...viaHttp, ...inProcess]) {
     const missing = structural.filter((k) => !(k in t));
     assert.deepEqual(missing, [], `${t.source} (${t.type}) lacks ${missing.join(", ")}`);
