@@ -3,8 +3,9 @@
  * Driven through the REAL group lane: a spawned server, the BlueBubbles webhook, a bound
  * group chat, verified phone numbers for an Owner and a Limited Member, and a scripted model
  * (the same harness group-agent-turn and group-injection use). The household is set to
- * Trusted by its Owner — the stance every bound group household has, and the one that used
- * to clear a parked step on its way through the run engine.
+ * Trusted by its Owner — one of the grants that let Famili speak in a group thread at all
+ * (group-chat.mjs speakPermission), and the one that used to clear a parked step on its way
+ * through the run engine.
  *
  * What this file pins, in order:
  *   1. THE RUN-PATH GAP, closed for catalog tools. A Limited Member's approval-gated catalog
