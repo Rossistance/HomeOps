@@ -24,25 +24,16 @@ import {
   toolCatalog, pruneCatalogForPrompt, buildServerContext, activeProviderId, INTERNAL_INPUTS,
   attachmentSection,
 } from "./context.mjs";
-/* helpers.mjs imports runAssistantAgent from here; both sides only reach across at CALL
- * time, which is what makes the cycle safe. */
-import { createHelper, updateHelper, listHelpers, publicHelper, runHelper, AUTONOMY, SCHEDULE_KINDS } from "./helpers.mjs";
-import { executeToolForChat } from "./engine.mjs";
-import { getAction } from "./actions/registry.mjs";
-import { retireMeal } from "./actions/meals.mjs";
+import { executeToolForChat, runNativeAction } from "./engine.mjs";
+import { getAction, NATIVE_ACTIONS } from "./actions/registry.mjs";
+import { KEY_HINTS, short } from "./actions/native/shared.mjs";
 import { splitList } from "./actions/define-action.mjs";
 import { orchestrate } from "./orchestrator.mjs";
 import {
-  getRun, listEvents, getEvent, patchEvent, deleteEventRec, listTasks, getTask, patchTask, deleteTaskRec,
-  listMeals, getMeal, listMembers, canSeeEntity, canSeeEntityInChannel, listApprovals, listMemory,
-  getMemoryEntry, deleteMemoryEntry, getMember, isAdultRole,
+  getRun, isAdultRole,
   recordAiUsage, aiBudgetExhausted, getSettings, appendAudit,
 } from "./store.mjs";
-import { canSeeMemory, canForgetMemory } from "./nests.mjs";
 import { roleAtLeast } from "./auth.mjs";
-import { memoryProvider } from "./memory-provider.mjs";
-import { isEditableLinkedGoogle, editLinkedGoogleEvent, pushEventToGoogle, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
-import { isValidReminder, isValidReminderList } from "./reminders.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MAX_STEPS = Number(process.env.HOMEOPS_ASSISTANT_MAX_STEPS) > 0 ? Number(process.env.HOMEOPS_ASSISTANT_MAX_STEPS) : 12;
@@ -63,59 +54,8 @@ export const toToolName = (id) => String(id).replace(/[^a-zA-Z0-9_-]/g, "__");
  * key a sensible string default. Lists are declared as arrays; a model that sends a
  * comma-separated string anyway is coerced (see coerceInput) rather than failed.
  * ------------------------------------------------------------------------------------ */
-const KEY_HINTS = {
-  title: { type: "string", description: "Short human title." },
-  text: { type: "string", description: "The text." },
-  body: { type: "string", description: "Full message body, ready to send." },
-  subject: { type: "string", description: "Subject line." },
-  notes: { type: "string", description: "Free-form notes." },
-  detail: { type: "string" },
-  startAt: { type: "string", description: "Start date-time, ISO 8601 with the household's UTC offset, e.g. 2026-09-14T17:00:00-04:00. For an all-day item use the date only (YYYY-MM-DD)." },
-  endAt: { type: "string", description: "End date-time, same format as startAt. Omit if unknown." },
-  dueAt: { type: "string", description: "Due date-time, ISO 8601 with the household's UTC offset (or YYYY-MM-DD)." },
-  date: { type: "string", description: "Calendar date, YYYY-MM-DD." },
-  time: { type: "string", description: "Time of day, 24-hour HH:MM." },
-  slot: { type: "string", enum: ["breakfast", "lunch", "dinner", "snack"] },
-  location: { type: "string" },
-  eventId: { type: "string", description: "The event's id (starts with ev_). Look it up with famili__list_events first." },
-  taskId: { type: "string", description: "The task's id (starts with tk_ or li_). Look it up with famili__list_tasks first." },
-  agentId: { type: "string", description: "The helper's id (from famili context existingAgents or famili__list_helpers)." },
-  fileId: { type: "string", description: "The attached file's id (context.attachedFileId)." },
-  question: { type: "string" },
-  assignedMemberId: { type: "string", description: "A member id from the household roster (famili__list_members)." },
-  driverId: { type: "string", description: "A member id from the household roster." },
-  participantIds: { type: "array", items: { type: "string" }, description: "Member ids from the household roster." },
-  items: { type: "array", items: { type: "string" }, description: "One entry per item." },
-  ingredients: { type: "array", items: { type: "string" }, description: "Full ingredient list, one entry per ingredient with quantity." },
-  instructions: { type: "array", items: { type: "string" }, description: "Step-by-step cooking instructions, one step per entry." },
-  whatToBring: { type: "array", items: { type: "string" } },
-  recipeUrl: { type: "string", description: "Source recipe URL, if any." },
-  servings: { type: "number", description: "Number of servings — size to the household." },
-  replace: { type: "boolean", description: "true to replace whatever is already planned in that slot (only when the family said so)." },
-  visibility: { type: "string", enum: ["household", "personal", "adults", "private"], description: "Who can see it. Default household." },
-  priority: { type: "string", enum: ["low", "medium", "high"] },
-  remindMinutesBefore: { type: "number", enum: [0, 5, 10, 15, 30, 60, 1440], description: "Reminder lead in minutes before the task's time: 0 (at the time), 5, 10, 15, 30, 60 or 1440 (the day before). Needs a dueAt to count back from. This is what actually sends a push — priority alone does not." },
-  type: { type: "string", description: "Kind of task: task, chore, bill, errand… Default task." },
-  listName: { type: "string", description: "Which list (Groceries, Shopping, Packing…)." },
-  scope: { type: "string", enum: ["household", "personal"], description: "household = everyone can use it later; personal = only the person who said it." },
-  kind: { type: "string" },
-  to: { type: "string", description: "Recipient address or phone number, exactly as the family gave it." },
-  methodId: { type: "string", description: "A verified contact-method id, when known." },
-  channel: { type: "string" },
-  query: { type: "string", description: "Plain-English search text." },
-  url: { type: "string", description: "A full http(s) URL." },
-  lat: { type: "number" },
-  lng: { type: "number" },
-  limit: { type: "number" },
-  name: { type: "string" },
-  purpose: { type: "string" },
-  status: { type: "string" },
-  runUnattended: { type: "boolean" },
-  includeSendAndSpend: { type: "boolean" },
-  note: { type: "string" },
-  fileRef: { type: "string" },
-  path: { type: "string" },
-};
+// KEY_HINTS itself lives in actions/native/shared.mjs: the native tools' declared schemas
+// embed its entries, and the table must stay the one copy both read (ADR-004).
 // Keys the app's own hand-written handlers read but the catalog hints leave out, declared
 // here so the model can pass them. A DECLARED action never needs a row: its own schema
 // reaches the model verbatim (inputSchemaForCatalogTool below).
@@ -156,11 +96,15 @@ function schemaForInputs(inputs, extraKeys = []) {
 }
 // A model that sends "eggs, milk" for a list is corrected, not failed — by the same splitter
 // the validator applies at every other door (splitList), so the two cannot disagree.
-function coerceInput(input) {
+// A native tool passes its own declared schema, and then only a key that schema declares an
+// array is split: famili.create_helper's `instructions` is prose, not plan_meal's step list,
+// and splitting it stored "due today,and write…" for "due today, and write…".
+function coerceInput(input, schema = null) {
   const out = { ...(input ?? {}) };
+  const isList = (k) => LIST_KEYS.has(k) && (!schema || [].concat(schema.properties?.[k]?.type ?? []).includes("array"));
   for (const k of Object.keys(out)) {
     const v = out[k];
-    if (LIST_KEYS.has(k) && typeof v === "string") out[k] = splitList(v);
+    if (isList(k) && typeof v === "string") out[k] = splitList(v);
     if (typeof v === "string" && (k === "servings" || k === "limit" || k === "lat" || k === "lng") && v.trim() && Number.isFinite(Number(v))) out[k] = Number(v);
     if (v === "" || v === null) delete out[k];
   }
@@ -190,7 +134,6 @@ function boundResult(value) {
   if (text && text.length > TOOL_RESULT_CHARS) return { truncated: true, preview: text.slice(0, TOOL_RESULT_CHARS) };
   return s;
 }
-const short = (v, n = 160) => { const s = typeof v === "string" ? v : JSON.stringify(v ?? ""); return s.length > n ? s.slice(0, n) + "…" : s; };
 function summarizeForCard(toolId, result) {
   if (!result || typeof result !== "object") return short(result);
   const r = result;
@@ -209,441 +152,21 @@ function summarizeForCard(toolId, result) {
  * CREATE events/tasks but has no way to list, move, complete or delete them — which is most
  * of what a family asks a scheduling assistant to do.) Same visibility and ownership rules
  * as the HTTP routes in index.mjs, mirrored here so chat can never do more than the app.
+ *
+ * They are declared actions now (actions/native/*, ADR-004): each one's available() says
+ * whether it is on this turn's menu — the helper tools need an adult, not a helper run, and
+ * never the group thread — and buildToolSet runs it through engine.mjs runNativeAction.
  * ------------------------------------------------------------------------------------ */
-const badStamp = (v) => v != null && v !== "" && Number.isNaN(+new Date(v));
-const startOfLocalDay = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
-function withinRange(stamp, from, to) {
-  if (!stamp) return true;
-  const t = +new Date(stamp);
-  if (Number.isNaN(t)) return true;
-  return (!from || t >= +from) && (!to || t <= +to);
-}
-function parseRange(input, defaultDays) {
-  const from = input?.from ? new Date(input.from) : startOfLocalDay();
-  const to = input?.to ? new Date(input.to) : new Date(+from + defaultDays * 86_400_000);
-  if (input?.to && /^\d{4}-\d{2}-\d{2}$/.test(String(input.to))) to.setHours(23, 59, 59, 999);
-  return { from: Number.isNaN(+from) ? startOfLocalDay() : from, to: Number.isNaN(+to) ? null : to };
-}
-const matches = (q, ...fields) => !q || fields.some((f) => String(f ?? "").toLowerCase().includes(String(q).toLowerCase()));
-const memberName = (hh, id) => (id ? listMembers({ householdId: hh }).find((m) => m.actorId === id)?.displayName ?? id : null);
-
-function publicEvent(hh, e) {
-  return {
-    id: e.id, title: e.title, startAt: e.startAt ?? null, endAt: e.endAt ?? null, allDay: e.allDay === true,
-    location: e.location || undefined, status: e.status ?? undefined, category: e.category ?? undefined,
-    source: e.layer === "canonical" ? "FamiliOS" : (e.source ?? e.layer ?? "external"), editable: e.layer === "canonical" || e.layer === "linked",
-    owner: memberName(hh, e.ownerId), driver: memberName(hh, e.driverId),
-    participants: (e.participantIds ?? []).map((id) => memberName(hh, id)).filter(Boolean),
-    notes: e.notes ? short(e.notes, 300) : undefined,
-    checklist: (e.checklist ?? []).length ? e.checklist.map((c) => `${c.done ? "[x]" : "[ ]"} ${c.text}`) : undefined,
-    visibility: e.visibility ?? "household",
-  };
-}
-function publicTask(hh, t) {
-  return {
-    id: t.id, title: t.title, type: t.type ?? "task", status: t.status ?? "todo", listName: t.listName ?? undefined,
-    dueAt: t.dueAt ?? null, startAt: t.startAt ?? undefined, priority: t.priority ?? undefined,
-    assignedTo: memberName(hh, t.assignedMemberId), notes: t.notes ? short(t.notes, 200) : undefined, visibility: t.visibility ?? "household",
-    /* The reminder, echoed back. Without it neither the model nor the person could tell
-     * whether a nudge was attached (2026-09-22: "the task record doesn't echo
-     * remindMinutesBefore, so this took two tests instead of one glance"). remindersSent is
-     * the receipt: the sweep stamps it BEFORE pushing, so its presence proves the reminder
-     * was attempted even when nothing arrived — and the audit then says why. */
-    ...(t.remindMinutesBefore != null ? { remindMinutesBefore: t.remindMinutesBefore } : {}),
-    ...(Array.isArray(t.remindOffsets) && t.remindOffsets.length ? { remindOffsets: t.remindOffsets } : {}),
-    ...(Array.isArray(t.remindersSent) && t.remindersSent.length ? { remindersSent: t.remindersSent } : {}),
-  };
-}
-
 function nativeTools(ctx) {
-  const { session } = ctx;
-  const hh = session.householdId;
-  /* THE CHANNEL GATE HAS TO LIVE HERE TOO, NOT ONLY IN buildServerContext.
-   *
-   * Every read below goes back to the store on its own. Scoping the context blob and
-   * stopping there would narrow the model's opening briefing and then hand it the asker's
-   * private calendar on its very first tool call — the filter has to be where the data is
-   * read, not where it is summarised. `seeable` is that one place for this module. */
-  const channel = ctx.channel ?? "personal";
-  const seeable = (e) => canSeeEntityInChannel(e, session, channel);
-  const canWrite = roleAtLeast(session.role, "Limited Member");
-  const readOnly = () => ({ ok: false, error: "read_only_profile", message: "This profile can look things up but not change them. Ask a parent or an adult member to do it." });
-  const defs = [];
-  const add = (id, name, description, schema, run, { action = "Read" } = {}) => defs.push({ id, name, description, schema, run, action, connectorName: "FamiliOS" });
-
-  add("famili.list_events", "List calendar events",
-    "List the household's calendar events the asker can see. Defaults to today through the next 30 days. Use it before answering any question about what is scheduled, before moving or deleting an event, and to check for conflicts before adding one.",
-    { type: "object", properties: { from: { type: "string", description: "Range start (ISO or YYYY-MM-DD). Default: start of today." }, to: { type: "string", description: "Range end (ISO or YYYY-MM-DD). Default: 30 days after from." }, query: { type: "string", description: "Only events whose title or location contains this." }, limit: { type: "number" } }, additionalProperties: false },
-    async (input) => {
-      const { from, to } = parseRange(input, 30);
-      const limit = Math.min(200, Math.max(1, Number(input?.limit) || 60));
-      const rows = listEvents((e) => e.householdId === hh).filter(seeable)
-        .filter((e) => withinRange(e.startAt, from, to) || (e.endAt && withinRange(e.endAt, from, to)))
-        .filter((e) => matches(input?.query, e.title, e.location))
-        .sort((a, b) => String(a.startAt ?? "").localeCompare(String(b.startAt ?? "")));
-      return { ok: true, result: { events: rows.slice(0, limit).map((e) => publicEvent(hh, e)), count: rows.length, range: { from: from.toISOString(), to: to?.toISOString() ?? null } } };
-    });
-
-  add("famili.list_tasks", "List tasks and list items",
-    "List the household's tasks, chores and list items (groceries, shopping, packing) the asker can see. Use it before answering about what is due or to find a task's id before completing, changing or deleting it.",
-    { type: "object", properties: { status: { type: "string", enum: ["open", "done", "all"], description: "Default open." }, listName: { type: "string", description: "Only items on this list (e.g. Groceries)." }, assignedMemberId: { type: "string" }, query: { type: "string", description: "Only tasks whose title contains this." }, limit: { type: "number" } }, additionalProperties: false },
-    async (input) => {
-      const status = input?.status ?? "open";
-      const limit = Math.min(200, Math.max(1, Number(input?.limit) || 80));
-      const rows = listTasks((t) => t.householdId === hh).filter(seeable)
-        .filter((t) => status === "all" ? true : status === "done" ? t.status === "done" : (t.status !== "done" && t.status !== "archived"))
-        .filter((t) => !input?.listName || String(t.listName ?? "").toLowerCase() === String(input.listName).toLowerCase())
-        .filter((t) => !input?.assignedMemberId || t.assignedMemberId === input.assignedMemberId)
-        .filter((t) => matches(input?.query, t.title, t.notes))
-        .sort((a, b) => String(a.dueAt ?? "9").localeCompare(String(b.dueAt ?? "9")));
-      return { ok: true, result: { tasks: rows.slice(0, limit).map((t) => publicTask(hh, t)), count: rows.length } };
-    });
-
-  add("famili.list_meals", "List planned meals",
-    "List the meal plan for a date range (default: today through 14 days). Use it before planning meals so you never double-book a slot.",
-    { type: "object", properties: { from: { type: "string", description: "YYYY-MM-DD" }, to: { type: "string", description: "YYYY-MM-DD" } }, additionalProperties: false },
-    async (input) => {
-      const from = /^\d{4}-\d{2}-\d{2}$/.test(String(input?.from ?? "")) ? input.from : new Date().toISOString().slice(0, 10);
-      const to = /^\d{4}-\d{2}-\d{2}$/.test(String(input?.to ?? "")) ? input.to : new Date(Date.parse(from) + 14 * 86_400_000).toISOString().slice(0, 10);
-      const rows = listMeals((m) => m.householdId === hh && !m.archived).filter(seeable)
-        .filter((m) => !m.date || (m.date >= from && m.date <= to))
-        .sort((a, b) => String(a.date ?? "").localeCompare(String(b.date ?? "")));
-      return { ok: true, result: { meals: rows.map((m) => ({ id: m.id, date: m.date, slot: m.slot, title: m.title, servings: m.servings ?? null, ingredientCount: (m.ingredients ?? []).length, recipeUrl: m.recipeUrl || undefined })), count: rows.length } };
-    });
-
-  add("famili.list_members", "List household members",
-    "The household roster with member ids, roles and relationships. Use it to resolve a name to the id that assign/driver/participant fields need.",
-    { type: "object", properties: {}, additionalProperties: false },
-    async () => {
-      const rows = listMembers({ householdId: hh }).filter((m) => !m.archived)
-        .map((m) => ({ id: m.actorId, name: m.displayName, role: m.role, relationship: m.relationship ?? null, isYou: m.actorId === session.actorId }));
-      return { ok: true, result: { members: rows, count: rows.length } };
-    });
-
-  add("famili.search_memory", "Search family memory",
-    "Search what the family has told Famili to remember (preferences, routines, facts) and past conversation knowledge. Use it when a request depends on something the family may have said before.",
-    { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false },
-    async (input) => {
-      const q = String(input?.query ?? "").trim();
-      if (!q) return { ok: false, error: "query_required", message: "What should I search for?" };
-      /* In the group channel a personal memory is dropped outright rather than matched
-       * against the asker — same rule as buildServerContext, and for the same reason:
-       * the asker is not the audience. */
-      const visible = (m) => m.scope !== "personal" || (channel !== "group" && (m.sourceActorId ?? m.source?.actorId) === session.actorId);
-      const health = await memoryProvider.health();
-      if (health.ok) {
-        const r = await memoryProvider.search(q, { containerTag: hh, limit: 10 });
-        /* `id` rides along so famili__delete_memory has something to name — before, a wrong
-         * memory could be found but never pointed at. The index row is `sm_mem_<store id>`
-         * and it is a COPY: its scope and author are whatever was passed at write time.
-         * Visibility is therefore decided on the STORE row when there is one — the same
-         * record and predicate the app and the delete tool use — so search can never show an
-         * entry that "Forget" then refuses (2026-09-22: found on every search,
-         * memory_not_found on every delete). The index's own fields are consulted only for a
-         * row the store no longer has. */
-        const judged = (m) => {
-          const id = m.id ? String(m.id).replace(/^sm_mem_/, "") : null;
-          const row = id ? getMemoryEntry(id) : null;
-          if (row) {
-            if (row.householdId !== hh) return null;
-            if (!(channel === "group" ? row.scope !== "personal" : canSeeMemory(row, session))) return null;
-            return { id: row.id, text: row.text, scope: row.scope };
-          }
-          return visible(m) ? { ...(id ? { id } : {}), text: m.text, scope: m.scope } : null;
-        };
-        if (r.ok) return { ok: true, result: { memories: (r.results ?? []).map(judged).filter(Boolean), degraded: !!r.degraded } };
-      }
-      const rows = listMemory({ householdId: hh, limit: 200 }).filter(visible).filter((m) => matches(q, m.text)).slice(0, 10);
-      return { ok: true, result: { memories: rows.map((m) => ({ id: m.id, text: m.text, scope: m.scope })), degraded: true } };
-    });
-
-  add("famili.list_approvals", "List pending approvals",
-    "Approvals the household still has to decide on (things waiting before they can send or run).",
-    { type: "object", properties: {}, additionalProperties: false },
-    async () => {
-      const rows = listApprovals({ householdId: hh }).filter((a) => a.status === "pending")
-        .filter((a) => a.visibility !== "personal" || (channel !== "group" && a.requestedBy === session.actorId))
-        .map((a) => ({ id: a.id, toolId: a.toolId, preview: a.preview, risk: a.risk, expiresAt: a.expiresAt ? new Date(a.expiresAt).toISOString() : null }));
-      return { ok: true, result: { approvals: rows, count: rows.length } };
-    });
-
-  add("famili.update_event", "Change an existing event",
-    "Move, rename, or edit a calendar event the asker owns (time, end, all-day, location, notes, participants, driver, status confirmed|draft). Look the event up first. Someone else's event, or one mirrored from an outside calendar, can't have its time/title changed here — the result says so.",
-    { type: "object", properties: { eventId: KEY_HINTS.eventId, title: KEY_HINTS.title, startAt: KEY_HINTS.startAt, endAt: KEY_HINTS.endAt, allDay: { type: "boolean" }, location: KEY_HINTS.location, notes: KEY_HINTS.notes, participantIds: KEY_HINTS.participantIds, driverId: KEY_HINTS.driverId, status: { type: "string", enum: ["draft", "confirmed", "cancelled"] } }, required: ["eventId"], additionalProperties: false },
-    async (input) => {
-      if (!canWrite) return readOnly();
-      const ev = getEvent(String(input?.eventId ?? ""));
-      if (!ev || ev.householdId !== hh) return { ok: false, error: "event_not_found", message: "No such event — list events to find the right id." };
-      if (!seeable(ev)) return { ok: false, error: "forbidden", message: "That event isn't visible to this person." };
-      const { eventId, ...patch } = input ?? {};
-      for (const k of Object.keys(patch)) if (patch[k] === undefined) delete patch[k];
-      if (badStamp(patch.startAt)) return { ok: false, error: "invalid_startAt", message: "startAt isn't a valid timestamp." };
-      if (badStamp(patch.endAt)) return { ok: false, error: "invalid_endAt", message: "endAt isn't a valid timestamp." };
-      // A made-up member id is refused here for the same reason as at creation: an event
-      // with a participant nobody can see is a record the family cannot reason about.
-      for (const id of Array.isArray(patch.participantIds) ? patch.participantIds : []) {
-        const m = getMember(String(id));
-        if (!m || m.archived) return { ok: false, error: "unknown_member", message: `No household member has the id "${id}" — list members to find the right one.` };
-      }
-      if (patch.driverId != null && patch.driverId !== "") {
-        const m = getMember(String(patch.driverId));
-        if (!m || m.archived) return { ok: false, error: "unknown_member", message: `No household member has the id "${patch.driverId}" — list members to find the right one.` };
-      }
-      const linkedGoogle = ev.layer === "linked" && isEditableLinkedGoogle(ev, hh, session.actorId);
-      const ownerMember = ev.ownerId ? getMember(ev.ownerId) : null;
-      const isOwner = ownerMember ? (ev.ownerId === session.actorId || linkedGoogle) : (ev.createdBy === session.actorId || linkedGoogle || isAdultRole(session.role));
-      if (!isOwner) {
-        const who = getMember(ev.ownerId ?? ev.createdBy)?.displayName ?? "its owner";
-        return { ok: false, error: "not_event_owner", message: `This is ${who}'s event — only they can change it. Offer to draft a message to them instead.` };
-      }
-      if (ev.layer && ev.layer !== "canonical" && !linkedGoogle) {
-        const SOURCE = ["title", "startAt", "endAt", "allDay", "location"];
-        const claimed = Object.keys(patch).filter((k) => SOURCE.includes(k));
-        if (claimed.length) return { ok: false, error: "read_only_layer", message: `This event comes from a calendar outside FamiliOS, so its ${claimed.join(", ")} can only change there. Notes, who's going and a driver can still be added here.` };
-        const updated = patchEvent(ev.id, patch);
-        appendAudit({ type: "event.append", eventId: ev.id, fields: Object.keys(patch), via: "assistant", householdId: hh, actorId: session.actorId });
-        return { ok: true, result: { event: publicEvent(hh, updated), localOnly: true } };
-      }
-      if (linkedGoogle) {
-        const { title, startAt, endAt, location, notes, ...localOnly } = patch;
-        const gPatch = Object.fromEntries(Object.entries({ title, startAt, endAt, location, notes }).filter(([, v]) => v !== undefined));
-        if (Object.keys(gPatch).length) {
-          if (getSettings(hh).externalActionsEnabled === false) return { ok: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch, so the Google copy can't be changed right now." };
-          const r = await editLinkedGoogleEvent({ ev, patch: gPatch, householdId: hh, actorId: session.actorId });
-          appendAudit({ type: "event.update", eventId: ev.id, ok: r.ok, target: "google-linked", via: "assistant", householdId: hh, actorId: session.actorId });
-          if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "Google rejected the change." };
-        }
-        const updated = Object.keys(localOnly).length ? patchEvent(ev.id, localOnly) : getEvent(ev.id);
-        return { ok: true, result: { event: publicEvent(hh, updated), google: "updated" } };
-      }
-      const updated = patchEvent(ev.id, patch);
-      appendAudit({ type: "event.update", eventId: ev.id, fields: Object.keys(patch), via: "assistant", householdId: hh, actorId: session.actorId });
-      let google;
-      if (getSettings(hh).calendarAutoSync === true && updated.provenance?.googleEventId && getSettings(hh).externalActionsEnabled !== false) {
-        const r = await pushEventToGoogle({ ev: updated, householdId: hh, actorId: session.actorId }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
-        google = r.ok ? "updated" : `not updated (${r.error})`;
-      }
-      return { ok: true, result: { event: publicEvent(hh, updated), ...(google ? { google } : {}) } };
-    }, { action: "Write" });
-
-  add("famili.delete_event", "Delete an event",
-    "Remove a calendar event the asker owns (or any event, for an adult). Look it up first and confirm it is the right one. Events mirrored from an outside calendar can't be deleted here.",
-    { type: "object", properties: { eventId: KEY_HINTS.eventId }, required: ["eventId"], additionalProperties: false },
-    async (input) => {
-      if (!canWrite) return readOnly();
-      const ev = getEvent(String(input?.eventId ?? ""));
-      if (!ev || ev.householdId !== hh) return { ok: false, error: "event_not_found", message: "No such event." };
-      if (!isAdultRole(session.role) && ev.ownerId !== session.actorId) return { ok: false, error: "forbidden", message: "Only the event's owner or an adult can delete it." };
-      const editableLinked = isEditableLinkedGoogle(ev, hh, session.actorId);
-      if (ev.layer && ev.layer !== "canonical" && !editableLinked) return { ok: false, error: "read_only_layer", message: "This event is synced from another calendar and can't be deleted here." };
-      const external = getSettings(hh).externalActionsEnabled !== false;
-      if (ev.layer === "linked" && editableLinked) {
-        if (!external) return { ok: false, error: "external_actions_disabled", message: "External actions are paused by the household kill switch." };
-        const r = await deleteLinkedGoogleEvent({ ev, householdId: hh, actorId: session.actorId });
-        appendAudit({ type: "event.delete", eventId: ev.id, ok: r.ok, target: "google-linked", via: "assistant", householdId: hh, actorId: session.actorId });
-        if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "Google rejected the delete." };
-        return { ok: true, result: { deleted: true, title: ev.title, google: "deleted" } };
-      }
-      let google = null;
-      if (ev.provenance?.googleEventId) {
-        if (!external) google = "kept (external actions paused)";
-        else { const r = await deleteGoogleCopy({ ev, householdId: hh, actorId: session.actorId }); google = r.ok ? "deleted" : `kept (${r.error ?? "google error"})`; }
-      }
-      deleteEventRec(ev.id);
-      appendAudit({ type: "event.delete", eventId: ev.id, ok: true, via: "assistant", ...(google ? { google } : {}), householdId: hh, actorId: session.actorId });
-      return { ok: true, result: { deleted: true, title: ev.title, ...(google ? { google } : {}) } };
-    }, { action: "Write" });
-
-  add("famili.update_task", "Change or complete a task",
-    "Update a task or list item: mark done (status \"done\") or reopen (\"todo\"), rename, change due date, assignee, priority, notes, or list. Look the task up first.",
-    { type: "object", properties: { taskId: KEY_HINTS.taskId, title: KEY_HINTS.title, status: { type: "string", enum: ["todo", "in_progress", "done"] }, dueAt: KEY_HINTS.dueAt, assignedMemberId: KEY_HINTS.assignedMemberId, priority: KEY_HINTS.priority, notes: KEY_HINTS.notes, listName: KEY_HINTS.listName, remindMinutesBefore: KEY_HINTS.remindMinutesBefore }, required: ["taskId"], additionalProperties: false },
-    async (input) => {
-      if (!canWrite) return readOnly();
-      const tk = getTask(String(input?.taskId ?? ""));
-      if (!tk || tk.householdId !== hh) return { ok: false, error: "task_not_found", message: "No such task — list tasks to find the right id." };
-      if (!seeable(tk)) return { ok: false, error: "forbidden", message: "That task isn't visible to this person." };
-      const { taskId, ...patch } = input ?? {};
-      for (const k of Object.keys(patch)) if (patch[k] === undefined) delete patch[k];
-      const onlyStatus = Object.keys(patch).every((k) => k === "status");
-      const mayEdit = isAdultRole(session.role) || tk.createdBy === session.actorId || (onlyStatus && tk.assignedMemberId === session.actorId);
-      if (!mayEdit) return { ok: false, error: "forbidden", message: "Only an adult, the person who created it, or (to complete it) the person it's assigned to can change this task." };
-      if (badStamp(patch.dueAt)) return { ok: false, error: "bad_timestamp", message: "dueAt isn't a valid date and time." };
-      // The schema's enum is only as good as the provider's schema support; the handler checks too.
-      if ("priority" in patch && !["low", "medium", "high"].includes(patch.priority)) return { ok: false, error: "bad_priority", message: "priority must be low, medium or high." };
-      if ("assignedMemberId" in patch && patch.assignedMemberId != null && patch.assignedMemberId !== "") {
-        const m = getMember(String(patch.assignedMemberId));
-        if (!m || m.archived) return { ok: false, error: "unknown_member", message: `No household member has the id "${patch.assignedMemberId}" — list members to find the right one.` };
-      }
-      if ("remindMinutesBefore" in patch && !isValidReminder(patch.remindMinutesBefore)) return { ok: false, error: "bad_reminder", message: "Pick a reminder lead the app offers (e.g. 15, 30, 60, 1440 minutes)." };
-      if ("remindMinutesBefore" in patch && !isValidReminderList([patch.remindMinutesBefore])) return { ok: false, error: "bad_reminder", message: "That reminder lead isn't supported." };
-      const timingChanged = ["dueAt", "remindMinutesBefore"].some((k) => k in patch && JSON.stringify(patch[k]) !== JSON.stringify(tk[k]));
-      if (timingChanged) { patch.reminderSentAt = null; patch.remindersSent = []; }
-      if (patch.status === "done" && tk.status !== "done") patch.completedAt = new Date().toISOString();
-      if (patch.status && patch.status !== "done" && (tk.status === "done" || tk.status === "archived")) patch.completedAt = null;
-      patch.updatedAt = new Date().toISOString();
-      const updated = patchTask(tk.id, patch);
-      appendAudit({ type: "task.update", taskId: tk.id, fields: Object.keys(patch), via: "assistant", householdId: hh, actorId: session.actorId });
-      return { ok: true, result: { task: publicTask(hh, updated) } };
-    }, { action: "Write" });
-
-  add("famili.delete_task", "Delete a task or list item",
-    "Remove a task or list item for good. Prefer marking it done unless the family asked to delete it.",
-    { type: "object", properties: { taskId: KEY_HINTS.taskId }, required: ["taskId"], additionalProperties: false },
-    async (input) => {
-      if (!canWrite) return readOnly();
-      const tk = getTask(String(input?.taskId ?? ""));
-      if (!tk || tk.householdId !== hh) return { ok: false, error: "task_not_found", message: "No such task." };
-      if (!isAdultRole(session.role) && tk.createdBy !== session.actorId) return { ok: false, error: "forbidden", message: "Only an adult or the person who created it can delete this." };
-      deleteTaskRec(tk.id);
-      appendAudit({ type: "task.delete", taskId: tk.id, via: "assistant", householdId: hh, actorId: session.actorId });
-      return { ok: true, result: { deleted: true, title: tk.title } };
-    }, { action: "Write" });
-
-  /* The App QA helper (2026-09-22) left four test meals and a test memory behind and said,
-   * truthfully, that it had no way to remove them: the API could, the assistant could not.
-   * Anything the assistant can plant it must be able to pull — under the same ownership
-   * rules as the API's DELETE routes, writing the same audit rows. */
-  add("famili.delete_meal", "Remove a planned meal",
-    "Take a meal off the planner — the person who planned it, or any adult. Its calendar event goes with it (and its Google copy, best effort); grocery items it added stay on the list but are no longer linked to it. List meals first to get the id.",
-    { type: "object", properties: { mealId: { type: "string", description: "The meal's id (starts with meal_), from famili__list_meals." } }, required: ["mealId"], additionalProperties: false },
-    async (input) => {
-      if (!canWrite) return readOnly();
-      const m = getMeal(String(input?.mealId ?? ""));
-      if (!m || m.householdId !== hh || m.archived) return { ok: false, error: "meal_not_found", message: "No such meal — list meals to find the right id." };
-      if (!isAdultRole(session.role) && m.createdBy !== session.actorId) return { ok: false, error: "forbidden", message: "Only an adult or the person who planned it can remove this meal." };
-      // The meal, its calendar event (and its Google copy, best effort — kept when the
-      // household paused external actions) and the unlink of its grocery items — never
-      // deleted; a still-wanted item outlives the meal that put it on the list — are the
-      // one cascade DELETE /api/meals/:id and plan_meal's replace run too (retireMeal).
-      const { eventsRemoved: events, groceryItemsUnlinked: unlinked, google = null } = await retireMeal(m, { householdId: hh, actorId: session.actorId }, { mode: "delete" });
-      appendAudit({ type: "meal.delete", mealId: m.id, via: "assistant", events, unlinked, ...(google ? { google } : {}), householdId: hh, actorId: session.actorId });
-      return { ok: true, result: { deleted: true, title: m.title, eventsRemoved: events, groceryItemsUnlinked: unlinked, ...(google ? { google } : {}) } };
-    }, { action: "Write" });
-
-  add("famili.delete_memory", "Forget a remembered fact",
-    "Delete one entry from family memory — something remembered wrongly, or a test note. Search memory first to get its id. A personal memory can only be forgotten by the person it belongs to; to anyone else it does not exist.",
-    { type: "object", properties: { memoryId: { type: "string", description: "The memory entry's id, from famili__search_memory." } }, required: ["memoryId"], additionalProperties: false },
-    async (input) => {
-      if (!canWrite) return readOnly();
-      // Either spelling of the id is accepted — the store's, or the provider's prefixed copy.
-      const m = getMemoryEntry(String(input?.memoryId ?? "").replace(/^sm_mem_/, ""));
-      // EXACTLY the API's DELETE rule (nests.mjs canForgetMemory): what this person cannot
-      // read does not exist for them — except an orphaned personal memory, which an adult may clear.
-      if (!m || m.householdId !== hh || !canForgetMemory(m, session)) return { ok: false, error: "memory_not_found", message: "No such memory entry — search memory to find the right id." };
-      deleteMemoryEntry(m.id);
-      appendAudit({ type: "memory.delete", memoryId: m.id, via: "assistant", householdId: hh, actorId: session.actorId });
-      return { ok: true, result: { deleted: true, text: short(m.text ?? "", 80) } };
-    }, { action: "Write" });
-
-  /* ------------------------------ helpers ------------------------------------
-   * The old design had ONE tool here — propose_build — which did not build anything.
-   * It returned a card describing a "skill" with steps, an "agent" to own it and an
-   * "automation" to fire it, and the family had to confirm three concepts they had
-   * never been taught in order to get a reminder. Worse, the card rendered whether or
-   * not anything was possible, so a request the app could not satisfy still came back
-   * looking like a plan.
-   *
-   * A helper is now made the same way anything else in this app is made: the tool
-   * creates it, and the assistant says what it created and when it will next run. */
-  const managesHelpers = roleAtLeast(session.role, "Adult Member") && !ctx.asHelper;
-
-  if (managesHelpers) {
-    const scheduleSchema = {
-      type: "object",
-      description: "When it runs. Leave it out for a helper the family runs by hand.",
-      properties: {
-        kind: { type: "string", enum: SCHEDULE_KINDS, description: "manual, hourly, daily or weekly." },
-        time: { type: "string", description: "Time of day on the household clock, 24-hour HH:MM. Needed for daily and weekly." },
-        weekday: { type: "number", description: "0 = Sunday … 6 = Saturday. Needed for weekly." },
-      },
-      required: ["kind"], additionalProperties: false,
-    };
-
-    add("famili.list_helpers", "List the family's helpers",
-      "List the helpers this household has, what each one does, when it runs and how it last went. Use it before creating one (so you extend an existing helper instead of making a near-duplicate) and to answer any question about what the helpers are doing.",
-      { type: "object", properties: {}, additionalProperties: false },
-      // A PERSONAL helper is not named into a shared thread, not even to its own owner.
-      async () => ({ ok: true, result: { helpers: listHelpers(session)
-        .filter((h) => channel !== "group" || String(h.visibility ?? "household") === "household")
-        .map((h) => {
-        const v = publicHelper(h, session);
-        return { id: v.id, name: v.name, purpose: v.purpose, instructions: short(v.instructions, 400), schedule: v.scheduleText, autonomy: v.autonomyText, enabled: v.enabled, lastRun: v.lastRun ? { at: new Date(v.lastRun.at).toISOString(), ok: v.lastRun.ok, summary: v.lastRun.summary } : null };
-      }) } }));
-
-    add("famili.create_helper", "Create a helper",
-      "Create a standing helper that does a job over and over — \"every morning…\", \"each week…\", \"from now on…\", \"remind us whenever…\". The instructions you write ARE the helper: write them as a clear paragraph addressed to the helper, saying what to look at, what to do, what to leave alone, and how to report back. It is created immediately, so tell the family its name, when it next runs and that they can edit or pause it in Helpers. Never use this for a one-off request — just do that now.",
-      { type: "object", properties: {
-        name: { type: "string", description: "Short, plain name the family will recognise, e.g. \"Morning Briefing\"." },
-        purpose: { type: "string", description: "One sentence: what it is for." },
-        instructions: { type: "string", description: "The helper's standing instructions, in plain English, written to the helper." },
-        schedule: scheduleSchema,
-        autonomy: { type: "string", enum: ["ask", "act"], description: "ask = it checks with the family before doing anything; act = it does everyday things itself and still asks before sending or spending. Default ask." },
-        visibility: { type: "string", enum: ["household", "personal"], description: "household = the whole family, personal = just this person. Default household." },
-      }, required: ["name", "instructions"], additionalProperties: false },
-      async (input) => {
-        const name = String(input?.name ?? "").trim();
-        const instructions = String(input?.instructions ?? "").trim();
-        if (!name) return { ok: false, error: "name_required", message: "Give the helper a name." };
-        if (instructions.length < 20) return { ok: false, error: "instructions_required", message: "Write the helper real instructions — a sentence or two saying what it should actually do." };
-        // An Adult Member gets a helper of their own; making one for the whole family is an
-        // Owner/Adult Admin act, and saying so beats silently creating a narrower thing.
-        const visibility = session.role === "Adult Member" ? "personal" : (input?.visibility === "personal" ? "personal" : "household");
-        const h = createHelper({
-          name, purpose: input?.purpose ?? "", instructions,
-          schedule: input?.schedule, visibility,
-          // "full" autonomy is never granted from a chat message: it is the one setting that
-          // lets a helper send and spend with nobody watching, and it belongs behind the
-          // household PIN in Helpers.
-          autonomy: input?.autonomy === "act" ? "act" : "ask",
-        }, session);
-        const v = publicHelper(h, session);
-        return { ok: true, result: { created: true, helperId: v.id, name: v.name, schedule: v.scheduleText, autonomy: v.autonomyText, visibility: v.visibility, note: visibility === "personal" && session.role === "Adult Member" ? "Created as a personal helper — an Owner or Adult Admin can share it with the whole family." : undefined } };
-      }, { action: "Write" });
-
-    add("famili.update_helper", "Change a helper",
-      "Change an existing helper: its instructions, name, schedule, autonomy, or pause/resume it. Use famili__list_helpers first to get its id. To fix a helper that is doing the wrong thing, rewrite the WHOLE instructions paragraph rather than appending a correction to it.",
-      { type: "object", properties: {
-        helperId: { type: "string", description: "The helper's id (starts with agt_)." },
-        name: { type: "string" },
-        purpose: { type: "string" },
-        instructions: { type: "string", description: "The complete replacement instructions." },
-        schedule: scheduleSchema,
-        autonomy: { type: "string", enum: ["ask", "act"] },
-        enabled: { type: "boolean", description: "false pauses it." },
-      }, required: ["helperId"], additionalProperties: false },
-      async (input) => {
-        const h = listHelpers(session).find((x) => x.id === String(input?.helperId ?? ""));
-        if (!h) return { ok: false, error: "helper_not_found", message: "No such helper. List them first." };
-        if (session.role === "Adult Member" && h.visibility === "household") {
-          return { ok: false, error: "household_helper", message: "That helper belongs to the whole family, so an Owner or Adult Admin looks after it. Say so." };
-        }
-        const patch = { ...input };
-        delete patch.helperId;
-        if (patch.autonomy === "full") patch.autonomy = "act";
-        const next = updateHelper(h.id, patch, session);
-        const v = publicHelper(next, session);
-        return { ok: true, result: { updated: true, helperId: v.id, name: v.name, schedule: v.scheduleText, autonomy: v.autonomyText, enabled: v.enabled } };
-      }, { action: "Write" });
-
-    add("famili.run_helper", "Run a helper now",
-      "Run one of the family's helpers immediately, instead of waiting for its schedule. Returns what it did. Use it when someone asks for a helper's output right now (\"give me the morning briefing\").",
-      { type: "object", properties: { helperId: { type: "string", description: "The helper's id (starts with agt_)." } }, required: ["helperId"], additionalProperties: false },
-      async (input) => {
-        const h = listHelpers(session).find((x) => x.id === String(input?.helperId ?? ""));
-        if (!h) return { ok: false, error: "helper_not_found", message: "No such helper. List them first." };
-        const out = await runHelper({ helperId: h.id, session, reason: "manual" });
-        if (!out.ok) return { ok: false, error: out.error, message: out.message };
-        return { ok: true, result: { ran: h.name, said: out.answer, did: (out.toolCalls ?? []).filter((c) => c.status === "done").length } };
-      }, { action: "Write" });
-  }
-
-  return defs;
+  return NATIVE_ACTIONS.filter((a) => a.available({ session: ctx.session, channel: ctx.channel ?? "personal", asHelper: !!ctx.asHelper }));
 }
 
 /* ------------------------------------------------------------------------------------ *
  * The tool set for one turn: the household's live catalog (permitted for the acting
- * helper; connected only), plus the native tools above. Each executes through
- * executeToolForChat, and an approval-gated call becomes a durable run.
+ * helper; connected only), plus the native tools above. A catalog tool executes through
+ * executeToolForChat, and an approval-gated call becomes a durable run; a native tool
+ * through runNativeAction — the same gate, so a helper's deny-list, the kill switch and
+ * rule 4b reach it too, and a refusal is recorded as `blocked` exactly as a catalog one is.
  * ------------------------------------------------------------------------------------ */
 function buildToolSet(ctx) {
   const { session, agent, message, providerId, conversationId, visibility } = ctx;
@@ -703,21 +226,22 @@ function buildToolSet(ctx) {
     });
   }
 
-  for (const d of nativeTools(ctx)) {
-    const name = toToolName(d.id);
-    const entry = { id: d.id, label: d.name, action: d.action, connectorName: "FamiliOS" };
+  for (const action of nativeTools(ctx)) {
+    const name = toToolName(action.id);
+    const entry = { id: action.id, label: action.name, action: action.action, connectorName: "FamiliOS" };
     names.set(name, entry);
     tools[name] = tool({
-      description: d.description,
-      inputSchema: jsonSchema(d.schema),
+      description: action.description,
+      inputSchema: jsonSchema(action.input),
       execute: async (rawInput) => {
-        const input = coerceInput(rawInput);
+        const input = coerceInput(rawInput, action.input);
         ctx.onToolStart?.(entry);
-        let out;
-        try { out = await d.run(input); } catch (e) { out = { ok: false, error: "tool_failed", message: String(e?.message ?? e) }; }
-        appendAudit({ type: "assistant.tool", toolId: d.id, ok: !!out?.ok, error: out?.ok ? undefined : out?.error, action: d.action, householdId: session.householdId, actorId: session.actorId, conversationId });
-        if (out?.ok) { record(entry, "done", { ok: true, summary: summarizeForCard(d.id, out.result) }); return { ok: true, result: boundResult(out.result) }; }
-        record(entry, "failed", { ok: false, summary: out?.message ?? out?.error });
+        const out = await runNativeAction({
+          action, input, session, agent, channel: ctx.channel, conversationId, asHelper: !!ctx.asHelper,
+          actorIsAdult: ctx.channel === "group" ? isAdultRole(session.role) : null,
+        });
+        if (out?.ok) { record(entry, "done", { ok: true, summary: summarizeForCard(action.id, out.result) }); return { ok: true, result: boundResult(out.result) }; }
+        record(entry, out?.policyBlocked ? "blocked" : "failed", { ok: false, summary: out?.message ?? out?.error });
         return { ok: false, error: out?.error ?? "tool_failed", message: out?.message ?? "The tool failed." };
       },
     });
