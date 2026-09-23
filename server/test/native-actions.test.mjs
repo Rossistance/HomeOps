@@ -530,6 +530,34 @@ describe("the run engine reaches a native action (ADR-004 Stage 2)", () => {
     assert.ok(getTask("tk_run_native_3"));
   });
 
+  /* A child's group write parked, then an adult approves it after the child's standing changed. */
+  const parkThenApprove = async (actorId, taskId, change) => {
+    const { decideApproval } = await import("../store.mjs");
+    const { resumeRun } = await import("../engine.mjs");
+    putMember({ actorId, displayName: actorId, role: "Limited Member", householdId: "local" });
+    putTask({ id: taskId, householdId: "local", title: "Hang up the coats", status: "todo", createdBy: actorId, visibility: "household" });
+    const parked = await runStep("famili.delete_task", { taskId }, { actorRole: "Limited Member", channel: "group", actorIsAdult: false }, { householdId: "local", actorId, role: "Limited Member" });
+    assert.equal(parked.status, "waiting_for_approval");
+    putMember({ actorId, displayName: actorId, role: "Limited Member", householdId: "local", ...change });
+    assert.ok(decideApproval(parked.steps[0].approvalId, { decision: "approve", actorId: "m-run-owner", actorRole: "Owner" }).approval, "an Owner approved it");
+    await resumeRun(parked.id);
+    return getRun(parked.id);
+  };
+
+  test("a DEMOTION while a step waits is honoured: the Owner's yes runs it as the lower role, and the body refuses it as read-only", async () => {
+    const run = await parkThenApprove("m-run-demoted", "tk_run_native_demoted", { role: "Child View" });
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "read_only_profile", JSON.stringify(run.steps[0]));
+    assert.ok(getTask("tk_run_native_demoted"), "nothing was deleted");
+  });
+
+  test("an ARCHIVED requester runs as no one: the Owner's yes ends in no_requester_role", async () => {
+    const run = await parkThenApprove("m-run-archived", "tk_run_native_archived", { archived: true });
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "no_requester_role", JSON.stringify(run.steps[0]));
+    assert.ok(getTask("tk_run_native_archived"), "nothing was deleted");
+  });
+
   test("a run with NO recorded requester role never runs a native step — it is refused, not run as nobody", async () => {
     putTask({ id: "tk_run_native_4", householdId: "local", title: "Sort the mail", status: "todo", createdBy: "m-run-owner", visibility: "household" });
     const run = await runStep("famili.delete_task", { taskId: "tk_run_native_4" }, {}, { householdId: "local", actorId: "m-run-owner", role: "Owner" });

@@ -292,6 +292,16 @@ describe("the group thread, through the real BlueBubbles lane", () => {
     parked = { runId, taskId: tk.id, approvalId: pending[0].id };
   });
 
+  test("…the child who asked cannot decide it: POST /api/approvals/:id/decide answers 403 approver_not_allowed, and it is still pending", async () => {
+    assert.ok(parked, "the park above ran");
+    const own = await maya.req(`/api/approvals/${parked.approvalId}/decide`, { method: "POST", body: JSON.stringify({ decision: "approve" }) });
+    assert.equal(own.status, 403, JSON.stringify(own.data));
+    assert.equal(own.data.error, "approver_not_allowed");
+    assert.equal((await pendingFor("famili.delete_task")).map((a) => a.id).includes(parked.approvalId), true, "still waiting for an adult");
+    assert.equal((await runOf(parked.runId)).status, "waiting_for_approval");
+    assert.ok(await taskExists(parked.taskId));
+  });
+
   test("…an Owner approves it (POST /api/approvals/:id/decide): the run completes, as the child, and the task is gone", async () => {
     assert.ok(parked, "the park above ran");
     await decide(parked.approvalId, "approve");
