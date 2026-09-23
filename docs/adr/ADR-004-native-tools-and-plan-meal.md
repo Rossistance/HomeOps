@@ -1,6 +1,6 @@
 # ADR-004: Rung 4 — native `famili.*` tools join the policy ladder; `plan_meal` becomes a declared composite
 
-**Status:** Proposed · 2026-09-23 — Stage 2 waits on the owner decisions at the end. Phase 2 (`plan_meal` as a declared composite, PR C) implemented 2026-09-23 on `rung4-plan-meal`, with owner decision B taken as recommended (grocery `source: "meal"`). PR B (Stage 1) implemented on branch `rung4-native-lane`; what it changed, including the few rows a family can see, is in the behaviour ledger.
+**Status:** Accepted · 2026-09-23 — owner decisions A, B and C taken (see the end): no native write requires approval, with the one exception C defines, which Stage 2 builds. Phase 2 (`plan_meal` as a declared composite, PR C) implemented 2026-09-23 on `rung4-plan-meal`, with owner decision B taken as recommended (grocery `source: "meal"`). PR B (Stage 1) implemented on branch `rung4-native-lane`; what it changed, including the few rows a family can see, is in the behaviour ledger.
 **Scope:** Follow-up item 4 of [ADR-003](ADR-003-actions-not-agent-native.md) (the native tools), and the question ADR-003 left for this rung (`plan_meal`).
 **Related:** ADR-003 · `server/assistant-agent.mjs` (`nativeTools`, `buildToolSet`) · `server/engine.mjs` (`executeToolForChat`) · `server/policy.mjs` · `server/internal-functions.mjs` (`homeops.plan_meal`) · `server/actions/meals.mjs`
 **Evidence:** six read-only audits under [`docs/audits/rung-4/`](../audits/rung-4/README.md); every finding cited below carries a `file:line` there. Eleven findings were additionally challenged by adversarial verifiers and none was refuted; the remaining verification runs were cut off by a spend limit and the findings they would have covered are marked *(unverified)* where it matters.
@@ -70,8 +70,8 @@ Each PR leaves `npm test`, `npm run typecheck` and `apps/mobile` `npx tsc --noEm
 4. Correct the record: ADR-003 item 3, the `meals.mjs` header and the `action-meals.test.mjs` header.
 5. **Tests.** `tool-input-validation.test.mjs`: `bad_slot` → `invalid_input` + `field: "slot"`; `"lots"` servings → `invalid_input` + `field: "servings"` (or keep `createMeal`'s wide wire and the handler's `bad_servings`; owner decision B). `internal-tools`, `action-meals`, `task-record-contract` keep reading the flat keys and additionally assert `result.meal.id === result.mealId`. New: private meal → event and groceries carry `visibility: "private"`; kill switch off → no Google push and `google.pushed === false` with the canonical reason; `replace:true` through `retireMeal` leaves the same store state `DELETE /api/meals/:id` leaves; regenerated types committed (drift test).
 
-### Stage 2 — reachability and approvals (waits on owner decisions)
-Only if a native write is ever to require approval: `resolveToolBase` resolves `NATIVE_ACTIONS`; `execResolved` threads `role` and `channel` (the run must store the actor's role at start); `queueApprovalRun` passes the evaluating `agentId` and `actorIsAdult` so the run reproduces the chat verdict (a pre-existing gap: today a step parked under rule 4b is re-evaluated without it and can execute under a Trusted stance); rule 6b's bound uses `reachesOutside` for local writes as rule 7 already does; the prompt lines "created immediately" / "applies immediately" and the parked/expired copy ("nothing has been sent") become action-aware; the approval `preview` carries a human summary and the sheet shows the step input; the TTL for local writes is decided. Every one of those is visible on iOS.
+### Stage 2 — the group-thread park for non-adults (decision C), and nothing broader (decision A)
+Scope, as decided: exactly one native approval exists — a non-adult's native **write** in the group thread (decision C). No stance, autonomy tier or per-tool setting makes any other native write ask (decision A), so the helper trio, and every native write in the app, 1:1 SMS and helper runs, stay immediate and the prompt's "created immediately" / "applies immediately" stays true there. Stage 2 also closes the channel-visibility gaps listed under C. What the one approval needs: `resolveToolBase` resolves `NATIVE_ACTIONS`; `execResolved` threads `role` and `channel` (the run must store the actor's role at start); `queueApprovalRun` passes the evaluating `agentId` and `actorIsAdult` so the run reproduces the chat verdict (a pre-existing gap: today a step parked under rule 4b is re-evaluated without it and can execute under a Trusted stance). The rest of the original list applies only as far as this one case reaches: `resolveToolBase` resolves `NATIVE_ACTIONS`; `execResolved` threads `role` and `channel` (the run must store the actor's role at start); `queueApprovalRun` passes the evaluating `agentId` and `actorIsAdult` so the run reproduces the chat verdict (a pre-existing gap: today a step parked under rule 4b is re-evaluated without it and can execute under a Trusted stance); rule 6b's bound uses `reachesOutside` for local writes as rule 7 already does; the prompt lines "created immediately" / "applies immediately" and the parked/expired copy ("nothing has been sent") become action-aware; the approval `preview` carries a human summary and the sheet shows the step input; the TTL for local writes is decided. Every one of those is visible on iOS.
 
 ## Behaviour ledger
 
@@ -108,6 +108,14 @@ Only if a native write is ever to require approval: `resolveToolBase` resolves `
 | Ask live run card for a parked run | badge "Doing it" | "Waiting for approval" | yes (bug fix) | string mismatch |
 
 ## Decisions for the owner
+
+All three decided by the owner on 2026-09-23:
+
+- **A — No.** No native write requires approval, under any stance, autonomy tier or per-tool setting. The single exception is C.
+- **B — Yes.** `plan_meal`'s grocery items are `source: "meal"` (shipped in PR C).
+- **C — Yes, in Stage 2.** A non-adult's native write in the group thread is parked for an adult; Stage 2 builds it and closes the channel-visibility gaps listed under C.
+
+The questions as they were put:
 
 **A. Should any native write ever require approval, and which?** Recommendation: not the helper trio (already role-gated, never in the group, and the prompt promises immediacy); consider `delete_event` / `delete_meal` / `delete_memory` under the **Cautious** stance only, and only after Stage 2 fixes the rule 6b asymmetry and the Inbox/TTL/copy issues, so the family sees "Waiting for approval · Delete an event" with the input shown. Nothing in PR A–C depends on this answer.
 
