@@ -21,6 +21,7 @@ import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
 import { NATIVE_ACTIONS } from "./actions/registry.mjs";
+import { approvalPreview } from "./actions/native/shared.mjs";
 import { getAgent, getMember, defaultApproverRoles, isAdultRole } from "./store.mjs";
 import { roleAtLeast } from "./auth.mjs";
 import { isToolStepAllowed } from "./helper-shape.mjs";
@@ -342,6 +343,10 @@ function requesterRole(run) {
   const current = member?.role ?? null;
   if (!current || current === stored) return stored;
   return roleAtLeast(current, stored) ? stored : current;
+}
+/** The person a native step is FOR, as a session: who asked, as the role above, by name. */
+function requesterSession(run) {
+  return { householdId: run.householdId, actorId: run.actorId, role: requesterRole(run), actorName: getMember(run.actorId)?.displayName ?? null };
 }
 
 // Execute a resolved tool. For gated steps this is called only AFTER the approval
@@ -1007,7 +1012,13 @@ async function _drive(runId) {
         const adultsOnly = actorIsAdultOf(run) === false
           ? { allowedApproverRoles: defaultApproverRoles(resolved.risk ?? "High").filter(isAdultRole) }
           : {};
-        const a = createApproval({ actorId: run.actorId, householdId: run.householdId, connectorId: resolved.connectorId, toolId: stepNow.toolId, input: stepNow.input, risk: resolved.risk, category: resolved.action, preview: stepNow.title, visibility: run.visibility, ...adultsOnly });
+        /* What the approver reads (Inbox title, Today sheet, push). A step's title is enough
+         * for most tools; a native write's is "Delete a task or list item", so it gets the
+         * server-built line naming the record and who asked (actions/native/shared.mjs). */
+        const preview = resolved.kind === "native"
+          ? approvalPreview(resolved.def, stepNow.input, { session: requesterSession(run), channel: run.sourceRef?.channel ?? "personal" })
+          : stepNow.title;
+        const a = createApproval({ actorId: run.actorId, householdId: run.householdId, connectorId: resolved.connectorId, toolId: stepNow.toolId, input: stepNow.input, risk: resolved.risk, category: resolved.action, preview, visibility: run.visibility, ...adultsOnly });
         patchRunStep(runId, i, { status: "waiting_for_approval", approvalId: a.id });
         patchRun(runId, { status: "waiting_for_approval" });
         appendAudit({ type: "run.await_approval", runId, toolId: stepNow.toolId, approvalId: a.id, householdId: run.householdId });
@@ -1065,9 +1076,10 @@ async function _drive(runId) {
     // A native step also carries who asked and where (execResolved rebuilds its ctx from
     // these), and keeps its own declared time limit rather than the step default.
     const native = resolved.kind === "native";
+    const who = native ? requesterSession(run) : null;
     const stepCtx = {
       householdId: run.householdId, actorId: run.actorId, runId, accountId: run.params?.accountId, agentId: run.sourceRef?.agentId ?? null,
-      ...(native ? { role: requesterRole(run), channel: run.sourceRef?.channel ?? null, actorName: getMember(run.actorId)?.displayName ?? null } : {}),
+      ...(native ? { role: who.role, channel: run.sourceRef?.channel ?? null, actorName: who.actorName } : {}),
     };
     try {
       out = await withTimeout(execResolved(resolved, stepNow.input, stepCtx, approvalId), native ? resolved.def.timeoutMs : RUN_STEP_TIMEOUT_MS);

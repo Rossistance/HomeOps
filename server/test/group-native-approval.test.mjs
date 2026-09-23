@@ -15,6 +15,9 @@
  *      the same way; an Owner's yes runs it AS THE CHILD (so it still cannot reach someone
  *      else's task), a no leaves it; the same child in the app, an adult in the group, and a
  *      child's read are never held (decision A).
+ *   3. WHAT AN ADULT READS (in-process, run first): the approval's server-built preview (never
+ *      a private item's title), the push body leading with it, and parked/expired copy that
+ *      says "changed" for a step that would only have changed something at home.
  */
 import test, { before, after, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -44,6 +47,97 @@ async function waitFor(fn, ms = 12000) {
     await sleep(100);
   }
 }
+
+/* ─────────── 3. what an adult reads: the preview, the push and the copy (in-process) ─────────── */
+
+describe("what an adult reads before deciding", () => {
+  let approvalPreview, getAction, store, notify, runs;
+  const kid = { householdId: "local", actorId: "m-pv-kid", role: "Limited Member", actorName: "Maya Harper" };
+  before(async () => {
+    ({ approvalPreview } = await import("../actions/native/shared.mjs"));
+    ({ getAction } = await import("../actions/registry.mjs"));
+    store = await import("../store.mjs");
+    notify = await import("../notify.mjs");
+    runs = await import("../assistant-runs.mjs");
+    store.putMember({ actorId: "m-pv-kid", displayName: "Maya Harper", role: "Limited Member", householdId: "local" });
+    store.putMember({ actorId: "m-pv-owner", displayName: "Alex Harper", role: "Owner", householdId: "local" });
+    store.setSettings({ timezone: "America/New_York" }, "local");
+  });
+
+  test("THE PREVIEW names the action, the record and who asked — built on the server, never from the request", () => {
+    const delTask = getAction("famili.delete_task");
+    store.putTask({ id: "tk_pv_1", householdId: "local", title: "Take out the trash", status: "todo", createdBy: "m-pv-kid", visibility: "household" });
+    assert.equal(approvalPreview(delTask, { taskId: "tk_pv_1" }, { session: kid, channel: "group" }),
+      "Delete a task: Take out the trash\nAsked by Maya Harper in the family group thread");
+    // A move names the new time, on the household's clock.
+    store.putEvent({ id: "ev_pv_1", householdId: "local", title: "Soccer practice", startAt: "2030-09-19T20:00:00.000Z", visibility: "household", layer: "canonical" });
+    const moved = approvalPreview(getAction("famili.update_event"), { eventId: "ev_pv_1", startAt: "2030-09-19T21:00:00.000Z" }, { session: kid, channel: "group" });
+    assert.match(moved.split("\n")[0], /^Change an event: Soccer practice → Thu, Sep 19, 5:00\sPM$/);
+    assert.equal(approvalPreview(getAction("famili.update_task"), { taskId: "tk_pv_1", status: "done" }, { session: kid, channel: "group" }).split("\n")[0],
+      "Change a task: Take out the trash → done");
+    // No such record: the action alone, and the body refuses the id when it runs.
+    assert.equal(approvalPreview(delTask, { taskId: "tk_nope" }, { session: kid, channel: "group" }).split("\n")[0], "Delete a task");
+  });
+
+  test("…and it never carries a PRIVATE item's title or a personal memory's text: the approval reaches every adult", () => {
+    store.putTask({ id: "tk_pv_private", householdId: "local", title: "Therapy homework", status: "todo", createdBy: "m-pv-owner", ownerId: "m-pv-owner", visibility: "private" });
+    const hidden = approvalPreview(getAction("famili.delete_task"), { taskId: "tk_pv_private" }, { session: kid, channel: "group" });
+    assert.equal(hidden, "Delete a task\nAsked by Maya Harper in the family group thread");
+    const mem = store.addMemory({ householdId: "local", scope: "personal", type: "fact", text: "Maya's locker code is 4412", sourceActorId: "m-pv-kid" });
+    const forgot = approvalPreview(getAction("famili.delete_memory"), { memoryId: mem.id }, { session: kid, channel: "group" });
+    assert.equal(forgot.split("\n")[0], "Forget a memory", "a personal memory is never named in the group thread, not even to its owner");
+    assert.equal(forgot.includes("4412"), false);
+  });
+
+  test("THE PUSH leads with the preview, for every tool — the raw id only when there is no preview", async () => {
+    store.addPushToken("tok-pv-owner", { householdId: "local", actorId: "m-pv-owner" });
+    const base = { householdId: "local", requestedBy: "m-pv-kid", visibility: "household", allowedApproverRoles: ["Owner", "Adult Admin", "Adult Member"] };
+    const realFetch = globalThis.fetch;
+    const sent = [];
+    globalThis.fetch = async (_url, init) => {
+      const messages = JSON.parse(init.body);
+      sent.push(messages);
+      return { ok: true, status: 200, json: async () => ({ data: messages.map(() => ({ status: "ok" })) }) };
+    };
+    try {
+      await notify.pushApprovalNotification({ ...base, id: "apr_pv_1", toolId: "famili.delete_task", preview: "Delete a task: Take out the trash\nAsked by Maya Harper in the family group thread" });
+      await notify.pushApprovalNotification({ ...base, id: "apr_pv_2", toolId: "gmail.send", preview: "Send the weekly note" });
+      await notify.pushApprovalNotification({ ...base, id: "apr_pv_3", toolId: "gmail.send", preview: "" });
+    } finally { globalThis.fetch = realFetch; }
+    const bodies = sent.map((m) => m[0]?.body);
+    assert.deepEqual(bodies, [
+      "Delete a task: Take out the trash — Asked by Maya Harper in the family group thread",
+      "Send the weekly note",
+      "gmail.send",
+    ]);
+    assert.equal(sent[0][0].title, "Approval needed", "the title is unchanged");
+  });
+
+  test("THE COPY: a step that would only have changed something at home says \"changed\"; a send keeps \"sent\"", () => {
+    const { nothingHappened, runOutcomeText, parkedStatusText } = runs;
+    assert.equal(nothingHappened("famili.delete_task"), "nothing has changed yet");
+    assert.equal(nothingHappened("famili.delete_task", { past: true }), "nothing was changed");
+    assert.equal(nothingHappened("homeops.create_task"), "nothing has changed yet", "a local catalog write too");
+    assert.equal(nothingHappened("gmail.send"), "nothing has been sent yet");
+    assert.equal(nothingHappened("homeops.create_approval", { past: true }), "nothing was sent", "a Send keeps today's words");
+    assert.equal(nothingHappened("calendar.create"), "nothing has been sent yet", "so does a provider write — it reaches outside");
+    assert.equal(nothingHappened(["famili.delete_task", "gmail.send"]), "nothing has been sent yet", "mixed or unknown → today's words");
+    assert.equal(nothingHappened(undefined), "nothing has been sent yet");
+
+    const expired = (toolId, title) => ({ status: "expired", title, cursor: 0, steps: [{ index: 0, toolId, title, status: "expired" }] });
+    const local = runOutcomeText(expired("famili.delete_task", "Delete a task or list item"));
+    assert.match(local, /^That approval expired — nothing was changed for "Delete a task or list item"\./);
+    assert.match(local, /• Expired — "Delete a task or list item" was waiting on approval and the window closed\. Nothing was changed\./);
+    const send = runOutcomeText(expired("gmail.send", "Send email"));
+    assert.match(send, /^That approval expired — nothing was sent for "Send email"\./);
+    assert.match(send, /the window closed\. Nothing was sent\./);
+
+    const parked = (toolId, title) => ({ title, cursor: 0, steps: [{ index: 0, toolId, title, status: "waiting_for_approval" }] });
+    assert.equal(parkedStatusText(parked("homeops.create_task", "Create task"), { expiresAt: Date.now() + 30 * 60_000 }),
+      "Waiting for your approval before \"Create task\" can run — nothing has changed yet. It expires in about 30 minutes. Review it in your Inbox to let it through.");
+    assert.match(parkedStatusText(parked("gmail.send", "Send email")), /can run — nothing has been sent yet\. Review it/);
+  });
+});
 
 describe("the group thread, through the real BlueBubbles lane", () => {
   let ctx, alex, maya, fake;
@@ -192,6 +286,8 @@ describe("the group thread, through the real BlueBubbles lane", () => {
     assert.equal(pending[0].id, run.steps[0].approvalId);
     assert.equal(pending[0].requestedBy, "m-maya");
     assert.deepEqual(pending[0].allowedApproverRoles, ["Owner", "Adult Admin", "Adult Member"], "an adult answers it");
+    // What the adult reads — the Inbox title is its first line, the push leads with it.
+    assert.equal(pending[0].preview, "Delete a task: Take out the trash\nAsked by Maya Harper in the family group thread");
     parked = { runId, taskId: tk.id, approvalId: pending[0].id };
   });
 

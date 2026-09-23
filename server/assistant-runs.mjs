@@ -21,6 +21,7 @@ import { onRunFinished, onRunParked } from "./engine.mjs";
 import { orchestrate } from "./orchestrator.mjs";
 import { providerChatWithFallback } from "./ai.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
+import { getAction } from "./actions/registry.mjs";
 import { findToolGlobal } from "./providers.mjs";
 import { CONNECTORS } from "./connectors.mjs";
 
@@ -73,6 +74,25 @@ function toolIsDraft(toolId) {
   return !!getInternalFunction(toolId)?.draft;
 }
 
+/* WHAT "NOTHING HAPPENED" MEANS for a step that waited on an approval (ADR-004 Stage 2).
+ * Every parked and expired sentence used to say "nothing has been sent" / "nothing was sent",
+ * which was true when only sends were ever gated, and reads wrongly for a step that would
+ * only have CHANGED something at home — a child's parked famili.delete_task, a helper's
+ * "always ask me" on homeops.create_task. Decided here, beside toolDelivers, from the step's
+ * own definition: a Write that delivers nothing (an internal function or a declared action,
+ * native ones included) changes; a send, a delivering tool, and anything a provider or
+ * connector runs keep today's words. Unknown or mixed → today's words. */
+function changesOnlyAtHome(toolId) {
+  if (!toolId || toolDelivers(toolId)) return false;
+  return (getInternalFunction(toolId) ?? getAction(toolId))?.action === "Write";
+}
+export function nothingHappened(toolIds, { past = false } = {}) {
+  const ids = [].concat(toolIds ?? []).filter(Boolean);
+  if (ids.length && ids.every(changesOnlyAtHome)) return past ? "nothing was changed" : "nothing has changed yet";
+  return past ? "nothing was sent" : "nothing has been sent yet";
+}
+const sentence = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
 // Best-effort human label for WHERE a delivered step reached — read from the step's
 // own result first (e.g. homeops.notify_contact reports the real channel it resolved
 // to), falling back to a static per-tool hint. Used only for wording; never changes
@@ -108,7 +128,7 @@ function shortfallLines(o) {
   const lines = [];
   for (const s of o.noTool) lines.push(`• Not sent — "${s.title}" had no delivery tool behind it, so nothing left the house.`);
   for (const s of o.skipped) lines.push(`• Skipped — "${s.title}": ${String(s.detail ?? "not permitted").replace(/^Not permitted:\s*/, "not permitted — ")}`);
-  for (const s of o.expired) lines.push(`• Expired — "${s.title}" was waiting on approval and the window closed. Nothing was sent.`);
+  for (const s of o.expired) lines.push(`• Expired — "${s.title}" was waiting on approval and the window closed. ${sentence(nothingHappened(s.toolId, { past: true }))}.`);
   for (const s of o.failed) lines.push(`• Failed — "${s.title}": ${String(s.detail ?? "unknown error").slice(0, 160)}`);
   return lines;
 }
@@ -322,7 +342,8 @@ export function runOutcomeText(run, { includeRows = true } = {}) {
   const caveat = shortfalls.length ? `\n\n${shortfalls.join("\n")}` : "";
 
   if (run.status === "expired") {
-    return `That approval expired — nothing was sent for "${run.title}". Ask me again when you're ready and I'll re-run it.${caveat}`;
+    const waited = o.expired.length ? o.expired.map((s) => s.toolId) : [run.steps?.[run.cursor]?.toolId];
+    return `That approval expired — ${nothingHappened(waited, { past: true })} for "${run.title}". Ask me again when you're ready and I'll re-run it.${caveat}`;
   }
   if (run.status === "completed") {
     // The headline must match the strongest thing that actually happened, in order:
@@ -380,6 +401,14 @@ export function buildResultLinks(run) {
     }
   }
   return links;
+}
+
+/** The thread's line when a run parks on an approval (WP-004), in the words that fit the step. */
+export function parkedStatusText(run, { expiresAt } = {}) {
+  const step = run.steps?.[run.cursor];
+  const mins = expiresAt ? Math.max(1, Math.round((expiresAt - Date.now()) / 60000)) : null;
+  const window = mins ? ` It expires in about ${mins} minute${mins === 1 ? "" : "s"}.` : "";
+  return `Waiting for your approval before "${step?.title ?? run.title}" can run — ${nothingHappened(step?.toolId)}.${window} Review it in your Inbox to let it through.`;
 }
 
 function appendToConversation(run, message) {
@@ -450,14 +479,11 @@ export function registerAssistantRunHooks() {
   // completely invisible. The message names the step, the deadline, and where to act.
   onRunParked((run, { approvalId, expiresAt } = {}) => runWithTenant(run.householdId, async () => {
     if (!run.sourceRef?.conversationId) return;
-    const step = run.steps?.[run.cursor];
-    const mins = expiresAt ? Math.max(1, Math.round((expiresAt - Date.now()) / 60000)) : null;
-    const window = mins ? ` It expires in about ${mins} minute${mins === 1 ? "" : "s"}.` : "";
     appendToConversation(run, {
       kind: "status",
       runId: run.id,
       approvalId: approvalId ?? null,
-      text: `Waiting for your approval before "${step?.title ?? run.title}" can run — nothing has been sent yet.${window} Review it in your Inbox to let it through.`,
+      text: parkedStatusText(run, { expiresAt }),
     });
   }));
 
