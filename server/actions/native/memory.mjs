@@ -20,13 +20,16 @@ export const familiDeleteMemory = defineAction({
   },
   errorCodes: ["invalid_input", "read_only_profile", "memory_not_found"],
   async run(ctx, input) {
-    const { session, hh, canWrite } = nativeScope(ctx);
+    const { session, hh, channel, canWrite } = nativeScope(ctx);
     if (!canWrite) return readOnly();
     // Either spelling of the id is accepted — the store's, or the provider's prefixed copy.
     const m = getMemoryEntry(String(input?.memoryId ?? "").replace(/^sm_mem_/, ""));
     // EXACTLY the API's DELETE rule (nests.mjs canForgetMemory): what this person cannot
     // read does not exist for them — except an orphaned personal memory, which an adult may clear.
-    if (!m || m.householdId !== hh || !canForgetMemory(m, session)) return { ok: false, error: "memory_not_found", message: "No such memory entry — search memory to find the right id." };
+    // And in the group thread a PERSONAL memory does not exist at all, not even to its owner —
+    // famili.search_memory's rule there — so its text never echoes into a thread people outside
+    // the household read. Elsewhere unchanged. (ADR-004 decision C.)
+    if (!m || m.householdId !== hh || !canForgetMemory(m, session) || (channel === "group" && m.scope === "personal")) return { ok: false, error: "memory_not_found", message: "No such memory entry — search memory to find the right id." };
     deleteMemoryEntry(m.id);
     appendAudit({ type: "memory.delete", memoryId: m.id, via: "assistant", householdId: hh, actorId: session.actorId });
     return { ok: true, result: { deleted: true, text: short(m.text ?? "", 80) } };

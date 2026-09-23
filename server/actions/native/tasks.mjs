@@ -63,10 +63,12 @@ export const familiDeleteTask = defineAction({
   },
   errorCodes: ["invalid_input", "read_only_profile", "task_not_found", "forbidden"],
   async run(ctx, input) {
-    const { session, hh, canWrite } = nativeScope(ctx);
+    const { session, hh, channel, seeable, canWrite } = nativeScope(ctx);
     if (!canWrite) return readOnly();
     const tk = getTask(String(input?.taskId ?? ""));
-    if (!tk || tk.householdId !== hh) return { ok: false, error: "task_not_found", message: "No such task." };
+    // In the group thread a task the channel may not show is a missing one, word for word
+    // (see famili.delete_event). Elsewhere unchanged. (ADR-004 decision C.)
+    if (!tk || tk.householdId !== hh || (channel === "group" && !seeable(tk))) return { ok: false, error: "task_not_found", message: "No such task." };
     if (!isAdultRole(session.role) && tk.createdBy !== session.actorId) return { ok: false, error: "forbidden", message: "Only an adult or the person who created it can delete this." };
     deleteTaskRec(tk.id);
     appendAudit({ type: "task.delete", taskId: tk.id, via: "assistant", householdId: hh, actorId: session.actorId });

@@ -28,10 +28,12 @@ export const familiDeleteMeal = defineAction({
   },
   errorCodes: ["invalid_input", "read_only_profile", "meal_not_found", "forbidden"],
   async run(ctx, input) {
-    const { session, hh, canWrite } = nativeScope(ctx);
+    const { session, hh, channel, seeable, canWrite } = nativeScope(ctx);
     if (!canWrite) return readOnly();
     const m = getMeal(String(input?.mealId ?? ""));
-    if (!m || m.householdId !== hh || m.archived) return { ok: false, error: "meal_not_found", message: "No such meal — list meals to find the right id." };
+    // In the group thread a meal the channel may not show is a missing one, word for word
+    // (see famili.delete_event). Elsewhere unchanged. (ADR-004 decision C.)
+    if (!m || m.householdId !== hh || m.archived || (channel === "group" && !seeable(m))) return { ok: false, error: "meal_not_found", message: "No such meal — list meals to find the right id." };
     if (!isAdultRole(session.role) && m.createdBy !== session.actorId) return { ok: false, error: "forbidden", message: "Only an adult or the person who planned it can remove this meal." };
     // The meal, its calendar event (and its Google copy, best effort — kept when the
     // household paused external actions) and the unlink of its grocery items — never

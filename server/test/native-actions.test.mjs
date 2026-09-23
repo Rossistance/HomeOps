@@ -316,6 +316,52 @@ test("a body that hangs is cut at its own timeoutMs; a body that throws is tool_
   assert.match(f.message, /kaput/);
 });
 
+/* ───────────────── the group channel's visibility (Stage 2) ───────────────── */
+
+test("IN THE GROUP THREAD the four deletes answer a private item exactly as a missing one — and outside it nothing changes", async () => {
+  /* famili.delete_event / delete_task / delete_meal had no channel check and delete_memory
+   * ignored the channel, so given an id, an adult in the group thread could delete someone's
+   * private item and echo its title or text into a thread people outside the household read.
+   * An Owner asks here (no park: decision C is about non-adults), about the Owner's OWN private
+   * items — the strongest case: the channel, not the person, is what hides them. */
+  const store = await import("../store.mjs");
+  const owner = { householdId: "local", actorId: "m-alex", role: "Owner" };
+  const call = (id, input, channel) => runNativeAction({ action: getAction(id), input, session: owner, agent: agentWith(), channel, actorIsAdult: channel === "group" ? true : null });
+  const mine = { householdId: "local", createdBy: "m-alex", ownerId: "m-alex", visibility: "private" };
+  store.putEvent({ id: "ev_vis_1", title: "Therapy appointment", startAt: "2030-10-01T15:00:00.000Z", layer: "canonical", ...mine });
+  store.putTask({ id: "tk_vis_1", title: "Refill the prescription", status: "todo", ...mine });
+  store.putMeal({ id: "meal_vis_1", title: "Anniversary dinner", date: "2030-10-02", slot: "dinner", archived: false, ...mine });
+  const mem = store.addMemory({ householdId: "local", scope: "personal", type: "fact", text: "Alex's surprise party is on the 12th", sourceActorId: "m-alex" });
+  const cases = [
+    ["famili.delete_event", { eventId: "ev_vis_1" }, { eventId: "ev_nope" }],
+    ["famili.delete_task", { taskId: "tk_vis_1" }, { taskId: "tk_nope" }],
+    ["famili.delete_meal", { mealId: "meal_vis_1" }, { mealId: "meal_nope" }],
+    ["famili.delete_memory", { memoryId: mem.id }, { memoryId: "mem_nope" }],
+  ];
+  for (const [id, real, missing] of cases) {
+    const hidden = await call(id, real, "group");
+    assert.equal(hidden.ok, false, `${id} refused in the group`);
+    assert.deepEqual(hidden, await call(id, missing, "group"), `${id}: the same code and the same words as a missing id`);
+    assert.equal(JSON.stringify(hidden).match(/Therapy|prescription|Anniversary|surprise/), null, "nothing about the item");
+  }
+  assert.ok(store.getEvent("ev_vis_1") && store.getTask("tk_vis_1") && store.getMeal("meal_vis_1") && store.getMemoryEntry(mem.id), "all four survive");
+  // The controls: the same Owner, the same ids, anywhere but the group thread — as before.
+  for (const [id, real] of cases) assert.equal((await call(id, real, "personal")).ok, true, `${id} still deletes outside the group`);
+  assert.ok(!store.getEvent("ev_vis_1") && !store.getTask("tk_vis_1") && !store.getMemoryEntry(mem.id));
+});
+
+test("…the two update tools already refused an item the group may not see — confirmed, unchanged", async () => {
+  const store = await import("../store.mjs");
+  const owner = { householdId: "local", actorId: "m-alex", role: "Owner" };
+  store.putEvent({ id: "ev_vis_2", householdId: "local", title: "Private lunch", startAt: "2030-10-03T16:00:00.000Z", layer: "canonical", createdBy: "m-alex", ownerId: "m-alex", visibility: "private" });
+  store.putTask({ id: "tk_vis_2", householdId: "local", title: "Private errand", status: "todo", createdBy: "m-alex", ownerId: "m-alex", visibility: "private" });
+  const ev = await runNativeAction({ action: getAction("famili.update_event"), input: { eventId: "ev_vis_2", notes: "x" }, session: owner, agent: agentWith(), channel: "group", actorIsAdult: true });
+  assert.deepEqual(ev, { ok: false, error: "forbidden", message: "That event isn't visible to this person." });
+  const tk = await runNativeAction({ action: getAction("famili.update_task"), input: { taskId: "tk_vis_2", status: "done" }, session: owner, agent: agentWith(), channel: "group", actorIsAdult: true });
+  assert.deepEqual(tk, { ok: false, error: "forbidden", message: "That task isn't visible to this person." });
+  assert.equal(store.getTask("tk_vis_2").status, "todo");
+});
+
 /* ───────────────────── the run engine (Stage 2) ───────────────────── */
 
 describe("the run engine reaches a native action (ADR-004 Stage 2)", () => {

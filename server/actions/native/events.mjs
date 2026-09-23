@@ -99,10 +99,14 @@ export const familiDeleteEvent = defineAction({
   },
   errorCodes: ["invalid_input", "read_only_profile", "event_not_found", "forbidden", "read_only_layer", "external_actions_disabled", ...GOOGLE_ERRORS],
   async run(ctx, input) {
-    const { session, hh, canWrite } = nativeScope(ctx);
+    const { session, hh, channel, seeable, canWrite } = nativeScope(ctx);
     if (!canWrite) return readOnly();
     const ev = getEvent(String(input?.eventId ?? ""));
-    if (!ev || ev.householdId !== hh) return { ok: false, error: "event_not_found", message: "No such event." };
+    /* In the group thread an event the channel may not show is answered exactly as a missing
+     * one — same code, same words — so nothing about someone's private event (that it exists,
+     * whose it is, its title in the result) reaches a thread people outside the household read.
+     * Elsewhere unchanged: the ownership rule below is the app's. (ADR-004 decision C.) */
+    if (!ev || ev.householdId !== hh || (channel === "group" && !seeable(ev))) return { ok: false, error: "event_not_found", message: "No such event." };
     if (!isAdultRole(session.role) && ev.ownerId !== session.actorId) return { ok: false, error: "forbidden", message: "Only the event's owner or an adult can delete it." };
     const editableLinked = isEditableLinkedGoogle(ev, hh, session.actorId);
     if (ev.layer && ev.layer !== "canonical" && !editableLinked) return { ok: false, error: "read_only_layer", message: "This event is synced from another calendar and can't be deleted here." };
