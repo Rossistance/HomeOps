@@ -369,16 +369,27 @@ test("IN THE GROUP THREAD the four deletes answer a private item exactly as a mi
   assert.ok(!store.getEvent("ev_vis_1") && !store.getTask("tk_vis_1") && !store.getMemoryEntry(mem.id));
 });
 
-test("…the two update tools already refused an item the group may not see — confirmed, unchanged", async () => {
+test("…and the two update tools answer the same way in the group — where \"isn't visible\" used to say the item exists — keeping forbidden outside it", async () => {
+  /* Review finding L2. update_event / update_task refused a private item in the group with
+   * forbidden, "That event isn't visible to this person." — which tells the thread there is one.
+   * In the group they now answer exactly as for a missing id; outside it, forbidden as before. */
   const store = await import("../store.mjs");
   const owner = { householdId: "local", actorId: "m-alex", role: "Owner" };
+  const update = (id, input, channel) => runNativeAction({ action: getAction(id), input, session: owner, agent: agentWith(), channel, actorIsAdult: channel === "group" ? true : null });
   store.putEvent({ id: "ev_vis_2", householdId: "local", title: "Private lunch", startAt: "2030-10-03T16:00:00.000Z", layer: "canonical", createdBy: "m-alex", ownerId: "m-alex", visibility: "private" });
   store.putTask({ id: "tk_vis_2", householdId: "local", title: "Private errand", status: "todo", createdBy: "m-alex", ownerId: "m-alex", visibility: "private" });
-  const ev = await runNativeAction({ action: getAction("famili.update_event"), input: { eventId: "ev_vis_2", notes: "x" }, session: owner, agent: agentWith(), channel: "group", actorIsAdult: true });
-  assert.deepEqual(ev, { ok: false, error: "forbidden", message: "That event isn't visible to this person." });
-  const tk = await runNativeAction({ action: getAction("famili.update_task"), input: { taskId: "tk_vis_2", status: "done" }, session: owner, agent: agentWith(), channel: "group", actorIsAdult: true });
-  assert.deepEqual(tk, { ok: false, error: "forbidden", message: "That task isn't visible to this person." });
+  const ev = await update("famili.update_event", { eventId: "ev_vis_2", notes: "x" }, "group");
+  assert.deepEqual(ev, await update("famili.update_event", { eventId: "ev_nope", notes: "x" }, "group"), "update_event: byte for byte a missing id");
+  assert.equal(ev.error, "event_not_found");
+  const tk = await update("famili.update_task", { taskId: "tk_vis_2", status: "done" }, "group");
+  assert.deepEqual(tk, await update("famili.update_task", { taskId: "tk_nope", status: "done" }, "group"), "update_task: byte for byte a missing id");
+  assert.equal(tk.error, "task_not_found");
   assert.equal(store.getTask("tk_vis_2").status, "todo");
+  // The control: outside the group an item this person may not see is still `forbidden`.
+  store.putEvent({ id: "ev_vis_3", householdId: "local", title: "Morgan's private lunch", startAt: "2030-10-04T16:00:00.000Z", layer: "canonical", createdBy: "m-morgan", ownerId: "m-morgan", visibility: "private" });
+  store.putTask({ id: "tk_vis_3", householdId: "local", title: "Morgan's private errand", status: "todo", createdBy: "m-morgan", ownerId: "m-morgan", visibility: "private" });
+  assert.deepEqual(await update("famili.update_event", { eventId: "ev_vis_3", notes: "x" }, "personal"), { ok: false, error: "forbidden", message: "That event isn't visible to this person." });
+  assert.deepEqual(await update("famili.update_task", { taskId: "tk_vis_3", status: "done" }, "personal"), { ok: false, error: "forbidden", message: "That task isn't visible to this person." });
 });
 
 describe("IN THE GROUP THREAD a NEST's memory is not there — found, forgotten or named — and outside it nothing changes", () => {

@@ -29,10 +29,12 @@ export const familiUpdateEvent = defineAction({
   },
   errorCodes: ["invalid_input", "read_only_profile", "event_not_found", "forbidden", "invalid_startAt", "invalid_endAt", "unknown_member", "not_event_owner", "read_only_layer", "external_actions_disabled", ...GOOGLE_ERRORS],
   async run(ctx, input) {
-    const { session, hh, seeable, canWrite } = nativeScope(ctx);
+    const { session, hh, channel, seeable, canWrite } = nativeScope(ctx);
     if (!canWrite) return readOnly();
     const ev = getEvent(String(input?.eventId ?? ""));
-    if (!ev || ev.householdId !== hh) return { ok: false, error: "event_not_found", message: "No such event — list events to find the right id." };
+    /* In the group thread an event the channel may not show is answered exactly as a missing
+     * one: "isn't visible" would tell the thread it exists. Elsewhere unchanged. (ADR-004.) */
+    if (!ev || ev.householdId !== hh || (channel === "group" && !seeable(ev))) return { ok: false, error: "event_not_found", message: "No such event — list events to find the right id." };
     if (!seeable(ev)) return { ok: false, error: "forbidden", message: "That event isn't visible to this person." };
     const { eventId, ...patch } = input ?? {};
     for (const k of Object.keys(patch)) if (patch[k] === undefined) delete patch[k];
