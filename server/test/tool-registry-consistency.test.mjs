@@ -25,6 +25,7 @@ process.on("exit", () => { try { fs.rmSync(process.env.HOMEOPS_DATA_DIR, { recur
 const { INTERNAL_FUNCTIONS } = await import("../internal-functions.mjs");
 const { INTERNAL_INPUTS } = await import("../context.mjs");
 const { EXTRA_INPUT_KEYS, toToolName } = await import("../assistant-agent.mjs");
+const { ACTION_INPUTS } = await import("../actions/registry.mjs");
 
 const registryIds = new Set(Object.keys(INTERNAL_FUNCTIONS));
 const src = await fs.promises.readFile(new URL("../assistant-agent.mjs", import.meta.url), "utf8");
@@ -38,6 +39,18 @@ test("EVERY INTERNAL_INPUTS ROW IS A REAL TOOL", () => {
 test("every EXTRA_INPUT_KEYS row is a real tool", () => {
   const phantoms = Object.keys(EXTRA_INPUT_KEYS).filter((id) => !registryIds.has(id));
   assert.deepEqual(phantoms, [], `extra keys for tools that do not exist: ${phantoms.join(", ")}`);
+});
+
+test("EVERY DECLARED ACTION'S INTERNAL_INPUTS ROW IS THE DERIVED ONE — a hand-kept row would shadow it silently", () => {
+  /* INTERNAL_INPUTS spreads ACTION_INPUTS first and lists the hand-written rows after it,
+   * so a row left behind for a tool that has since been declared (plan_meal was the
+   * first) wins by object-literal order: the planner and the engine's input fill would
+   * read the stale hand row, keys only, while the model read the declared schema — and
+   * the phantom check above cannot see it, because the id does resolve. */
+  assert.ok(Object.keys(ACTION_INPUTS).length >= 1, "there are declared agent actions");
+  for (const [id, row] of Object.entries(ACTION_INPUTS)) {
+    assert.deepEqual(INTERNAL_INPUTS[id], row, `${id}: INTERNAL_INPUTS carries a hand-kept row that shadows the declared one`);
+  }
 });
 
 test("EVERY TOOL THE PROMPT OR A HINT NAMES EXISTS — homeops__* in the registry, famili__* as a native tool", () => {

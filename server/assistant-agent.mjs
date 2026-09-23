@@ -115,11 +115,10 @@ const KEY_HINTS = {
   fileRef: { type: "string" },
   path: { type: "string" },
 };
-// Keys the app's own handlers read but the catalog hints leave out (Severity-5 item 7: the
-// plan_meal prompt contract and INTERNAL_INPUTS disagreed, so recipeUrl/instructions/
-// servings/replace could never be threaded). Declared here so the model can pass them.
+// Keys the app's own hand-written handlers read but the catalog hints leave out, declared
+// here so the model can pass them. A DECLARED action never needs a row: its own schema
+// reaches the model verbatim (inputSchemaForCatalogTool below).
 export const EXTRA_INPUT_KEYS = {
-  "homeops.plan_meal": ["recipeUrl", "instructions", "servings", "replace", "time", "notes"],
   "homeops.write_memory": ["type"],
 };
 const LIST_KEYS = new Set(["items", "participantIds", "ingredients", "instructions", "whatToBring"]);
