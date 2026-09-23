@@ -597,7 +597,6 @@ function nativeTools(ctx) {
           autonomy: input?.autonomy === "act" ? "act" : "ask",
         }, session);
         const v = publicHelper(h, session);
-        ctx.helperChanged = true;
         return { ok: true, result: { created: true, helperId: v.id, name: v.name, schedule: v.scheduleText, autonomy: v.autonomyText, visibility: v.visibility, note: visibility === "personal" && session.role === "Adult Member" ? "Created as a personal helper — an Owner or Adult Admin can share it with the whole family." : undefined } };
       }, { action: "Write" });
 
@@ -623,7 +622,6 @@ function nativeTools(ctx) {
         if (patch.autonomy === "full") patch.autonomy = "act";
         const next = updateHelper(h.id, patch, session);
         const v = publicHelper(next, session);
-        ctx.helperChanged = true;
         return { ok: true, result: { updated: true, helperId: v.id, name: v.name, schedule: v.scheduleText, autonomy: v.autonomyText, enabled: v.enabled } };
       }, { action: "Write" });
 
@@ -891,7 +889,7 @@ export async function runAssistantAgent({ message, context, session, providerId,
     if (!lm.ok) return { ok: false, error: lm.error, message: lm.message };
     const ctx = {
       session, agent, message: text, providerId: pid, conversationId, visibility, channel,
-      toolCalls: [], runIds: [], firstRunId: null, helperChanged: false, asHelper,
+      toolCalls: [], runIds: [], firstRunId: null, asHelper,
       onToolStart: (entry) => {
         event({ type: "tool", tool: entry.id, label: entry.label, status: "running" });
         if (/^web\./.test(entry.id) || entry.id === "homeops.find_places") phase("searching");
@@ -971,7 +969,6 @@ export async function runAssistantAgent({ message, context, session, providerId,
       toolCalls: ctx.toolCalls,
       runIds: ctx.runIds,
       ...(ctx.firstRunId ? { runId: ctx.firstRunId } : {}),
-      ...(ctx.helperChanged ? { helperChanged: true } : {}),
       steps,
       ...(fellBackFrom ? { degraded: true, fellBackFrom } : {}),
       ...(streamError ? { providerWarning: short(errMessage, 200) } : {}),

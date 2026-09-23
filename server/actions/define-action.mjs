@@ -37,6 +37,11 @@ const RISKS = new Set(["Low", "Medium", "High", "Sensitive"]);
 const METHODS = new Set(["GET", "POST", "PATCH", "DELETE"]);
 const ID_RE = /^[a-z]+\.[a-z_]+$/;
 const REF_RE = /^#\/\$defs\/([A-Za-z][A-Za-z0-9]*)$/;
+/* "native" is the chat loop's own lane (ADR-004 Stage 1): the famili.* tools, dispatched by
+ * assistant-agent.mjs through engine.mjs runNativeAction — never the catalog, never
+ * INTERNAL_FUNCTIONS. No other lane exists yet; absent means the ordinary registry path. */
+const LANES = new Set(["native"]);
+const DEFAULT_TIMEOUT_MS = 60_000;
 
 function deepFreeze(o) {
   if (o && typeof o === "object" && !Object.isFrozen(o)) { Object.freeze(o); for (const v of Object.values(o)) deepFreeze(v); }
@@ -143,6 +148,28 @@ export function validateInput(schema, value, { unknown = "reject", coerce = fals
   return { ok: true, value: r.value, stripped };
 }
 
+/* THE NATIVE LANE'S WIRE: the declared input with `required` and `enum` lifted, and nothing
+ * else changed. The famili.* bodies were written against an unvalidated wire and each one
+ * already refuses a missing id or an out-of-range word with its OWN code and sentence
+ * ("No such event — list events to find the right id.", bad_priority, bad_reminder) or maps
+ * it on purpose — create_helper turns autonomy "full" into "ask" and update_helper into
+ * "act", and a test pins that the family still gets its helper. Enforcing the enum here
+ * would turn those into invalid_input and lose the helper. So on this lane the validator
+ * does what only it can — coerce scalars, split a string list, strip undeclared keys — and
+ * `run` keeps the semantics it always had. The model and the generated types still see the
+ * declared schema, enums and all. */
+function nativeWire(schema) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
+  const out = {};
+  for (const [k, v] of Object.entries(schema)) {
+    if (k === "required" || k === "enum") continue;
+    if (k === "properties") out[k] = Object.fromEntries(Object.entries(v).map(([p, s]) => [p, nativeWire(s)]));
+    else if (k === "items" || (k === "additionalProperties" && typeof v === "object")) out[k] = nativeWire(v);
+    else out[k] = v;
+  }
+  return out;
+}
+
 /**
  * Declare a capability once. Returns a frozen action carrying the derived forms:
  *   invoke(ctx, raw)       validate (strip unknown, coerce scalars) → run
@@ -150,6 +177,13 @@ export function validateInput(schema, value, { unknown = "reject", coerce = fals
  *   toInternalInputs()     the INTERNAL_INPUTS row the planner already reads
  * `ctx.via` is "user" (HTTP) or "agent" (engine/chat); toInternalFunction defaults it to
  * "agent" so every existing caller — and every existing test — needs no change.
+ *
+ * Three optional fields serve the native lane (ADR-004), validated here and carried on the
+ * frozen action: `lane` ("native" or absent), `timeoutMs` (a positive integer, default
+ * 60 000 — the run engine's step limit) and `available({ session, channel, asHelper })`
+ * (default: always), which decides whether the tool is on a given turn's menu at all. A
+ * native action has no registry entry and no HTTP door: its ctx carries the session and
+ * the channel, which neither execResolved nor the HTTP door can supply.
  */
 export function defineAction(def) {
   const where = `defineAction(${def?.id ?? "?"})`;
@@ -181,6 +215,12 @@ export function defineAction(def) {
     if (!Number.isInteger(status) || status < 400 || status > 599) throw new Error(`${where}: errors.${code} must be an HTTP error status`);
   }
   if (!def.errorCodes.includes("invalid_input")) throw new Error(`${where}: errorCodes must include "invalid_input" — the validator can return it`);
+  if (def.lane !== undefined && !LANES.has(def.lane)) throw new Error(`${where}: lane must be "native" or absent`);
+  const native = def.lane === "native";
+  if (native && (!agent || def.http !== undefined)) throw new Error(`${where}: a native-lane action is the model's alone — agent:true and no http door`);
+  if (def.timeoutMs !== undefined && !(Number.isInteger(def.timeoutMs) && def.timeoutMs > 0)) throw new Error(`${where}: timeoutMs must be a positive integer (milliseconds)`);
+  if (def.available !== undefined && typeof def.available !== "function") throw new Error(`${where}: available must be a function of { session, channel, asHelper }`);
+  const wire = native ? nativeWire(def.input) : def.input;
 
   const warned = new Set();
   const action = {
@@ -188,8 +228,9 @@ export function defineAction(def) {
     requiresApproval: !!def.requiresApproval, delivers: !!def.delivers,
     connectorId: def.connectorId ?? "homeops", connectorName: def.connectorName ?? "FamiliOS",
     $defs: defs, errors, agent,
+    lane: def.lane ?? null, timeoutMs: def.timeoutMs ?? DEFAULT_TIMEOUT_MS, available: def.available ?? (() => true),
     async invoke(ctx, raw) {
-      const v = validateInput(def.input, raw ?? {}, { unknown: "strip", coerce: true, defs });
+      const v = validateInput(wire, raw ?? {}, { unknown: "strip", coerce: true, defs });
       if (!v.ok) return v;
       for (const k of v.stripped) {
         const key = `${def.id}:${k}`;
@@ -213,6 +254,7 @@ export function defineAction(def) {
     },
     toInternalFunction() {
       if (!agent) throw new Error(`${def.id} is HTTP-only (agent:false) and has no registry entry`);
+      if (native) throw new Error(`${def.id} is a native-lane tool (lane:"native") and has no registry entry — the chat loop runs it through runNativeAction`);
       return Object.freeze({
         id: def.id, name: def.name, description: def.description, action: def.action, risk: def.risk,
         requiresApproval: action.requiresApproval, delivers: action.delivers,
@@ -222,6 +264,7 @@ export function defineAction(def) {
     },
     toInternalInputs() {
       if (!agent) throw new Error(`${def.id} is HTTP-only (agent:false) and has no planner row`);
+      if (native) throw new Error(`${def.id} is a native-lane tool (lane:"native") and has no planner row`);
       const required = new Set(def.input.required ?? []);
       return Object.freeze(Object.entries(def.input.properties ?? {}).map(([key, s]) =>
         Object.freeze({ key, required: required.has(key), ...(s.description ? { label: s.description } : {}) })));

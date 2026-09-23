@@ -10,8 +10,8 @@
 // famili.list_tasks: windowed, searchable, channel-scoped reads with a compact projection —
 // the right shape for a model and the wrong one for a calendar screen that wants everything
 // with its decorations. Making one run serve both would mean branching on the door, which is
-// the drift this registry exists to remove. Whether the native tools themselves become
-// declared actions is rung 4 of the ladder, a separate decision.
+// the drift this registry exists to remove. The native tools are declared too, as their own
+// lane (./native/reads.mjs, ADR-004) — two declared reads over the same data, by design.
 import { listEvents, listTasks, listSubscriptions, getViewerNote, canSeeEntity } from "../store.mjs";
 import { accountStatusById } from "../accounts.mjs";
 import { isEditableLinkedGoogle } from "../calendar.mjs";
