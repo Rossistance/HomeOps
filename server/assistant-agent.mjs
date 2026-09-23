@@ -30,6 +30,7 @@ import { createHelper, updateHelper, listHelpers, publicHelper, runHelper, AUTON
 import { executeToolForChat } from "./engine.mjs";
 import { getAction } from "./actions/registry.mjs";
 import { retireMeal } from "./actions/meals.mjs";
+import { splitList } from "./actions/define-action.mjs";
 import { orchestrate } from "./orchestrator.mjs";
 import {
   getRun, listEvents, getEvent, patchEvent, deleteEventRec, listTasks, getTask, patchTask, deleteTaskRec,
@@ -153,16 +154,13 @@ function schemaForInputs(inputs, extraKeys = []) {
   for (const key of extraKeys) if (!properties[key]) properties[key] = propFor(key);
   return { type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: false };
 }
-// A model that sends "eggs, milk" for a list is corrected, not failed.
+// A model that sends "eggs, milk" for a list is corrected, not failed — by the same splitter
+// the validator applies at every other door (splitList), so the two cannot disagree.
 function coerceInput(input) {
   const out = { ...(input ?? {}) };
   for (const k of Object.keys(out)) {
     const v = out[k];
-    if (LIST_KEYS.has(k) && typeof v === "string") {
-      const t = v.trim();
-      if (t.startsWith("[")) { try { out[k] = JSON.parse(t); continue; } catch { /* fall through */ } }
-      out[k] = t ? t.split(/\n|,\s*(?![^()]*\))/).map((s) => s.trim()).filter(Boolean) : [];
-    }
+    if (LIST_KEYS.has(k) && typeof v === "string") out[k] = splitList(v);
     if (typeof v === "string" && (k === "servings" || k === "limit" || k === "lat" || k === "lng") && v.trim() && Number.isFinite(Number(v))) out[k] = Number(v);
     if (v === "" || v === null) delete out[k];
   }

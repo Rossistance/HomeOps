@@ -98,6 +98,9 @@ test("validateInput: under coerce a comma- or newline-joined string becomes an a
   assert.deepEqual(validateInput(A, { ln: "a" }, { coerce: true }).value.ln, ["a"], "a nullable array too");
   assert.equal(validateInput(A, { l: "eggs, milk" }).field, "l", "without coerce a string is not an array");
   assert.deepEqual(validateInput(S, { t: "x", l: ["a"] }, { coerce: true }).value.l, ["a"], "a real array is untouched");
+  // One splitter with the chat loop's coerceInput (splitList): the two doors cannot disagree.
+  assert.deepEqual(validateInput(A, { l: '["eggs", "milk"]' }, { coerce: true }).value.l, ["eggs", "milk"], "a JSON array in a string is parsed, not cut into garbage");
+  assert.deepEqual(validateInput(A, { l: "salt (to taste, or more), pepper" }, { coerce: true }).value.l, ["salt (to taste, or more)", "pepper"], "a comma inside parentheses does not split");
 });
 
 test("validateInput: $ref resolves against $defs", () => {

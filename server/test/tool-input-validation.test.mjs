@@ -104,6 +104,8 @@ test("plan_meal: an unknown slot is refused rather than quietly becoming dinner"
   // refuses "brunch" first and names the field — the create_task precedent above.
   assert.equal(bad.error, "invalid_input");
   assert.equal(bad.field, "slot");
+  assert.match(bad.message, /breakfast, lunch, dinner, snack/, "the hint lists the slots");
+  assert.doesNotMatch(bad.message, /\bnull\b/, "null is in the enum so absent is fine, but it is not a word to offer the model");
   assert.ok(!store.listMeals((m) => m.title === "QA Brunch").length, "nothing was planned");
 
   const ok = await run("homeops.plan_meal", { title: "QA Lunch", date: "2031-05-03", slot: "lunch", ingredients: ["bread"] });

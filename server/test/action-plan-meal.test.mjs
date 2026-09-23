@@ -181,6 +181,48 @@ test("RE-PLANNING A DISH MERGES THE CALL'S INGREDIENTS INTO THE RECORD, and the 
   assert.equal(again.result.date, "2031-09-01", "a dateless re-plan keeps the stored date");
 });
 
+test("A BARE RE-PLAN OF A CURATED DISH ESTIMATES NOTHING: the estimator is armed, and 'move it to Thursday' neither calls it nor touches the list", async () => {
+  const first = await run({ title: "Enchiladas", date: "2031-09-10", slot: "dinner", ingredients: ["enchilada sauce", { item: "queso", have: true }] });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(first.result.groceryItems, 1);
+  // Arm the last-resort estimator exactly as production meets it: a key in the environment,
+  // a host that resolves (the egress guard looks it up before any fetch) and an OpenAI answer.
+  const dns = (await import("node:dns/promises")).default;
+  const saved = { key: process.env.OPENAI_API_KEY, fetch: globalThis.fetch, lookup: dns.lookup };
+  const calls = [];
+  process.env.OPENAI_API_KEY = "sk-test-not-a-real-key";
+  dns.lookup = async () => [{ address: "203.0.113.7", family: 4 }];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    const content = JSON.stringify({ ingredients: ["ground beef", "kidney beans", "chili powder"], instructions: ["Brown the beef."] });
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    // The control: a bare NEW dish is estimated, so the stub is live and the pin below means something.
+    const bare = await run({ title: "Estimated chili", date: "2031-09-11", slot: "dinner" });
+    assert.equal(bare.ok, true, JSON.stringify(bare));
+    assert.equal(calls.length, 1, "the estimator was called once for the new dish");
+    assert.equal(bare.result.groceryItems, 3);
+    assert.match(bare.result.note, /estimated by Famili/);
+
+    // The pin: the same call shape, for a dish that already holds the family's list. Before
+    // this, the estimate ran (20 s of network on every move) and was MERGED into the record,
+    // so a "move tacos to Thursday" put four guessed items on Groceries.
+    const moved = await run({ title: "enchiladas", date: "2031-09-13", slot: "dinner" });
+    assert.equal(moved.ok, true, JSON.stringify(moved));
+    assert.equal(moved.result.mealId, first.result.mealId, "the same dish, moved, not duplicated");
+    assert.equal(moved.result.date, "2031-09-13", "the move itself happened");
+    assert.equal(calls.length, 1, "nothing was fetched or estimated for a dish that has a list");
+    assert.deepEqual(moved.result.meal.ingredients, [{ item: "enchilada sauce", have: false }, { item: "queso", have: true }], "the curated list is untouched");
+    assert.equal(moved.result.groceryItems, 0);
+    assert.deepEqual(tasksOf(first.result.mealId).map((t) => t.title), ["enchilada sauce"], "and nothing new landed on Groceries");
+    assert.doesNotMatch(moved.result.note ?? "", /estimated/i, "no 'estimated' label on a list nobody estimated");
+  } finally {
+    globalThis.fetch = saved.fetch; dns.lookup = saved.lookup;
+    if (saved.key === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = saved.key;
+  }
+});
+
 test("A NON-LATIN INGREDIENT OR TITLE IS STILL A KEY: two Cyrillic ingredients land as two items, two Cyrillic titles as two meals", async () => {
   // The [a-z0-9] fold turned every non-Latin string into the same empty key.
   const r = await run({ title: "Борщ", date: "2031-09-05", slot: "dinner", ingredients: ["свёкла", "капуста"] });
@@ -191,6 +233,17 @@ test("A NON-LATIN INGREDIENT OR TITLE IS STILL A KEY: two Cyrillic ingredients l
   assert.equal(other.ok, true, JSON.stringify(other));
   assert.notEqual(other.result.mealId, r.result.mealId, "a different Cyrillic title within the week is a different dish, not a dupe");
   assert.equal(store.listMeals((m) => ["Борщ", "Пельмени"].includes(m.title) && !m.archived).length, 2);
+  // And one word in two Unicode spellings is one key: the fold drops combining marks, so
+  // the decomposed "café" (e + U+0301) was a different item, and a different dish, from
+  // the composed one iOS and the model send.
+  const nfc = await run({ title: "Café au lait", date: "2031-09-07", slot: "breakfast", ingredients: ["café"] });
+  assert.equal(nfc.ok, true, JSON.stringify(nfc));
+  assert.equal(nfc.result.groceryItems, 1);
+  const nfd = await run({ title: "Café au lait", date: "2031-09-08", slot: "breakfast", ingredients: ["café"] });
+  assert.equal(nfd.ok, true, JSON.stringify(nfd));
+  assert.equal(nfd.result.mealId, nfc.result.mealId, "the decomposed spelling is the same dish");
+  assert.equal(nfd.result.groceryItems, 0, "and the same grocery item");
+  assert.equal(nfd.result.meal.ingredients.length, 1, "the record did not gain a second spelling");
 });
 
 test("THE PLANNER ROW IS THE DERIVED ONE, and the registry entry is the action itself", () => {

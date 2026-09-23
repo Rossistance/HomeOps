@@ -73,6 +73,17 @@ export function assertSchema(schema, where, defs = {}) {
   if (schema.additionalProperties !== undefined && typeof schema.additionalProperties !== "boolean") assertSchema(schema.additionalProperties, `${where}.*`, defs);
 }
 
+/** ONE list splitter for every door. The chat loop corrected a model's "eggs, milk" this way
+ *  (assistant-agent.mjs, coerceInput) before the validator learned to, and the two had to
+ *  agree: a JSON array in a string is parsed; otherwise the string splits on newlines and on
+ *  commas outside parentheses, so "salt (to taste, or more)" stays one item; entries are
+ *  trimmed and empties dropped. */
+export function splitList(v) {
+  const t = String(v ?? "").trim();
+  if (t.startsWith("[")) { try { const p = JSON.parse(t); if (Array.isArray(p)) return p; } catch { /* not JSON — split it */ } }
+  return t ? t.split(/\n|,\s*(?![^()]*\))/).map((s) => s.trim()).filter(Boolean) : [];
+}
+
 /* Shape validation only. `run` keeps every SEMANTIC check (a timestamp that parses, a
  * member who exists, an end after its start) — the validator says what a field IS, the
  * action says what it MEANS. Two modes for keys the schema does not declare, because the
@@ -83,12 +94,12 @@ function coerceScalar(v, types) {
   if (typeof v !== "string") return v;
   if (types.includes("boolean") && (v === "true" || v === "false")) return v === "true";
   if (types.includes("number") && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
-  /* A string where an array is declared (and a string is not) is split on commas and
-   * newlines: the run engine's fillStepInput comma-joins every array it fills, so a filled
-   * plan_meal step arrived as ingredients "eggs,milk" and was refused as invalid_input, and
-   * a GET query string reaches the HTTP door the same way. The items are then validated as
-   * usual, so a number[] still coerces each entry and a bad entry is still named. */
-  if (types.includes("array") && !types.includes("string")) return v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+  /* A string where an array is declared (and a string is not) is split into a list: the run
+   * engine's fillStepInput comma-joins every array it fills, so a filled plan_meal step
+   * arrived as ingredients "eggs,milk" and was refused as invalid_input, and a GET query
+   * string reaches the HTTP door the same way. The items are then validated as usual, so a
+   * number[] still coerces each entry and a bad entry is still named. */
+  if (types.includes("array") && !types.includes("string")) return splitList(v);
   return v;
 }
 export function validateInput(schema, value, { unknown = "reject", coerce = false, defs = {} } = {}) {
@@ -100,7 +111,8 @@ export function validateInput(schema, value, { unknown = "reject", coerce = fals
     if (types && coerce) v = coerceScalar(v, types);
     const actual = typeOf(v);
     if (types && !types.includes(actual)) return fail(path, `${path || "input"} must be ${types.join(" or ")}, got ${actual}`);
-    if (s.enum && !s.enum.includes(v)) return fail(path, `${path || "input"} must be one of ${s.enum.map(String).join(", ")}`);
+    /* null in an enum means "absent is fine" — not a word to offer a model, which then sends "null". */
+    if (s.enum && !s.enum.includes(v)) return fail(path, `${path || "input"} must be one of ${s.enum.filter((x) => x !== null).map(String).join(", ")}`);
     if (actual === "object" && (s.properties || s.required || s.additionalProperties !== undefined)) {
       const props = s.properties ?? {};
       for (const r of s.required ?? []) if (v[r] === undefined) return fail(join(path, r), `${join(path, r)} is required`);

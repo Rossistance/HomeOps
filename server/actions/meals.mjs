@@ -30,8 +30,9 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
  * same item to a shopper, and the trim-and-lowercase the create route used let both land.
  * Letters and digits in ANY script: the [a-z0-9] fold turned "свёкла" and "капуста" into the
  * same empty key, so a non-Latin ingredient list collapsed to one item and two non-Latin
- * dishes within a week were one meal. */
-const groceryKey = (s) => String(s ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+ * dishes within a week were one meal. Composed first (NFC): the fold drops combining marks,
+ * so the decomposed spelling of "café" was a different key from the composed one. */
+const groceryKey = (s) => String(s ?? "").normalize("NFC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
 /* P2 [09:20] — "are these ingredients automatically added to the grocery list? If not,
  * they need to be."
@@ -328,12 +329,21 @@ export const planMeal = defineAction({
       .map((i) => (typeof i === "string" ? { item: i.trim(), have: false } : { item: String(i.item ?? "").trim(), have: !!i.have }))
       .filter((i) => i.item).slice(0, 60);
     let instructions = (Array.isArray(input?.instructions) ? input.instructions : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 60);
+    let date = typeof input?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.date) ? input.date : null;
+    // The same dish already on the plan, looked up BEFORE enrichment: a bare re-plan of a
+    // dish the family curated ("move tacos to Thursday") must not spend a 20 s call
+    // estimating a list, and must not merge that estimate into the record — only what the
+    // call itself supplied joins the stored list (below).
+    const household = (m) => m.householdId === ctx.householdId && !m.archived;
+    const norm = groceryKey;
+    const dupe = listMeals(household).find((m) => norm(m.title) === norm(title) && (!date || !m.date || Math.abs(Date.parse(m.date) - Date.parse(date)) < 8 * 86400000));
     let enrichmentNote = "";
     // Self-enrichment: planners routinely arrive with a bare title (recipe pages
     // bot-walled upstream). A meal without ingredients puts NOTHING on the
     // grocery list — the exact silent failure users hit — so fetch the recipe
     // here, and as a last resort estimate a standard list, honestly labeled.
-    if (ingredients.length === 0) {
+    // Never for a dish that already holds a list: nothing is fetched or estimated for it.
+    if (ingredients.length === 0 && !(dupe?.ingredients ?? []).length) {
       const recipeUrl = typeof input?.recipeUrl === "string" ? input.recipeUrl.trim() : "";
       try {
         const { extractRecipe, estimateIngredients } = await import("../web.mjs");
@@ -356,15 +366,11 @@ export const planMeal = defineAction({
       } catch { /* enrichment is best-effort; the meal still lands */ }
     }
     const slot = MEAL_SLOTS.includes(input?.slot) ? input.slot : "dinner";
-    let date = typeof input?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.date) ? input.date : null;
     let scheduleNote = "";
     // State-aware scheduling — the intelligence users expect:
-    // 1. Same meal already planned this week → update it, never duplicate.
+    // 1. Same meal already planned this week → update it, never duplicate (dupe, above).
     // 2. The requested slot is taken → replace only when explicitly asked
     //    (replace:true); otherwise shift to the nearest free slot and say so.
-    const household = (m) => m.householdId === ctx.householdId && !m.archived;
-    const norm = groceryKey;
-    const dupe = listMeals(household).find((m) => norm(m.title) === norm(title) && (!date || !m.date || Math.abs(Date.parse(m.date) - Date.parse(date)) < 8 * 86400000));
     const occupant = (d) => listMeals(household).find((m) => m.date === d && m.slot === slot && (!dupe || m.id !== dupe.id));
     if (date && occupant(date)) {
       if (input?.replace === true) {
