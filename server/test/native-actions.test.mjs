@@ -258,6 +258,25 @@ test("STAGE 2 (owner decision C): a Limited Member's native WRITE in the GROUP t
   assert.deepEqual(app, { ok: true, result: { deleted: true, title: "Feed the fish" } });
 });
 
+test("A READ-ONLY PROFILE in the group is not parked: Child View and Guest/Helper get the body's read_only_profile, as in Stage 1", async () => {
+  /* Review finding L1. The park fired before the body's write check, so these profiles were
+   * queued and then refused by queueApprovalRun ("This profile can't start actions that need
+   * approval.") — a request nobody could ever approve. Only someone who can write at all (a
+   * Limited Member, the bodies' own test) is held for an adult. */
+  const { putTask, getTask } = await import("../store.mjs");
+  const { nativeRequiresApproval } = await import("../engine.mjs");
+  const del = getAction("famili.delete_task");
+  putTask({ id: "tk_native_readonly", householdId: "local", title: "Feed the cat", status: "todo", createdBy: "m-kid", visibility: "household" });
+  for (const role of ["Child View", "Guest/Helper"]) {
+    const who = { householdId: "local", actorId: "m-readonly", role };
+    const out = await runNativeAction({ action: del, input: { taskId: "tk_native_readonly" }, session: who, agent: agentWith(), channel: "group", actorIsAdult: false });
+    assert.deepEqual(out, { ok: false, error: "read_only_profile", message: "This profile can look things up but not change them. Ask a parent or an adult member to do it." }, role);
+    assert.equal(nativeRequiresApproval(del, { channel: "group", actorIsAdult: false, role }), false, `${role}: never gated`);
+  }
+  assert.equal(nativeRequiresApproval(del, { channel: "group", actorIsAdult: false, role: "Limited Member" }), true, "a Limited Member still is");
+  assert.ok(getTask("tk_native_readonly"), "nothing was deleted");
+});
+
 test("ONLY rule 4b queues a native call: \"always ask me\" on a child's group write is still a refusal (decision A), and a read never asks", async () => {
   /* Rule 4 fires before rule 4b, so a helper's alwaysApprove on the tool refuses even the one
    * call that would otherwise park — refused in words, never queued. */

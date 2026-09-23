@@ -275,9 +275,14 @@ const actorIsAdultOf = (run) => (typeof run?.sourceRef?.actorIsAdult === "boolea
  * stance, autonomy tier or per-tool setting — makes a native write ask (decision A), and a
  * read never asks. `actorIsAdult` must be the boolean false, not merely absent: absent is "not
  * stated", which leaves the ladder alone everywhere else. Shared by the chat lane
- * (runNativeAction) and the run engine (resolveToolBase), so the two cannot disagree. */
-export function nativeRequiresApproval(action, { channel = null, actorIsAdult = null } = {}) {
-  return action?.action === "Write" && channel === "group" && actorIsAdult === false;
+ * (runNativeAction) and the run engine (resolveToolBase), so the two cannot disagree.
+ *
+ * Only someone who can write at all is held — a Limited Member, the bodies' own test
+ * (nativeScope's canWrite). A read-only profile (Child View, Guest/Helper) is not parked for an
+ * adult to sign something the body would refuse anyway: it gets the body's own read_only_profile
+ * answer, as it did before Stage 2, instead of queueApprovalRun's "can't start actions". */
+export function nativeRequiresApproval(action, { channel = null, actorIsAdult = null, role = null } = {}) {
+  return action?.action === "Write" && channel === "group" && actorIsAdult === false && roleAtLeast(role, "Limited Member");
 }
 
 /* ---- authoritative tool resolution (server decides requiresApproval, NOT client) ---- */
@@ -292,7 +297,7 @@ function resolveToolBase(toolId, runCtx = null) {
   if (native) {
     return {
       kind: "native", def: native,
-      requiresApproval: nativeRequiresApproval(native, { channel: runCtx?.channel ?? null, actorIsAdult: typeof runCtx?.actorIsAdult === "boolean" ? runCtx.actorIsAdult : null }),
+      requiresApproval: nativeRequiresApproval(native, { channel: runCtx?.channel ?? null, actorIsAdult: typeof runCtx?.actorIsAdult === "boolean" ? runCtx.actorIsAdult : null, role: runCtx?.actorRole ?? null }),
       action: native.action, risk: native.risk, connectorId: native.connectorId, connectorName: native.connectorName,
     };
   }
@@ -555,7 +560,7 @@ export async function runNativeAction({ action, input = {}, session, agent = nul
   const actorId = session?.actorId ?? null;
   if (!householdId) return { ok: false, error: "no_session", message: "No household session." };
   const toolId = action.id;
-  const cap = { id: toolId, name: action.name, requiresApproval: nativeRequiresApproval(action, { channel, actorIsAdult }), risk: action.risk, action: action.action, delivers: false, external: false };
+  const cap = { id: toolId, name: action.name, requiresApproval: nativeRequiresApproval(action, { channel, actorIsAdult, role: session.role }), risk: action.risk, action: action.action, delivers: false, external: false };
   const gate = gateToolCall({ cap, toolId, agent, householdId, actorId, conversationId, actorIsAdult });
   if (gate.blocked) return { ok: false, error: gate.error, message: gate.message, policyBlocked: true };
   if (gate.needsApproval) {
