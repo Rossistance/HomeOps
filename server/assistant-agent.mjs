@@ -29,10 +29,11 @@ import {
 import { createHelper, updateHelper, listHelpers, publicHelper, runHelper, AUTONOMY, SCHEDULE_KINDS } from "./helpers.mjs";
 import { executeToolForChat } from "./engine.mjs";
 import { getAction } from "./actions/registry.mjs";
+import { retireMeal } from "./actions/meals.mjs";
 import { orchestrate } from "./orchestrator.mjs";
 import {
   getRun, listEvents, getEvent, patchEvent, deleteEventRec, listTasks, getTask, patchTask, deleteTaskRec,
-  listMeals, getMeal, deleteMealRec, listMembers, canSeeEntity, canSeeEntityInChannel, listApprovals, listMemory,
+  listMeals, getMeal, listMembers, canSeeEntity, canSeeEntityInChannel, listApprovals, listMemory,
   getMemoryEntry, deleteMemoryEntry, getMember, isAdultRole,
   recordAiUsage, aiBudgetExhausted, getSettings, appendAudit,
 } from "./store.mjs";
@@ -513,28 +514,11 @@ function nativeTools(ctx) {
       const m = getMeal(String(input?.mealId ?? ""));
       if (!m || m.householdId !== hh || m.archived) return { ok: false, error: "meal_not_found", message: "No such meal — list meals to find the right id." };
       if (!isAdultRole(session.role) && m.createdBy !== session.actorId) return { ok: false, error: "forbidden", message: "Only an adult or the person who planned it can remove this meal." };
-      deleteMealRec(m.id);
-      // Grocery items carry a real mealId back-reference: unlinked, never deleted — a
-      // still-wanted item outlives the meal that put it on the list.
-      let unlinked = 0;
-      for (const t of listTasks((t) => t.householdId === hh && t.mealId === m.id)) {
-        patchTask(t.id, { mealId: null, notes: t.notes === `For ${m.title}` ? "" : t.notes });
-        unlinked++;
-      }
-      const external = getSettings(hh).externalActionsEnabled !== false;
-      let events = 0;
-      let google = null;
-      for (const e of listEvents((e) => e.householdId === hh && e.mealId === m.id)) {
-        if (e.provenance?.googleEventId) {
-          if (!external) google = "kept (external actions paused)";
-          else {
-            const r = await deleteGoogleCopy({ ev: e, householdId: hh, actorId: session.actorId }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
-            google = r.ok ? "deleted" : `kept (${r.error ?? "google error"})`;
-          }
-        }
-        deleteEventRec(e.id);
-        events++;
-      }
+      // The meal, its calendar event (and its Google copy, best effort — kept when the
+      // household paused external actions) and the unlink of its grocery items — never
+      // deleted; a still-wanted item outlives the meal that put it on the list — are the
+      // one cascade DELETE /api/meals/:id and plan_meal's replace run too (retireMeal).
+      const { eventsRemoved: events, groceryItemsUnlinked: unlinked, google = null } = await retireMeal(m, { householdId: hh, actorId: session.actorId }, { mode: "delete" });
       appendAudit({ type: "meal.delete", mealId: m.id, via: "assistant", events, unlinked, ...(google ? { google } : {}), householdId: hh, actorId: session.actorId });
       return { ok: true, result: { deleted: true, title: m.title, eventsRemoved: events, groceryItemsUnlinked: unlinked, ...(google ? { google } : {}) } };
     }, { action: "Write" });

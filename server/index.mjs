@@ -24,7 +24,7 @@ import {
   listEvents, getEvent, putEvent, patchEvent, deleteEventRec,
   listTasks, getTask, putTask, patchTask, deleteTaskRec, listTaskLists, addTaskList, markTaskListDeleted,
   listSubscriptions, getSubscription, putSubscription, patchSubscription, deleteSubscriptionRec,
-  listMeals, getMeal, putMeal, patchMeal, deleteMealRec,
+  listMeals, getMeal, putMeal, patchMeal,
   listKnowledge, getKnowledge, addKnowledge, patchKnowledge, removeKnowledge, normalizeVisibility,
   listConversations, getConversation, putConversation, appendConversationMessage, deleteConversationRec,
   canSeeEntity, listMemory, listArtifacts, getMemoryEntry, deleteMemoryEntry,
@@ -47,7 +47,7 @@ import { closeBrowser } from "./browser.mjs";
 import { orchestrate, ensureDefaultHelper } from "./orchestrator.mjs";
 import { sandboxEnabled, seedSandboxAccounts, listSandboxEffects } from "./sandbox-connectors.mjs";
 import { seedDefaults } from "./seed.mjs";
-import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, mealEventNotes, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
+import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
 import { handleInboundSms, replyToSender, setLoopReplyHandler } from "./sms.mjs";
 import { bluebubblesConfig, parseInboundWebhook, webhookSecretPresented, secretMatches } from "./bluebubbles.mjs";
 import {
@@ -68,7 +68,7 @@ import { hashPin, verifyPin, needsRehash, matchesPlainSecret } from "./pin.mjs";
 import { createNest, inviteToNest, respondToNest, leaveNest, nestsFor, nestInvitesFor, canSeeNest, canSeeMemory, canForgetMemory, publicNest, nestLabel, listNests, resolveVisibility } from "./nests.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { isValidReminder, isValidReminderList, sweepTaskReminders, sweepTaskArchive, sweepEventReminders } from "./reminders.mjs";
-import { householdTimeZone, formatForHousehold, wallClockISO } from "./household-time.mjs";
+import { householdTimeZone, formatForHousehold } from "./household-time.mjs";
 import { addEventTombstone } from "./store.mjs";
 import { listImessageChats, getImessageChat } from "./store.mjs";
 import { readPreviewToken, renderPreviewCard, renderPreviewGone } from "./preview-token.mjs";
@@ -100,7 +100,7 @@ import { handleFamilyMessageRoutes } from "./family-messages-routes.mjs";
 import { handleActionRoutes } from "./actions/routes.mjs";
 import { newEventRecord } from "./actions/schemas/event.mjs";
 import { newTaskRecord } from "./actions/schemas/task.mjs";
-import { syncMealGroceries } from "./actions/meals.mjs";
+import { syncMealGroceries, mealEventFields, retireMeal } from "./actions/meals.mjs";
 import { createHelpRequest } from "./help-requests.mjs";
 import { postMessage as postFamilyMessage } from "./family-messages.mjs";
 import { listConnectors, connectorById, publicConnector, healthCheck, executeTool, readinessOf } from "./connectors.mjs";
@@ -3313,17 +3313,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // The edit path was a bare patchMeal: move a meal to Saturday and its calendar event
       // stayed on Thursday with the old title; add an ingredient and the grocery list never
       // heard. Same cascade the create and to-calendar routes already do.
-      const groceriesAdded = "ingredients" in patch ? syncMealGroceries(updated, g.session) : 0;
+      const groceriesAdded = "ingredients" in patch ? syncMealGroceries(updated, g.session).added : 0;
       let eventSynced = false;
       const affectsEvent = ["date", "slot", "time", "title", "notes", "ingredients", "instructions", "servings", "recipeUrl"].some((k) => k in patch);
       if (affectsEvent) {
         const linked = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id)[0];
         if (linked && updated.date) {
-          const SLOT_TIMES = { breakfast: "08:00", lunch: "12:00", dinner: "18:00", snack: "15:00" };
-          const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(updated.time ?? "") ? updated.time : (SLOT_TIMES[updated.slot] ?? "18:00");
-          const slotLabel = updated.slot ? updated.slot.charAt(0).toUpperCase() + updated.slot.slice(1) : "Dinner";
-          const fields = { title: `${slotLabel}: ${updated.title}`, startAt: wallClockISO(updated.date, time, householdTimeZone(g.session.householdId)) ?? `${updated.date}T${time}:00`, notes: mealEventNotes(updated) };
-          const ev2 = patchEvent(linked.id, fields);
+          const ev2 = patchEvent(linked.id, mealEventFields(updated, householdTimeZone(g.session.householdId)));
           eventSynced = true;
           if (getSettings(g.session.householdId).calendarAutoSync === true && ev2.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
             void pushEventToGoogle({ ev: ev2, householdId: g.session.householdId, actorId: g.session.actorId })
@@ -3339,30 +3335,21 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const m = getMeal(mealOne[1]);
       if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       if (!isAdultRole(g.session.role) && m.createdBy !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
-      deleteMealRec(m.id);
       // Grocery items carry a real mealId back-reference. Default: unlink (a
       // still-wanted item survives its source meal). With ?groceries=delete the
       // caller opted to remove the meal's ingredients from the list too.
       const dropGroceries = url.searchParams.get("groceries") === "delete";
-      const linked = listTasks((t) => t.householdId === g.session.householdId && t.mealId === m.id);
       let removedGroceries = 0;
-      for (const t of linked) {
-        if (dropGroceries) { deleteTaskRec(t.id); removedGroceries++; }
-        else patchTask(t.id, { mealId: null, notes: t.notes === `For ${m.title}` ? "" : t.notes });
+      if (dropGroceries) {
+        for (const t of listTasks((t) => t.householdId === g.session.householdId && t.mealId === m.id)) { deleteTaskRec(t.id); removedGroceries++; }
       }
-      // The meal's calendar event goes with the meal — including the pushed Google
-      // copy (best-effort; without it the next subscription sync would resurrect it).
-      const linkedEvents = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id);
-      for (const e of linkedEvents) {
-        if (e.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
-          void deleteGoogleCopy({ ev: e, householdId: g.session.householdId, actorId: g.session.actorId })
-            .then((r) => appendAudit({ type: "calendar.googledelete", eventId: e.id, ok: r.ok }))
-            .catch(() => {});
-        }
-        deleteEventRec(e.id);
-      }
-      audit({ type: "meal.delete", mealId: m.id, removedEvents: linkedEvents.length, removedGroceries, unlinkedGroceries: dropGroceries ? 0 : linked.length, ok: true }, req, g.session);
-      return json(res, 200, { ok: true, removedEvents: linkedEvents.length, removedGroceries, unlinkedGroceries: dropGroceries ? 0 : linked.length }, req);
+      // The meal, its calendar event (with the pushed Google copy, best-effort — without
+      // that the next subscription sync would resurrect it) and the unlink of whatever
+      // is still on the list: the one cascade plan_meal's replace and famili.delete_meal
+      // also run.
+      const retired = await retireMeal(m, g.session, { mode: "delete" });
+      audit({ type: "meal.delete", mealId: m.id, removedEvents: retired.eventsRemoved, removedGroceries, unlinkedGroceries: retired.groceryItemsUnlinked, ok: true }, req, g.session);
+      return json(res, 200, { ok: true, removedEvents: retired.eventsRemoved, removedGroceries, unlinkedGroceries: retired.groceryItemsUnlinked }, req);
     }
     const mealGrocery = path.match(/^\/api\/meals\/([^/]+)\/to-grocery$/);
     if (mealGrocery && method === "POST") {
@@ -3378,7 +3365,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
        * Which makes this button a RE-SYNC rather than an add: press it after editing a meal
        * and only genuinely new ingredients appear. Adding nothing is the correct, common
        * answer, and `added: 0` says so honestly. */
-      const added = syncMealGroceries(m, g.session);
+      const added = syncMealGroceries(m, g.session).added;
       audit({ type: "meal.to_grocery", mealId: m.id, added, ok: true }, req, g.session);
       return json(res, 200, { ok: true, added }, req);
     }
@@ -3393,19 +3380,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const m = getMeal(mealCal[1]);
       if (!m || m.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       if (!m.date) return json(res, 400, { error: "date_required", message: "Give the meal a date before adding it to the calendar." }, req);
-      const SLOT_TIMES = { breakfast: "08:00", lunch: "12:00", dinner: "18:00", snack: "15:00" };
-      const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(m.time ?? "") ? m.time : (SLOT_TIMES[m.slot] ?? "18:00");
-      // A real instant on the household's clock — a zoneless stamp meant one time on the
-      // server and another on every phone, and reached Google with no zone at all.
-      const startAt = wallClockISO(m.date, time, householdTimeZone(g.session.householdId)) ?? `${m.date}T${time}:00`;
-      const slotLabel = m.slot ? m.slot.charAt(0).toUpperCase() + m.slot.slice(1) : "Dinner";
-      const title = `${slotLabel}: ${m.title}`;
-      // The event body mirrors the full meal context (recipe link, ingredients,
-      // instructions) so the SAME details land in Google Calendar's description.
-      const notes = mealEventNotes(m);
+      // Title, a real instant on the household's clock, and the full meal context (recipe
+      // link, ingredients, instructions) as the body, so the SAME details land in Google
+      // Calendar's description — composed once, in mealEventFields, for every writer.
+      const fields = mealEventFields(m, householdTimeZone(g.session.householdId));
       const existing = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id)[0];
       if (existing) {
-        const updated = patchEvent(existing.id, { title, startAt, notes });
+        const updated = patchEvent(existing.id, fields);
         if (getSettings(g.session.householdId).calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
           void pushEventToGoogle({ ev: updated, householdId: g.session.householdId, actorId: g.session.actorId })
             .then((r) => appendAudit({ type: "calendar.autopush", eventId: updated.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) })).catch(() => {});
@@ -3414,8 +3395,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
         return json(res, 200, { ok: true, event: updated, action: "updated" }, req);
       }
       const ev = putEvent(newEventRecord({
-        title, startAt, notes, ownerId: g.session.actorId, mealId: m.id,
-        visibility: m.visibility ?? "household", category: "Meal",
+        ...fields, ownerId: g.session.actorId, mealId: m.id,
+        visibility: m.visibility ?? "household",
         provenance: { via: "meal", actorId: g.session.actorId },
       }, g.session));
       audit({ type: "meal.to_calendar", mealId: m.id, eventId: ev.id, action: "created", ok: true }, req, g.session);
