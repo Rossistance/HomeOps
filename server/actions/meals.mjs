@@ -1,14 +1,15 @@
-// Meals, declared (ADR-003): POST /api/meals and GET /api/meals.
+// Meals, declared: POST /api/meals and GET /api/meals (ADR-003), and homeops.plan_meal,
+// the model's meal tool, as a declared composite beside them (ADR-004).
 //
-// HTTP-only (agent: false), both of them, and the reason is different from the reads'.
-// The model's meal tool is homeops.plan_meal, and planning a meal is more than creating
-// one: it de-duplicates against the plan, writes the groceries, puts the dish on the
-// calendar and may push it to Google — because "plan dinner Tuesday" means all of that.
-// A person typing a meal into the app asked for less: the meal, and its groceries. Those
-// are two intents, not one drifted contract, so they keep two doors; plan_meal simply
-// writes its meal through the same newMealRecord and its groceries through the same
-// syncMealGroceries. Whether plan_meal itself becomes a declared composite is rung 4's
-// conversation, not this one.
+// The two HTTP doors are HTTP-only (agent: false), and the reason is different from the
+// reads'. Planning a meal is more than creating one: it de-duplicates against the plan,
+// writes the groceries, puts the dish on the calendar and may push it to Google — because
+// "plan dinner Tuesday" means all of that. A person typing a meal into the app asked for
+// less: the meal, and its groceries. Those are two intents, not one drifted contract, so
+// they keep two doors. What they share is underneath: one newMealRecord, one grocery
+// writer (syncMealGroceries — plan_meal kept a loop of its own until ADR-004, whatever the
+// earlier record said), one meal-to-event composer (mealEventFields) and one retire
+// cascade (retireMeal), which the meal routes in index.mjs and famili.delete_meal use too.
 import { listTasks, putTask, patchTask, listMeals, putMeal, patchMeal, deleteMealRec, listEvents, putEvent, patchEvent, deleteEventRec, getSettings, appendAudit, canSeeEntity, normalizeVisibility } from "../store.mjs";
 import { resolveVisibility } from "../nests.mjs";
 import { roleAtLeast } from "../auth.mjs";

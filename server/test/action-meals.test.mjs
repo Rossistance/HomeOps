@@ -4,8 +4,10 @@
  * model's meal tool is plan_meal, which does MORE than create (de-dupe, groceries, the
  * calendar, Google), because "plan dinner Tuesday" means all of that; a person typing a
  * meal asked for the meal and its groceries. Two intents, two doors — not one drifted run.
- * plan_meal writes its meal through the same newMealRecord and its groceries through the
- * same syncMealGroceries, and the contract holds for both.
+ * plan_meal writes its meal through the same newMealRecord and — since ADR-004 declared it
+ * as a composite; this header claimed it earlier, wrongly — its groceries through the same
+ * syncMealGroceries, and the contract holds for both. action-plan-meal.test.mjs pins the
+ * composite itself.
  */
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";

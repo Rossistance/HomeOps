@@ -1,6 +1,6 @@
 # ADR-004: Rung 4 — native `famili.*` tools join the policy ladder; `plan_meal` becomes a declared composite
 
-**Status:** Proposed · 2026-09-23 — Stage 1 and the `plan_meal` composite carry no user-visible change and can start; Stage 2 waits on the two owner decisions at the end.
+**Status:** Proposed · 2026-09-23 — Stage 1 and the `plan_meal` composite carry no user-visible change and can start; Stage 2 waits on the two owner decisions at the end. Phase 2 (`plan_meal` as a declared composite, PR C) implemented 2026-09-23 on `rung4-plan-meal`, with owner decision B taken as recommended (grocery `source: "meal"`).
 **Scope:** Follow-up item 4 of [ADR-003](ADR-003-actions-not-agent-native.md) (the native tools), and the question ADR-003 left for this rung (`plan_meal`).
 **Related:** ADR-003 · `server/assistant-agent.mjs` (`nativeTools`, `buildToolSet`) · `server/engine.mjs` (`executeToolForChat`) · `server/policy.mjs` · `server/internal-functions.mjs` (`homeops.plan_meal`) · `server/actions/meals.mjs`
 **Evidence:** six read-only audits under [`docs/audits/rung-4/`](../audits/rung-4/README.md); every finding cited below carries a `file:line` there. Eleven findings were additionally challenged by adversarial verifiers and none was refuted; the remaining verification runs were cut off by a spend limit and the findings they would have covered are marked *(unverified)* where it matters.
