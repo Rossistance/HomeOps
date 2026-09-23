@@ -111,6 +111,7 @@ export function statusColor(c: HearthColors, status: string): { fg: string; bg: 
     case "done": case "completed": case "succeeded": case "verified": case "Active": case "healthy": case "connected":
       return { fg: c.sage, bg: c.sageBg };
     case "running": case "in_progress": case "pending": case "waiting_approval": case "attention": case "needs_attention":
+    case "waiting_for_approval": case "waiting_for_connector": case "waiting_for_provider": // what the engine writes for a parked run (server/engine.mjs)
       return { fg: c.amber, bg: c.amberBg };
     case "failed": case "error": case "denied": case "blocked":
       return { fg: c.coral, bg: c.coralBg };
