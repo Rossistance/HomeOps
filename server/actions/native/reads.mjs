@@ -9,7 +9,7 @@
 // chat loop's shared gate (engine.mjs runNativeAction) reads. These are not the HTTP reads
 // in ../reads.mjs: those serve a calendar screen everything with its decorations, and
 // making one run serve both would mean branching on the door.
-import { listEvents, listTasks, listMeals, listMembers, listApprovals, listMemory, getMemoryEntry } from "../../store.mjs";
+import { listEvents, listTasks, listMeals, listMembers, listApprovals, listMemory, getMemoryEntry, listRuns } from "../../store.mjs";
 import { canSeeMemory } from "../../nests.mjs";
 import { memoryProvider } from "../../memory-provider.mjs";
 import { defineAction } from "../define-action.mjs";
@@ -219,8 +219,17 @@ export const familiListApprovals = defineAction({
   errorCodes: ["invalid_input"],
   async run(ctx) {
     const { session, hh, channel } = nativeScope(ctx);
+    /* In the group thread — read by people outside the household, and an approval's preview
+     * now names the record it would change — only what the asker requested, or what was itself
+     * asked for in the thread: a pending approval whose run the thread queued (sourceRef.channel
+     * "group" from the chat lane, via "group_chat" from the group listener). An approval a
+     * helper or someone's app turn queued stays in the Inbox, not the thread. (ADR-004 Stage 2.) */
+    const fromThread = channel === "group" ? new Set(listRuns({ householdId: hh, status: "waiting_for_approval", limit: 1000 })
+      .filter((r) => r.sourceRef?.channel === "group" || r.sourceRef?.via === "group_chat")
+      .flatMap((r) => (r.steps ?? []).map((s) => s.approvalId).filter(Boolean))) : null;
     const rows = listApprovals({ householdId: hh }).filter((a) => a.status === "pending")
       .filter((a) => a.visibility !== "personal" || (channel !== "group" && a.requestedBy === session.actorId))
+      .filter((a) => channel !== "group" || a.requestedBy === session.actorId || fromThread.has(a.id))
       .map((a) => ({ id: a.id, toolId: a.toolId, preview: a.preview, risk: a.risk, expiresAt: a.expiresAt ? new Date(a.expiresAt).toISOString() : null }));
     return { ok: true, result: { approvals: rows, count: rows.length } };
   },

@@ -419,6 +419,28 @@ describe("IN THE GROUP THREAD a NEST's memory is not there — found, forgotten 
     assert.equal(group.some((t) => /Paris/.test(t)), false, "the nest's memory is not in the group");
     assert.ok((await texts("personal")).includes("NESTSECRET grandma surprise trip to Paris"), "the control: found by its nest member elsewhere");
   });
+
+  test("(d) famili.list_approvals in the group shows only the asker's own requests and the thread's own parks; outside it, all of them", async () => {
+    /* An approval queued outside the thread — here one whose preview names the nest's memory —
+     * is the Inbox's business, not a thread people outside the household read. */
+    const { startRun } = await import("../engine.mjs");
+    const offThread = store.createApproval({ actorId: "m-nest-adult", householdId: "local", connectorId: "homeops", toolId: "famili.delete_memory", input: { memoryId: secret.id }, risk: "Medium", category: "Write", visibility: "household",
+      preview: "Forget a memory: “NESTSECRET grandma surprise trip to Paris”\nAsked by Gran Harper" });
+    store.putTask({ id: "tk_vis_thread", householdId: "local", title: "Rake the leaves", status: "todo", createdBy: "m-nest-kid", visibility: "household" });
+    const parked = await startRun({ source: "assistant", sourceRef: { channel: "group", actorIsAdult: false, actorRole: "Limited Member" }, session: kid, title: "Change a task",
+      plan: { title: "Change a task", steps: [{ toolId: "famili.update_task", title: "Change a task", input: { taskId: "tk_vis_thread", status: "done" } }] } });
+    let run = null;
+    for (let i = 0; i < 100 && run?.status !== "waiting_for_approval"; i++) { await new Promise((r) => setTimeout(r, 20)); run = store.getRun(parked.id); }
+    const inThread = run?.steps?.[0]?.approvalId;
+    assert.ok(inThread, "the thread's own park");
+    const ids = async (who, channel) => ((await call("famili.list_approvals", {}, who, channel)).result?.approvals ?? []).map((a) => a.id);
+    const outsiderGroup = await ids(outsider, "group");
+    assert.ok(outsiderGroup.includes(inThread), "a park the thread itself queued is the thread's to see");
+    assert.equal(outsiderGroup.includes(offThread.id), false, "one queued elsewhere is not — its preview names a nest's memory");
+    assert.ok((await ids(adult, "group")).includes(offThread.id), "…except to the person who asked for it");
+    const outsiderApp = await ids(outsider, "personal");
+    assert.ok(outsiderApp.includes(offThread.id) && outsiderApp.includes(inThread), "the control: outside the group, as before");
+  });
 });
 
 /* ───────────────────── the run engine (Stage 2) ───────────────────── */
