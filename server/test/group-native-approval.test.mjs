@@ -300,6 +300,23 @@ describe("the group thread, through the real BlueBubbles lane", () => {
     assert.equal(await taskExists(parked.taskId), false, "deleted once an adult said yes");
   });
 
+  test("the turn's RECEIPT is awaiting_approval — and when the model goes quiet, the thread hears it said as a change, not a send", async () => {
+    /* A group turn's receipts are not returned to anyone, so they are read back the one way the
+     * thread itself can hear them: a model that says nothing after acting gets an answer
+     * composed from its receipts ("Waiting for your approval: … — …"), and speakToChat sends
+     * that to the thread. It names the awaiting_approval receipt, and says "nothing has changed
+     * yet" (not "sent") for a local write. */
+    const { readStoreDoc } = await import("./harness.mjs");
+    const tk = await makeTask(maya, "Water the tomatoes");
+    const told = await groupTurn(KID_NUM, "delete my tomatoes task", [{ toolCalls: [{ name: "famili__delete_task", args: { taskId: tk.id } }] }, { text: "" }]);
+    assert.equal(outcome(told)?.status, "awaiting_approval");
+    const spoken = JSON.stringify(readStoreDoc(ctx, "sandbox_effects.json", {}));
+    assert.ok(spoken.includes("Waiting for your approval: Delete a task or list item — nothing has changed yet."), `the thread heard the receipt: ${spoken.slice(-600)}`);
+    const [appr] = await pendingFor("famili.delete_task");
+    await decide(appr.id, "deny"); // leave nothing pending for the tests below
+    assert.ok(await taskExists(tk.id));
+  });
+
   test("…a DENIAL leaves the task where it was", async () => {
     const tk = await makeTask(maya, "Walk the dog");
     const { runId } = await childParks("famili__delete_task", { taskId: tk.id }, "delete my dog walk task");

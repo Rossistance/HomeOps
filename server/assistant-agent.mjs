@@ -29,6 +29,7 @@ import { getAction, NATIVE_ACTIONS } from "./actions/registry.mjs";
 import { KEY_HINTS, short } from "./actions/native/shared.mjs";
 import { splitList } from "./actions/define-action.mjs";
 import { orchestrate } from "./orchestrator.mjs";
+import { nothingHappened } from "./assistant-runs.mjs";
 import {
   getRun, isAdultRole,
   recordAiUsage, aiBudgetExhausted, getSettings, appendAudit,
@@ -490,7 +491,8 @@ export async function runAssistantAgent({ message, context, session, providerId,
       const failed = ctx.toolCalls.filter((c) => c.status === "failed" || c.status === "blocked");
       const lines = [];
       if (done.length) lines.push(`Done: ${done.map((c) => `${c.label}${c.summary ? ` (${short(c.summary, 60)})` : ""}`).join(", ")}.`);
-      if (waiting.length) lines.push(`Waiting for your approval: ${waiting.map((c) => c.label).join(", ")} — nothing has been sent yet.`);
+      // "sent" or "changed", decided where the parked copy is (assistant-runs.mjs nothingHappened).
+      if (waiting.length) lines.push(`Waiting for your approval: ${waiting.map((c) => c.label).join(", ")} — ${nothingHappened(waiting.map((c) => c.tool))}.`);
       if (failed.length) lines.push(`Couldn't finish: ${failed.map((c) => `${c.label} (${short(c.summary ?? "", 80)})`).join("; ")}.`);
       /* The provider's own words are NOT put in front of a family. Groq's gpt-oss models
        * refuse the turn after a tool result with "'messages.2' : property 'reasoning' ...",
