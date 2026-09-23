@@ -109,6 +109,11 @@ const MAX_ATTACH_BYTES = 25 * 1024 * 1024;
  *  "waiting_approval" is kept as a fallback so nothing that ever sent it regresses. */
 const PARKED_RUN_STATUSES = ["waiting_for_approval", "waiting_approval"];
 
+/** A run that will not change again — mirrors TERMINAL_RUN_STATUSES in server/engine.mjs.
+ *  "partially_failed" is terminal too; without it the live card stayed up and the poll kept
+ *  going until its 120 x 1.5 s budget ran out. The thread's result message says what happened. */
+const TERMINAL_RUN_STATUSES = ["completed", "partially_failed", "failed", "cancelled", "expired"];
+
 export default function AskScreen() {
   const { colors, spacing, radii, type, dark } = useTheme();
   const calm = useCalmMotion();
@@ -355,7 +360,7 @@ export default function AskScreen() {
     const poll = async () => {
       const r = await api.getRun(runId);
       if (r.run) setServerRun(r.run);
-      const terminal = r.run && ["completed", "failed", "cancelled", "expired"].includes(r.run.status);
+      const terminal = r.run && TERMINAL_RUN_STATUSES.includes(r.run.status);
       if (!terminal && ticks++ < 120) { setTimeout(() => void poll(), 1500); return; }
       setServerRun(null);
       await refreshConversation(convId);
@@ -1186,12 +1191,12 @@ export default function AskScreen() {
           })}
 
           {/* Auto-executed server run: live step progress inline in the thread. */}
-          {serverRun && msgs.length > 0 && !["completed", "failed", "cancelled", "expired"].includes(serverRun.status) ? (
+          {serverRun && msgs.length > 0 && !TERMINAL_RUN_STATUSES.includes(serverRun.status) ? (
             <Card style={{ gap: spacing.sm }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
                 <T kind="h3" color={colors.text} style={{ flex: 1 }}>{serverRun.title}</T>
                 <Badge
-                  label={PARKED_RUN_STATUSES.includes(serverRun.status) ? "Needs approval" : "Doing it"}
+                  label={PARKED_RUN_STATUSES.includes(serverRun.status) ? "Waiting for approval" : "Doing it"}
                   fg={PARKED_RUN_STATUSES.includes(serverRun.status) ? colors.amber : colors.ember}
                   bg={PARKED_RUN_STATUSES.includes(serverRun.status) ? colors.amberBg : colors.emberBg}
                 />

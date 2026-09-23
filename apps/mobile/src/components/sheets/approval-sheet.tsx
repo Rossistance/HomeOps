@@ -75,7 +75,7 @@ export function ApprovalSheet({ approval, visible, onClose, onDecided }: {
       const roles = approval.allowedApproverRoles ?? [];
       const who = roles.length > 1 ? `${roles.slice(0, -1).join(", ")} or ${roles[roles.length - 1]}` : roles[0];
       Alert.alert("Couldn't record your decision", notAllowed
-        ? `This profile can't approve this one${who ? ` — only ${who} can decide it` : ""}.`
+        ? `This profile can't approve this one${who ? ` — ${who} can decide it` : ""}.`
         : "Something went wrong — pull to refresh and try again.");
       return;
     }
