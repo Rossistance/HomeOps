@@ -370,6 +370,66 @@ export type ListMealsResult = {
 /** Error codes homeops.list_meals can return. */
 export type ListMealsError = "invalid_input";
 
+/** Input of homeops.plan_meal. Plan a dish for the family: put it on the meal plan, add the ingredients the family does not already have to the Groceries list, and put a calendar event on the household's clock (pushed to Google Calendar when the household turned calendar auto-sync on). The same dish already planned within a week is updated, never duplicated. When the slot is taken the dish moves to the next free day and the note says so; pass replace:true only when the family asked to swap — that archives the old dish and removes its calendar event and grocery links. Give the full ingredient list with quantities; with none, the recipe page (recipeUrl) is read, or a standard list is estimated and labelled as such. Use this for anything cooked or eaten on a day; for a bare item on the list use homeops__create_list_item. */
+export type PlanMealInput = {
+  /** Short human title. */
+  title: string;
+  /** Calendar date, YYYY-MM-DD. */
+  date?: string | null;
+  /** Default dinner. */
+  slot?: "breakfast" | "lunch" | "dinner" | "snack" | null;
+  /** Time of day, 24-hour HH:MM. */
+  time?: string | null;
+  /** Full ingredient list, one entry per ingredient with quantity — a bare string, or { item, have }. */
+  ingredients?: Array<string | {
+    item: string;
+    /** true when the family already has it — it stays off the grocery list. */
+    have?: boolean;
+  }> | null;
+  /** Step-by-step cooking instructions, one step per entry. */
+  instructions?: Array<string> | null;
+  /** Source recipe URL, if any. */
+  recipeUrl?: string | null;
+  /** Number of servings — size to the household. A positive whole number. */
+  servings?: number | string | null;
+  /** true to replace whatever is already planned in that slot (only when the family said so). */
+  replace?: boolean | null;
+  /** Free-form notes. */
+  notes?: string | null;
+  /** Who can see it. Default household. nest needs nestId. */
+  visibility?: "household" | "private" | "personal" | "adults" | "nest" | "childVisible";
+  /** The nest, when visibility is nest. */
+  nestId?: string | null;
+};
+
+/** Result of homeops.plan_meal. */
+export type PlanMealResult = {
+  /** The meal's id (starts with meal_); the same as mealId. */
+  id: string;
+  mealId: string;
+  title: string;
+  date: string | null;
+  slot: "breakfast" | "lunch" | "dinner" | "snack";
+  /** How many ingredients were added to the Groceries list. */
+  groceryItems: number;
+  /** The linked calendar event, when the meal has a date. */
+  eventId: string | null;
+  /** Whether the event reached Google Calendar — attempted only when calendar auto-sync is on and external actions are not paused. */
+  google: {
+    pushed: boolean;
+    googleEventId?: string;
+    action?: "created" | "updated";
+    error?: string;
+  };
+  /** What the planner did differently from what was asked: moved, replaced, de-duplicated, estimated. */
+  note?: string;
+  meal: MealRecord;
+  event?: EventRecord;
+};
+
+/** Error codes homeops.plan_meal can return. */
+export type PlanMealError = "invalid_input" | "empty_title" | "bad_servings" | "not_in_nest";
+
 /** Every declared action that answers over HTTP, by id. */
 export const ACTION_ROUTES = {
   "homeops.create_event_draft": { method: "POST", path: "/api/events" },

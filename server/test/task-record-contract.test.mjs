@@ -4,8 +4,9 @@
  * remindOffsets. The point of this file is that whatever a writer DOES put there is
  * declared. Two halves: the HTTP writers through the real server (the action, a status
  * patch that stamps completedAt, task → calendar that stamps eventId), and the in-process
- * tools that still write by hand (create_list_item, plan_meal's groceries) against this
- * process's own store. Every task from both is validated with unknown keys REJECTED.
+ * tools (create_list_item, and plan_meal's groceries — through syncMealGroceries since
+ * ADR-004) against this process's own store. Every task from both is validated with
+ * unknown keys REJECTED.
  */
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -19,7 +20,7 @@ process.on("exit", () => { try { fs.rmSync(process.env.HOMEOPS_DATA_DIR, { recur
 
 const { startServer, stopServer, makeSession } = await import("./harness.mjs");
 const { validateInput } = await import("../actions/define-action.mjs");
-const { TASK_RECORD } = await import("../actions/schemas/task.mjs");
+const { TASK_RECORD, newTaskRecord } = await import("../actions/schemas/task.mjs");
 const { createTask } = await import("../actions/tasks.mjs");
 const { INTERNAL_FUNCTIONS } = await import("../internal-functions.mjs");
 const store = await import("../store.mjs");
@@ -49,7 +50,7 @@ test("HTTP WRITERS: the action, a completion, a calendar link — every task GET
   assert.ok(v.ok, `the action's own output holds: ${v.field} — ${v.message}`);
 });
 
-test("IN-PROCESS WRITERS fit the same record — the list-item action, and the grocery writers still by hand", async () => {
+test("IN-PROCESS WRITERS fit the same record — the list-item action, and plan_meal's groceries through syncMealGroceries", async () => {
   const tctx = { householdId: "local", actorId: "m-alex", runId: "run_test" };
   const li = await INTERNAL_FUNCTIONS["homeops.create_list_item"].run(tctx, { text: "Batteries", listName: "Shopping" });
   assert.equal(li.ok, true, JSON.stringify(li));
@@ -57,6 +58,7 @@ test("IN-PROCESS WRITERS fit the same record — the list-item action, and the g
   assert.ok(li.result.task.id.startsWith("li_"), "a list item's id says what it is");
   const meal = await INTERNAL_FUNCTIONS["homeops.plan_meal"].run(tctx, { title: "Contract chili", date: "2031-07-09", slot: "dinner", ingredients: ["beans", { item: "salt", have: true }] });
   assert.equal(meal.ok, true, JSON.stringify(meal));
+  assert.equal(meal.result.meal.id, meal.result.mealId, "declared (ADR-004): the record beside the flat id");
   const groceries = store.listTasks((t) => t.mealId === meal.result.mealId);
   assert.ok(groceries.length >= 1, "plan_meal wrote groceries");
   for (const g of groceries) fits(g, "a plan_meal grocery");
@@ -75,10 +77,16 @@ test("EVERY WRITER NOW SHARES ONE SET OF DEFAULTS — a grocery item has the sam
   const structural = ["type", "status", "dueAt", "startAt", "endAt", "assignedMemberId", "spaceId", "priority", "amount", "visibility", "nestId",
     "notes", "remindMinutesBefore", "remindOffsets", "remindersSent", "reminderSentAt", "source", "createdBy", "createdAt", "updatedAt"];
   const viaHttp = ok200(await adult.req("/api/tasks"), "GET /api/tasks").tasks;
+  /* plan_meal's groceries were the only rows stamped source "assistant"; they are source
+   * "meal" now, written by the one grocery writer (ADR-004, owner decision B). The
+   * "assistant" writer is seeded directly — the claim here is that a row from ANY writer
+   * fits, not who happens to write it today. */
+  store.putTask(newTaskRecord({ title: "Seeded by the assistant", source: "assistant" }, { householdId: "local", actorId: "m-alex" }));
   const inProcess = store.listTasks((t) => t.householdId === "local");
   assert.ok(viaHttp.length >= 2 && inProcess.length >= 3, "both halves wrote tasks");
   const sources = new Set([...viaHttp, ...inProcess].map((t) => t.source));
-  for (const s of ["user", "agent", "assistant"]) assert.ok(sources.has(s), `writer "${s}" is exercised: ${[...sources]}`);
+  for (const s of ["user", "agent"]) assert.ok(sources.has(s), `writer "${s}" is exercised: ${[...sources]}`);
+  assert.ok(sources.has("assistant"), `the "assistant" row is the seeded fixture above, not a writer this file exercises: ${[...sources]}`);
   for (const t of [...viaHttp, ...inProcess]) {
     const missing = structural.filter((k) => !(k in t));
     assert.deepEqual(missing, [], `${t.source} (${t.type}) lacks ${missing.join(", ")}`);

@@ -29,10 +29,12 @@ import {
 import { createHelper, updateHelper, listHelpers, publicHelper, runHelper, AUTONOMY, SCHEDULE_KINDS } from "./helpers.mjs";
 import { executeToolForChat } from "./engine.mjs";
 import { getAction } from "./actions/registry.mjs";
+import { retireMeal } from "./actions/meals.mjs";
+import { splitList } from "./actions/define-action.mjs";
 import { orchestrate } from "./orchestrator.mjs";
 import {
   getRun, listEvents, getEvent, patchEvent, deleteEventRec, listTasks, getTask, patchTask, deleteTaskRec,
-  listMeals, getMeal, deleteMealRec, listMembers, canSeeEntity, canSeeEntityInChannel, listApprovals, listMemory,
+  listMeals, getMeal, listMembers, canSeeEntity, canSeeEntityInChannel, listApprovals, listMemory,
   getMemoryEntry, deleteMemoryEntry, getMember, isAdultRole,
   recordAiUsage, aiBudgetExhausted, getSettings, appendAudit,
 } from "./store.mjs";
@@ -114,11 +116,10 @@ const KEY_HINTS = {
   fileRef: { type: "string" },
   path: { type: "string" },
 };
-// Keys the app's own handlers read but the catalog hints leave out (Severity-5 item 7: the
-// plan_meal prompt contract and INTERNAL_INPUTS disagreed, so recipeUrl/instructions/
-// servings/replace could never be threaded). Declared here so the model can pass them.
+// Keys the app's own hand-written handlers read but the catalog hints leave out, declared
+// here so the model can pass them. A DECLARED action never needs a row: its own schema
+// reaches the model verbatim (inputSchemaForCatalogTool below).
 export const EXTRA_INPUT_KEYS = {
-  "homeops.plan_meal": ["recipeUrl", "instructions", "servings", "replace", "time", "notes"],
   "homeops.write_memory": ["type"],
 };
 const LIST_KEYS = new Set(["items", "participantIds", "ingredients", "instructions", "whatToBring"]);
@@ -153,16 +154,13 @@ function schemaForInputs(inputs, extraKeys = []) {
   for (const key of extraKeys) if (!properties[key]) properties[key] = propFor(key);
   return { type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: false };
 }
-// A model that sends "eggs, milk" for a list is corrected, not failed.
+// A model that sends "eggs, milk" for a list is corrected, not failed — by the same splitter
+// the validator applies at every other door (splitList), so the two cannot disagree.
 function coerceInput(input) {
   const out = { ...(input ?? {}) };
   for (const k of Object.keys(out)) {
     const v = out[k];
-    if (LIST_KEYS.has(k) && typeof v === "string") {
-      const t = v.trim();
-      if (t.startsWith("[")) { try { out[k] = JSON.parse(t); continue; } catch { /* fall through */ } }
-      out[k] = t ? t.split(/\n|,\s*(?![^()]*\))/).map((s) => s.trim()).filter(Boolean) : [];
-    }
+    if (LIST_KEYS.has(k) && typeof v === "string") out[k] = splitList(v);
     if (typeof v === "string" && (k === "servings" || k === "limit" || k === "lat" || k === "lng") && v.trim() && Number.isFinite(Number(v))) out[k] = Number(v);
     if (v === "" || v === null) delete out[k];
   }
@@ -513,28 +511,11 @@ function nativeTools(ctx) {
       const m = getMeal(String(input?.mealId ?? ""));
       if (!m || m.householdId !== hh || m.archived) return { ok: false, error: "meal_not_found", message: "No such meal — list meals to find the right id." };
       if (!isAdultRole(session.role) && m.createdBy !== session.actorId) return { ok: false, error: "forbidden", message: "Only an adult or the person who planned it can remove this meal." };
-      deleteMealRec(m.id);
-      // Grocery items carry a real mealId back-reference: unlinked, never deleted — a
-      // still-wanted item outlives the meal that put it on the list.
-      let unlinked = 0;
-      for (const t of listTasks((t) => t.householdId === hh && t.mealId === m.id)) {
-        patchTask(t.id, { mealId: null, notes: t.notes === `For ${m.title}` ? "" : t.notes });
-        unlinked++;
-      }
-      const external = getSettings(hh).externalActionsEnabled !== false;
-      let events = 0;
-      let google = null;
-      for (const e of listEvents((e) => e.householdId === hh && e.mealId === m.id)) {
-        if (e.provenance?.googleEventId) {
-          if (!external) google = "kept (external actions paused)";
-          else {
-            const r = await deleteGoogleCopy({ ev: e, householdId: hh, actorId: session.actorId }).catch((err) => ({ ok: false, error: String(err?.message ?? err) }));
-            google = r.ok ? "deleted" : `kept (${r.error ?? "google error"})`;
-          }
-        }
-        deleteEventRec(e.id);
-        events++;
-      }
+      // The meal, its calendar event (and its Google copy, best effort — kept when the
+      // household paused external actions) and the unlink of its grocery items — never
+      // deleted; a still-wanted item outlives the meal that put it on the list — are the
+      // one cascade DELETE /api/meals/:id and plan_meal's replace run too (retireMeal).
+      const { eventsRemoved: events, groceryItemsUnlinked: unlinked, google = null } = await retireMeal(m, { householdId: hh, actorId: session.actorId }, { mode: "delete" });
       appendAudit({ type: "meal.delete", mealId: m.id, via: "assistant", events, unlinked, ...(google ? { google } : {}), householdId: hh, actorId: session.actorId });
       return { ok: true, result: { deleted: true, title: m.title, eventsRemoved: events, groceryItemsUnlinked: unlinked, ...(google ? { google } : {}) } };
     }, { action: "Write" });

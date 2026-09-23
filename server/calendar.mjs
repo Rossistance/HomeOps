@@ -8,7 +8,7 @@
 import crypto from "node:crypto";
 import { safeFetch } from "./net.mjs";
 import { parseICS, expandRecurring } from "./ics.mjs";
-import { listEvents, putEvent, patchEvent, deleteEventRec, getAccountRaw, getSubscription, isEventTombstoned, getMember } from "./store.mjs";
+import { listEvents, putEvent, patchEvent, deleteEventRec, getAccountRaw, getSubscription, isEventTombstoned, getMember, getSettings } from "./store.mjs";
 import { householdTimeZone, serverTimeZone, localMidnightISO, localDateKey, stampToMs, toInstantISO } from "./household-time.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
@@ -483,6 +483,15 @@ export function googleEventTimes(ev, tz) {
   const startISO = toInstantISO(ev.startAt, tz);
   const end = ev.endAt ? toInstantISO(ev.endAt, tz) : new Date(Date.parse(startISO) + 3_600_000).toISOString();
   return { start: { dateTime: startISO }, end: { dateTime: end } };
+}
+
+/** May this household reach Google right now? The kill switch (`externalActionsEnabled`)
+ * pauses every outbound write; the policy ladder enforces it for a capability that
+ * declares `delivers`, but a Google push made INSIDE a local Write (a meal's calendar
+ * event, a meal's retirement) is invisible to the ladder — so the writers ask here, once,
+ * instead of each keeping its own copy of the sentence. Unset means on (store default). */
+export function googleReachAllowed(householdId) {
+  return getSettings(householdId).externalActionsEnabled !== false;
 }
 
 /* ---- Push half of two-way sync (shared executor) ----

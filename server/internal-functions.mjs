@@ -2,9 +2,8 @@
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
-import { addMemory, addArtifact, putEvent, getEvent, patchEvent, deleteEventRec, putTask, listTasks, patchTask, putMeal, listMeals, patchMeal, listEvents, getSettings, listContactMethods, listAgents, getAgent, getMember } from "./store.mjs";
-import { mealEventNotes, pushEventToGoogle, deleteGoogleCopy } from "./calendar.mjs";
-import { householdTimeZone, localMidnightISO, wallClockISO } from "./household-time.mjs";
+import { addMemory, addArtifact, getEvent, patchEvent, listContactMethods, listAgents, getAgent, getMember } from "./store.mjs";
+import { localMidnightISO } from "./household-time.mjs";
 import { searchPlaces } from "./places.mjs";
 import { understandFile } from "./file-understanding.mjs";
 import { extractStructured } from "./file-extract.mjs";
@@ -15,14 +14,10 @@ import { isValidReminder } from "./reminders.mjs";
  * in one place, so a check tightened for one is tightened for both. */
 import { eid, nowISO, badStamp, DATE_ONLY_RE, unknownMember, ghostMessage } from "./actions/shared.mjs";
 import { ACTION_INTERNAL_FUNCTIONS } from "./actions/registry.mjs";
-import { newEventRecord } from "./actions/schemas/event.mjs";
-import { newTaskRecord } from "./actions/schemas/task.mjs";
-import { newMealRecord } from "./actions/schemas/meal.mjs";
 import crypto from "node:crypto";
 
 const MEMORY_SCOPES = ["household", "personal", "nest"];
 const PRIORITIES = ["low", "medium", "high"];
-const MEAL_SLOTS = ["breakfast", "lunch", "dinner", "snack"];
 
 export const INTERNAL_FUNCTIONS = {
   /* ---- Helper (agent) inspection + iteration is NOT in this registry ----------------
@@ -284,168 +279,9 @@ export const INTERNAL_FUNCTIONS = {
    * ...ACTION_INTERNAL_FUNCTIONS spread at the bottom. create_list_item below still writes
    * a task by hand — next on the ladder. */
 
-  "homeops.plan_meal": {
-    id: "homeops.plan_meal",
-    name: "Plan a meal (planner + groceries + calendar)",
-    action: "Write",
-    risk: "Low",
-    requiresApproval: false,
-    delivers: false,
-    connectorId: "homeops",
-    connectorName: "FamiliOS",
-    // One approved meal → everything wired in a single real action:
-    //   1. meal in the Meal Planner (title, date, slot, recipe URL, ingredients, instructions)
-    //   2. missing ingredients onto the shared Groceries list (mealId back-reference,
-    //      so the grocery mini app shows them linked to this meal)
-    //   3. a canonical calendar event whose `notes` body carries the recipe URL,
-    //      full ingredient list, and step-by-step instructions
-    //   4. when the household enabled calendar auto-sync, the event is pushed to
-    //      Google Calendar immediately (description = the same notes body).
-    // This is what the assistant calls per approved meal in the "plan my week" flow.
-    async run(ctx, input) {
-      const title = String(input?.title ?? "").trim();
-      if (!title) return { ok: false, error: "empty_title", message: "A meal needs a title." };
-      // "brunch" used to become dinner and servings:0 used to become null, both silently.
-      if (input?.slot != null && input.slot !== "" && !MEAL_SLOTS.includes(input.slot)) return { ok: false, error: "bad_slot", message: "slot must be breakfast, lunch, dinner or snack." };
-      if (input?.servings != null && input.servings !== "" && !(Number.isFinite(+input.servings) && +input.servings > 0)) return { ok: false, error: "bad_servings", message: "servings must be a whole number greater than zero." };
-      const now = nowISO();
-      let ingredients = (Array.isArray(input?.ingredients) ? input.ingredients : [])
-        .map((i) => (typeof i === "string" ? { item: i.trim(), have: false } : { item: String(i.item ?? "").trim(), have: !!i.have }))
-        .filter((i) => i.item).slice(0, 60);
-      let instructions = (Array.isArray(input?.instructions) ? input.instructions : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 60);
-      let enrichmentNote = "";
-      // Self-enrichment: planners routinely arrive with a bare title (recipe pages
-      // bot-walled upstream). A meal without ingredients puts NOTHING on the
-      // grocery list — the exact silent failure users hit — so fetch the recipe
-      // here, and as a last resort estimate a standard list, honestly labeled.
-      if (ingredients.length === 0) {
-        const recipeUrl = typeof input?.recipeUrl === "string" ? input.recipeUrl.trim() : "";
-        try {
-          const { extractRecipe, estimateIngredients } = await import("./web.mjs");
-          if (recipeUrl) {
-            const r = await extractRecipe(recipeUrl);
-            if (r.ok && r.recipe?.ingredients?.length) {
-              ingredients = r.recipe.ingredients.map((x) => ({ item: String(x).slice(0, 160), have: false })).slice(0, 60);
-              if (instructions.length === 0) instructions = (r.recipe.instructions ?? []).map((s) => String(s)).slice(0, 60);
-              if (r.extraction === "text") enrichmentNote = "Ingredients read from the recipe page text.";
-            }
-          }
-          if (ingredients.length === 0) {
-            const est = await estimateIngredients(title, input?.servings ?? 4);
-            if (est) {
-              ingredients = est.ingredients.map((x) => ({ item: x, have: false }));
-              if (instructions.length === 0) instructions = est.instructions;
-              enrichmentNote = "Ingredients estimated by Famili — check quantities before shopping.";
-            }
-          }
-        } catch { /* enrichment is best-effort; the meal still lands */ }
-      }
-      const slot = ["breakfast", "lunch", "dinner", "snack"].includes(input?.slot) ? input.slot : "dinner";
-      let date = typeof input?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.date) ? input.date : null;
-      let scheduleNote = "";
-      // State-aware scheduling — the intelligence users expect:
-      // 1. Same meal already planned this week → update it, never duplicate.
-      // 2. The requested slot is taken → replace only when explicitly asked
-      //    (replace:true); otherwise shift to the nearest free slot and say so.
-      const household = (m) => m.householdId === ctx.householdId && !m.archived;
-      const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-      const dupe = listMeals(household).find((m) => norm(m.title) === norm(title) && (!date || !m.date || Math.abs(Date.parse(m.date) - Date.parse(date)) < 8 * 86400000));
-      const occupant = (d) => listMeals(household).find((m) => m.date === d && m.slot === slot && (!dupe || m.id !== dupe.id));
-      if (date && occupant(date)) {
-        if (input?.replace === true) {
-          const old = occupant(date);
-          patchMeal(old.id, { archived: true, updatedAt: nowISO() });
-          // Archiving the meal alone left its calendar event and grocery items behind —
-          // two dinners on the calendar and both ingredient lists on the shopping list.
-          for (const e of listEvents((x) => x.householdId === ctx.householdId && x.mealId === old.id)) {
-            if (e.provenance?.googleEventId && getSettings(ctx.householdId).externalActionsEnabled !== false) {
-              await deleteGoogleCopy({ ev: e, householdId: ctx.householdId, actorId: ctx.actorId }).catch(() => null);
-            }
-            deleteEventRec(e.id);
-          }
-          for (const t of listTasks((x) => x.householdId === ctx.householdId && x.mealId === old.id && x.status !== "done")) {
-            patchTask(t.id, { mealId: null, notes: t.notes === `For ${old.title}` ? "" : t.notes });
-          }
-          scheduleNote = `Replaced ${old.title} on ${date}.`;
-        } else {
-          const requested = date;
-          for (let d = 1; d <= 7 && occupant(date); d++) {
-            date = new Date(Date.parse(requested) + d * 86400000).toISOString().slice(0, 10);
-          }
-          if (occupant(date)) {
-            // Week is full — keep the requested date, but SAY it is now a double booking.
-            date = requested;
-            scheduleNote = `${requested} ${slot} already had ${occupant(requested)?.title ?? "a meal"} and the week is full, so both are on that slot now. Ask me to "replace" if you'd rather swap.`;
-          } else {
-            scheduleNote = `${requested} ${slot} already had ${occupant(requested)?.title ?? "a meal"} — moved to ${date}. Ask me to "replace" if you'd rather swap.`;
-          }
-        }
-      }
-      let meal;
-      if (dupe) {
-        // Same dish already on the plan — move/refresh it instead of duplicating.
-        // Only move it when a date was actually given — re-planning "tacos" with no date used
-        // to write date:null over the real one, dropping the meal off the planner while its
-        // calendar event stayed on the old day.
-        meal = patchMeal(dupe.id, {
-          ...(date ? { date, slot } : {}), updatedAt: now,
-          ...(ingredients.length && !(dupe.ingredients ?? []).length ? { ingredients } : {}),
-          ...(instructions.length && !(dupe.instructions ?? []).length ? { instructions } : {}),
-        }) ?? dupe;
-        date = meal.date ?? date;
-        scheduleNote = scheduleNote || `${meal.title} was already planned — updated it instead of adding a duplicate.`;
-      } else {
-        meal = putMeal(newMealRecord({
-          title, date, slot,
-          time: typeof input?.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(input.time) ? input.time : null,
-          notes: String(input?.notes ?? ""), ingredients, instructions,
-          servings: Number.isFinite(+input?.servings) && +input.servings > 0 ? Math.floor(+input.servings) : null,
-          recipeUrl: typeof input?.recipeUrl === "string" ? input.recipeUrl.trim() : "",
-          visibility: input?.visibility ?? "household", source: "assistant",
-        }, ctx));
-      }
-      if (enrichmentNote) scheduleNote = [scheduleNote, enrichmentNote].filter(Boolean).join(" ");
-      // 2) Groceries — every not-yet-have ingredient, linked by mealId. Items
-      // already on the open list (any meal) aren't added twice.
-      const openGrocery = new Set(listTasks((t) => t.householdId === ctx.householdId && t.type === "list" && t.listName === "Groceries" && t.status !== "done").map((t) => norm(t.title)));
-      const groceryIds = [];
-      for (const ing of ingredients.filter((i) => !i.have && !openGrocery.has(norm(i.item)))) {
-        const tk = putTask(newTaskRecord({
-          title: ing.item, type: "list", listName: "Groceries", priority: "low",
-          notes: `For ${meal.title}`, mealId: meal.id, source: "assistant",
-        }, ctx));
-        groceryIds.push(tk.id);
-      }
-      // 3) Calendar event (idempotent by mealId) with the full recipe body in notes.
-      let event = null;
-      if (date) {
-        const SLOT_TIMES = { breakfast: "08:00", lunch: "12:00", dinner: "18:00", snack: "15:00" };
-        const time = meal.time ?? SLOT_TIMES[slot] ?? "18:00";
-        const slotLabel = slot.charAt(0).toUpperCase() + slot.slice(1);
-        const evTitle = `${slotLabel}: ${meal.title}`;
-        // A real instant on the household's clock. The zoneless "2026-07-23T18:00:00" this
-        // used to write meant one time on the server and another on every phone, and went
-        // to Google with no zone beside a UTC end.
-        const startAt = wallClockISO(date, time, householdTimeZone(ctx.householdId)) ?? `${date}T${time}:00`;
-        const notes = mealEventNotes(meal);
-        const existing = listEvents((e) => e.householdId === ctx.householdId && e.mealId === meal.id)[0];
-        event = existing
-          ? patchEvent(existing.id, { title: evTitle, startAt, notes })
-          : putEvent(newEventRecord({
-              title: evTitle, startAt, notes, ownerId: ctx.actorId, mealId: meal.id,
-              category: "Meal", source: "FamiliOS Assistant",
-              provenance: { via: "meal", runId: ctx.runId, actorId: ctx.actorId },
-            }, ctx));
-      }
-      // 4) Google push — only when the household pre-authorized it (calendar auto-sync).
-      let google = { pushed: false };
-      if (event && getSettings(ctx.householdId).calendarAutoSync === true) {
-        const r = await pushEventToGoogle({ ev: event, householdId: ctx.householdId, actorId: ctx.actorId });
-        google = r.ok ? { pushed: true, googleEventId: r.googleEventId, action: r.action } : { pushed: false, error: r.error };
-      }
-      return { ok: true, result: { id: meal.id, mealId: meal.id, title: meal.title, date, slot, groceryItems: groceryIds.length, eventId: event?.id ?? null, google, ...(scheduleNote ? { note: scheduleNote } : {}) } };
-    },
-  },
+  /* `homeops.plan_meal` is a DECLARED action (actions/meals.mjs, ADR-004): the model's meal
+   * tool, a composite over the same grocery writer, event composer and retire cascade the
+   * meal routes use. It arrives through the spread at the bottom. */
 
   /* `homeops.create_list_item` is a DECLARED action (actions/tasks.mjs) that runs on the
    * same code as create_task with type "list"; it arrives through the spread at the bottom. */

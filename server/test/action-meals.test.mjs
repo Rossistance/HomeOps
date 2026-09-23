@@ -4,8 +4,10 @@
  * model's meal tool is plan_meal, which does MORE than create (de-dupe, groceries, the
  * calendar, Google), because "plan dinner Tuesday" means all of that; a person typing a
  * meal asked for the meal and its groceries. Two intents, two doors — not one drifted run.
- * plan_meal writes its meal through the same newMealRecord and its groceries through the
- * same syncMealGroceries, and the contract holds for both.
+ * plan_meal writes its meal through the same newMealRecord and — since ADR-004 declared it
+ * as a composite; this header claimed it earlier, wrongly — its groceries through the same
+ * syncMealGroceries, and the contract holds for both. action-plan-meal.test.mjs pins the
+ * composite itself.
  */
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -125,6 +127,7 @@ test("PLAN_MEAL WRITES ITS MEAL THROUGH THE SAME HELPER, and the record fits", a
   const tctx = { householdId: "local", actorId: "m-alex", runId: "run_test" };
   const r = await INTERNAL_FUNCTIONS["homeops.plan_meal"].run(tctx, { title: "Contract chili", date: "2031-07-09", slot: "dinner", servings: 4, ingredients: ["beans", { item: "salt", have: true }], instructions: ["Simmer."] });
   assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.result.meal.id, r.result.mealId, "the declared result carries the record beside the flat id");
   const meal = store.getMeal(r.result.mealId);
   fits(meal, "plan_meal's meal");
   assert.equal(meal.source, "assistant"); assert.equal(meal.nestId, null, "the same structural keys as a typed meal");
@@ -158,11 +161,13 @@ test("EVERY putMeal( IN THE SERVER GOES THROUGH newMealRecord, and index.mjs no 
   assert.equal(index.includes("const syncMealGroceries ="), false, "the grocery sync lives with the declared create now");
 });
 
-test("both meal actions are HTTP-only: the model keeps plan_meal", () => {
+test("the two HTTP meal actions are HTTP-only; plan_meal is the model's, and agent-only", () => {
   assert.equal(actionForRoute("POST", "/api/meals")?.id, "homeops.create_meal");
   assert.equal(actionForRoute("GET", "/api/meals")?.id, "homeops.list_meals");
   assert.equal(getAction("homeops.create_meal").agent, false);
   assert.equal(INTERNAL_FUNCTIONS["homeops.create_meal"], undefined);
   assert.equal(typeof INTERNAL_FUNCTIONS["homeops.plan_meal"]?.run, "function", "plan_meal is still the model's meal tool");
+  assert.equal(getAction("homeops.plan_meal")?.agent, true, "declared now (ADR-004), through the same registry");
+  assert.equal(getAction("homeops.plan_meal")?.http, undefined, "and with no HTTP door of its own");
   assert.equal(createMeal.http.path, "/api/meals");
 });

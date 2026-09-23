@@ -145,9 +145,12 @@ record is why.
    `MEAL_RECORD`, `newMealRecord`, `MealRecord` generated for both clients): `POST /api/meals`
    and `GET /api/meals` are declared and HTTP-only, because the model's meal tool,
    `plan_meal`, is a different intent (de-dupe, groceries, calendar, Google) rather than a
-   drifted copy; it writes its meal through the same helper and its groceries through the
-   same `syncMealGroceries`. **Rung 3 is complete.** Whether `plan_meal` becomes a declared
-   composite belongs to rung 4's conversation.
+   drifted copy; it writes its meal through the same helper. *Correction (ADR-004, PR C):*
+   this entry claimed it also wrote its groceries through `syncMealGroceries`. It did not —
+   it kept a hand-written loop with a different normaliser, `source: "assistant"` and no
+   visibility — until PR C declared it as a composite over that one writer. **Rung 3 is
+   complete.** Whether `plan_meal` becomes a declared composite belonged to rung 4's
+   conversation, and ADR-004 answered it.
 4. **Native `famili.*` tools bypass the policy ladder** (`assistant-agent.mjs`, the second
    loop in `buildToolSet`) while registry tools go through `executeToolForChat`. Decide
    whether native tools become actions — the next real architectural decision.

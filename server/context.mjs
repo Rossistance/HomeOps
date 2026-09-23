@@ -35,10 +35,6 @@ export const INTERNAL_INPUTS = {
   // remindMinutesBefore: "set a reminder" said in the same breath as "add a task" used to be
   // silently dropped — only the UPDATE tool could carry a lead, so a task created by Famili
   // never nudged anyone (2026-09-22: a "notification test" task that could not have fired).
-  // The prompt contract and this schema used to disagree: recipeUrl/instructions/servings/
-  // replace were read by the handler and named in the prompt, but never declared here — so
-  // the engine's input fill dropped them (Severity-5 item 7) and a meal lost its recipe.
-  "homeops.plan_meal": [{ key: "title", required: true }, { key: "date" }, { key: "slot" }, { key: "time" }, { key: "ingredients" }, { key: "instructions" }, { key: "recipeUrl" }, { key: "servings" }, { key: "replace" }, { key: "notes" }],
   "homeops.attach_note_or_file_reference": [{ key: "eventId", required: true }, { key: "note" }, { key: "fileRef" }],
   "homeops.send_notification_draft": [{ key: "to" }, { key: "body", required: true }, { key: "subject" }, { key: "channel" }],
   // WP-005: the registry delivery tool — the one path that can actually deliver on a
