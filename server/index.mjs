@@ -148,7 +148,7 @@ function attachAgentRun(out) {
 }
 
 const PORT = Number(process.env.PORT || 8787);
-const VERSION = "1.3.0"; // 1.3: declared actions (ADR-003) — events, tasks, list items, meals, and the reads
+const VERSION = "1.4.0"; // 1.4: Rung 4 (ADR-004) — native tools behind the gate, plan_meal declared, a child's group write waits for an adult
 
 // WP-006 s3 (connector sandbox): when HOMEOPS_CONNECTOR_SANDBOX=1, an OWNER
 // session seeds deterministic sandbox connector accounts for its household, so
