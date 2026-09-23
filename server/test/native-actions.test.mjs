@@ -558,6 +558,33 @@ describe("the run engine reaches a native action (ADR-004 Stage 2)", () => {
     assert.ok(getTask("tk_run_native_archived"), "nothing was deleted");
   });
 
+  test("THE RUN PATH ASKS available() AGAIN: a helper tool is refused for a non-adult, and for anyone in the group thread", async () => {
+    /* Review finding L4: the chat lane only offers a tool available() to this person here, but
+     * the run path did not ask again before executing. Now it does, for the recorded requester
+     * and channel. famili.list_helpers needs an adult outside the group thread. */
+    const kid = { householdId: "local", actorId: "m-run-kid", role: "Limited Member" };
+    const owner = { householdId: "local", actorId: "m-run-owner", role: "Owner" };
+    const asKid = await runStep("famili.list_helpers", {}, { actorRole: "Limited Member", channel: "personal" }, kid);
+    assert.equal(asKid.status, "failed");
+    assert.equal(asKid.error, "tool_not_available", JSON.stringify(asKid.steps[0]));
+    assert.match(asKid.steps[0].detail, /nothing was changed/);
+    const inGroup = await runStep("famili.list_helpers", {}, { actorRole: "Owner", channel: "group" }, owner);
+    assert.equal(inGroup.error, "tool_not_available", "not in the group thread, even for an Owner");
+    const control = await runStep("famili.list_helpers", {}, { actorRole: "Owner", channel: "personal" }, owner);
+    assert.equal(control.status, "completed", `the control: an Owner outside the group — ${JSON.stringify(control.steps[0])}`);
+  });
+
+  test("a native body that THROWS on the run path is tool_failed, as in the chat lane — not timeout", async () => {
+    /* Review finding L4. famili.list_meals throws a RangeError on an impossible date (a latent
+     * bug in its own `to` default, reported, not fixed here) — which is what makes it a real
+     * throwing body to run. If that is ever fixed, pick another input that throws. */
+    await assert.rejects(getAction("famili.list_meals").invoke({ householdId: "local", session: { householdId: "local", actorId: "m-run-owner", role: "Owner" }, channel: "personal" }, { from: "2026-99-99" }), RangeError, "precondition: the body throws");
+    const run = await runStep("famili.list_meals", { from: "2026-99-99" }, { actorRole: "Owner", channel: "personal" }, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "tool_failed", JSON.stringify(run.steps[0]));
+    assert.match(run.steps[0].detail, /Invalid time value/, "the body's own message");
+  });
+
   test("a run with NO recorded requester role never runs a native step — it is refused, not run as nobody", async () => {
     putTask({ id: "tk_run_native_4", householdId: "local", title: "Sort the mail", status: "todo", createdBy: "m-run-owner", visibility: "household" });
     const run = await runStep("famili.delete_task", { taskId: "tk_run_native_4" }, {}, { householdId: "local", actorId: "m-run-owner", role: "Owner" });

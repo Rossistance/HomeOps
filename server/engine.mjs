@@ -385,8 +385,16 @@ async function execResolved(resolved, input, ctx, approvalId) {
      * run as nobody in particular. The run's own step timeout is the action's (see _drive). */
     if (!ctx.role) return { ok: false, error: "no_requester_role", message: "This step can only run for the person who asked for it, and this run doesn't say who that was — nothing was changed." };
     const session = { householdId: ctx.householdId, actorId: ctx.actorId, role: ctx.role, ...(ctx.actorName ? { actorName: ctx.actorName } : {}) };
+    const channel = ctx.channel ?? "personal";
+    /* A backstop (review finding L4): the chat lane only offers a tool whose available() says
+     * yes for this person here — the helper tools need an adult, outside the group thread — so a
+     * run should never hold one that does not. It is asked again before the step runs, for the
+     * recorded requester and channel, instead of trusting how the step got onto the run. */
+    if (!resolved.def.available({ session, channel, asHelper: false })) {
+      return { ok: false, error: "tool_not_available", message: "That isn't something that can be done for this person from here — nothing was changed." };
+    }
     return await resolved.def.invoke({
-      householdId: ctx.householdId, actorId: ctx.actorId, role: ctx.role, channel: ctx.channel ?? "personal", session,
+      householdId: ctx.householdId, actorId: ctx.actorId, role: ctx.role, channel, session,
       via: "agent", runId: ctx.runId ?? null, agentId: ctx.agentId ?? null, asHelper: false,
     }, input);
   }
@@ -1089,7 +1097,9 @@ async function _drive(runId) {
     try {
       out = await withTimeout(execResolved(resolved, stepNow.input, stepCtx, approvalId), native ? resolved.def.timeoutMs : RUN_STEP_TIMEOUT_MS);
     } catch (e) {
-      out = { ok: false, error: "timeout", message: String(e?.message ?? e) };
+      // A native body that throws is tool_failed, exactly as runNativeAction records it in the
+      // chat lane; only the timer's own rejection is a timeout. Other kinds keep their word.
+      out = { ok: false, error: native && e?.message !== "step_timeout" ? "tool_failed" : "timeout", message: String(e?.message ?? e) };
     }
     const durationMs = Date.now() - t0;
     // First-class trace fields (P3.2): who acted, which account/connector, the input
