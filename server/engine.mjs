@@ -372,7 +372,7 @@ async function execResolved(resolved, input, ctx, approvalId) {
   }
   if (resolved.kind === "native") {
     /* A native action's body reads the session and the channel (actions/native/*), so its
-     * ctx is rebuilt from the run: the REQUESTER's role (requesterRole below — never the
+     * ctx is rebuilt from the run: the REQUESTER's role (requesterRole above — never the
      * approver's, so an adult's approval cannot widen what the asker may touch; the body's own
      * ownership checks still run) and the channel the request came from. A run that recorded
      * no requester role — anything not queued by the chat lane, e.g. a hand-rolled plan
