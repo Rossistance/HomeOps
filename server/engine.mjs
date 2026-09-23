@@ -85,7 +85,11 @@ function fireRunParked(runId, { stepIndex, approvalId, expiresAt } = {}) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function withTimeout(promise, ms) {
-  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error("step_timeout")), ms))]);
+  // The timer is cleared however the race ends: left running, every call held a live timer
+  // for its whole limit (60 s a step, five minutes after a native run_helper).
+  let timer;
+  const limit = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("step_timeout")), ms); });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
 }
 function summarize(result) {
   if (result == null) return "ok";
@@ -435,8 +439,10 @@ export async function executeToolForChat({ toolId, input = {}, session, agent = 
  * exactly as executeToolForChat always behaved. `decision` is null in that case.
  *
  * Returns { blocked, needsApproval, decision, error, message }. */
-export function gateToolCall({ cap, toolId, agent = null, householdId, actorId = null, conversationId = null, actorIsAdult = null, requiresApproval = cap?.requiresApproval } = {}) {
-  if (!agent) return { blocked: false, needsApproval: !!requiresApproval, decision: null, error: null, message: null };
+export function gateToolCall({ cap, toolId, agent = null, householdId, actorId = null, conversationId = null, actorIsAdult = null, requiresApproval } = {}) {
+  // Not a boolean (absent, or null) → the capability's own gate; never "no gate" by accident.
+  const preLadder = typeof requiresApproval === "boolean" ? requiresApproval : !!cap?.requiresApproval;
+  if (!agent) return { blocked: false, needsApproval: preLadder, decision: null, error: null, message: null };
   const verdict = isToolStepAllowed(agent, toolId, { householdId, actorId });
   if (!verdict.ok) {
     appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent.id, reason: verdict.reason, householdId, actorId, conversationId });
@@ -460,8 +466,12 @@ export function gateToolCall({ cap, toolId, agent = null, householdId, actorId =
  * The famili.* tools the chat loop offers itself (actions/native/*). They are declared
  * actions, but not catalog tools: their bodies read the session and the channel, which
  * execResolved's ctx cannot carry. What they now share with every catalog tool is the gate
- * above, a per-action timeout and the engine's audit row — so a helper's deny-list, the kill
- * switch, a household risk override and rule 4b reach them for the first time.
+ * above, a per-action timeout and the engine's audit row. What the gate can actually do to a
+ * native tool in Stage 1 is narrower than "the ladder": a helper's allow/deny lists (rules
+ * 2/3) reach it for the first time, and "always ask me" / autoAllow (rules 4 and 6) refuse
+ * it, below. Rule 1 cannot fire — a native write is local, and its Google calls ask
+ * googleReachAllowed() inside run — and rules 4b and 5 act only on a capability that
+ * requires approval by default, which no native tool does until Stage 2.
  *
  * Every native action is requiresApproval:false, so the ladder's verdict is ALLOWED for every
  * stance — with two exceptions an agent can still produce: "always ask me" (rule 4) and an
@@ -473,6 +483,7 @@ export function gateToolCall({ cap, toolId, agent = null, householdId, actorId =
  * Returns the action's own { ok, result } | { ok:false, error, message } — or, refused by
  * policy, { ok:false, error, message, policyBlocked:true } with the errors
  * executeToolForChat uses. */
+const NATIVE_APPROVAL_LATER = "This helper is set to ask before doing this, and approvals for this tool arrive in a later update — nothing was done.";
 export async function runNativeAction({ action, input = {}, session, agent = null, channel = "personal", conversationId = null, asHelper = false, actorIsAdult = null } = {}) {
   const householdId = session?.householdId;
   const actorId = session?.actorId ?? null;
@@ -482,12 +493,12 @@ export async function runNativeAction({ action, input = {}, session, agent = nul
   const gate = gateToolCall({ cap, toolId, agent, householdId, actorId, conversationId, actorIsAdult });
   if (gate.blocked) return { ok: false, error: gate.error, message: gate.message, policyBlocked: true };
   if (gate.needsApproval) {
+    /* One sentence of our own, not the ladder's reason: rule 6's says "…it still needs you",
+     * promising an ask that Stage 1 cannot make. The row keeps the ladder's reason, the same
+     * shape as every other assistant.tool_blocked row. */
     const rule = gate.decision?.rule ?? "capability.requires_approval";
-    const message = rule === "agent.always_approve"
-      ? "This helper is set to always ask first; approvals for this tool arrive in a later update, so nothing was done."
-      : `${gate.decision?.reason ?? "This step needs approval."} Approvals for this tool arrive in a later update, so nothing was done.`;
-    appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent?.id ?? null, rule, reason: message, householdId, actorId, conversationId });
-    return { ok: false, error: `policy_${rule}`, message, policyBlocked: true };
+    appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent?.id ?? null, rule, reason: gate.decision?.reason ?? null, householdId, actorId, conversationId });
+    return { ok: false, error: `policy_${rule}`, message: NATIVE_APPROVAL_LATER, policyBlocked: true };
   }
   const ctx = { householdId, actorId, role: session.role, channel, session, via: "agent", runId: null, agentId: agent?.id ?? null, asHelper: !!asHelper };
   let out;

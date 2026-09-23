@@ -59,7 +59,7 @@ export function assertSchema(schema, where, defs = {}) {
   if (schema.$ref !== undefined) {
     const m = REF_RE.exec(String(schema.$ref));
     if (!m) throw new Error(`${where}: $ref must look like #/$defs/Name, got ${JSON.stringify(schema.$ref)}`);
-    if (!defs[m[1]]) throw new Error(`${where}: $ref to unknown $defs.${m[1]}`);
+    if (!Object.hasOwn(defs, m[1])) throw new Error(`${where}: $ref to unknown $defs.${m[1]}`);
     if (Object.keys(schema).some((k) => k !== "$ref" && k !== "description")) throw new Error(`${where}: a $ref schema carries only a description`);
     return;
   }
@@ -68,7 +68,7 @@ export function assertSchema(schema, where, defs = {}) {
   if (schema.enum !== undefined && (!Array.isArray(schema.enum) || schema.enum.length === 0)) throw new Error(`${where}: enum must be a non-empty array`);
   if (schema.required !== undefined) {
     if (!Array.isArray(schema.required)) throw new Error(`${where}: required must be an array of property names`);
-    for (const r of schema.required) if (!schema.properties || !(r in schema.properties)) throw new Error(`${where}: required "${r}" is not a declared property`);
+    for (const r of schema.required) if (!schema.properties || !Object.hasOwn(schema.properties, r)) throw new Error(`${where}: required "${r}" is not a declared property`);
   }
   if (schema.properties !== undefined) {
     if (!schema.properties || typeof schema.properties !== "object") throw new Error(`${where}: properties must be an object`);
@@ -120,12 +120,18 @@ export function validateInput(schema, value, { unknown = "reject", coerce = fals
     if (s.enum && !s.enum.includes(v)) return fail(path, `${path || "input"} must be one of ${s.enum.filter((x) => x !== null).map(String).join(", ")}`);
     if (actual === "object" && (s.properties || s.required || s.additionalProperties !== undefined)) {
       const props = s.properties ?? {};
-      for (const r of s.required ?? []) if (v[r] === undefined) return fail(join(path, r), `${join(path, r)} is required`);
+      for (const r of s.required ?? []) if (!Object.hasOwn(v, r) || v[r] === undefined) return fail(join(path, r), `${join(path, r)} is required`);
       const out = {};
       for (const [k, val] of Object.entries(v)) {
         if (val === undefined) continue;
-        if (k in props) { const r = walk(props[k], val, join(path, k)); if (r.ok === false) return r; out[k] = r.value; continue; }
-        if (s.additionalProperties === false) {
+        /* OWN keys only. `k in props` also answered true for toString, constructor and every
+         * other name Object.prototype carries, so those passed as declared fields. And a key
+         * named __proto__ (JSON.parse makes it an own property) is never data: assigned into
+         * `out` it would SET out's prototype, and every field nested under it would read back
+         * as if it had been sent. It is treated as undeclared whatever the schema says. */
+        const proto = k === "__proto__";
+        if (!proto && Object.hasOwn(props, k)) { const r = walk(props[k], val, join(path, k)); if (r.ok === false) return r; out[k] = r.value; continue; }
+        if (proto || s.additionalProperties === false) {
           if (unknown === "reject") return fail(join(path, k), `${join(path, k)} is not a known field`);
           stripped.push(join(path, k)); continue;
         }
@@ -157,16 +163,33 @@ export function validateInput(schema, value, { unknown = "reject", coerce = fals
  * would turn those into invalid_input and lose the helper. So on this lane the validator
  * does what only it can — coerce scalars, split a string list, strip undeclared keys — and
  * `run` keeps the semantics it always had. The model and the generated types still see the
- * declared schema, enums and all. */
-function nativeWire(schema) {
+ * declared schema, enums and all.
+ *
+ * And NULL MEANS ABSENT, at every depth: every property also admits null, and dropNulls
+ * removes it before run. The chat loop's coerceInput has always done that for a top-level
+ * key; a nested one (a helper's schedule sent as { kind: "weekly", weekday: null }) reached
+ * the body, whose normalizeSchedule defaulted it — so refusing it now would be new.
+ *
+ * A $ref is refused at load: this function does not follow one, so the relaxation would
+ * silently stop at it. */
+function nativeWire(schema, where) {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
+  if (schema.$ref !== undefined) throw new Error(`${where}: a native-lane input may not use $ref — the native wire does not follow it`);
   const out = {};
   for (const [k, v] of Object.entries(schema)) {
     if (k === "required" || k === "enum") continue;
-    if (k === "properties") out[k] = Object.fromEntries(Object.entries(v).map(([p, s]) => [p, nativeWire(s)]));
-    else if (k === "items" || (k === "additionalProperties" && typeof v === "object")) out[k] = nativeWire(v);
+    if (k === "properties") out[k] = Object.fromEntries(Object.entries(v).map(([p, s]) => [p, orNull(nativeWire(s, `${where}.${p}`))]));
+    else if (k === "items" || (k === "additionalProperties" && typeof v === "object")) out[k] = nativeWire(v, `${where}[]`);
     else out[k] = v;
   }
+  return out;
+}
+const orNull = (s) => (s && s.type !== undefined ? { ...s, type: [...new Set([...[].concat(s.type), "null"])] } : s);
+function dropNulls(v) {
+  if (Array.isArray(v)) return v.map(dropNulls);
+  if (!v || typeof v !== "object") return v;
+  const out = {};
+  for (const [k, x] of Object.entries(v)) if (x !== null && k !== "__proto__") out[k] = dropNulls(x);
   return out;
 }
 
@@ -220,7 +243,7 @@ export function defineAction(def) {
   if (native && (!agent || def.http !== undefined)) throw new Error(`${where}: a native-lane action is the model's alone — agent:true and no http door`);
   if (def.timeoutMs !== undefined && !(Number.isInteger(def.timeoutMs) && def.timeoutMs > 0)) throw new Error(`${where}: timeoutMs must be a positive integer (milliseconds)`);
   if (def.available !== undefined && typeof def.available !== "function") throw new Error(`${where}: available must be a function of { session, channel, asHelper }`);
-  const wire = native ? nativeWire(def.input) : def.input;
+  const wire = native ? nativeWire(def.input, `${where}.input`) : def.input;
 
   const warned = new Set();
   const action = {
@@ -236,7 +259,7 @@ export function defineAction(def) {
         const key = `${def.id}:${k}`;
         if (!warned.has(key)) { warned.add(key); console.warn(`[actions] ${def.id}: ignoring undeclared input field "${k}"`); }
       }
-      const out = await def.run(ctx, v.value);
+      const out = await def.run(ctx, native ? dropNulls(v.value) : v.value);
       /* The declared output is checked on the way out — and only WARNED about, once per
        * field per process. Writers are held to the schema at the write (newEventRecord /
        * newTaskRecord throw); a read may meet rows written years before the schema existed,

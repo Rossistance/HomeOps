@@ -165,8 +165,9 @@ function nativeTools(ctx) {
  * The tool set for one turn: the household's live catalog (permitted for the acting
  * helper; connected only), plus the native tools above. A catalog tool executes through
  * executeToolForChat, and an approval-gated call becomes a durable run; a native tool
- * through runNativeAction — the same gate, so a helper's deny-list, the kill switch and
- * rule 4b reach it too, and a refusal is recorded as `blocked` exactly as a catalog one is.
+ * through runNativeAction — the same gate, so a helper's allow/deny lists reach it too
+ * (engine.mjs says what else can and cannot yet), and a refusal is recorded as `blocked`
+ * exactly as a catalog one is.
  * ------------------------------------------------------------------------------------ */
 function buildToolSet(ctx) {
   const { session, agent, message, providerId, conversationId, visibility } = ctx;

@@ -103,6 +103,41 @@ test("validateInput: under coerce a comma- or newline-joined string becomes an a
   assert.deepEqual(validateInput(A, { l: "salt (to taste, or more), pepper" }, { coerce: true }).value.l, ["salt (to taste, or more)", "pepper"], "a comma inside parentheses does not split");
 });
 
+test("THE STRIP IS OWN KEYS ONLY: toString, constructor and __proto__ from a JSON body never ride through, and nothing inherits from the input", async () => {
+  /* `k in props` answered true for every name Object.prototype carries, so toString and
+   * constructor passed as "declared" fields, and a JSON-parsed __proto__ key was assigned
+   * into the result — which SETS ITS PROTOTYPE: every field nested under it (a visibility,
+   * an owner) then read back as if it had been sent. Every declared action's HTTP door and
+   * agent path validate through here. */
+  const S = { type: "object", properties: { title: { type: "string" } }, required: ["title"], additionalProperties: false };
+  const body = '{"title":"x","toString":"a","constructor":"b","__proto__":{"visibility":"household","ownerId":"m-evil"}}';
+  const r = validateInput(S, JSON.parse(body), { unknown: "strip", coerce: true });
+  assert.equal(r.ok, true);
+  assert.deepEqual([...r.stripped].sort(), ["__proto__", "constructor", "toString"], "all three are stripped, and named");
+  assert.deepEqual(Object.keys(r.value), ["title"]);
+  assert.equal(Object.getPrototypeOf(r.value), Object.prototype, "the result inherits from Object.prototype, never from the input");
+  assert.equal(r.value.visibility, undefined);
+  assert.equal(r.value.ownerId, undefined);
+  assert.equal(r.value.toString, Object.prototype.toString, "toString is the real one, not the string sent");
+  assert.equal(validateInput(S, JSON.parse(body), { unknown: "reject" }).ok, false, "reject mode refuses them");
+  // An OPEN object may keep an own toString — a record can have one — but never takes a prototype.
+  const open = validateInput({ type: "object", additionalProperties: true }, JSON.parse(body), { unknown: "strip" });
+  assert.equal(Object.getPrototypeOf(open.value), Object.prototype);
+  assert.equal(open.value.visibility, undefined);
+  assert.deepEqual(open.stripped, ["__proto__"]);
+  // `required` is answered by the value's OWN keys, so an inherited field cannot satisfy it.
+  assert.equal(validateInput(S, Object.create({ title: "x" })).field, "title");
+  // And through invoke — what run() receives.
+  let seen = null;
+  const a = defineAction(minimal({ id: "test.proto_strip", run: async (_ctx, input) => { seen = input; return { ok: true, result: {} }; } }));
+  const warn = console.warn;
+  console.warn = () => {};
+  try { assert.equal((await a.invoke({}, JSON.parse(body))).ok, true); } finally { console.warn = warn; }
+  assert.equal(seen.visibility, undefined, "input.visibility is undefined");
+  assert.equal(Object.getPrototypeOf(seen), Object.prototype);
+  assert.deepEqual(Object.keys(seen), ["title"]);
+});
+
 test("validateInput: $ref resolves against $defs", () => {
   const defs = { Row: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false } };
   const out = { type: "object", properties: { row: { $ref: "#/$defs/Row" } }, required: ["row"], additionalProperties: false };

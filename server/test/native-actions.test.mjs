@@ -45,6 +45,7 @@ const RISK = {
   "famili.delete_event": "Medium", "famili.delete_task": "Medium", "famili.delete_meal": "Medium", "famili.delete_memory": "Medium",
   "famili.create_helper": "Medium", "famili.update_helper": "Medium", "famili.run_helper": "Medium",
 };
+const ASK_FIRST = "This helper is set to ask before doing this, and approvals for this tool arrive in a later update — nothing was done.";
 const menu = ({ role, channel = "personal", asHelper = false }) =>
   NATIVE_ACTIONS.filter((a) => a.available({ session: { role, householdId: "local", actorId: "m-x" }, channel, asHelper })).map((a) => a.id);
 
@@ -130,6 +131,35 @@ test("THE NATIVE WIRE: types are coerced and undeclared keys stripped, but requi
   assert.deepEqual(spy.input.properties.level.enum, ["ask", "act"]);
 });
 
+test("ON THE NATIVE WIRE NULL MEANS ABSENT, at every depth — a schedule's weekday:null is the default again, not invalid_input", async () => {
+  /* The chat loop's coerceInput has always dropped a top-level null. A NESTED one reached
+   * the bodies untouched and normalizeSchedule defaulted it; the declared number type then
+   * refused it outright. The native lane now drops a null wherever it sits, before run. */
+  let got = null;
+  const spy = defineAction({
+    id: "test.native_nulls", name: "Nulls", description: "n", action: "Write", risk: "Low", lane: "native", errorCodes: ["invalid_input"],
+    input: { type: "object", properties: { id: { type: "string" }, schedule: { type: "object", properties: { kind: { type: "string", enum: ["manual", "weekly"] }, time: { type: "string" }, weekday: { type: "number" } }, required: ["kind"], additionalProperties: false } }, additionalProperties: false },
+    run: async (_ctx, input) => { got = input; return { ok: true, result: {} }; },
+  });
+  assert.equal((await spy.invoke({}, { id: "a", schedule: { kind: "weekly", time: "07:00", weekday: null } })).ok, true);
+  assert.deepEqual(got, { id: "a", schedule: { kind: "weekly", time: "07:00" } });
+  assert.equal((await spy.invoke({}, { id: null, schedule: { kind: "manual", time: null, weekday: null } })).ok, true);
+  assert.deepEqual(got, { schedule: { kind: "manual" } });
+  assert.equal((await spy.invoke({}, { schedule: { weekday: "Monday" } })).field, "schedule.weekday", "a wrong type is still refused");
+  // The declared schema — what the model and the generated types see — is untouched.
+  assert.deepEqual(spy.input.properties.schedule.properties.weekday, { type: "number" });
+});
+
+test("a native input may not use $ref — the native wire does not follow one, so the fence refuses it at load", () => {
+  assert.throws(() => defineAction({
+    id: "test.native_ref", name: "R", description: "r", action: "Read", risk: "Low", lane: "native", errorCodes: ["invalid_input"],
+    $defs: { Row: { type: "object", properties: { x: { type: "string" } } } },
+    input: { type: "object", properties: { row: { $ref: "#/$defs/Row" } } },
+    run: async () => ({ ok: true, result: {} }),
+  }), /native-lane input may not use \$ref/);
+  for (const a of NATIVE_ACTIONS) assert.equal(JSON.stringify(a.input).includes("$ref"), false, `${a.id} has no $ref`);
+});
+
 /* ───────────────────────────── the runner ───────────────────────────── */
 
 const session = { householdId: "local", actorId: "m-alex", role: "Owner" };
@@ -138,8 +168,7 @@ function spyAction(id, { action = "Write", timeoutMs, run } = {}) {
   const calls = [];
   const a = defineAction({
     id, name: `Spy ${id}`, description: "spy", action, risk: "Low", lane: "native", errorCodes: ["invalid_input", "boom"],
-    // Short limits keep the runner's race timer from holding this process open.
-    timeoutMs: timeoutMs ?? 2000,
+    ...(timeoutMs ? { timeoutMs } : {}),
     input: { type: "object", properties: { x: { type: "string" } }, additionalProperties: false },
     run: async (ctx, input) => { calls.push({ ctx, input }); return run ? run(ctx, input) : { ok: true, result: { did: true } }; },
   });
@@ -189,11 +218,15 @@ test("\"ALWAYS ASK ME\" ON A NATIVE TOOL IS REFUSED IN WORDS — Stage 1 cannot 
   assert.equal(out.ok, false);
   assert.equal(out.policyBlocked, true);
   assert.equal(out.error, "policy_agent.always_approve");
-  assert.match(out.message, /always ask first; approvals for this tool arrive in a later update/);
-  assert.ok(lastAudit((r) => r.type === "assistant.tool_blocked" && r.toolId === "test.native_ask" && r.rule === "agent.always_approve"));
+  assert.equal(out.message, ASK_FIRST, "one sentence the model can repeat");
+  // The row keeps the ladder's own reason, the same shape every assistant.tool_blocked row has.
+  assert.equal(lastAudit((r) => r.type === "assistant.tool_blocked" && r.toolId === "test.native_ask" && r.rule === "agent.always_approve")?.reason, "This helper is set to always ask you first.");
   const auto = await runNativeAction({ action: a, input: {}, session, agent: agentWith({ approvalPolicy: { autoAllow: ["test.native_ask"] } }) });
   assert.equal(auto.error, "policy_agent.auto_allow_refused");
-  assert.match(auto.message, /later update/);
+  /* Rule 6's own reason says "…doesn't apply — it still needs you", which the family was
+   * never going to be asked; embedding it contradicted the refusal. The row keeps it. */
+  assert.equal(auto.message, ASK_FIRST);
+  assert.match(lastAudit((r) => r.type === "assistant.tool_blocked" && r.toolId === "test.native_ask" && r.rule === "agent.auto_allow_refused")?.reason ?? "", /still needs you/);
   assert.equal(calls.length, 0, "nothing ran");
   // A read on autoAllow is not high-stakes and was never gated: it runs.
   const { a: read, calls: readCalls } = spyAction("test.native_ask_read", { action: "Read" });
@@ -201,15 +234,43 @@ test("\"ALWAYS ASK ME\" ON A NATIVE TOOL IS REFUSED IN WORDS — Stage 1 cannot 
   assert.equal(readCalls.length, 1);
 });
 
+test("STAGE 1, BY DESIGN: a Limited Member in the GROUP thread still deletes their own task at once — rule 4b parks only a gated tool (owner decision C)", async () => {
+  /* Rule 4b parks a non-adult's call only when the capability itself asks for approval, and
+   * no native tool does. So the real famili.delete_task, called as a Limited Member in the
+   * group lane with actorIsAdult:false, runs immediately. Pinned so that changing it is a
+   * decision (ADR-004 decision C), not a side effect. */
+  const { putTask, getTask } = await import("../store.mjs");
+  putTask({ id: "tk_native_kid", householdId: "local", title: "Feed the fish", status: "todo", createdBy: "m-kid", visibility: "household" });
+  const kid = { householdId: "local", actorId: "m-kid", role: "Limited Member" };
+  const del = NATIVE_ACTIONS.find((a) => a.id === "famili.delete_task");
+  const out = await runNativeAction({ action: del, input: { taskId: "tk_native_kid" }, session: kid, agent: agentWith(), channel: "group", actorIsAdult: false });
+  assert.deepEqual(out, { ok: true, result: { deleted: true, title: "Feed the fish" } });
+  assert.equal(getTask("tk_native_kid") ?? null, null, "gone, with no approval record");
+});
+
 test("with no acting agent the ladder is skipped exactly as executeToolForChat skips it; rule 4b never touches a native tool", async () => {
   const { a, calls } = spyAction("test.native_unattributed");
   assert.equal((await runNativeAction({ action: a, input: {}, session })).ok, true);
   assert.equal(calls[0].ctx.agentId, null);
-  // The gate's no-agent branch reads the pre-ladder gate only.
+  // The gate's no-agent branch reads the pre-ladder gate only…
   const g = gateToolCall({ cap: { id: "x.y", requiresApproval: true }, toolId: "x.y", agent: null, householdId: "local", requiresApproval: false });
   assert.deepEqual(g, { blocked: false, needsApproval: false, decision: null, error: null, message: null });
+  // …and when that is not a boolean, the capability's own gate — never "no gate" by accident.
+  for (const requiresApproval of [undefined, null]) {
+    assert.equal(gateToolCall({ cap: { id: "x.y", requiresApproval: true }, toolId: "x.y", agent: null, householdId: "local", requiresApproval }).needsApproval, true, String(requiresApproval));
+  }
   // A Limited Member in the group thread: 4b parks only what the capability itself gates.
   assert.equal((await runNativeAction({ action: a, input: {}, session, agent: agentWith(), channel: "group", actorIsAdult: false })).ok, true);
+});
+
+test("the runner's timer is cleared when the tool answers — a finished call leaves nothing ticking", async () => {
+  /* withTimeout raced the call against a setTimeout it never cleared, so every native call
+   * left a live timer behind for its whole limit: 60 s, and five minutes after run_helper. */
+  const { a } = spyAction("test.native_timer", { timeoutMs: 300_000 });
+  const timers = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+  const before = timers();
+  for (let i = 0; i < 3; i++) assert.equal((await runNativeAction({ action: a, input: {}, session })).ok, true);
+  assert.equal(timers(), before);
 });
 
 test("a body that hangs is cut at its own timeoutMs; a body that throws is tool_failed, as it always was", async () => {
@@ -276,7 +337,7 @@ describe("the native lane through the real chat route", () => {
     const tk = (await owner.req("/api/tasks", { method: "POST", body: JSON.stringify({ title: "Recycle the boxes" }) })).data.task;
     const r = await withHousehold({ approvalPolicy: { alwaysApprove: ["famili.delete_task"] } }, () => ask([{ name: "famili__delete_task", args: { taskId: tk.id } }]));
     assert.equal(r.toolCalls?.[0]?.status, "blocked");
-    assert.match(String(r.toolCalls?.[0]?.summary), /always ask first/);
+    assert.equal(r.toolCalls?.[0]?.summary, ASK_FIRST);
     assert.ok((await owner.req("/api/tasks")).data.tasks.some((t) => t.id === tk.id), "not deleted");
     assert.ok((await audit()).some((a) => a.type === "assistant.tool_blocked" && a.toolId === "famili.delete_task" && a.rule === "agent.always_approve"));
   });
@@ -334,5 +395,33 @@ describe("the native lane through the real chat route", () => {
     assert.equal(r.toolCalls?.[0]?.status, "done", JSON.stringify(r.toolCalls));
     const made = (await owner.req("/api/helpers")).data.helpers.find((h) => h.name === "Evening Look-Ahead");
     assert.equal(made?.instructions, instructions);
+  });
+
+  test("a schedule with nulls in it is the default again, through the real helper tools", async () => {
+    const r = await ask([{ name: "famili__create_helper", args: { name: "Weekly Tidy", instructions: "Each week, list the chores nobody has done and nudge whoever they are assigned to.", schedule: { kind: "weekly", time: "07:00", weekday: null } } }]);
+    assert.equal(r.toolCalls?.[0]?.status, "done", JSON.stringify(r.toolCalls));
+    const made = (await owner.req("/api/helpers")).data.helpers.find((h) => h.name === "Weekly Tidy");
+    assert.equal(made?.scheduleText, "Every Monday at 7:00 AM", "normalizeSchedule's default weekday, as before");
+    const u = await ask([{ name: "famili__update_helper", args: { helperId: made.id, schedule: { kind: "manual", time: null, weekday: null } } }]);
+    assert.equal(u.toolCalls?.[0]?.status, "done", JSON.stringify(u.toolCalls));
+    assert.equal((await owner.req("/api/helpers")).data.helpers.find((h) => h.id === made.id)?.scheduleText, "Only when you ask");
+  });
+
+  test("ACCEPTED RISK, made concrete: \"Famili in chat\" (agt_chat) has a non-empty allow-list, so a manual run of it is refused every native tool", async () => {
+    /* agt_chat is seeded with allowedToolIds ["sms.send"] the first time a group thread is
+     * seen, and the Helpers list offers it Run now. A non-empty allow-list means "only
+     * these", so the native tools it used to reach regardless are refused as not_permitted. */
+    assert.equal((await owner.req("/api/contact-methods", { method: "POST", body: JSON.stringify({ memberId: "m-alex", label: "Mobile", type: "Phone/Text", value: "+15550107499", verified: true, optInStatus: "Opted In" }) })).status, 200);
+    const hook = await ctx.fetch("/api/webhooks/bluebubbles", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "new-message", data: { guid: "p:0/native-seed", text: "hello all", isFromMe: false, dateCreated: Date.now(), handle: { address: "+15550107499", service: "iMessage" }, chats: [{ guid: "iMessage;+;chat-native-seed" }] } }) });
+    assert.equal(hook.status, 200);
+    const chatHelper = readStoreDoc(ctx, "agents.json", {}).agt_chat;
+    assert.deepEqual(chatHelper?.allowedToolIds, ["sms.send"], "seeded with its one-tool list");
+    fake.state.requests = [];
+    fake.state.script = [{ toolCalls: [{ name: "famili__list_events", args: {} }] }, { text: "Nothing I can look at." }];
+    const run = await owner.req("/api/helpers/agt_chat/run", { method: "POST" });
+    assert.equal(run.status, 200, JSON.stringify(run.data));
+    assert.equal(run.data.toolCalls?.[0]?.tool, "famili.list_events");
+    assert.equal(run.data.toolCalls?.[0]?.status, "blocked");
+    assert.match(toolMessage(), /not_permitted_not_permitted/);
   });
 });
