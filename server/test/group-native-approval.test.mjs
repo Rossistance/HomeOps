@@ -367,6 +367,22 @@ describe("the group thread, through the real BlueBubbles lane", () => {
     assert.equal((await pendingFor("famili.delete_task")).length, 0);
   });
 
+  test("TWO DENIED GROUP PARKS raise no \"automation keeps not finishing\" alert — not to the child, not to anyone", async () => {
+    /* Review finding M2: every group-born run is attributed to the household assistant, so two
+     * of a child's requests turned down in a row used to count as a routine that keeps failing,
+     * and the child was told to check Agents. They are one-off requests. */
+    const alertsFor = async (client) => ((await client.req("/api/notifications")).data.notifications ?? []).filter((x) => x.title === "An automation keeps not finishing");
+    for (const title of ["Clean the hamster cage", "Sort the recycling"]) {
+      const tk = await makeTask(maya, title);
+      const { runId } = await childParks("famili__delete_task", { taskId: tk.id }, `delete my ${title.toLowerCase()} task`);
+      const [appr] = await pendingFor("famili.delete_task");
+      await decide(appr.id, "deny");
+      assert.equal((await settled(runId))?.error, "approval_denied");
+    }
+    assert.deepEqual(await alertsFor(maya), [], "the child is told nothing of the kind");
+    assert.deepEqual(await alertsFor(alex), [], "nor is anyone else");
+  });
+
   test("a child's native READ in the group thread is never parked", async () => {
     const approvalsBefore = ((await alex.req("/api/approvals")).data.approvals ?? []).length;
     const told = await groupTurn(KID_NUM, "what's on the task list", [{ toolCalls: [{ name: "famili__list_tasks", args: {} }] }, { text: "Here's the list." }]);

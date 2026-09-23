@@ -188,9 +188,12 @@ function buildToolSet(ctx) {
    * ONE path for a catalog tool and for the one native call that asks (a non-adult's write in
    * the group thread, ADR-004 decision C): the same queueApprovalRun, the same receipts
    * (awaiting_approval, or blocked on a connection) and the same sentence to the model. The
-   * run is handed what this turn judged the call on, so it re-judges it the same way. */
+   * run is handed what this turn judged the call on, so it re-judges it the same way. A
+   * helper's own run (asHelper) queues as orchestrate's "agent" — a helper acting — not "chat",
+   * a person's one-off request: the engine's "an automation keeps not finishing" alert is for
+   * the first and never the second (engine.mjs notifyRepeatedNonDelivery). */
   const queueForApproval = async (entry, { toolId, input, title, actorIsAdult }) => {
-    const q = await queueApprovalRun({ toolId, input, title, session, conversationId, goal: message, visibility, agentId: agent?.id ?? null, channel: ctx.channel, actorIsAdult });
+    const q = await queueApprovalRun({ toolId, input, title, session, conversationId, goal: message, visibility, agentId: agent?.id ?? null, channel: ctx.channel, actorIsAdult, via: ctx.asHelper ? "agent" : "chat" });
     if (!q.ok) { record(entry, "failed", { ok: false, summary: q.message ?? q.error }); return { ok: false, error: q.error, message: q.message }; }
     if (q.status === "completed") { record(entry, "done", { ok: true, summary: summarizeForCard(toolId, q.result), runId: q.runId }); return { ok: true, result: boundResult(q.result), runId: q.runId }; }
     if (!ctx.firstRunId) ctx.firstRunId = q.runId;

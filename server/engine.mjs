@@ -1175,9 +1175,22 @@ const NON_DELIVERY = ["failed", "expired"];
 // streak the way "completed" does — the routine did deliver something), but it is not
 // itself non-delivery, so it never trips the alert on its own.
 const TERMINAL_FOR_STREAK = ["completed", "partially_failed", ...NON_DELIVERY];
+/* A ONE-OFF REQUEST IS NOT AN AUTOMATION (review finding M2). A run a person's chat, text or
+ * group turn queued for an approval carries orchestrate's via label "chat" or "group_chat"; a
+ * helper's own run queues with "agent" (assistant-agent.mjs). The person's runs are attributed
+ * to the household assistant only so the policy ladder applies — so two of them denied or
+ * expired in a row are two answers to two questions, not a routine that keeps failing, and a
+ * child told "An automation keeps not finishing … an approval allowlisted" after an adult said
+ * no was told the wrong thing. Helper, schedule and automation runs are unchanged. */
+const ONE_OFF_VIA = new Set(["chat", "group_chat"]);
 function notifyRepeatedNonDelivery(run, failureClass) {
   if (!run) return;
   try {
+    if (ONE_OFF_VIA.has(run.sourceRef?.via)) return;
+    // Never to a non-adult: the fixes it points at (Agents, connections, allowlists) are an
+    // adult's. A recipient who is not a member at all is left exactly as it was.
+    const to = run.actorId ? getMember(run.actorId) : null;
+    if (to && !isAdultRole(to.role)) return;
     const refId = run.sourceRef?.agentId || run.sourceRef?.automationId || run.sourceRef?.triggerId || null;
     if (!refId) return;
     const siblings = listRuns({ householdId: run.householdId, limit: 50 })

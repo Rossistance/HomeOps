@@ -534,6 +534,30 @@ describe("the run engine reaches a native action (ADR-004 Stage 2)", () => {
     assert.ok(getTask("tk_run_native_7"));
   });
 
+  test("\"AN AUTOMATION KEEPS NOT FINISHING\": a helper's run still raises it; a person's one-off request never does, and it never reaches a non-adult", async () => {
+    /* Review finding M2. Two failed or expired runs in a row from the same agent raise an in-app
+     * alert to the run's actor. Every run a person's chat or group turn queues is attributed to
+     * the household assistant, so a child whose two group requests an adult turned down was told
+     * an automation keeps not finishing and to check Agents. A helper's own runs (via "agent") —
+     * what the alert is for — keep it exactly as before. */
+    const { putAgent, listNotifications } = await import("../store.mjs");
+    const helper = (id) => putAgent({ id, householdId: "local", name: id, status: "Active", enabled: true, visibility: "household", allowedToolIds: [], deniedToolIds: [], approvalPolicy: {} });
+    helper("agt_household"); helper("agt_alert_helper"); helper("agt_alert_kid_helper");
+    const alerts = (actorId) => listNotifications((n) => n.actorId === actorId && n.title === "An automation keeps not finishing");
+    const failTwice = async (sourceRef, session) => {
+      for (let i = 0; i < 2; i++) assert.equal((await runStep("famili.delete_task", { taskId: "tk_alert_missing" }, sourceRef, session)).error, "task_not_found");
+    };
+    const owner = { householdId: "local", actorId: "m-run-owner", role: "Owner" };
+    await failTwice({ via: "agent", agentId: "agt_alert_helper", actorRole: "Owner", channel: "personal" }, owner);
+    assert.equal(alerts("m-run-owner").length, 1, "a helper's run failing twice still raises it — unchanged");
+    assert.match(alerts("m-run-owner")[0].body, /hasn't delivered twice in a row/);
+    await failTwice({ via: "chat", agentId: "agt_household", actorRole: "Owner", channel: "personal" }, owner);
+    await failTwice({ via: "group_chat", agentId: "agt_household", actorRole: "Owner", channel: "group" }, owner);
+    assert.equal(alerts("m-run-owner").length, 1, "a person's one-off requests — app, text or group — never do");
+    await failTwice({ via: "agent", agentId: "agt_alert_kid_helper", actorRole: "Limited Member", channel: "personal" }, { householdId: "local", actorId: "m-run-kid", role: "Limited Member" });
+    assert.equal(alerts("m-run-kid").length, 0, "and it never reaches a non-adult");
+  });
+
   test("a native READ resolves and runs too, with the channel the run recorded", async () => {
     putTask({ id: "tk_run_native_5", householdId: "local", title: "Private journal time", status: "todo", createdBy: "m-run-owner", visibility: "private" });
     const personal = await runStep("famili.list_tasks", { query: "journal" }, { actorRole: "Owner", channel: "personal" }, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
