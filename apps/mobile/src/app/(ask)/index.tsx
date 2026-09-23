@@ -105,6 +105,10 @@ type SpaceKey = "personal" | "household" | `nest:${string}`;
  * request ceiling above it is sized to clear that. */
 const MAX_ATTACH_BYTES = 25 * 1024 * 1024;
 
+/** A run parked on an approval. The engine writes "waiting_for_approval" (server/engine.mjs);
+ *  "waiting_approval" is kept as a fallback so nothing that ever sent it regresses. */
+const PARKED_RUN_STATUSES = ["waiting_for_approval", "waiting_approval"];
+
 export default function AskScreen() {
   const { colors, spacing, radii, type, dark } = useTheme();
   const calm = useCalmMotion();
@@ -1187,9 +1191,9 @@ export default function AskScreen() {
               <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
                 <T kind="h3" color={colors.text} style={{ flex: 1 }}>{serverRun.title}</T>
                 <Badge
-                  label={serverRun.status === "waiting_approval" ? "Needs approval" : "Doing it"}
-                  fg={serverRun.status === "waiting_approval" ? colors.amber : colors.ember}
-                  bg={serverRun.status === "waiting_approval" ? colors.amberBg : colors.emberBg}
+                  label={PARKED_RUN_STATUSES.includes(serverRun.status) ? "Needs approval" : "Doing it"}
+                  fg={PARKED_RUN_STATUSES.includes(serverRun.status) ? colors.amber : colors.ember}
+                  bg={PARKED_RUN_STATUSES.includes(serverRun.status) ? colors.amberBg : colors.emberBg}
                 />
               </View>
               {serverRun.steps.map((s, i) => (
@@ -1199,7 +1203,7 @@ export default function AskScreen() {
                     backgroundColor: ["succeeded", "done", "completed"].includes(s.status) ? colors.sage
                       : s.status === "running" ? colors.ember
                       : s.status === "failed" ? colors.coral
-                      : ["waiting_approval", "waiting_for_approval", "skipped_no_tool", "skipped", "expired"].includes(s.status) ? colors.amber
+                      : [...PARKED_RUN_STATUSES, "skipped_no_tool", "skipped", "expired"].includes(s.status) ? colors.amber
                       : colors.textFaint,
                   }} />
                   <View style={{ flex: 1 }}>
@@ -1457,10 +1461,16 @@ function ToolCallsRow({ calls }: { calls: AssistantToolCall[] }) {
           );
         }
         const failed = c.status === "failed" || c.status === "blocked" || c.ok === false;
+        // A refusal carries its reason in `summary` ("Not permitted for this helper", the kill
+        // switch). Show it, so a policy block reads differently from a crash.
+        const reason = failed && typeof c.summary === "string" && c.summary.trim() ? c.summary.trim() : null;
         return (
-          <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 4 }} accessibilityLabel={`${label}: ${failed ? c.status : "done"}`}>
-            <Sym name={failed ? "exclamationmark.triangle" : "checkmark"} size={10} color={failed ? colors.coral : colors.textFaint} />
-            <T kind="caption" color={failed ? colors.coral : colors.textFaint}>{label}</T>
+          <View key={i} style={{ flexDirection: "row", alignItems: reason ? "flex-start" : "center", gap: 4, maxWidth: "100%" }} accessibilityLabel={`${label}: ${failed ? c.status : "done"}${reason ? `. ${reason}` : ""}`}>
+            <Sym name={failed ? "exclamationmark.triangle" : "checkmark"} size={10} color={failed ? colors.coral : colors.textFaint} style={reason ? { marginTop: 3 } : undefined} />
+            <View style={{ flexShrink: 1 }}>
+              <T kind="caption" color={failed ? colors.coral : colors.textFaint}>{label}</T>
+              {reason ? <T kind="detail" color={colors.textSecondary} numberOfLines={2}>{reason}</T> : null}
+            </View>
           </View>
         );
       })}

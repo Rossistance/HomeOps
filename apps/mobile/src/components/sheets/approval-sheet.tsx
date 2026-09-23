@@ -68,8 +68,14 @@ export function ApprovalSheet({ approval, visible, onClose, onDecided }: {
     const r = await api.decideApproval(approval.id, approve);
     setBusy(false);
     if (r.error) {
-      Alert.alert("Couldn't record your decision", r.error === "insufficient_role"
-        ? "Only household adults can decide approvals."
+      // The decide route answers 403 `approver_not_allowed` when this profile's role is not on
+      // the approval's allowedApproverRoles (server/index.mjs); `insufficient_role` is the older
+      // shape and is kept. Name who can, since the record says.
+      const notAllowed = r.error === "approver_not_allowed" || r.error === "insufficient_role";
+      const roles = approval.allowedApproverRoles ?? [];
+      const who = roles.length > 1 ? `${roles.slice(0, -1).join(", ")} or ${roles[roles.length - 1]}` : roles[0];
+      Alert.alert("Couldn't record your decision", notAllowed
+        ? `This profile can't approve this one${who ? ` — only ${who} can decide it` : ""}.`
         : "Something went wrong — pull to refresh and try again.");
       return;
     }
