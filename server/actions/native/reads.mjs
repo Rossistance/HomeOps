@@ -162,8 +162,11 @@ export const familiSearchMemory = defineAction({
     if (!q) return { ok: false, error: "query_required", message: "What should I search for?" };
     /* In the group channel a personal memory is dropped outright rather than matched
      * against the asker — same rule as buildServerContext, and for the same reason:
-     * the asker is not the audience. */
-    const visible = (m) => m.scope !== "personal" || (channel !== "group" && (m.sourceActorId ?? m.source?.actorId) === session.actorId);
+     * the asker is not the audience. So is a NEST's: only household memory is found there,
+     * exactly as a nest's tasks and events are hidden there (canSeeEntityInChannel), and as
+     * famili.delete_memory refuses anything else there. (ADR-004 Stage 2.) */
+    const groupVisible = (m) => m.scope === "household";
+    const visible = (m) => (channel === "group" ? groupVisible(m) : m.scope !== "personal" || (m.sourceActorId ?? m.source?.actorId) === session.actorId);
     const health = await memoryProvider.health();
     if (health.ok) {
       const r = await memoryProvider.search(q, { containerTag: hh, limit: 10 });
@@ -180,7 +183,7 @@ export const familiSearchMemory = defineAction({
         const row = id ? getMemoryEntry(id) : null;
         if (row) {
           if (row.householdId !== hh) return null;
-          if (!(channel === "group" ? row.scope !== "personal" : canSeeMemory(row, session))) return null;
+          if (!(channel === "group" ? groupVisible(row) : canSeeMemory(row, session))) return null;
           return { id: row.id, text: row.text, scope: row.scope };
         }
         return visible(m) ? { ...(id ? { id } : {}), text: m.text, scope: m.scope } : null;

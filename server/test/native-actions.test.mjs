@@ -362,6 +362,65 @@ test("…the two update tools already refused an item the group may not see — 
   assert.equal(store.getTask("tk_vis_2").status, "todo");
 });
 
+describe("IN THE GROUP THREAD a NEST's memory is not there — found, forgotten or named — and outside it nothing changes", () => {
+  /* Review finding M1. The group rules hid PERSONAL memory only; a nest's memory (a third room,
+   * visible to its members and nobody else, not even the Owner) was found by search_memory,
+   * deleted and echoed by delete_memory, and named on the approval a nest child's group request
+   * parked — an approval pushed to every adult and readable in the thread. Tasks and events of a
+   * nest were already hidden there (canSeeEntityInChannel admits household/childVisible only). */
+  let store, memoryProvider, approvalPreview, secret, shared;
+  const adult = { householdId: "local", actorId: "m-nest-adult", role: "Adult Member", actorName: "Gran Harper" };
+  const kid = { householdId: "local", actorId: "m-nest-kid", role: "Limited Member", actorName: "Maya Harper" };
+  const outsider = { householdId: "local", actorId: "m-nest-outsider", role: "Owner", actorName: "Alex Harper" };
+  const call = (id, input, who, channel) => runNativeAction({ action: getAction(id), input, session: who, agent: agentWith(), channel, actorIsAdult: channel === "group" ? true : null });
+  const remember = async (text, scope, extra = {}) => {
+    const rec = store.addMemory({ householdId: "local", scope, type: "fact", text, source: { actorId: "m-nest-adult" }, ...extra });
+    await memoryProvider.add(text, { containerTag: "local", scope, type: "fact", sourceActorId: "m-nest-adult", id: `sm_mem_${rec.id}` });
+    return rec;
+  };
+  before(async () => {
+    store = await import("../store.mjs");
+    ({ memoryProvider } = await import("../memory-provider.mjs"));
+    ({ approvalPreview } = await import("../actions/native/shared.mjs"));
+    for (const m of [adult, kid, outsider]) store.putMember({ actorId: m.actorId, displayName: m.actorName, role: m.role, householdId: "local" });
+    store.putNest({ id: "nest_vis_1", householdId: "local", name: "Gran + Maya", archived: false, createdBy: "m-nest-adult",
+      members: [{ actorId: "m-nest-adult", status: "joined" }, { actorId: "m-nest-kid", status: "joined" }] });
+    secret = await remember("NESTSECRET grandma surprise trip to Paris", "nest", { nestId: "nest_vis_1" });
+    shared = await remember("NESTSECRET is also the name of the household's wifi", "household");
+  });
+
+  test("(a) famili.delete_memory: a nest member's delete in the group answers exactly as a missing id; outside it, it deletes", async () => {
+    const hidden = await call("famili.delete_memory", { memoryId: secret.id }, adult, "group");
+    assert.deepEqual(hidden, await call("famili.delete_memory", { memoryId: "mem_nope" }, adult, "group"), "the same code and the same words as a missing id");
+    assert.equal(JSON.stringify(hidden).includes("Paris"), false, "nothing of the text");
+    assert.ok(store.getMemoryEntry(secret.id), "still there");
+    // The non-group control — kept for the other tests in this block, so on a copy.
+    const copy = store.addMemory({ householdId: "local", scope: "nest", nestId: "nest_vis_1", type: "fact", text: "NESTSECRET copy for the control", source: { actorId: "m-nest-adult" } });
+    const gone = await call("famili.delete_memory", { memoryId: copy.id }, adult, "personal");
+    assert.deepEqual(gone, { ok: true, result: { deleted: true, text: "NESTSECRET copy for the control" } });
+  });
+
+  test("(b) the approval preview names a nest memory's text only outside the group, and only to someone who may forget it", () => {
+    const forget = getAction("famili.delete_memory");
+    assert.equal(approvalPreview(forget, { memoryId: secret.id }, { session: kid, channel: "group" }),
+      "Forget a memory\nAsked by Maya Harper in the family group thread", "a nest child's group request: the action alone");
+    assert.equal(approvalPreview(forget, { memoryId: secret.id }, { session: kid, channel: "personal" }).split("\n")[0],
+      "Forget a memory: “NESTSECRET grandma surprise trip to Paris”", "the control: a nest member outside the group");
+    assert.equal(approvalPreview(forget, { memoryId: secret.id }, { session: outsider, channel: "personal" }).split("\n")[0],
+      "Forget a memory", "never to someone outside the nest — the Owner included");
+    assert.equal(approvalPreview(forget, { memoryId: shared.id }, { session: kid, channel: "group" }).split("\n")[0],
+      "Forget a memory: “NESTSECRET is also the name of the household's wifi”", "a household memory is still named in the group");
+  });
+
+  test("(c) famili.search_memory: a nest member's group search does not find the nest's memory; outside the group it does", async () => {
+    const texts = async (channel) => ((await call("famili.search_memory", { query: "NESTSECRET" }, adult, channel)).result?.memories ?? []).map((m) => m.text);
+    const group = await texts("group");
+    assert.ok(group.includes("NESTSECRET is also the name of the household's wifi"), `the search really ran: ${JSON.stringify(group)}`);
+    assert.equal(group.some((t) => /Paris/.test(t)), false, "the nest's memory is not in the group");
+    assert.ok((await texts("personal")).includes("NESTSECRET grandma surprise trip to Paris"), "the control: found by its nest member elsewhere");
+  });
+});
+
 /* ───────────────────── the run engine (Stage 2) ───────────────────── */
 
 describe("the run engine reaches a native action (ADR-004 Stage 2)", () => {
