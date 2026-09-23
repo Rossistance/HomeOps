@@ -56,6 +56,19 @@ function approvalLines(a: ApprovalRec): { title: string; rest: string } {
   return { title: lines[0] ?? humanizeTool(a.toolId), rest: lines.slice(1).join("\n") };
 }
 
+// Approve / Deny only for a role the approval names as its approvers: the decide route answers
+// anyone else 403 approver_not_allowed — the child who asked, whose request an adult decides.
+// They are told who it waits for instead. No roles on the record (an older server) keeps the
+// buttons, as before. (Approvers named by id are not sent to the client; no approval uses them.)
+function mayDecide(a: ApprovalRec, role: string | undefined): boolean {
+  const roles = a.allowedApproverRoles ?? [];
+  return roles.length === 0 || (!!role && roles.includes(role));
+}
+function waitingFor(a: ApprovalRec): string {
+  const roles = a.allowedApproverRoles ?? [];
+  return `Waiting for ${roles.includes("Adult Member") ? "an adult" : roles.join(" or ")} to decide`;
+}
+
 function ago(ts: number, now: number): string {
   const s = Math.max(0, Math.floor((now - ts) / 1000));
   if (s < 60) return "just now";
@@ -321,14 +334,18 @@ export default function InboxScreen() {
                       <Sym name="clock" size={11} color={expColor} />
                       <T kind="caption" color={expColor}>{exp.text}</T>
                     </View>
-                    <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.md }}>
-                      <View style={{ flex: 1 }}>
-                        <Button title="Approve" variant="success" icon="checkmark" loading={busyId === a.id} onPress={() => void decide(a, true)} />
+                    {mayDecide(a, session?.role) ? (
+                      <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.md }}>
+                        <View style={{ flex: 1 }}>
+                          <Button title="Approve" variant="success" icon="checkmark" loading={busyId === a.id} onPress={() => void decide(a, true)} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Button title="Deny" variant="danger" icon="xmark" disabled={busyId === a.id} onPress={() => confirmDeny(a)} />
+                        </View>
                       </View>
-                      <View style={{ flex: 1 }}>
-                        <Button title="Deny" variant="danger" icon="xmark" disabled={busyId === a.id} onPress={() => confirmDeny(a)} />
-                      </View>
-                    </View>
+                    ) : (
+                      <T kind="caption" color={colors.textFaint} style={{ marginTop: spacing.md }}>{waitingFor(a)}</T>
+                    )}
                   </Card>
                 </Rise>
               );

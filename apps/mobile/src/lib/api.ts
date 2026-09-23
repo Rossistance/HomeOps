@@ -36,6 +36,9 @@ export interface ApprovalRec {
   id: string; connectorId: string | null; toolId: string; status: string; risk: string;
   category: string; preview: string; createdAt: number; expiresAt: number;
   decidedBy: string | null; decidedAt: number | null;
+  /** Also sent by the server (publicApproval in server/index.mjs); optional so an older server
+   *  that omits them still parses. `consumedBy` is set once the approved step has run. */
+  requestedBy?: string; source?: string; allowedApproverRoles?: string[]; consumedBy?: string | null;
 }
 export interface PlanStep { toolId: string | null; title: string; detail: string; requiresApproval: boolean; risk: string; connectorName: string | null; connected: boolean }
 export interface AgentPlan { title: string; summary: string; risk: string; steps: PlanStep[]; missing: string[]; approvalRequired: boolean; triggerType: string }
