@@ -20,7 +20,9 @@ import { listConnectors, executeTool, toolActionOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
-import { getAgent } from "./store.mjs";
+import { NATIVE_ACTIONS } from "./actions/registry.mjs";
+import { getAgent, getMember } from "./store.mjs";
+import { roleAtLeast } from "./auth.mjs";
 import { isToolStepAllowed } from "./helper-shape.mjs";
 import { resolveEffectivePolicy, reachesOutside, BLOCKED } from "./policy.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
@@ -267,10 +269,32 @@ async function fillStepInput(run, stepIndex, step, schema) {
  * sourceRef; clientSourceRef strips it from a request body). Only a boolean counts. */
 const actorIsAdultOf = (run) => (typeof run?.sourceRef?.actorIsAdult === "boolean" ? run.sourceRef.actorIsAdult : null);
 
+/* THE ONE NATIVE APPROVAL (ADR-004 decision C). A native famili.* write waits for an adult in
+ * exactly one case: a non-adult asked for it in the family group thread. Nothing else — no
+ * stance, autonomy tier or per-tool setting — makes a native write ask (decision A), and a
+ * read never asks. `actorIsAdult` must be the boolean false, not merely absent: absent is "not
+ * stated", which leaves the ladder alone everywhere else. Shared by the chat lane
+ * (runNativeAction) and the run engine (resolveToolBase), so the two cannot disagree. */
+export function nativeRequiresApproval(action, { channel = null, actorIsAdult = null } = {}) {
+  return action?.action === "Write" && channel === "group" && actorIsAdult === false;
+}
+
 /* ---- authoritative tool resolution (server decides requiresApproval, NOT client) ---- */
-function resolveToolBase(toolId) {
+// `runCtx` is what a run recorded about who asked and where (its sourceRef): only a native
+// action reads it, to decide decision C above. Every other kind ignores it.
+function resolveToolBase(toolId, runCtx = null) {
   const internal = getInternalFunction(toolId);
   if (internal) return { kind: "internal", def: internal, requiresApproval: !!internal.requiresApproval, action: internal.action, risk: internal.risk, connectorId: internal.connectorId, connectorName: internal.connectorName };
+  /* The native lane (ADR-004 Stage 2): reachable by a run so a step parked for an adult can
+   * execute once one approves. Only lane:"native" actions — never an HTTP-only declared read. */
+  const native = NATIVE_ACTIONS.find((a) => a.id === toolId);
+  if (native) {
+    return {
+      kind: "native", def: native,
+      requiresApproval: nativeRequiresApproval(native, { channel: runCtx?.channel ?? null, actorIsAdult: typeof runCtx?.actorIsAdult === "boolean" ? runCtx.actorIsAdult : null }),
+      action: native.action, risk: native.risk, connectorId: native.connectorId, connectorName: native.connectorName,
+    };
+  }
   const platform = findToolGlobal(toolId);
   if (platform) return { kind: "provider", provider: platform.provider, tool: platform.tool, requiresApproval: !!platform.tool.requiresApproval, action: platform.tool.action, risk: platform.tool.risk, connectorId: platform.provider.id, connectorName: platform.provider.name };
   const conn = listConnectors().find((x) => x.tools.some((t) => t.id === toolId));
@@ -288,8 +312,8 @@ function resolveToolBase(toolId) {
 // actorId is threaded so a nest's own risk rules apply to its members' runs (Cluster W);
 // omitted, it resolves the household's rule, which is the correct default for anything
 // running without a person behind it.
-function resolveTool(toolId, householdId, actorId = null) {
-  const base = resolveToolBase(toolId);
+function resolveTool(toolId, householdId, actorId = null, runCtx = null) {
+  const base = resolveToolBase(toolId, runCtx);
   if (!base || !householdId) return base;
   const ov = getRiskOverride(householdId, toolId, actorId);
   // Always hand back a FRESH object: the agent-policy pass below refines
@@ -303,6 +327,21 @@ function resolveTool(toolId, householdId, actorId = null) {
     risk: ov.riskClass ?? base.risk,
     riskOverridden: true,
   };
+}
+
+/* WHO A NATIVE STEP RUNS AS: the person who asked, with the role recorded when the run
+ * started (sourceRef.actorRole, server-assigned). If that person's standing has changed
+ * since — a promotion or a demotion while the step waited for an adult — the LOWER of the two
+ * roles applies: an approval must never widen what the asker may touch, and a demotion or
+ * removal in between is honoured rather than outlived. A removed member runs as no one. */
+function requesterRole(run) {
+  const stored = typeof run?.sourceRef?.actorRole === "string" ? run.sourceRef.actorRole : null;
+  if (!stored) return null;
+  const member = run.actorId ? getMember(run.actorId) : null;
+  if (member?.archived) return null;
+  const current = member?.role ?? null;
+  if (!current || current === stored) return stored;
+  return roleAtLeast(current, stored) ? stored : current;
 }
 
 // Execute a resolved tool. For gated steps this is called only AFTER the approval
@@ -325,6 +364,21 @@ async function execResolved(resolved, input, ctx, approvalId) {
     // the recipient's per-agent allowlist, and it cannot do that without knowing who
     // is acting — an unattributed send would silently skip that gate.
     return await resolved.def.run({ householdId: ctx.householdId, actorId: ctx.actorId, runId: ctx.runId, agentId: ctx.agentId ?? null }, input);
+  }
+  if (resolved.kind === "native") {
+    /* A native action's body reads the session and the channel (actions/native/*), so its
+     * ctx is rebuilt from the run: the REQUESTER's role (requesterRole below — never the
+     * approver's, so an adult's approval cannot widen what the asker may touch; the body's own
+     * ownership checks still run) and the channel the request came from. A run that recorded
+     * no requester role — anything not queued by the chat lane, e.g. a hand-rolled plan
+     * posted to /api/runs/start, whose sourceRef cannot carry one — is refused rather than
+     * run as nobody in particular. The run's own step timeout is the action's (see _drive). */
+    if (!ctx.role) return { ok: false, error: "no_requester_role", message: "This step can only run for the person who asked for it, and this run doesn't say who that was — nothing was changed." };
+    const session = { householdId: ctx.householdId, actorId: ctx.actorId, role: ctx.role, ...(ctx.actorName ? { actorName: ctx.actorName } : {}) };
+    return await resolved.def.invoke({
+      householdId: ctx.householdId, actorId: ctx.actorId, role: ctx.role, channel: ctx.channel ?? "personal", session,
+      via: "agent", runId: ctx.runId ?? null, agentId: ctx.agentId ?? null, asHelper: false,
+    }, input);
   }
   if (resolved.kind === "provider") {
     if (!externalActionsEnabled(ctx.householdId) && ["Write", "Send", "Download"].includes(resolved.action)) {
@@ -593,7 +647,8 @@ export async function startRun({ source = "manual", sourceRef = {}, plan, params
   const runId = "run_" + crypto.randomBytes(10).toString("hex");
   const now = Date.now();
   const steps = (plan?.steps ?? []).map((s, i) => {
-    const resolved = s.toolId ? resolveTool(s.toolId, session?.householdId, session?.actorId ?? null) : null;
+    // sourceRef carries what a queued chat step was judged on; a native step's gate reads it.
+    const resolved = s.toolId ? resolveTool(s.toolId, session?.householdId, session?.actorId ?? null, sourceRef) : null;
     return {
       index: i,
       toolId: s.toolId ?? null,
@@ -802,7 +857,7 @@ async function _drive(runId) {
       continue;
     }
 
-    const resolved = resolveTool(step.toolId, run.householdId, run.actorId ?? null);
+    const resolved = resolveTool(step.toolId, run.householdId, run.actorId ?? null, run.sourceRef);
     if (!resolved) {
       patchRunStep(runId, i, { status: "failed", detail: `Unknown tool: ${step.toolId}`, finishedAt: Date.now() });
       return finishFailed(runId, "unknown_tool");
@@ -979,8 +1034,15 @@ async function _drive(runId) {
 
     let out;
     const t0 = Date.now();
+    // A native step also carries who asked and where (execResolved rebuilds its ctx from
+    // these), and keeps its own declared time limit rather than the step default.
+    const native = resolved.kind === "native";
+    const stepCtx = {
+      householdId: run.householdId, actorId: run.actorId, runId, accountId: run.params?.accountId, agentId: run.sourceRef?.agentId ?? null,
+      ...(native ? { role: requesterRole(run), channel: run.sourceRef?.channel ?? null, actorName: getMember(run.actorId)?.displayName ?? null } : {}),
+    };
     try {
-      out = await withTimeout(execResolved(resolved, stepNow.input, { householdId: run.householdId, actorId: run.actorId, runId, accountId: run.params?.accountId, agentId: run.sourceRef?.agentId ?? null }, approvalId), RUN_STEP_TIMEOUT_MS);
+      out = await withTimeout(execResolved(resolved, stepNow.input, stepCtx, approvalId), native ? resolved.def.timeoutMs : RUN_STEP_TIMEOUT_MS);
     } catch (e) {
       out = { ok: false, error: "timeout", message: String(e?.message ?? e) };
     }

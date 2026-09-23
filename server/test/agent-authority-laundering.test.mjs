@@ -132,6 +132,28 @@ test("SOURCEREF (ADR-004 Stage 2): what a queued chat step was JUDGED ON is serv
   assert.equal(run.sourceRef.conversationId, "conv_keepme_2", "and the correlation field beside them still does");
 });
 
+test("…and a hand-rolled plan naming a NATIVE write cannot buy a role with them: it runs as no one, so it does not run", async () => {
+  /* The run engine resolves famili.* ids now (a step parked for an adult has to run once one
+   * approves), and a native step runs as the role its run recorded. A forged actorRole is
+   * stripped, so this run records none — and a native step with no requester is refused
+   * before its body is reached. */
+  const made = await owner.req("/api/tasks", { method: "POST", body: JSON.stringify({ title: "TG native forgery target" }) });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  const r = await owner.req("/api/runs/start", {
+    method: "POST",
+    body: JSON.stringify({
+      plan: { title: "TG-native", summary: "", steps: [{ toolId: "famili.delete_task", title: "Delete", detail: "", input: { taskId: made.data.task.id } }] },
+      sourceRef: { actorRole: "Owner", channel: "personal", actorIsAdult: true },
+    }),
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const run = await waitTerminal(owner, r.data.run.id, ["waiting_for_approval"]);
+  assert.equal(run.steps[0].attribution, "native", "resolved — the engine knows the id");
+  assert.equal(run.status, "failed");
+  assert.equal(run.error, "no_requester_role", JSON.stringify(run.steps[0]));
+  assert.ok((await owner.req("/api/tasks")).data.tasks.some((t) => t.id === made.data.task.id), "and the task is still there");
+});
+
 test("a member with no standing cannot launder the Owner's grant into a run of their own", async () => {
   // The original attack in its most direct form: read the allowlists, name the helper that is
   // on them, and post a plan. The role floor stops this one before the strip even matters —

@@ -284,6 +284,82 @@ test("a body that hangs is cut at its own timeoutMs; a body that throws is tool_
   assert.match(f.message, /kaput/);
 });
 
+/* ───────────────────── the run engine (Stage 2) ───────────────────── */
+
+describe("the run engine reaches a native action (ADR-004 Stage 2)", () => {
+  /* A step parked for an adult has to be able to run once one approves, so the engine now
+   * resolves a famili.* id (kind "native") and runs it with a ctx rebuilt from the run: the
+   * role recorded when the run started — the REQUESTER's, never the approver's — and the
+   * channel the request came from. These runs are started directly, as the chat lane's
+   * queueApprovalRun → orchestrate would start them, with nothing to approve (a personal
+   * channel), so what is pinned here is the resolution and the ctx, not the park. */
+  let startRun, getRun, putTask, getTask, putMember;
+  const settle = async (id) => {
+    for (let i = 0; i < 100; i++) {
+      const r = getRun(id);
+      if (["completed", "failed", "partially_failed", "waiting_for_approval"].includes(r?.status)) return r;
+      await new Promise((res) => setTimeout(res, 30));
+    }
+    return getRun(id);
+  };
+  const runStep = async (toolId, input, sourceRef, session) => settle((await startRun({
+    source: "assistant", sourceRef, session, title: "Native step",
+    plan: { title: "Native step", steps: [{ toolId, title: "Native step", input }] },
+  })).id);
+  before(async () => {
+    ({ startRun } = await import("../engine.mjs"));
+    ({ getRun, putTask, getTask, putMember } = await import("../store.mjs"));
+    putMember({ actorId: "m-run-owner", displayName: "Run Owner", role: "Owner", householdId: "local" });
+    putMember({ actorId: "m-run-kid", displayName: "Run Kid", role: "Limited Member", householdId: "local" });
+  });
+
+  test("a famili.* id resolves as kind \"native\" — not \"Unknown tool\" — and runs as the requester", async () => {
+    putTask({ id: "tk_run_native_1", householdId: "local", title: "Water the plants", status: "todo", createdBy: "m-run-owner", visibility: "household" });
+    const run = await runStep("famili.delete_task", { taskId: "tk_run_native_1" }, { actorRole: "Owner", channel: "personal" }, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(run.steps[0].attribution, "native", "resolved by the run engine");
+    assert.equal(run.steps[0].requiresApproval, false, "an adult's native write never asks (decision A)");
+    assert.equal(run.status, "completed", JSON.stringify(run.steps[0]));
+    assert.deepEqual(run.steps[0].result, { deleted: true, title: "Water the plants" });
+    assert.equal(getTask("tk_run_native_1") ?? null, null);
+  });
+
+  test("the recorded role is the one that runs: a Limited Member's step cannot delete someone else's task", async () => {
+    putTask({ id: "tk_run_native_2", householdId: "local", title: "Mow the lawn", status: "todo", createdBy: "m-run-owner", visibility: "household" });
+    const run = await runStep("famili.delete_task", { taskId: "tk_run_native_2" }, { actorRole: "Limited Member", channel: "personal" }, { householdId: "local", actorId: "m-run-kid", role: "Limited Member" });
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "forbidden", "the body's own ownership check, as the requester");
+    assert.ok(getTask("tk_run_native_2"), "still there");
+  });
+
+  test("a promotion while a step waits does not widen it — the LOWER of the recorded and current roles runs", async () => {
+    // Recorded as a Limited Member; the member record now says Owner. The step still runs as
+    // the Limited Member it was asked as.
+    putMember({ actorId: "m-run-promoted", displayName: "Run Promoted", role: "Owner", householdId: "local" });
+    putTask({ id: "tk_run_native_3", householdId: "local", title: "Clean the garage", status: "todo", createdBy: "m-run-owner", visibility: "household" });
+    const run = await runStep("famili.delete_task", { taskId: "tk_run_native_3" }, { actorRole: "Limited Member", channel: "personal" }, { householdId: "local", actorId: "m-run-promoted", role: "Limited Member" });
+    assert.equal(run.error, "forbidden");
+    assert.ok(getTask("tk_run_native_3"));
+  });
+
+  test("a run with NO recorded requester role never runs a native step — it is refused, not run as nobody", async () => {
+    putTask({ id: "tk_run_native_4", householdId: "local", title: "Sort the mail", status: "todo", createdBy: "m-run-owner", visibility: "household" });
+    const run = await runStep("famili.delete_task", { taskId: "tk_run_native_4" }, {}, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(run.steps[0].attribution, "native");
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "no_requester_role");
+    assert.ok(getTask("tk_run_native_4"), "nothing was changed");
+  });
+
+  test("a native READ resolves and runs too, with the channel the run recorded", async () => {
+    putTask({ id: "tk_run_native_5", householdId: "local", title: "Private journal time", status: "todo", createdBy: "m-run-owner", visibility: "private" });
+    const personal = await runStep("famili.list_tasks", { query: "journal" }, { actorRole: "Owner", channel: "personal" }, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(personal.status, "completed");
+    assert.equal(personal.steps[0].result.count, 1, "the owner sees their private task in a personal run");
+    const group = await runStep("famili.list_tasks", { query: "journal" }, { actorRole: "Owner", channel: "group" }, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(group.steps[0].result.count, 0, "and not in a run recorded as the group thread's");
+  });
+});
+
 /* ───────────────────── through the real chat route ───────────────────── */
 
 describe("the native lane through the real chat route", () => {
