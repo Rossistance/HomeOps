@@ -124,6 +124,24 @@ test("plan_meal: zero (or nonsense) servings is an error, not null", async () =>
   assert.equal(store.listMeals((m) => m.title === "QA Four eat")[0]?.servings, 4);
 });
 
+test("plan_meal: null for an optional input means absent — the run path hands the step input to the door unstripped", async () => {
+  // The chat path strips nulls in coerceInput; the run path does not, and the hand-written
+  // tool tolerated a null it was given. Every optional field, null, in one call. No key in
+  // the environment, so the empty ingredient list is not estimated over the network.
+  const savedKey = process.env.OPENAI_API_KEY; delete process.env.OPENAI_API_KEY;
+  try {
+    const r = await run("homeops.plan_meal", { title: "QA Null fields", date: "2031-05-06", slot: null, time: null, recipeUrl: null, notes: null, ingredients: null, instructions: null, replace: null, nestId: null });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.result.slot, "dinner", "null slot is the default, exactly as absent is");
+    assert.equal(r.result.groceryItems, 0);
+    const m = store.listMeals((x) => x.title === "QA Null fields")[0];
+    assert.deepEqual([m.recipeUrl, m.notes, m.ingredients, m.instructions], ["", "", [], []]);
+  } finally { if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey; }
+  // The enum still refuses a slot by name — null joined it, "brunch" did not.
+  const bad = await run("homeops.plan_meal", { title: "QA Null brunch", date: "2031-05-06", slot: "brunch" });
+  assert.equal(bad.error, "invalid_input"); assert.equal(bad.field, "slot");
+});
+
 test("a tool that is given nothing to validate still works exactly as before", async () => {
   // No priority, no assignee, no slot, no servings: the defaults the app has always applied.
   const t = await run("homeops.create_task", { title: "Plain task" });

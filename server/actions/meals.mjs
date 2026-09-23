@@ -27,8 +27,11 @@ const strOrNull = { type: ["string", "null"] };
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 /* One title normaliser for the grocery list, and it is plan_meal's: lowercase, every run of
  * punctuation or whitespace folded to one space. "Ground Beef" and "ground-beef" are the
- * same item to a shopper, and the trim-and-lowercase the create route used let both land. */
-const groceryKey = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+ * same item to a shopper, and the trim-and-lowercase the create route used let both land.
+ * Letters and digits in ANY script: the [a-z0-9] fold turned "свёкла" and "капуста" into the
+ * same empty key, so a non-Latin ingredient list collapsed to one item and two non-Latin
+ * dishes within a week were one meal. */
+const groceryKey = (s) => String(s ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
 /* P2 [09:20] — "are these ingredients automatically added to the grocery list? If not,
  * they need to be."
@@ -240,10 +243,14 @@ export const planMeal = defineAction({
     properties: {
       title: { ...str, description: "Short human title." },
       date: { ...strOrNull, description: "Calendar date, YYYY-MM-DD." },
-      slot: { type: "string", enum: [...MEAL_SLOTS], description: "Default dinner." },
+      /* null means absent, for every optional field below. The chat path strips nulls before
+       * the call (coerceInput); the run path hands the step input to the door as it is, and
+       * the hand-written tool tolerated a null it was given. The enum carries null so the
+       * shape gate still refuses "brunch" by name — bad_slot stays unreachable. */
+      slot: { type: ["string", "null"], enum: [...MEAL_SLOTS, null], description: "Default dinner." },
       time: { ...strOrNull, description: "Time of day, 24-hour HH:MM." },
       ingredients: {
-        type: "array",
+        type: ["array", "null"],
         items: {
           type: ["string", "object"],
           properties: { item: str, have: { type: "boolean", description: "true when the family already has it — it stays off the grocery list." } },
@@ -251,14 +258,14 @@ export const planMeal = defineAction({
         },
         description: "Full ingredient list, one entry per ingredient with quantity — a bare string, or { item, have }.",
       },
-      instructions: { type: "array", items: str, description: "Step-by-step cooking instructions, one step per entry." },
-      recipeUrl: { ...str, description: "Source recipe URL, if any." },
+      instructions: { type: ["array", "null"], items: str, description: "Step-by-step cooking instructions, one step per entry." },
+      recipeUrl: { ...strOrNull, description: "Source recipe URL, if any." },
       /* createMeal's wire, on purpose: the record's servings is number | null. A value that
        * is not a positive number is refused by run (bad_servings) rather than stored as
        * null — the App QA helper found servings:0 becoming null without a word. */
       servings: { type: ["number", "string", "null"], description: "Number of servings — size to the household. A positive whole number." },
-      replace: { type: "boolean", description: "true to replace whatever is already planned in that slot (only when the family said so)." },
-      notes: { ...str, description: "Free-form notes." },
+      replace: { type: ["boolean", "null"], description: "true to replace whatever is already planned in that slot (only when the family said so)." },
+      notes: { ...strOrNull, description: "Free-form notes." },
       visibility: { type: "string", enum: ["household", "private", "personal", "adults", "nest", "childVisible"], description: "Who can see it. Default household. nest needs nestId." },
       nestId: { ...strOrNull, description: "The nest, when visibility is nest." },
     },
@@ -387,9 +394,23 @@ export const planMeal = defineAction({
       // Only move it when a date was actually given — re-planning "tacos" with no date used
       // to write date:null over the real one, dropping the meal off the planner while its
       // calendar event stayed on the old day.
+      // The call's ingredients JOIN the stored list rather than being dropped when the dish
+      // already had one: the groceries are synced from the PERSISTED record (below), so an
+      // ingredient that never reaches the record never reaches the list — re-planning
+      // "tacos" with limes added put no limes on Groceries. Same key as the list itself
+      // (groceryKey), the stored entry wins so a `have` the family set is kept, and the
+      // record's cap holds.
+      const stored = dupe.ingredients ?? [];
+      const seen = new Set(stored.map((i) => norm(i?.item)));
+      const merged = [...stored];
+      for (const ing of ingredients) {
+        const k = norm(ing.item);
+        if (seen.has(k)) continue;
+        seen.add(k); merged.push(ing);
+      }
       meal = patchMeal(dupe.id, {
         ...(date ? { date, slot } : {}), updatedAt: now,
-        ...(ingredients.length && !(dupe.ingredients ?? []).length ? { ingredients } : {}),
+        ...(merged.length > stored.length ? { ingredients: merged.slice(0, 60) } : {}),
         ...(instructions.length && !(dupe.instructions ?? []).length ? { instructions } : {}),
       }) ?? dupe;
       date = meal.date ?? date;

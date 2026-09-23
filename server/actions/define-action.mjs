@@ -83,6 +83,12 @@ function coerceScalar(v, types) {
   if (typeof v !== "string") return v;
   if (types.includes("boolean") && (v === "true" || v === "false")) return v === "true";
   if (types.includes("number") && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+  /* A string where an array is declared (and a string is not) is split on commas and
+   * newlines: the run engine's fillStepInput comma-joins every array it fills, so a filled
+   * plan_meal step arrived as ingredients "eggs,milk" and was refused as invalid_input, and
+   * a GET query string reaches the HTTP door the same way. The items are then validated as
+   * usual, so a number[] still coerces each entry and a bad entry is still named. */
+  if (types.includes("array") && !types.includes("string")) return v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
   return v;
 }
 export function validateInput(schema, value, { unknown = "reject", coerce = false, defs = {} } = {}) {

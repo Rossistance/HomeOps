@@ -158,6 +158,41 @@ test("INGREDIENTS ARRIVE AS STRINGS OR { item, have }: both validate, and the re
   assert.ok(!store.listMeals((m) => m.title === "Broken").length, "nothing was planned");
 });
 
+test("A COMMA-JOINED INGREDIENT STRING IS AN ARRAY ON THE RUN PATH: fillStepInput joins arrays that way, and the door splits them", async () => {
+  const r = await run({ title: "Joined omelette", ingredients: "cheddar, spinach" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.result.meal.ingredients, [{ item: "cheddar", have: false }, { item: "spinach", have: false }], "two ingredients stored, not invalid_input");
+  assert.equal(r.result.groceryItems, 2);
+});
+
+test("RE-PLANNING A DISH MERGES THE CALL'S INGREDIENTS INTO THE RECORD, and the list is synced from the record", async () => {
+  const first = await run({ title: "Tacos", date: "2031-09-01", slot: "dinner", ingredients: ["tortillas", { item: "salsa", have: true }] });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(first.result.groceryItems, 1);
+  // The dupe branch wrote the call's ingredients only when the stored dish had none, and the
+  // groceries come from the PERSISTED record — so limes never reached the list.
+  const again = await run({ title: "tacos", ingredients: ["Tortillas", "salsa", "limes"] });
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.equal(again.result.mealId, first.result.mealId, "the same dish, updated, not duplicated");
+  assert.deepEqual(again.result.meal.ingredients, [{ item: "tortillas", have: false }, { item: "salsa", have: true }, { item: "limes", have: false }],
+    "the stored entries keep their spelling and their `have`; the new one joins the record");
+  assert.equal(again.result.groceryItems, 1, "only limes is new to the list");
+  assert.deepEqual(tasksOf(first.result.mealId).map((t) => t.title).sort(), ["limes", "tortillas"]);
+  assert.equal(again.result.date, "2031-09-01", "a dateless re-plan keeps the stored date");
+});
+
+test("A NON-LATIN INGREDIENT OR TITLE IS STILL A KEY: two Cyrillic ingredients land as two items, two Cyrillic titles as two meals", async () => {
+  // The [a-z0-9] fold turned every non-Latin string into the same empty key.
+  const r = await run({ title: "Борщ", date: "2031-09-05", slot: "dinner", ingredients: ["свёкла", "капуста"] });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.result.groceryItems, 2, "the second ingredient no longer collides with the first");
+  assert.deepEqual(tasksOf(r.result.mealId).map((t) => t.title).sort(), ["капуста", "свёкла"]);
+  const other = await run({ title: "Пельмени", date: "2031-09-06", slot: "dinner", ingredients: ["тесто"] });
+  assert.equal(other.ok, true, JSON.stringify(other));
+  assert.notEqual(other.result.mealId, r.result.mealId, "a different Cyrillic title within the week is a different dish, not a dupe");
+  assert.equal(store.listMeals((m) => ["Борщ", "Пельмени"].includes(m.title) && !m.archived).length, 2);
+});
+
 test("THE PLANNER ROW IS THE DERIVED ONE, and the registry entry is the action itself", () => {
   assert.deepEqual(INTERNAL_INPUTS["homeops.plan_meal"], planMeal.toInternalInputs());
   assert.equal(getAction("homeops.plan_meal"), planMeal);

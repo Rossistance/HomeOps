@@ -90,6 +90,16 @@ test("validateInput: types, unions, enums, arrays and required — with the FIEL
   assert.equal(validateInput(S, { t: "x", l: ["a", 2] }).field, "l[1]");
 });
 
+test("validateInput: under coerce a comma- or newline-joined string becomes an array — the run engine's fillStepInput joins arrays that way", () => {
+  const A = { type: "object", properties: { l: { type: "array", items: { type: "string" } }, n: { type: "array", items: { type: "number" } }, ln: { type: ["array", "null"], items: { type: "string" } } }, additionalProperties: false };
+  assert.deepEqual(validateInput(A, { l: "eggs, milk,,\nflour " }, { coerce: true }).value.l, ["eggs", "milk", "flour"], "split, trimmed, empties dropped");
+  assert.deepEqual(validateInput(A, { n: "15, 60" }, { coerce: true }).value.n, [15, 60], "the items then coerce by their own type");
+  assert.equal(validateInput(A, { n: "15, sixty" }, { coerce: true }).field, "n[1]", "and a bad entry is still named");
+  assert.deepEqual(validateInput(A, { ln: "a" }, { coerce: true }).value.ln, ["a"], "a nullable array too");
+  assert.equal(validateInput(A, { l: "eggs, milk" }).field, "l", "without coerce a string is not an array");
+  assert.deepEqual(validateInput(S, { t: "x", l: ["a"] }, { coerce: true }).value.l, ["a"], "a real array is untouched");
+});
+
 test("validateInput: $ref resolves against $defs", () => {
   const defs = { Row: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false } };
   const out = { type: "object", properties: { row: { $ref: "#/$defs/Row" } }, required: ["row"], additionalProperties: false };

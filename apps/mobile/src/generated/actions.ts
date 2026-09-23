@@ -377,7 +377,7 @@ export type PlanMealInput = {
   /** Calendar date, YYYY-MM-DD. */
   date?: string | null;
   /** Default dinner. */
-  slot?: "breakfast" | "lunch" | "dinner" | "snack";
+  slot?: "breakfast" | "lunch" | "dinner" | "snack" | null;
   /** Time of day, 24-hour HH:MM. */
   time?: string | null;
   /** Full ingredient list, one entry per ingredient with quantity — a bare string, or { item, have }. */
@@ -385,17 +385,17 @@ export type PlanMealInput = {
     item: string;
     /** true when the family already has it — it stays off the grocery list. */
     have?: boolean;
-  }>;
+  }> | null;
   /** Step-by-step cooking instructions, one step per entry. */
-  instructions?: Array<string>;
+  instructions?: Array<string> | null;
   /** Source recipe URL, if any. */
-  recipeUrl?: string;
+  recipeUrl?: string | null;
   /** Number of servings — size to the household. A positive whole number. */
   servings?: number | string | null;
   /** true to replace whatever is already planned in that slot (only when the family said so). */
-  replace?: boolean;
+  replace?: boolean | null;
   /** Free-form notes. */
-  notes?: string;
+  notes?: string | null;
   /** Who can see it. Default household. nest needs nestId. */
   visibility?: "household" | "private" | "personal" | "adults" | "nest" | "childVisible";
   /** The nest, when visibility is nest. */

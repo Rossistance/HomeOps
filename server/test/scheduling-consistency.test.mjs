@@ -96,6 +96,10 @@ describe("meals, tasks and their calendar mirrors", () => {
     assert.equal(meal.slot, "breakfast");
     const events = (await adult.req("/api/events")).data.events.filter((e) => e.mealId === meal.id);
     assert.equal(events.length, 1, "still exactly one linked event");
+    assert.equal(events[0].title, "Breakfast: Pancakes", "composed from the STORED slot, not the call's default dinner");
+    assert.deepEqual(meal.ingredients.map((i) => i.item), ["flour", "eggs"], "the second call's new ingredient joined the record");
+    const groceries = (await adult.req("/api/tasks")).data.tasks.filter((t) => t.mealId === meal.id);
+    assert.deepEqual(groceries.map((t) => t.title).sort(), ["eggs", "flour"], "…and landed on the Groceries list");
   });
 
   test("renaming or deleting a task follows through to its calendar mirror", async () => {
