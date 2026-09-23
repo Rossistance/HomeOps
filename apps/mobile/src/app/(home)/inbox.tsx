@@ -8,6 +8,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import { api, type ApprovalRec, type NotificationRec, type PublicHelper, type ThreadRec } from "@/lib/api";
 import { ThreadList } from "@/components/messages/thread-list";
 import { useShareToThread, localPreview } from "@/components/sheets/share-to-thread-sheet";
+import { humanizeTool } from "@/components/sheets/approval-sheet";
 import { useSession } from "@/lib/session";
 import { useRevSync } from "@/lib/rev-sync";
 import { notificationSources, sourceKeyOf, notificationTarget } from "@/lib/messages";
@@ -45,6 +46,27 @@ function formatInput(input: Record<string, unknown>): string {
     lines.push(`${label}: ${text.length > 120 ? text.slice(0, 117) + "…" : text}`);
   }
   return lines.join("\n");
+}
+
+// An approval's headline is its own first preview line (a parked native write reads "Delete a
+// task: Take out the trash"), else a readable tool name — the order the approval sheet and
+// Today use. Never the raw dotted id. The preview's remaining lines are the card's subline.
+function approvalLines(a: ApprovalRec): { title: string; rest: string } {
+  const lines = (a.preview ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  return { title: lines[0] ?? humanizeTool(a.toolId), rest: lines.slice(1).join("\n") };
+}
+
+// Approve / Deny only for a role the approval names as its approvers: the decide route answers
+// anyone else 403 approver_not_allowed — the child who asked, whose request an adult decides.
+// They are told who it waits for instead. No roles on the record (an older server) keeps the
+// buttons, as before. (Approvers named by id are not sent to the client; no approval uses them.)
+function mayDecide(a: ApprovalRec, role: string | undefined): boolean {
+  const roles = a.allowedApproverRoles ?? [];
+  return roles.length === 0 || (!!role && roles.includes(role));
+}
+function waitingFor(a: ApprovalRec): string {
+  const roles = a.allowedApproverRoles ?? [];
+  return `Waiting for ${roles.includes("Adult Member") ? "an adult" : roles.join(" or ")} to decide`;
 }
 
 function ago(ts: number, now: number): string {
@@ -291,14 +313,15 @@ export default function InboxScreen() {
               const risk = riskColor(colors, a.risk);
               const exp = expiryLabel(a.expiresAt, now);
               const expColor = exp.expired ? colors.coral : exp.urgent ? colors.amber : colors.textFaint;
+              const head = approvalLines(a);
               return (
                 <Rise key={a.id} index={i + 1}>
                   <Card>
                     <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-                      <T kind="h3" color={colors.text} style={{ flex: 1 }}>{a.toolId}</T>
+                      <T kind="h3" color={colors.text} style={{ flex: 1 }}>{head.title}</T>
                       <Badge label={`${a.risk} risk`} fg={risk.fg} bg={risk.bg} />
                     </View>
-                    {a.preview ? <T kind="sub" style={{ marginTop: 6 }}>{a.preview}</T> : null}
+                    {head.rest ? <T kind="sub" style={{ marginTop: 6 }}>{head.rest}</T> : null}
                     {stepInputs[a.id] ? (
                       <Well style={{ marginTop: spacing.sm }}>
                         <T kind="sub" color={colors.textSecondary} selectable>{stepInputs[a.id]}</T>
@@ -311,14 +334,18 @@ export default function InboxScreen() {
                       <Sym name="clock" size={11} color={expColor} />
                       <T kind="caption" color={expColor}>{exp.text}</T>
                     </View>
-                    <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.md }}>
-                      <View style={{ flex: 1 }}>
-                        <Button title="Approve" variant="success" icon="checkmark" loading={busyId === a.id} onPress={() => void decide(a, true)} />
+                    {mayDecide(a, session?.role) ? (
+                      <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.md }}>
+                        <View style={{ flex: 1 }}>
+                          <Button title="Approve" variant="success" icon="checkmark" loading={busyId === a.id} onPress={() => void decide(a, true)} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Button title="Deny" variant="danger" icon="xmark" disabled={busyId === a.id} onPress={() => confirmDeny(a)} />
+                        </View>
                       </View>
-                      <View style={{ flex: 1 }}>
-                        <Button title="Deny" variant="danger" icon="xmark" disabled={busyId === a.id} onPress={() => confirmDeny(a)} />
-                      </View>
-                    </View>
+                    ) : (
+                      <T kind="caption" color={colors.textFaint} style={{ marginTop: spacing.md }}>{waitingFor(a)}</T>
+                    )}
                   </Card>
                 </Rise>
               );
@@ -344,7 +371,7 @@ export default function InboxScreen() {
                   return (
                     <Row
                       key={a.id}
-                      title={a.toolId}
+                      title={approvalLines(a).title}
                       subtitle={a.decidedAt ? `${a.decidedBy ? `${a.decidedBy} · ` : ""}${ago(a.decidedAt, now)}` : undefined}
                       trailing={<Badge label={a.status} fg={sc.fg} bg={sc.bg} />}
                       last={i === decided.length - 1}

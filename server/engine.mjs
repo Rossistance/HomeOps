@@ -20,7 +20,10 @@ import { listConnectors, executeTool, toolActionOf } from "./connectors.mjs";
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
-import { getAgent } from "./store.mjs";
+import { NATIVE_ACTIONS } from "./actions/registry.mjs";
+import { approvalPreview } from "./actions/native/shared.mjs";
+import { getAgent, getMember, defaultApproverRoles, isAdultRole } from "./store.mjs";
+import { roleAtLeast } from "./auth.mjs";
 import { isToolStepAllowed } from "./helper-shape.mjs";
 import { resolveEffectivePolicy, reachesOutside, BLOCKED } from "./policy.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
@@ -263,10 +266,41 @@ async function fillStepInput(run, stepIndex, step, schema) {
   return { filled, note: null };
 }
 
+/* What the chat verdict for a queued step was computed from (orchestrate stamps it on
+ * sourceRef; clientSourceRef strips it from a request body). Only a boolean counts. */
+const actorIsAdultOf = (run) => (typeof run?.sourceRef?.actorIsAdult === "boolean" ? run.sourceRef.actorIsAdult : null);
+
+/* THE ONE NATIVE APPROVAL (ADR-004 decision C). A native famili.* write waits for an adult in
+ * exactly one case: a non-adult asked for it in the family group thread. Nothing else — no
+ * stance, autonomy tier or per-tool setting — makes a native write ask (decision A), and a
+ * read never asks. `actorIsAdult` must be the boolean false, not merely absent: absent is "not
+ * stated", which leaves the ladder alone everywhere else. Shared by the chat lane
+ * (runNativeAction) and the run engine (resolveToolBase), so the two cannot disagree.
+ *
+ * Only someone who can write at all is held — a Limited Member, the bodies' own test
+ * (nativeScope's canWrite). A read-only profile (Child View, Guest/Helper) is not parked for an
+ * adult to sign something the body would refuse anyway: it gets the body's own read_only_profile
+ * answer, as it did before Stage 2, instead of queueApprovalRun's "can't start actions". */
+export function nativeRequiresApproval(action, { channel = null, actorIsAdult = null, role = null } = {}) {
+  return action?.action === "Write" && channel === "group" && actorIsAdult === false && roleAtLeast(role, "Limited Member");
+}
+
 /* ---- authoritative tool resolution (server decides requiresApproval, NOT client) ---- */
-function resolveToolBase(toolId) {
+// `runCtx` is what a run recorded about who asked and where (its sourceRef): only a native
+// action reads it, to decide decision C above. Every other kind ignores it.
+function resolveToolBase(toolId, runCtx = null) {
   const internal = getInternalFunction(toolId);
   if (internal) return { kind: "internal", def: internal, requiresApproval: !!internal.requiresApproval, action: internal.action, risk: internal.risk, connectorId: internal.connectorId, connectorName: internal.connectorName };
+  /* The native lane (ADR-004 Stage 2): reachable by a run so a step parked for an adult can
+   * execute once one approves. Only lane:"native" actions — never an HTTP-only declared read. */
+  const native = NATIVE_ACTIONS.find((a) => a.id === toolId);
+  if (native) {
+    return {
+      kind: "native", def: native,
+      requiresApproval: nativeRequiresApproval(native, { channel: runCtx?.channel ?? null, actorIsAdult: typeof runCtx?.actorIsAdult === "boolean" ? runCtx.actorIsAdult : null, role: runCtx?.actorRole ?? null }),
+      action: native.action, risk: native.risk, connectorId: native.connectorId, connectorName: native.connectorName,
+    };
+  }
   const platform = findToolGlobal(toolId);
   if (platform) return { kind: "provider", provider: platform.provider, tool: platform.tool, requiresApproval: !!platform.tool.requiresApproval, action: platform.tool.action, risk: platform.tool.risk, connectorId: platform.provider.id, connectorName: platform.provider.name };
   const conn = listConnectors().find((x) => x.tools.some((t) => t.id === toolId));
@@ -284,8 +318,8 @@ function resolveToolBase(toolId) {
 // actorId is threaded so a nest's own risk rules apply to its members' runs (Cluster W);
 // omitted, it resolves the household's rule, which is the correct default for anything
 // running without a person behind it.
-function resolveTool(toolId, householdId, actorId = null) {
-  const base = resolveToolBase(toolId);
+function resolveTool(toolId, householdId, actorId = null, runCtx = null) {
+  const base = resolveToolBase(toolId, runCtx);
   if (!base || !householdId) return base;
   const ov = getRiskOverride(householdId, toolId, actorId);
   // Always hand back a FRESH object: the agent-policy pass below refines
@@ -299,6 +333,25 @@ function resolveTool(toolId, householdId, actorId = null) {
     risk: ov.riskClass ?? base.risk,
     riskOverridden: true,
   };
+}
+
+/* WHO A NATIVE STEP RUNS AS: the person who asked, with the role recorded when the run
+ * started (sourceRef.actorRole, server-assigned). If that person's standing has changed
+ * since — a promotion or a demotion while the step waited for an adult — the LOWER of the two
+ * roles applies: an approval must never widen what the asker may touch, and a demotion or
+ * removal in between is honoured rather than outlived. A removed member runs as no one. */
+function requesterRole(run) {
+  const stored = typeof run?.sourceRef?.actorRole === "string" ? run.sourceRef.actorRole : null;
+  if (!stored) return null;
+  const member = run.actorId ? getMember(run.actorId) : null;
+  if (member?.archived) return null;
+  const current = member?.role ?? null;
+  if (!current || current === stored) return stored;
+  return roleAtLeast(current, stored) ? stored : current;
+}
+/** The person a native step is FOR, as a session: who asked, as the role above, by name. */
+function requesterSession(run) {
+  return { householdId: run.householdId, actorId: run.actorId, role: requesterRole(run), actorName: getMember(run.actorId)?.displayName ?? null };
 }
 
 // Execute a resolved tool. For gated steps this is called only AFTER the approval
@@ -321,6 +374,29 @@ async function execResolved(resolved, input, ctx, approvalId) {
     // the recipient's per-agent allowlist, and it cannot do that without knowing who
     // is acting — an unattributed send would silently skip that gate.
     return await resolved.def.run({ householdId: ctx.householdId, actorId: ctx.actorId, runId: ctx.runId, agentId: ctx.agentId ?? null }, input);
+  }
+  if (resolved.kind === "native") {
+    /* A native action's body reads the session and the channel (actions/native/*), so its
+     * ctx is rebuilt from the run: the REQUESTER's role (requesterRole above — never the
+     * approver's, so an adult's approval cannot widen what the asker may touch; the body's own
+     * ownership checks still run) and the channel the request came from. A run that recorded
+     * no requester role — anything not queued by the chat lane, e.g. a hand-rolled plan
+     * posted to /api/runs/start, whose sourceRef cannot carry one — is refused rather than
+     * run as nobody in particular. The run's own step timeout is the action's (see _drive). */
+    if (!ctx.role) return { ok: false, error: "no_requester_role", message: "This step can only run for the person who asked for it, and this run doesn't say who that was — nothing was changed." };
+    const session = { householdId: ctx.householdId, actorId: ctx.actorId, role: ctx.role, ...(ctx.actorName ? { actorName: ctx.actorName } : {}) };
+    const channel = ctx.channel ?? "personal";
+    /* A backstop (review finding L4): the chat lane only offers a tool whose available() says
+     * yes for this person here — the helper tools need an adult, outside the group thread — so a
+     * run should never hold one that does not. It is asked again before the step runs, for the
+     * recorded requester and channel, instead of trusting how the step got onto the run. */
+    if (!resolved.def.available({ session, channel, asHelper: false })) {
+      return { ok: false, error: "tool_not_available", message: "That isn't something that can be done for this person from here — nothing was changed." };
+    }
+    return await resolved.def.invoke({
+      householdId: ctx.householdId, actorId: ctx.actorId, role: ctx.role, channel, session,
+      via: "agent", runId: ctx.runId ?? null, agentId: ctx.agentId ?? null, asHelper: false,
+    }, input);
   }
   if (resolved.kind === "provider") {
     if (!externalActionsEnabled(ctx.householdId) && ["Write", "Send", "Download"].includes(resolved.action)) {
@@ -462,43 +538,53 @@ export function gateToolCall({ cap, toolId, agent = null, householdId, actorId =
   return { blocked: false, needsApproval: !!decision.requiresApproval, decision, error: null, message: null };
 }
 
-/* ================= THE NATIVE LANE (ADR-004 Stage 1) =================
+/* ================= THE NATIVE LANE (ADR-004 Stages 1 and 2) =================
  * The famili.* tools the chat loop offers itself (actions/native/*). They are declared
- * actions, but not catalog tools: their bodies read the session and the channel, which
- * execResolved's ctx cannot carry. What they now share with every catalog tool is the gate
- * above, a per-action timeout and the engine's audit row. What the gate can actually do to a
- * native tool in Stage 1 is narrower than "the ladder": a helper's allow/deny lists (rules
- * 2/3) reach it for the first time, and "always ask me" / autoAllow (rules 4 and 6) refuse
- * it, below. Rule 1 cannot fire — a native write is local, and its Google calls ask
- * googleReachAllowed() inside run — and rules 4b and 5 act only on a capability that
- * requires approval by default, which no native tool does until Stage 2.
+ * actions, but not catalog tools: their bodies read the session and the channel, which the
+ * catalog's execResolved ctx does not carry. What they share with every catalog tool is the
+ * gate above, a per-action timeout and the engine's audit row. A helper's allow/deny lists
+ * (rules 2/3) reach them; rule 1 cannot fire — a native write is local, and its Google calls
+ * ask googleReachAllowed() inside run — and rule 5 has nothing to clear.
  *
- * Every native action is requiresApproval:false, so the ladder's verdict is ALLOWED for every
- * stance — with two exceptions an agent can still produce: "always ask me" (rule 4) and an
- * autoAllow listed for a write (rule 6 refuses to relax a high-stakes step, and every Write
- * is high-stakes there). Parking a native write for approval needs the run engine to resolve
- * it, which is Stage 2. Until then such a call is REFUSED, honestly and in words the model can
- * repeat — never executed, never silently dropped.
+ * ONE native call waits for an adult (owner decision C): a WRITE asked for in the family
+ * group thread by someone who is not an adult. For that call alone the capability is gated
+ * (nativeRequiresApproval), policy rule 4b answers NEEDS_APPROVAL (actor.not_adult), and this
+ * function reports it as the catalog path does — { needsApproval: true } — so the chat lane
+ * queues it through the same queueApprovalRun, and the run engine executes it once an adult
+ * approves (resolveToolBase kind "native"). Nothing else parks (owner decision A).
+ *
+ * Every other NEEDS_APPROVAL verdict an agent can still produce for a native tool — "always
+ * ask me" (rule 4), or an autoAllow listed for a write (rule 6 refuses to relax a high-stakes
+ * step, and every Write is high-stakes there) — is REFUSED, honestly and in words the model
+ * can repeat: never executed, never silently dropped, and never queued, because under
+ * decision A no such approval exists.
  *
  * Returns the action's own { ok, result } | { ok:false, error, message } — or, refused by
  * policy, { ok:false, error, message, policyBlocked:true } with the errors
- * executeToolForChat uses. */
-const NATIVE_APPROVAL_LATER = "This helper is set to ask before doing this, and approvals for this tool arrive in a later update — nothing was done.";
+ * executeToolForChat uses — or, for decision C, { ok:false, needsApproval:true, rule }. */
+const NATIVE_NEVER_ASKS = "This helper is set to ask before doing this, and a change like this is never held for approval — nothing was done.";
 export async function runNativeAction({ action, input = {}, session, agent = null, channel = "personal", conversationId = null, asHelper = false, actorIsAdult = null } = {}) {
   const householdId = session?.householdId;
   const actorId = session?.actorId ?? null;
   if (!householdId) return { ok: false, error: "no_session", message: "No household session." };
   const toolId = action.id;
-  const cap = { id: toolId, name: action.name, requiresApproval: false, risk: action.risk, action: action.action, delivers: false, external: false };
+  const cap = { id: toolId, name: action.name, requiresApproval: nativeRequiresApproval(action, { channel, actorIsAdult, role: session.role }), risk: action.risk, action: action.action, delivers: false, external: false };
   const gate = gateToolCall({ cap, toolId, agent, householdId, actorId, conversationId, actorIsAdult });
   if (gate.blocked) return { ok: false, error: gate.error, message: gate.message, policyBlocked: true };
   if (gate.needsApproval) {
-    /* One sentence of our own, not the ladder's reason: rule 6's says "…it still needs you",
-     * promising an ask that Stage 1 cannot make. The row keeps the ladder's reason, the same
-     * shape as every other assistant.tool_blocked row. */
     const rule = gate.decision?.rule ?? "capability.requires_approval";
+    /* Decision C, and only decision C, is queued: the gate was the capability's own (only a
+     * non-adult's group write has one) and the ladder's verdict is rule 4b's — or, with no
+     * acting agent to run a ladder, the capability's own gate. Rule 4 fires before 4b, so a
+     * helper's "always ask me" on the tool is refused below even for a child's call. */
+    if (cap.requiresApproval && (!gate.decision || rule === "actor.not_adult")) {
+      return { ok: false, needsApproval: true, rule };
+    }
+    /* One sentence of our own, not the ladder's reason: rule 6's says "…it still needs you",
+     * promising an ask that decision A means never comes. The row keeps the ladder's reason,
+     * the same shape as every other assistant.tool_blocked row. */
     appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent?.id ?? null, rule, reason: gate.decision?.reason ?? null, householdId, actorId, conversationId });
-    return { ok: false, error: `policy_${rule}`, message: NATIVE_APPROVAL_LATER, policyBlocked: true };
+    return { ok: false, error: `policy_${rule}`, message: NATIVE_NEVER_ASKS, policyBlocked: true };
   }
   const ctx = { householdId, actorId, role: session.role, channel, session, via: "agent", runId: null, agentId: agent?.id ?? null, asHelper: !!asHelper };
   let out;
@@ -589,7 +675,8 @@ export async function startRun({ source = "manual", sourceRef = {}, plan, params
   const runId = "run_" + crypto.randomBytes(10).toString("hex");
   const now = Date.now();
   const steps = (plan?.steps ?? []).map((s, i) => {
-    const resolved = s.toolId ? resolveTool(s.toolId, session?.householdId, session?.actorId ?? null) : null;
+    // sourceRef carries what a queued chat step was judged on; a native step's gate reads it.
+    const resolved = s.toolId ? resolveTool(s.toolId, session?.householdId, session?.actorId ?? null, sourceRef) : null;
     return {
       index: i,
       toolId: s.toolId ?? null,
@@ -798,7 +885,7 @@ async function _drive(runId) {
       continue;
     }
 
-    const resolved = resolveTool(step.toolId, run.householdId, run.actorId ?? null);
+    const resolved = resolveTool(step.toolId, run.householdId, run.actorId ?? null, run.sourceRef);
     if (!resolved) {
       patchRunStep(runId, i, { status: "failed", detail: `Unknown tool: ${step.toolId}`, finishedAt: Date.now() });
       return finishFailed(runId, "unknown_tool");
@@ -858,6 +945,12 @@ async function _drive(runId) {
           agent,
           settings: getSettings(run.householdId),
           override: getRiskOverride(run.householdId, step.toolId, run.actorId ?? null),
+          /* The chat verdict's own input (ADR-004 Stage 2). A step parked under rule 4b — a
+           * non-adult asking in the group thread — used to be re-judged here without it, so a
+           * Trusted or Balanced stance cleared it and it ran with no approval. It is recorded on
+           * the run by queueApprovalRun and is never client-writable; absent, the rule is off,
+           * exactly as before. */
+          actorIsAdult: actorIsAdultOf(run),
         });
         // A BLOCKED verdict is a REFUSAL, and until now nothing read it. `decide()` reports
         // requiresApproval:false for every verdict that isn't NEEDS_APPROVAL, so consuming
@@ -868,6 +961,16 @@ async function _drive(runId) {
         // by isToolStepAllowed; the kill-switch path was not.
         if (decision.decision === BLOCKED) {
           patchRunStep(runId, i, { status: "failed", detail: decision.reason, finishedAt: Date.now() });
+          appendAudit({ type: "run.policy_block", runId, toolId: step.toolId, agentId: agent.id, rule: decision.rule, reason: decision.reason, householdId: run.householdId });
+          return finishFailed(runId, `policy_${decision.rule}`);
+        }
+        /* Owner decision A, held on the run path too: a native step waits for a person only
+         * under rule 4b (decision C — a non-adult's write from the group thread). Any other
+         * ask the ladder produces for one — a helper's "always ask me", an autoAllow it refuses
+         * to relax — is a refusal here exactly as it is in the chat lane (runNativeAction),
+         * never an approval nobody is meant to be asked for. */
+        if (resolved.kind === "native" && decision.requiresApproval && decision.rule !== "actor.not_adult") {
+          patchRunStep(runId, i, { status: "failed", detail: NATIVE_NEVER_ASKS, finishedAt: Date.now() });
           appendAudit({ type: "run.policy_block", runId, toolId: step.toolId, agentId: agent.id, rule: decision.rule, reason: decision.reason, householdId: run.householdId });
           return finishFailed(runId, `policy_${decision.rule}`);
         }
@@ -914,7 +1017,21 @@ async function _drive(runId) {
     // Approval gate — create the approval, park, and return until a human decides.
     if (resolved.requiresApproval) {
       if (!stepNow.approvalId) {
-        const a = createApproval({ actorId: run.actorId, householdId: run.householdId, connectorId: resolved.connectorId, toolId: stepNow.toolId, input: stepNow.input, risk: resolved.risk, category: resolved.action, preview: stepNow.title, visibility: run.visibility });
+        /* Parked because the asker is not an adult (rule 4b, and decision C's native write):
+         * then only an ADULT may answer it. The default approvers for a Low-risk step include
+         * Limited Members — so a child's parked famili.update_task could otherwise be approved
+         * by another child, or by the child who asked (the requester of an approval they can
+         * decide is also the only person its push reaches). */
+        const adultsOnly = actorIsAdultOf(run) === false
+          ? { allowedApproverRoles: defaultApproverRoles(resolved.risk ?? "High").filter(isAdultRole) }
+          : {};
+        /* What the approver reads (Inbox title, Today sheet, push). A step's title is enough
+         * for most tools; a native write's is "Delete a task or list item", so it gets the
+         * server-built line naming the record and who asked (actions/native/shared.mjs). */
+        const preview = resolved.kind === "native"
+          ? approvalPreview(resolved.def, stepNow.input, { session: requesterSession(run), channel: run.sourceRef?.channel ?? "personal" })
+          : stepNow.title;
+        const a = createApproval({ actorId: run.actorId, householdId: run.householdId, connectorId: resolved.connectorId, toolId: stepNow.toolId, input: stepNow.input, risk: resolved.risk, category: resolved.action, preview, visibility: run.visibility, ...adultsOnly });
         patchRunStep(runId, i, { status: "waiting_for_approval", approvalId: a.id });
         patchRun(runId, { status: "waiting_for_approval" });
         appendAudit({ type: "run.await_approval", runId, toolId: stepNow.toolId, approvalId: a.id, householdId: run.householdId });
@@ -969,10 +1086,20 @@ async function _drive(runId) {
 
     let out;
     const t0 = Date.now();
+    // A native step also carries who asked and where (execResolved rebuilds its ctx from
+    // these), and keeps its own declared time limit rather than the step default.
+    const native = resolved.kind === "native";
+    const who = native ? requesterSession(run) : null;
+    const stepCtx = {
+      householdId: run.householdId, actorId: run.actorId, runId, accountId: run.params?.accountId, agentId: run.sourceRef?.agentId ?? null,
+      ...(native ? { role: who.role, channel: run.sourceRef?.channel ?? null, actorName: who.actorName } : {}),
+    };
     try {
-      out = await withTimeout(execResolved(resolved, stepNow.input, { householdId: run.householdId, actorId: run.actorId, runId, accountId: run.params?.accountId, agentId: run.sourceRef?.agentId ?? null }, approvalId), RUN_STEP_TIMEOUT_MS);
+      out = await withTimeout(execResolved(resolved, stepNow.input, stepCtx, approvalId), native ? resolved.def.timeoutMs : RUN_STEP_TIMEOUT_MS);
     } catch (e) {
-      out = { ok: false, error: "timeout", message: String(e?.message ?? e) };
+      // A native body that throws is tool_failed, exactly as runNativeAction records it in the
+      // chat lane; only the timer's own rejection is a timeout. Other kinds keep their word.
+      out = { ok: false, error: native && e?.message !== "step_timeout" ? "tool_failed" : "timeout", message: String(e?.message ?? e) };
     }
     const durationMs = Date.now() - t0;
     // First-class trace fields (P3.2): who acted, which account/connector, the input
@@ -1063,9 +1190,22 @@ const NON_DELIVERY = ["failed", "expired"];
 // streak the way "completed" does — the routine did deliver something), but it is not
 // itself non-delivery, so it never trips the alert on its own.
 const TERMINAL_FOR_STREAK = ["completed", "partially_failed", ...NON_DELIVERY];
+/* A ONE-OFF REQUEST IS NOT AN AUTOMATION (review finding M2). A run a person's chat, text or
+ * group turn queued for an approval carries orchestrate's via label "chat" or "group_chat"; a
+ * helper's own run queues with "agent" (assistant-agent.mjs). The person's runs are attributed
+ * to the household assistant only so the policy ladder applies — so two of them denied or
+ * expired in a row are two answers to two questions, not a routine that keeps failing, and a
+ * child told "An automation keeps not finishing … an approval allowlisted" after an adult said
+ * no was told the wrong thing. Helper, schedule and automation runs are unchanged. */
+const ONE_OFF_VIA = new Set(["chat", "group_chat"]);
 function notifyRepeatedNonDelivery(run, failureClass) {
   if (!run) return;
   try {
+    if (ONE_OFF_VIA.has(run.sourceRef?.via)) return;
+    // Never to a non-adult: the fixes it points at (Agents, connections, allowlists) are an
+    // adult's. A recipient who is not a member at all is left exactly as it was.
+    const to = run.actorId ? getMember(run.actorId) : null;
+    if (to && !isAdultRole(to.role)) return;
     const refId = run.sourceRef?.agentId || run.sourceRef?.automationId || run.sourceRef?.triggerId || null;
     if (!refId) return;
     const siblings = listRuns({ householdId: run.householdId, limit: 50 })

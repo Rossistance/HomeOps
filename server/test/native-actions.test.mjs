@@ -45,7 +45,9 @@ const RISK = {
   "famili.delete_event": "Medium", "famili.delete_task": "Medium", "famili.delete_meal": "Medium", "famili.delete_memory": "Medium",
   "famili.create_helper": "Medium", "famili.update_helper": "Medium", "famili.run_helper": "Medium",
 };
-const ASK_FIRST = "This helper is set to ask before doing this, and approvals for this tool arrive in a later update — nothing was done.";
+// Stage 1 said approvals for these "arrive in a later update"; owner decision A means they
+// never do, so the refusal no longer promises one.
+const ASK_FIRST = "This helper is set to ask before doing this, and a change like this is never held for approval — nothing was done.";
 const menu = ({ role, channel = "personal", asHelper = false }) =>
   NATIVE_ACTIONS.filter((a) => a.available({ session: { role, householdId: "local", actorId: "m-x" }, channel, asHelper })).map((a) => a.id);
 
@@ -208,11 +210,12 @@ test("a DENY-LIST and a non-empty ALLOW-LIST reach a native tool — refused, au
   assert.equal(calls.length, 0, "neither ran");
 });
 
-test("\"ALWAYS ASK ME\" ON A NATIVE TOOL IS REFUSED IN WORDS — Stage 1 cannot park it, and must not run or drop it", async () => {
+test("\"ALWAYS ASK ME\" ON A NATIVE TOOL IS REFUSED IN WORDS — decision A means it is never parked, and it must not run or drop it", async () => {
   /* Every native tool is requiresApproval:false, but the ladder can still answer
    * NEEDS_APPROVAL for one: rule 4 (the helper's alwaysApprove) and rule 6 (an autoAllow on a
-   * write, which it refuses to relax). The run engine cannot resolve a famili.* id until
-   * Stage 2, so queueing it would end as "Unknown tool". It is refused, and says why. */
+   * write, which it refuses to relax). Stage 1 refused it because the run engine could not
+   * yet resolve a famili.* id; since Stage 2 it can, and it is still refused, because owner
+   * decision A says no native write waits for approval except a child's in the group thread. */
   const { a, calls } = spyAction("test.native_ask");
   const out = await runNativeAction({ action: a, input: {}, session, agent: agentWith({ approvalPolicy: { alwaysApprove: ["test.native_ask"] } }) });
   assert.equal(out.ok, false);
@@ -234,21 +237,62 @@ test("\"ALWAYS ASK ME\" ON A NATIVE TOOL IS REFUSED IN WORDS — Stage 1 cannot 
   assert.equal(readCalls.length, 1);
 });
 
-test("STAGE 1, BY DESIGN: a Limited Member in the GROUP thread still deletes their own task at once — rule 4b parks only a gated tool (owner decision C)", async () => {
-  /* Rule 4b parks a non-adult's call only when the capability itself asks for approval, and
-   * no native tool does. So the real famili.delete_task, called as a Limited Member in the
-   * group lane with actorIsAdult:false, runs immediately. Pinned so that changing it is a
-   * decision (ADR-004 decision C), not a side effect. */
+test("STAGE 2 (owner decision C): a Limited Member's native WRITE in the GROUP thread is no longer run — rule 4b holds it for an adult", async () => {
+  /* Stage 1 pinned the opposite on purpose: no native tool asked for approval, so rule 4b had
+   * nothing to park and the real famili.delete_task ran at once. Decision C gates exactly this
+   * call — a native write, the group thread, an asker who is not an adult — so the ladder now
+   * answers NEEDS_APPROVAL under rule 4b, and the runner reports it for the chat lane to queue
+   * (queueApprovalRun), exactly as a gated catalog call. Nothing ran and nothing was refused.
+   * The queued run, its approval and an adult's decision are pinned end to end, through the
+   * real group lane, in group-native-approval.test.mjs. */
   const { putTask, getTask } = await import("../store.mjs");
   putTask({ id: "tk_native_kid", householdId: "local", title: "Feed the fish", status: "todo", createdBy: "m-kid", visibility: "household" });
   const kid = { householdId: "local", actorId: "m-kid", role: "Limited Member" };
   const del = NATIVE_ACTIONS.find((a) => a.id === "famili.delete_task");
   const out = await runNativeAction({ action: del, input: { taskId: "tk_native_kid" }, session: kid, agent: agentWith(), channel: "group", actorIsAdult: false });
-  assert.deepEqual(out, { ok: true, result: { deleted: true, title: "Feed the fish" } });
-  assert.equal(getTask("tk_native_kid") ?? null, null, "gone, with no approval record");
+  assert.deepEqual(out, { ok: false, needsApproval: true, rule: "actor.not_adult" });
+  assert.ok(getTask("tk_native_kid"), "still there — it waits for an adult");
+  assert.equal(lastAudit((r) => r.type === "assistant.tool_blocked" && r.toolId === "famili.delete_task"), undefined, "a park is not a refusal");
+  // The same child, the same call, anywhere but the group thread: immediate (decision A).
+  const app = await runNativeAction({ action: del, input: { taskId: "tk_native_kid" }, session: kid, agent: agentWith(), channel: "personal", actorIsAdult: null });
+  assert.deepEqual(app, { ok: true, result: { deleted: true, title: "Feed the fish" } });
 });
 
-test("with no acting agent the ladder is skipped exactly as executeToolForChat skips it; rule 4b never touches a native tool", async () => {
+test("A READ-ONLY PROFILE in the group is not parked: Child View and Guest/Helper get the body's read_only_profile, as in Stage 1", async () => {
+  /* Review finding L1. The park fired before the body's write check, so these profiles were
+   * queued and then refused by queueApprovalRun ("This profile can't start actions that need
+   * approval.") — a request nobody could ever approve. Only someone who can write at all (a
+   * Limited Member, the bodies' own test) is held for an adult. */
+  const { putTask, getTask } = await import("../store.mjs");
+  const { nativeRequiresApproval } = await import("../engine.mjs");
+  const del = getAction("famili.delete_task");
+  putTask({ id: "tk_native_readonly", householdId: "local", title: "Feed the cat", status: "todo", createdBy: "m-kid", visibility: "household" });
+  for (const role of ["Child View", "Guest/Helper"]) {
+    const who = { householdId: "local", actorId: "m-readonly", role };
+    const out = await runNativeAction({ action: del, input: { taskId: "tk_native_readonly" }, session: who, agent: agentWith(), channel: "group", actorIsAdult: false });
+    assert.deepEqual(out, { ok: false, error: "read_only_profile", message: "This profile can look things up but not change them. Ask a parent or an adult member to do it." }, role);
+    assert.equal(nativeRequiresApproval(del, { channel: "group", actorIsAdult: false, role }), false, `${role}: never gated`);
+  }
+  assert.equal(nativeRequiresApproval(del, { channel: "group", actorIsAdult: false, role: "Limited Member" }), true, "a Limited Member still is");
+  assert.ok(getTask("tk_native_readonly"), "nothing was deleted");
+});
+
+test("ONLY rule 4b queues a native call: \"always ask me\" on a child's group write is still a refusal (decision A), and a read never asks", async () => {
+  /* Rule 4 fires before rule 4b, so a helper's alwaysApprove on the tool refuses even the one
+   * call that would otherwise park — refused in words, never queued. */
+  const { a, calls } = spyAction("test.native_child_always_ask");
+  const kid = { householdId: "local", actorId: "m-kid", role: "Limited Member" };
+  const refused = await runNativeAction({ action: a, input: {}, session: kid, agent: agentWith({ approvalPolicy: { alwaysApprove: ["test.native_child_always_ask"] } }), channel: "group", actorIsAdult: false });
+  assert.equal(refused.needsApproval, undefined, "not queued");
+  assert.equal(refused.error, "policy_agent.always_approve");
+  assert.equal(refused.message, ASK_FIRST);
+  assert.equal(calls.length, 0);
+  const { a: read, calls: readCalls } = spyAction("test.native_child_read", { action: "Read" });
+  assert.equal((await runNativeAction({ action: read, input: {}, session: kid, agent: agentWith(), channel: "group", actorIsAdult: false })).ok, true, "a child's read in the group runs");
+  assert.equal(readCalls.length, 1);
+});
+
+test("with no acting agent the ladder is skipped exactly as executeToolForChat skips it; only a non-adult's group write is gated", async () => {
   const { a, calls } = spyAction("test.native_unattributed");
   assert.equal((await runNativeAction({ action: a, input: {}, session })).ok, true);
   assert.equal(calls[0].ctx.agentId, null);
@@ -259,8 +303,15 @@ test("with no acting agent the ladder is skipped exactly as executeToolForChat s
   for (const requiresApproval of [undefined, null]) {
     assert.equal(gateToolCall({ cap: { id: "x.y", requiresApproval: true }, toolId: "x.y", agent: null, householdId: "local", requiresApproval }).needsApproval, true, String(requiresApproval));
   }
-  // A Limited Member in the group thread: 4b parks only what the capability itself gates.
-  assert.equal((await runNativeAction({ action: a, input: {}, session, agent: agentWith(), channel: "group", actorIsAdult: false })).ok, true);
+  /* Stage 1 asserted here that a write asked as a non-adult in the group thread ran, because no
+   * native tool was gated. Decision C gates exactly that call, so it is held — by rule 4b with
+   * an acting agent, by the capability's own gate without one — and never runs in the turn. */
+  assert.deepEqual(await runNativeAction({ action: a, input: {}, session, agent: agentWith(), channel: "group", actorIsAdult: false }), { ok: false, needsApproval: true, rule: "actor.not_adult" });
+  assert.deepEqual(await runNativeAction({ action: a, input: {}, session, channel: "group", actorIsAdult: false }), { ok: false, needsApproval: true, rule: "capability.requires_approval" });
+  assert.equal(calls.length, 1, "only the unattributed personal call above ran");
+  // …an adult in the group thread, or anyone outside it, is never held (decision A).
+  assert.equal((await runNativeAction({ action: a, input: {}, session, agent: agentWith(), channel: "group", actorIsAdult: true })).ok, true);
+  assert.equal((await runNativeAction({ action: a, input: {}, session, agent: agentWith(), channel: "personal", actorIsAdult: false })).ok, true);
 });
 
 test("the runner's timer is cleared when the tool answers — a finished call leaves nothing ticking", async () => {
@@ -282,6 +333,324 @@ test("a body that hangs is cut at its own timeoutMs; a body that throws is tool_
   const f = await runNativeAction({ action: bad, input: {}, session });
   assert.equal(f.error, "tool_failed");
   assert.match(f.message, /kaput/);
+});
+
+/* ───────────────── the group channel's visibility (Stage 2) ───────────────── */
+
+test("IN THE GROUP THREAD the four deletes answer a private item exactly as a missing one — and outside it nothing changes", async () => {
+  /* famili.delete_event / delete_task / delete_meal had no channel check and delete_memory
+   * ignored the channel, so given an id, an adult in the group thread could delete someone's
+   * private item and echo its title or text into a thread people outside the household read.
+   * An Owner asks here (no park: decision C is about non-adults), about the Owner's OWN private
+   * items — the strongest case: the channel, not the person, is what hides them. */
+  const store = await import("../store.mjs");
+  const owner = { householdId: "local", actorId: "m-alex", role: "Owner" };
+  const call = (id, input, channel) => runNativeAction({ action: getAction(id), input, session: owner, agent: agentWith(), channel, actorIsAdult: channel === "group" ? true : null });
+  const mine = { householdId: "local", createdBy: "m-alex", ownerId: "m-alex", visibility: "private" };
+  store.putEvent({ id: "ev_vis_1", title: "Therapy appointment", startAt: "2030-10-01T15:00:00.000Z", layer: "canonical", ...mine });
+  store.putTask({ id: "tk_vis_1", title: "Refill the prescription", status: "todo", ...mine });
+  store.putMeal({ id: "meal_vis_1", title: "Anniversary dinner", date: "2030-10-02", slot: "dinner", archived: false, ...mine });
+  const mem = store.addMemory({ householdId: "local", scope: "personal", type: "fact", text: "Alex's surprise party is on the 12th", sourceActorId: "m-alex" });
+  const cases = [
+    ["famili.delete_event", { eventId: "ev_vis_1" }, { eventId: "ev_nope" }],
+    ["famili.delete_task", { taskId: "tk_vis_1" }, { taskId: "tk_nope" }],
+    ["famili.delete_meal", { mealId: "meal_vis_1" }, { mealId: "meal_nope" }],
+    ["famili.delete_memory", { memoryId: mem.id }, { memoryId: "mem_nope" }],
+  ];
+  for (const [id, real, missing] of cases) {
+    const hidden = await call(id, real, "group");
+    assert.equal(hidden.ok, false, `${id} refused in the group`);
+    assert.deepEqual(hidden, await call(id, missing, "group"), `${id}: the same code and the same words as a missing id`);
+    assert.equal(JSON.stringify(hidden).match(/Therapy|prescription|Anniversary|surprise/), null, "nothing about the item");
+  }
+  assert.ok(store.getEvent("ev_vis_1") && store.getTask("tk_vis_1") && store.getMeal("meal_vis_1") && store.getMemoryEntry(mem.id), "all four survive");
+  // The controls: the same Owner, the same ids, anywhere but the group thread — as before.
+  for (const [id, real] of cases) assert.equal((await call(id, real, "personal")).ok, true, `${id} still deletes outside the group`);
+  assert.ok(!store.getEvent("ev_vis_1") && !store.getTask("tk_vis_1") && !store.getMemoryEntry(mem.id));
+});
+
+test("…and the two update tools answer the same way in the group — where \"isn't visible\" used to say the item exists — keeping forbidden outside it", async () => {
+  /* Review finding L2. update_event / update_task refused a private item in the group with
+   * forbidden, "That event isn't visible to this person." — which tells the thread there is one.
+   * In the group they now answer exactly as for a missing id; outside it, forbidden as before. */
+  const store = await import("../store.mjs");
+  const owner = { householdId: "local", actorId: "m-alex", role: "Owner" };
+  const update = (id, input, channel) => runNativeAction({ action: getAction(id), input, session: owner, agent: agentWith(), channel, actorIsAdult: channel === "group" ? true : null });
+  store.putEvent({ id: "ev_vis_2", householdId: "local", title: "Private lunch", startAt: "2030-10-03T16:00:00.000Z", layer: "canonical", createdBy: "m-alex", ownerId: "m-alex", visibility: "private" });
+  store.putTask({ id: "tk_vis_2", householdId: "local", title: "Private errand", status: "todo", createdBy: "m-alex", ownerId: "m-alex", visibility: "private" });
+  const ev = await update("famili.update_event", { eventId: "ev_vis_2", notes: "x" }, "group");
+  assert.deepEqual(ev, await update("famili.update_event", { eventId: "ev_nope", notes: "x" }, "group"), "update_event: byte for byte a missing id");
+  assert.equal(ev.error, "event_not_found");
+  const tk = await update("famili.update_task", { taskId: "tk_vis_2", status: "done" }, "group");
+  assert.deepEqual(tk, await update("famili.update_task", { taskId: "tk_nope", status: "done" }, "group"), "update_task: byte for byte a missing id");
+  assert.equal(tk.error, "task_not_found");
+  assert.equal(store.getTask("tk_vis_2").status, "todo");
+  // The control: outside the group an item this person may not see is still `forbidden`.
+  store.putEvent({ id: "ev_vis_3", householdId: "local", title: "Morgan's private lunch", startAt: "2030-10-04T16:00:00.000Z", layer: "canonical", createdBy: "m-morgan", ownerId: "m-morgan", visibility: "private" });
+  store.putTask({ id: "tk_vis_3", householdId: "local", title: "Morgan's private errand", status: "todo", createdBy: "m-morgan", ownerId: "m-morgan", visibility: "private" });
+  assert.deepEqual(await update("famili.update_event", { eventId: "ev_vis_3", notes: "x" }, "personal"), { ok: false, error: "forbidden", message: "That event isn't visible to this person." });
+  assert.deepEqual(await update("famili.update_task", { taskId: "tk_vis_3", status: "done" }, "personal"), { ok: false, error: "forbidden", message: "That task isn't visible to this person." });
+});
+
+describe("IN THE GROUP THREAD a NEST's memory is not there — found, forgotten or named — and outside it nothing changes", () => {
+  /* Review finding M1. The group rules hid PERSONAL memory only; a nest's memory (a third room,
+   * visible to its members and nobody else, not even the Owner) was found by search_memory,
+   * deleted and echoed by delete_memory, and named on the approval a nest child's group request
+   * parked — an approval pushed to every adult and readable in the thread. Tasks and events of a
+   * nest were already hidden there (canSeeEntityInChannel admits household/childVisible only). */
+  let store, memoryProvider, approvalPreview, secret, shared;
+  const adult = { householdId: "local", actorId: "m-nest-adult", role: "Adult Member", actorName: "Gran Harper" };
+  const kid = { householdId: "local", actorId: "m-nest-kid", role: "Limited Member", actorName: "Maya Harper" };
+  const outsider = { householdId: "local", actorId: "m-nest-outsider", role: "Owner", actorName: "Alex Harper" };
+  const call = (id, input, who, channel) => runNativeAction({ action: getAction(id), input, session: who, agent: agentWith(), channel, actorIsAdult: channel === "group" ? true : null });
+  const remember = async (text, scope, extra = {}) => {
+    const rec = store.addMemory({ householdId: "local", scope, type: "fact", text, source: { actorId: "m-nest-adult" }, ...extra });
+    await memoryProvider.add(text, { containerTag: "local", scope, type: "fact", sourceActorId: "m-nest-adult", id: `sm_mem_${rec.id}` });
+    return rec;
+  };
+  before(async () => {
+    store = await import("../store.mjs");
+    ({ memoryProvider } = await import("../memory-provider.mjs"));
+    ({ approvalPreview } = await import("../actions/native/shared.mjs"));
+    for (const m of [adult, kid, outsider]) store.putMember({ actorId: m.actorId, displayName: m.actorName, role: m.role, householdId: "local" });
+    store.putNest({ id: "nest_vis_1", householdId: "local", name: "Gran + Maya", archived: false, createdBy: "m-nest-adult",
+      members: [{ actorId: "m-nest-adult", status: "joined" }, { actorId: "m-nest-kid", status: "joined" }] });
+    secret = await remember("NESTSECRET grandma surprise trip to Paris", "nest", { nestId: "nest_vis_1" });
+    shared = await remember("NESTSECRET is also the name of the household's wifi", "household");
+  });
+
+  test("(a) famili.delete_memory: a nest member's delete in the group answers exactly as a missing id; outside it, it deletes", async () => {
+    const hidden = await call("famili.delete_memory", { memoryId: secret.id }, adult, "group");
+    assert.deepEqual(hidden, await call("famili.delete_memory", { memoryId: "mem_nope" }, adult, "group"), "the same code and the same words as a missing id");
+    assert.equal(JSON.stringify(hidden).includes("Paris"), false, "nothing of the text");
+    assert.ok(store.getMemoryEntry(secret.id), "still there");
+    // The non-group control — kept for the other tests in this block, so on a copy.
+    const copy = store.addMemory({ householdId: "local", scope: "nest", nestId: "nest_vis_1", type: "fact", text: "NESTSECRET copy for the control", source: { actorId: "m-nest-adult" } });
+    const gone = await call("famili.delete_memory", { memoryId: copy.id }, adult, "personal");
+    assert.deepEqual(gone, { ok: true, result: { deleted: true, text: "NESTSECRET copy for the control" } });
+  });
+
+  test("(b) the approval preview names a nest memory's text only outside the group, and only to someone who may forget it", () => {
+    const forget = getAction("famili.delete_memory");
+    assert.equal(approvalPreview(forget, { memoryId: secret.id }, { session: kid, channel: "group" }),
+      "Forget a memory\nAsked by Maya Harper in the family group thread", "a nest child's group request: the action alone");
+    assert.equal(approvalPreview(forget, { memoryId: secret.id }, { session: kid, channel: "personal" }).split("\n")[0],
+      "Forget a memory: “NESTSECRET grandma surprise trip to Paris”", "the control: a nest member outside the group");
+    assert.equal(approvalPreview(forget, { memoryId: secret.id }, { session: outsider, channel: "personal" }).split("\n")[0],
+      "Forget a memory", "never to someone outside the nest — the Owner included");
+    assert.equal(approvalPreview(forget, { memoryId: shared.id }, { session: kid, channel: "group" }).split("\n")[0],
+      "Forget a memory: “NESTSECRET is also the name of the household's wifi”", "a household memory is still named in the group");
+  });
+
+  test("(c) famili.search_memory: a nest member's group search does not find the nest's memory; outside the group it does", async () => {
+    const texts = async (channel) => ((await call("famili.search_memory", { query: "NESTSECRET" }, adult, channel)).result?.memories ?? []).map((m) => m.text);
+    const group = await texts("group");
+    assert.ok(group.includes("NESTSECRET is also the name of the household's wifi"), `the search really ran: ${JSON.stringify(group)}`);
+    assert.equal(group.some((t) => /Paris/.test(t)), false, "the nest's memory is not in the group");
+    assert.ok((await texts("personal")).includes("NESTSECRET grandma surprise trip to Paris"), "the control: found by its nest member elsewhere");
+  });
+
+  test("(d) famili.list_approvals in the group shows only the asker's own requests and the thread's own parks; outside it, all of them", async () => {
+    /* An approval queued outside the thread — here one whose preview names the nest's memory —
+     * is the Inbox's business, not a thread people outside the household read. */
+    const { startRun } = await import("../engine.mjs");
+    const offThread = store.createApproval({ actorId: "m-nest-adult", householdId: "local", connectorId: "homeops", toolId: "famili.delete_memory", input: { memoryId: secret.id }, risk: "Medium", category: "Write", visibility: "household",
+      preview: "Forget a memory: “NESTSECRET grandma surprise trip to Paris”\nAsked by Gran Harper" });
+    store.putTask({ id: "tk_vis_thread", householdId: "local", title: "Rake the leaves", status: "todo", createdBy: "m-nest-kid", visibility: "household" });
+    const parked = await startRun({ source: "assistant", sourceRef: { channel: "group", actorIsAdult: false, actorRole: "Limited Member" }, session: kid, title: "Change a task",
+      plan: { title: "Change a task", steps: [{ toolId: "famili.update_task", title: "Change a task", input: { taskId: "tk_vis_thread", status: "done" } }] } });
+    let run = null;
+    for (let i = 0; i < 100 && run?.status !== "waiting_for_approval"; i++) { await new Promise((r) => setTimeout(r, 20)); run = store.getRun(parked.id); }
+    const inThread = run?.steps?.[0]?.approvalId;
+    assert.ok(inThread, "the thread's own park");
+    const ids = async (who, channel) => ((await call("famili.list_approvals", {}, who, channel)).result?.approvals ?? []).map((a) => a.id);
+    const outsiderGroup = await ids(outsider, "group");
+    assert.ok(outsiderGroup.includes(inThread), "a park the thread itself queued is the thread's to see");
+    assert.equal(outsiderGroup.includes(offThread.id), false, "one queued elsewhere is not — its preview names a nest's memory");
+    assert.ok((await ids(adult, "group")).includes(offThread.id), "…except to the person who asked for it");
+    const outsiderApp = await ids(outsider, "personal");
+    assert.ok(outsiderApp.includes(offThread.id) && outsiderApp.includes(inThread), "the control: outside the group, as before");
+  });
+});
+
+/* ───────────────────── the run engine (Stage 2) ───────────────────── */
+
+describe("the run engine reaches a native action (ADR-004 Stage 2)", () => {
+  /* A step parked for an adult has to be able to run once one approves, so the engine now
+   * resolves a famili.* id (kind "native") and runs it with a ctx rebuilt from the run: the
+   * role recorded when the run started — the REQUESTER's, never the approver's — and the
+   * channel the request came from. These runs are started directly, as the chat lane's
+   * queueApprovalRun → orchestrate would start them, with nothing to approve (a personal
+   * channel), so what is pinned here is the resolution and the ctx, not the park. */
+  let startRun, getRun, putTask, getTask, putMember;
+  const settle = async (id) => {
+    for (let i = 0; i < 100; i++) {
+      const r = getRun(id);
+      if (["completed", "failed", "partially_failed", "waiting_for_approval"].includes(r?.status)) return r;
+      await new Promise((res) => setTimeout(res, 30));
+    }
+    return getRun(id);
+  };
+  const runStep = async (toolId, input, sourceRef, session) => settle((await startRun({
+    source: "assistant", sourceRef, session, title: "Native step",
+    plan: { title: "Native step", steps: [{ toolId, title: "Native step", input }] },
+  })).id);
+  before(async () => {
+    ({ startRun } = await import("../engine.mjs"));
+    ({ getRun, putTask, getTask, putMember } = await import("../store.mjs"));
+    putMember({ actorId: "m-run-owner", displayName: "Run Owner", role: "Owner", householdId: "local" });
+    putMember({ actorId: "m-run-kid", displayName: "Run Kid", role: "Limited Member", householdId: "local" });
+  });
+
+  test("a famili.* id resolves as kind \"native\" — not \"Unknown tool\" — and runs as the requester", async () => {
+    putTask({ id: "tk_run_native_1", householdId: "local", title: "Water the plants", status: "todo", createdBy: "m-run-owner", visibility: "household" });
+    const run = await runStep("famili.delete_task", { taskId: "tk_run_native_1" }, { actorRole: "Owner", channel: "personal" }, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(run.steps[0].attribution, "native", "resolved by the run engine");
+    assert.equal(run.steps[0].requiresApproval, false, "an adult's native write never asks (decision A)");
+    assert.equal(run.status, "completed", JSON.stringify(run.steps[0]));
+    assert.deepEqual(run.steps[0].result, { deleted: true, title: "Water the plants" });
+    assert.equal(getTask("tk_run_native_1") ?? null, null);
+  });
+
+  test("the recorded role is the one that runs: a Limited Member's step cannot delete someone else's task", async () => {
+    putTask({ id: "tk_run_native_2", householdId: "local", title: "Mow the lawn", status: "todo", createdBy: "m-run-owner", visibility: "household" });
+    const run = await runStep("famili.delete_task", { taskId: "tk_run_native_2" }, { actorRole: "Limited Member", channel: "personal" }, { householdId: "local", actorId: "m-run-kid", role: "Limited Member" });
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "forbidden", "the body's own ownership check, as the requester");
+    assert.ok(getTask("tk_run_native_2"), "still there");
+  });
+
+  test("a promotion while a step waits does not widen it — the LOWER of the recorded and current roles runs", async () => {
+    // Recorded as a Limited Member; the member record now says Owner. The step still runs as
+    // the Limited Member it was asked as.
+    putMember({ actorId: "m-run-promoted", displayName: "Run Promoted", role: "Owner", householdId: "local" });
+    putTask({ id: "tk_run_native_3", householdId: "local", title: "Clean the garage", status: "todo", createdBy: "m-run-owner", visibility: "household" });
+    const run = await runStep("famili.delete_task", { taskId: "tk_run_native_3" }, { actorRole: "Limited Member", channel: "personal" }, { householdId: "local", actorId: "m-run-promoted", role: "Limited Member" });
+    assert.equal(run.error, "forbidden");
+    assert.ok(getTask("tk_run_native_3"));
+  });
+
+  /* A child's group write parked, then an adult approves it after the child's standing changed. */
+  const parkThenApprove = async (actorId, taskId, change) => {
+    const { decideApproval } = await import("../store.mjs");
+    const { resumeRun } = await import("../engine.mjs");
+    putMember({ actorId, displayName: actorId, role: "Limited Member", householdId: "local" });
+    putTask({ id: taskId, householdId: "local", title: "Hang up the coats", status: "todo", createdBy: actorId, visibility: "household" });
+    const parked = await runStep("famili.delete_task", { taskId }, { actorRole: "Limited Member", channel: "group", actorIsAdult: false }, { householdId: "local", actorId, role: "Limited Member" });
+    assert.equal(parked.status, "waiting_for_approval");
+    putMember({ actorId, displayName: actorId, role: "Limited Member", householdId: "local", ...change });
+    assert.ok(decideApproval(parked.steps[0].approvalId, { decision: "approve", actorId: "m-run-owner", actorRole: "Owner" }).approval, "an Owner approved it");
+    await resumeRun(parked.id);
+    return getRun(parked.id);
+  };
+
+  test("a DEMOTION while a step waits is honoured: the Owner's yes runs it as the lower role, and the body refuses it as read-only", async () => {
+    const run = await parkThenApprove("m-run-demoted", "tk_run_native_demoted", { role: "Child View" });
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "read_only_profile", JSON.stringify(run.steps[0]));
+    assert.ok(getTask("tk_run_native_demoted"), "nothing was deleted");
+  });
+
+  test("an ARCHIVED requester runs as no one: the Owner's yes ends in no_requester_role", async () => {
+    const run = await parkThenApprove("m-run-archived", "tk_run_native_archived", { archived: true });
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "no_requester_role", JSON.stringify(run.steps[0]));
+    assert.ok(getTask("tk_run_native_archived"), "nothing was deleted");
+  });
+
+  test("THE RUN PATH ASKS available() AGAIN: a helper tool is refused for a non-adult, and for anyone in the group thread", async () => {
+    /* Review finding L4: the chat lane only offers a tool available() to this person here, but
+     * the run path did not ask again before executing. Now it does, for the recorded requester
+     * and channel. famili.list_helpers needs an adult outside the group thread. */
+    const kid = { householdId: "local", actorId: "m-run-kid", role: "Limited Member" };
+    const owner = { householdId: "local", actorId: "m-run-owner", role: "Owner" };
+    const asKid = await runStep("famili.list_helpers", {}, { actorRole: "Limited Member", channel: "personal" }, kid);
+    assert.equal(asKid.status, "failed");
+    assert.equal(asKid.error, "tool_not_available", JSON.stringify(asKid.steps[0]));
+    assert.match(asKid.steps[0].detail, /nothing was changed/);
+    const inGroup = await runStep("famili.list_helpers", {}, { actorRole: "Owner", channel: "group" }, owner);
+    assert.equal(inGroup.error, "tool_not_available", "not in the group thread, even for an Owner");
+    const control = await runStep("famili.list_helpers", {}, { actorRole: "Owner", channel: "personal" }, owner);
+    assert.equal(control.status, "completed", `the control: an Owner outside the group — ${JSON.stringify(control.steps[0])}`);
+  });
+
+  test("a native body that THROWS on the run path is tool_failed, as in the chat lane — not timeout", async () => {
+    /* Review finding L4. famili.list_meals throws a RangeError on an impossible date (a latent
+     * bug in its own `to` default, reported, not fixed here) — which is what makes it a real
+     * throwing body to run. If that is ever fixed, pick another input that throws. */
+    await assert.rejects(getAction("famili.list_meals").invoke({ householdId: "local", session: { householdId: "local", actorId: "m-run-owner", role: "Owner" }, channel: "personal" }, { from: "2026-99-99" }), RangeError, "precondition: the body throws");
+    const run = await runStep("famili.list_meals", { from: "2026-99-99" }, { actorRole: "Owner", channel: "personal" }, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "tool_failed", JSON.stringify(run.steps[0]));
+    assert.match(run.steps[0].detail, /Invalid time value/, "the body's own message");
+  });
+
+  test("a run with NO recorded requester role never runs a native step — it is refused, not run as nobody", async () => {
+    putTask({ id: "tk_run_native_4", householdId: "local", title: "Sort the mail", status: "todo", createdBy: "m-run-owner", visibility: "household" });
+    const run = await runStep("famili.delete_task", { taskId: "tk_run_native_4" }, {}, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(run.steps[0].attribution, "native");
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "no_requester_role");
+    assert.ok(getTask("tk_run_native_4"), "nothing was changed");
+  });
+
+  test("a run recorded as a non-adult's GROUP write parks it for an ADULT — even a Low-risk one a Limited Member could otherwise approve", async () => {
+    const { listApprovals } = await import("../store.mjs");
+    putTask({ id: "tk_run_native_6", householdId: "local", title: "Tidy the shoe rack", status: "todo", createdBy: "m-run-kid", visibility: "household" });
+    const run = await runStep("famili.update_task", { taskId: "tk_run_native_6", status: "done" }, { actorRole: "Limited Member", channel: "group", actorIsAdult: false }, { householdId: "local", actorId: "m-run-kid", role: "Limited Member" });
+    assert.equal(run.steps[0].requiresApproval, true, "decision C, from what the run recorded");
+    assert.equal(run.status, "waiting_for_approval");
+    const appr = listApprovals({ householdId: "local" }).find((a) => a.id === run.steps[0].approvalId);
+    assert.equal(appr?.risk, "Low");
+    assert.deepEqual(appr?.allowedApproverRoles, ["Owner", "Adult Admin", "Adult Member"], "a child's park is answered by an adult — never by a Limited Member, the asker included");
+    assert.equal(getTask("tk_run_native_6").status, "todo", "nothing changed while it waits");
+  });
+
+  test("DECISION A ON THE RUN PATH: a helper's \"always ask me\" on a native step fails it — no approval nobody is meant to be asked for", async () => {
+    const { putAgent, listApprovals } = await import("../store.mjs");
+    putAgent({ id: "agt_run_ask", householdId: "local", name: "Asker", status: "Active", enabled: true, visibility: "household", allowedToolIds: [], deniedToolIds: [], approvalPolicy: { alwaysApprove: ["famili.delete_task"] } });
+    putTask({ id: "tk_run_native_7", householdId: "local", title: "Fold the towels", status: "todo", createdBy: "m-run-owner", visibility: "household" });
+    const before = listApprovals({ householdId: "local" }).length;
+    const run = await runStep("famili.delete_task", { taskId: "tk_run_native_7" }, { agentId: "agt_run_ask", actorRole: "Owner", channel: "personal" }, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(run.status, "failed");
+    assert.equal(run.error, "policy_agent.always_approve");
+    assert.equal(run.steps[0].detail, ASK_FIRST);
+    assert.equal(listApprovals({ householdId: "local" }).length, before, "no approval was created");
+    assert.ok(getTask("tk_run_native_7"));
+  });
+
+  test("\"AN AUTOMATION KEEPS NOT FINISHING\": a helper's run still raises it; a person's one-off request never does, and it never reaches a non-adult", async () => {
+    /* Review finding M2. Two failed or expired runs in a row from the same agent raise an in-app
+     * alert to the run's actor. Every run a person's chat or group turn queues is attributed to
+     * the household assistant, so a child whose two group requests an adult turned down was told
+     * an automation keeps not finishing and to check Agents. A helper's own runs (via "agent") —
+     * what the alert is for — keep it exactly as before. */
+    const { putAgent, listNotifications } = await import("../store.mjs");
+    const helper = (id) => putAgent({ id, householdId: "local", name: id, status: "Active", enabled: true, visibility: "household", allowedToolIds: [], deniedToolIds: [], approvalPolicy: {} });
+    helper("agt_household"); helper("agt_alert_helper"); helper("agt_alert_kid_helper");
+    const alerts = (actorId) => listNotifications((n) => n.actorId === actorId && n.title === "An automation keeps not finishing");
+    const failTwice = async (sourceRef, session) => {
+      for (let i = 0; i < 2; i++) assert.equal((await runStep("famili.delete_task", { taskId: "tk_alert_missing" }, sourceRef, session)).error, "task_not_found");
+    };
+    const owner = { householdId: "local", actorId: "m-run-owner", role: "Owner" };
+    await failTwice({ via: "agent", agentId: "agt_alert_helper", actorRole: "Owner", channel: "personal" }, owner);
+    assert.equal(alerts("m-run-owner").length, 1, "a helper's run failing twice still raises it — unchanged");
+    assert.match(alerts("m-run-owner")[0].body, /hasn't delivered twice in a row/);
+    await failTwice({ via: "chat", agentId: "agt_household", actorRole: "Owner", channel: "personal" }, owner);
+    await failTwice({ via: "group_chat", agentId: "agt_household", actorRole: "Owner", channel: "group" }, owner);
+    assert.equal(alerts("m-run-owner").length, 1, "a person's one-off requests — app, text or group — never do");
+    await failTwice({ via: "agent", agentId: "agt_alert_kid_helper", actorRole: "Limited Member", channel: "personal" }, { householdId: "local", actorId: "m-run-kid", role: "Limited Member" });
+    assert.equal(alerts("m-run-kid").length, 0, "and it never reaches a non-adult");
+  });
+
+  test("a native READ resolves and runs too, with the channel the run recorded", async () => {
+    putTask({ id: "tk_run_native_5", householdId: "local", title: "Private journal time", status: "todo", createdBy: "m-run-owner", visibility: "private" });
+    const personal = await runStep("famili.list_tasks", { query: "journal" }, { actorRole: "Owner", channel: "personal" }, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(personal.status, "completed");
+    assert.equal(personal.steps[0].result.count, 1, "the owner sees their private task in a personal run");
+    const group = await runStep("famili.list_tasks", { query: "journal" }, { actorRole: "Owner", channel: "group" }, { householdId: "local", actorId: "m-run-owner", role: "Owner" });
+    assert.equal(group.steps[0].result.count, 0, "and not in a run recorded as the group thread's");
+  });
 });
 
 /* ───────────────────── through the real chat route ───────────────────── */

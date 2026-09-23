@@ -3,11 +3,13 @@
 // the model's input hints, the compact projections a model reads, the range helpers, the
 // read-only refusal, and the per-turn scope every body derives from its ctx.
 //
-// A LEAF, like the registry that imports these files: store, auth and nothing that reaches
-// context.mjs, internal-functions.mjs or assistant-agent.mjs. assistant-agent.mjs imports
+// A LEAF, like the registry that imports these files: store, auth, nests (which reaches only
+// the store) and nothing that reaches context.mjs, internal-functions.mjs or
+// assistant-agent.mjs. assistant-agent.mjs imports
 // KEY_HINTS and short() back from here.
-import { listMembers, canSeeEntityInChannel } from "../../store.mjs";
+import { listMembers, canSeeEntityInChannel, getEvent, getTask, getMeal, getMemoryEntry, getSettings } from "../../store.mjs";
 import { roleAtLeast } from "../../auth.mjs";
+import { canForgetMemory } from "../../nests.mjs";
 
 /* The model's input hints by key name. The catalog's hand-written tools get their types and
  * meaning from this table (assistant-agent.mjs propFor), and the native schemas embed the
@@ -144,3 +146,88 @@ export const managesHelpers = ({ session, channel, asHelper }) =>
 
 /** A result that embeds a projection (publicEvent / publicTask / a helper view). */
 export const PROJECTION = { type: "object", additionalProperties: true };
+
+/* WHAT AN ADULT READS BEFORE SAYING YES (ADR-004 Stage 2). A parked native write reaches the
+ * Inbox, the Today sheet and a push notification as its approval's `preview`, which for every
+ * other step is the step's title — for a native one, "Delete a task or list item", which says
+ * nothing about WHICH task or who wants it gone. This is the line an approver needs instead,
+ * built on the server from the action, the record it names and the person who asked:
+ *
+ *   Delete a task: Take out the trash
+ *   Asked by Maya Harper in the family group thread
+ *
+ * The first line is the headline every surface shows; the second is context. A record is
+ * named only if the asker could see it where they asked: the approval reaches every adult, so
+ * someone's private item must not ride along on it by title. Otherwise the line names the
+ * action alone, and the body refuses the id when it runs. */
+function whenText(stamp, timeZone) {
+  const s = String(stamp ?? "");
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(s);
+  const d = new Date(dateOnly ? `${s}T12:00:00Z` : s);
+  if (!s || Number.isNaN(+d)) return s;
+  try {
+    return d.toLocaleString("en-US", dateOnly
+      ? { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" }
+      : { ...(timeZone ? { timeZone } : {}), weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  } catch { return s; }
+}
+const quoted = (v) => `“${short(String(v ?? ""), 60)}”`;
+const changes = (list) => (list.length ? ` → ${list.join(", ")}` : "");
+const visibleThere = (rec, session, channel) => canSeeEntityInChannel(rec, session, channel);
+const APPROVAL_LINES = {
+  "famili.delete_task": { verb: "Delete a task", get: (i) => getTask(String(i.taskId ?? "")), visible: visibleThere, what: (t) => t.title },
+  "famili.delete_event": { verb: "Delete an event", get: (i) => getEvent(String(i.eventId ?? "")), visible: visibleThere, what: (e) => e.title },
+  "famili.delete_meal": { verb: "Remove a meal", get: (i) => getMeal(String(i.mealId ?? "")), visible: (m, s, c) => !m.archived && visibleThere(m, s, c), what: (m) => m.title },
+  "famili.delete_memory": {
+    verb: "Forget a memory",
+    get: (i) => getMemoryEntry(String(i.memoryId ?? "").replace(/^sm_mem_/, "")),
+    /* Named only if the asker may forget it (the delete's own rule, canForgetMemory) and, in
+     * the group thread, only a HOUSEHOLD memory — famili.search_memory and delete_memory's rule
+     * there. A nest's memory is not the household's: its text must not reach every adult, and
+     * people outside the household, on an approval and its push. */
+    visible: (m, s, c) => canForgetMemory(m, s) && (c !== "group" || m.scope === "household"),
+    what: (m) => quoted(m.text),
+  },
+  "famili.update_task": {
+    verb: "Change a task", get: (i) => getTask(String(i.taskId ?? "")), visible: visibleThere,
+    what: (t, i, hh, tz) => `${t.title}${changes([
+      ...(i.title ? [`renamed ${quoted(i.title)}`] : []),
+      ...(i.status === "done" ? ["done"] : i.status === "todo" ? ["reopened"] : i.status === "in_progress" ? ["in progress"] : []),
+      ...(i.dueAt ? [`due ${whenText(i.dueAt, tz)}`] : []),
+      ...(i.assignedMemberId ? [`for ${memberName(hh, i.assignedMemberId)}`] : []),
+      ...(i.priority ? [`${i.priority} priority`] : []),
+      ...(i.listName ? [`on ${i.listName}`] : []),
+      ...(i.remindMinutesBefore != null ? ["reminder"] : []),
+      ...(i.notes ? ["notes"] : []),
+    ])}`,
+  },
+  "famili.update_event": {
+    verb: "Change an event", get: (i) => getEvent(String(i.eventId ?? "")), visible: visibleThere,
+    what: (e, i, hh, tz) => `${e.title}${changes([
+      ...(i.startAt ? [whenText(i.startAt, tz)] : []),
+      ...(i.endAt && !i.startAt ? [`ends ${whenText(i.endAt, tz)}`] : []),
+      ...(i.title ? [`renamed ${quoted(i.title)}`] : []),
+      ...(i.status === "cancelled" ? ["cancelled"] : i.status === "confirmed" ? ["confirmed"] : []),
+      ...(i.location ? [`at ${i.location}`] : []),
+      ...(i.allDay === true ? ["all day"] : []),
+      ...(i.driverId ? [`driver ${memberName(hh, i.driverId)}`] : []),
+      ...(Array.isArray(i.participantIds) && i.participantIds.length ? ["who's going"] : []),
+      ...(i.notes ? ["notes"] : []),
+    ])}`,
+  },
+};
+export function approvalPreview(action, input = {}, { session = {}, channel = "personal" } = {}) {
+  const hh = session?.householdId;
+  const i = input && typeof input === "object" ? input : {};
+  const spec = APPROVAL_LINES[action?.id];
+  let head = action?.name ?? "A change";
+  if (spec) {
+    const rec = spec.get(i);
+    const named = rec && rec.householdId === hh && spec.visible(rec, session, channel);
+    let tz = null;
+    try { tz = getSettings(hh).timezone || null; } catch { /* the stamp is still shown, unzoned */ }
+    head = named ? `${spec.verb}: ${spec.what(rec, i, hh, tz)}` : spec.verb;
+  }
+  const who = session?.actorName || memberName(hh, session?.actorId) || "someone in the household";
+  return `${head}\nAsked by ${who}${channel === "group" ? " in the family group thread" : ""}`;
+}

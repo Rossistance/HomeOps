@@ -29,6 +29,7 @@ import { getAction, NATIVE_ACTIONS } from "./actions/registry.mjs";
 import { KEY_HINTS, short } from "./actions/native/shared.mjs";
 import { splitList } from "./actions/define-action.mjs";
 import { orchestrate } from "./orchestrator.mjs";
+import { nothingHappened } from "./assistant-runs.mjs";
 import {
   getRun, isAdultRole,
   recordAiUsage, aiBudgetExhausted, getSettings, appendAudit,
@@ -183,6 +184,27 @@ function buildToolSet(ctx) {
     return call;
   };
 
+  /* A call the policy says a person must sign off on becomes a durable run parked for one —
+   * ONE path for a catalog tool and for the one native call that asks (a non-adult's write in
+   * the group thread, ADR-004 decision C): the same queueApprovalRun, the same receipts
+   * (awaiting_approval, or blocked on a connection) and the same sentence to the model. The
+   * run is handed what this turn judged the call on, so it re-judges it the same way. A
+   * helper's own run (asHelper) queues as orchestrate's "agent" — a helper acting — not "chat",
+   * a person's one-off request: the engine's "an automation keeps not finishing" alert is for
+   * the first and never the second (engine.mjs notifyRepeatedNonDelivery). */
+  const queueForApproval = async (entry, { toolId, input, title, actorIsAdult }) => {
+    const q = await queueApprovalRun({ toolId, input, title, session, conversationId, goal: message, visibility, agentId: agent?.id ?? null, channel: ctx.channel, actorIsAdult, via: ctx.asHelper ? "agent" : "chat" });
+    if (!q.ok) { record(entry, "failed", { ok: false, summary: q.message ?? q.error }); return { ok: false, error: q.error, message: q.message }; }
+    if (q.status === "completed") { record(entry, "done", { ok: true, summary: summarizeForCard(toolId, q.result), runId: q.runId }); return { ok: true, result: boundResult(q.result), runId: q.runId }; }
+    if (!ctx.firstRunId) ctx.firstRunId = q.runId;
+    ctx.runIds.push(q.runId);
+    const waiting = q.status === "waiting_for_connector";
+    record(entry, waiting ? "blocked" : "awaiting_approval", { ok: false, summary: waiting ? "Needs a connection first" : "Waiting for approval", runId: q.runId, approvalId: q.approvalId ?? undefined });
+    return waiting
+      ? { ok: false, status: "waiting_for_connector", runId: q.runId, message: "This step is parked until the service it needs is connected in Connections. Nothing was sent." }
+      : { ok: false, status: "awaiting_approval", runId: q.runId, approvalId: q.approvalId, message: `Queued for the family's approval (run ${q.runId}). Nothing has been sent or changed yet — an approver will see it in Approvals. Tell the person this is waiting on their approval; do not retry the call.` };
+  };
+
   for (const t of catalog) {
     if (!permittedIds.has(t.toolId)) continue;
     if (!t.connected) { if (t.connectorName) notConnected.push(`${t.connectorName} (${t.name})`); continue; }
@@ -201,26 +223,15 @@ function buildToolSet(ctx) {
          * household did not hand a session to. In the group thread a Limited Member's
          * consequential call is drafted and parked for an adult (policy.mjs rule 4b) rather
          * than executed. `null` everywhere else leaves the ladder exactly as it was. */
+        const actorIsAdult = ctx.channel === "group" ? isAdultRole(session.role) : null;
         const out = await executeToolForChat({
-          toolId: t.toolId, input, session, agent, conversationId,
-          actorIsAdult: ctx.channel === "group" ? isAdultRole(session.role) : null,
+          toolId: t.toolId, input, session, agent, conversationId, actorIsAdult,
         });
         if (out.ok) {
           record(entry, "done", { summary: summarizeForCard(t.toolId, out.result), ok: true });
           return { ok: true, result: boundResult(out.result) };
         }
-        if (out.needsApproval) {
-          const q = await queueApprovalRun({ toolId: t.toolId, input, title: t.name, session, conversationId, goal: message, visibility });
-          if (!q.ok) { record(entry, "failed", { ok: false, summary: q.message ?? q.error }); return { ok: false, error: q.error, message: q.message }; }
-          if (q.status === "completed") { record(entry, "done", { ok: true, summary: summarizeForCard(t.toolId, q.result), runId: q.runId }); return { ok: true, result: boundResult(q.result), runId: q.runId }; }
-          if (!ctx.firstRunId) ctx.firstRunId = q.runId;
-          ctx.runIds.push(q.runId);
-          const waiting = q.status === "waiting_for_connector";
-          record(entry, waiting ? "blocked" : "awaiting_approval", { ok: false, summary: waiting ? "Needs a connection first" : "Waiting for approval", runId: q.runId, approvalId: q.approvalId ?? undefined });
-          return waiting
-            ? { ok: false, status: "waiting_for_connector", runId: q.runId, message: "This step is parked until the service it needs is connected in Connections. Nothing was sent." }
-            : { ok: false, status: "awaiting_approval", runId: q.runId, approvalId: q.approvalId, message: `Queued for the family's approval (run ${q.runId}). Nothing has been sent or changed yet — an approver will see it in Approvals. Tell the person this is waiting on their approval; do not retry the call.` };
-        }
+        if (out.needsApproval) return queueForApproval(entry, { toolId: t.toolId, input, title: t.name, actorIsAdult });
         record(entry, out.policyBlocked ? "blocked" : "failed", { ok: false, summary: out.message ?? out.error });
         return { ok: false, error: out.error, message: out.message, ...(out.needsSetup ? { needsSetup: out.needsSetup } : {}) };
       },
@@ -237,11 +248,14 @@ function buildToolSet(ctx) {
       execute: async (rawInput) => {
         const input = coerceInput(rawInput, action.input);
         ctx.onToolStart?.(entry);
+        const actorIsAdult = ctx.channel === "group" ? isAdultRole(session.role) : null;
         const out = await runNativeAction({
-          action, input, session, agent, channel: ctx.channel, conversationId, asHelper: !!ctx.asHelper,
-          actorIsAdult: ctx.channel === "group" ? isAdultRole(session.role) : null,
+          action, input, session, agent, channel: ctx.channel, conversationId, asHelper: !!ctx.asHelper, actorIsAdult,
         });
         if (out?.ok) { record(entry, "done", { ok: true, summary: summarizeForCard(action.id, out.result) }); return { ok: true, result: boundResult(out.result) }; }
+        // Decision C: a non-adult's write in the group thread waits for an adult, exactly as a
+        // gated catalog call does. Every other native refusal stays a refusal (decision A).
+        if (out?.needsApproval) return queueForApproval(entry, { toolId: action.id, input, title: action.name, actorIsAdult });
         record(entry, out?.policyBlocked ? "blocked" : "failed", { ok: false, summary: out?.message ?? out?.error });
         return { ok: false, error: out?.error ?? "tool_failed", message: out?.message ?? "The tool failed." };
       },
@@ -262,16 +276,28 @@ function buildToolSet(ctx) {
  *
  *  The 5s poll below belongs on a REQUEST path, never inside a swept pass: it is bounded
  *  and it is why a caller can name the approval in its reply, but it would hold a sweep
- *  that has no reentrancy protection of its own. */
+ *  that has no reentrancy protection of its own.
+ *
+ *  THE RUN RE-JUDGES THE STEP, so it is handed what the chat judged it on (ADR-004 Stage 2):
+ *  the helper that evaluated it (`agentId`), the channel, and whether the asker is an adult —
+ *  plus the asker's role, which a native step runs as. Without them the run re-derived the
+ *  verdict from less: a Limited Member's step parked under rule 4b in the group thread was
+ *  re-judged with no `actorIsAdult`, cleared by a Trusted stance, and executed with no
+ *  approval while this function reported it "completed"; and a helper's step was re-judged as
+ *  the household assistant, whose lists and dials are not the helper's. A caller that passes
+ *  none of them (the group listener's own proposals) gets the household assistant and no
+ *  recorded channel, exactly as before. */
 export async function queueApprovalRun({
   toolId, input, title, session, conversationId, goal, visibility,
   source = "assistant", via = "chat", summaryPrefix = "Asked in chat",
+  agentId = null, channel = null, actorIsAdult = null,
 }) {
   if (!roleAtLeast(session.role, "Limited Member")) return { ok: false, error: "insufficient_role", message: "This profile can't start actions that need approval." };
   let r;
   try {
     r = await orchestrate({
       source, via, session, conversationId, goal, visibility,
+      agentId, channel, actorIsAdult, actorRole: session.role ?? null,
       plan: { title, summary: `${summaryPrefix}: ${String(goal).slice(0, 140)}`, steps: [{ toolId, title, detail: String(goal).slice(0, 240), input, requiresApproval: true }] },
     });
   } catch (e) { return { ok: false, error: "run_failed", message: String(e?.message ?? e) }; }
@@ -468,7 +494,8 @@ export async function runAssistantAgent({ message, context, session, providerId,
       const failed = ctx.toolCalls.filter((c) => c.status === "failed" || c.status === "blocked");
       const lines = [];
       if (done.length) lines.push(`Done: ${done.map((c) => `${c.label}${c.summary ? ` (${short(c.summary, 60)})` : ""}`).join(", ")}.`);
-      if (waiting.length) lines.push(`Waiting for your approval: ${waiting.map((c) => c.label).join(", ")} — nothing has been sent yet.`);
+      // "sent" or "changed", decided where the parked copy is (assistant-runs.mjs nothingHappened).
+      if (waiting.length) lines.push(`Waiting for your approval: ${waiting.map((c) => c.label).join(", ")} — ${nothingHappened(waiting.map((c) => c.tool))}.`);
       if (failed.length) lines.push(`Couldn't finish: ${failed.map((c) => `${c.label} (${short(c.summary ?? "", 80)})`).join("; ")}.`);
       /* The provider's own words are NOT put in front of a family. Groq's gpt-oss models
        * refuse the turn after a tool result with "'messages.2' : property 'reasoning' ...",

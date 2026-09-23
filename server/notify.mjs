@@ -106,7 +106,12 @@ export async function pushApprovalNotification(approval) {
   try {
     const tokens = approvalPushTokens(approval);
     if (!tokens.length) return { ok: false, reason: "no_tokens" };
-    const body = `${approval.toolId ?? "Action"}${approval.preview ? " — " + String(approval.preview).slice(0, 80) : ""}`;
+    /* The approval's own words lead, for every tool: its preview's lines ("Delete a task: Take
+     * out the trash — Asked by Maya Harper in the family group thread"), and the tool's id only
+     * when there is no preview. The body used to open with the raw dotted id, which is not
+     * something a family can decide on from a lock screen. */
+    const lines = String(approval.preview ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+    const body = lines.length ? lines.join(" — ").slice(0, 160) : String(approval.toolId ?? "Action");
     const r = await expoPush(tokens.map((to) => ({ to, title: "Approval needed", body, data: { type: "approval", id: approval.id }, sound: "default", badge: 1 })));
     if (!r.ok) return { ok: false, reason: r.reason };
     const { delivered, rejected } = judgeTickets(tokens, r.tickets, { householdId: approval.householdId ?? "local", purpose: "approval" });

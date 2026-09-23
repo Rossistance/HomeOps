@@ -10,7 +10,7 @@ import { api, type ApprovalRec } from "@/lib/api";
 import { useTheme, riskColor } from "@/theme";
 import { T, Badge, Button, Well, SymTile, PressableScale, HSheet, useConfirmFlash } from "@/components/ui";
 
-function humanizeTool(toolId: string): string {
+export function humanizeTool(toolId: string): string {
   const last = toolId.split(".").pop() ?? toolId;
   return last.replace(/[_-]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
 }

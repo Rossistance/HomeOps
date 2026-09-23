@@ -23,7 +23,16 @@
 // into "the caller picks their own identity", which is not an allowlist at all.
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { startServer, stopServer, makeSession } from "./harness.mjs";
+
+/* The two LAYER tests below load the store in THIS process, so it gets a throwaway dir of its
+ * own before it first loads, removed on exit. The spawned server always has its own. */
+const LAYER_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "familios-laundering-"));
+process.env.HOMEOPS_DATA_DIR = LAYER_DIR;
+process.on("exit", () => { try { fs.rmSync(LAYER_DIR, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 let ctx, owner, kid, helper;
 
@@ -110,6 +119,78 @@ test("SOURCEREF: every authority-bearing field is stripped, not just agentId", a
   // names exactly the four fields the server reads to decide what a run MAY DO.
   assert.equal(run.sourceRef.conversationId, "conv_keepme", "correlation metadata is not authority");
   assert.equal(run.sourceRef.isRepair, true);
+});
+
+test("SOURCEREF (ADR-004 Stage 2): what a queued chat step was JUDGED ON is server-assigned too", async () => {
+  /* channel, actorIsAdult and actorRole decide whether policy rule 4b applies when a run
+   * re-judges a parked step, whether a native write waits for an adult, and the role a native
+   * step runs as. A body that could set them could clear a child's park (actorIsAdult:true) or
+   * run a native step as an Owner, so they are stripped with the other four. */
+  const r = await owner.req("/api/runs/start", {
+    method: "POST",
+    body: JSON.stringify({
+      plan: { title: "TG-verdict", summary: "", steps: [{ toolId: "homeops.write_memory", title: "Note", detail: "", input: { text: "TG verdict forgery probe", scope: "household" } }] },
+      sourceRef: { channel: "personal", actorIsAdult: true, actorRole: "Owner", conversationId: "conv_keepme_2" },
+    }),
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const run = await waitTerminal(owner, r.data.run.id, ["waiting_for_approval", "waiting_for_connector"]);
+  for (const field of ["channel", "actorIsAdult", "actorRole"]) {
+    assert.ok(run.sourceRef?.[field] == null, `${field} must not survive from a request body: ${JSON.stringify(run.sourceRef)}`);
+  }
+  assert.equal(run.sourceRef.conversationId, "conv_keepme_2", "and the correlation field beside them still does");
+});
+
+/* THE TWO LAYERS, EACH ON ITS OWN (review finding L3d). The route test above cannot tell which
+ * layer did the work: the route strips a body's sourceRef (clientSourceRef) AND orchestrate
+ * drops the verdict inputs from any caller's sourceRef, so removing either one alone left it
+ * green. Each is pinned here without the other, in-process. */
+test("LAYER 1 — clientSourceRef strips every authority-bearing field from a body, and keeps the correlation fields", async () => {
+  const { clientSourceRef } = await import("../orchestrator.mjs");
+  const forged = {
+    agentId: "agt_x", skillId: "skl_x", triggerId: "trg_x", automationId: "aut_x",
+    channel: "personal", actorIsAdult: true, actorRole: "Owner",
+    conversationId: "conv_1", via: "chat", isRepair: true, repairedFrom: "run_0",
+  };
+  assert.deepEqual(clientSourceRef(forged), { conversationId: "conv_1", via: "chat", isRepair: true, repairedFrom: "run_0" });
+  assert.deepEqual(forged.actorRole, "Owner", "the caller's object is not mutated");
+  for (const bad of [null, undefined, "agt_x", 7]) assert.deepEqual(clientSourceRef(bad), {}, String(bad));
+});
+
+test("LAYER 2 — orchestrate drops the verdict inputs from ANY caller's sourceRef, and sets them only from its own parameters", async () => {
+  const { orchestrate } = await import("../orchestrator.mjs");
+  const session = { householdId: "local", actorId: "m-layer2", role: "Owner" };
+  const plan = { title: "Layer 2", steps: [] };
+  const forged = await orchestrate({ source: "manual", via: "manual", session, plan, sourceRef: { channel: "personal", actorIsAdult: true, actorRole: "Owner", conversationId: "conv_2" } });
+  for (const field of ["channel", "actorIsAdult", "actorRole"]) {
+    assert.equal(forged.run.sourceRef[field], undefined, `${field} from a caller's sourceRef is dropped: ${JSON.stringify(forged.run.sourceRef)}`);
+  }
+  assert.equal(forged.run.sourceRef.conversationId, "conv_2", "correlation survives");
+  const stamped = await orchestrate({ source: "manual", via: "manual", session, plan, sourceRef: { actorIsAdult: true, actorRole: "Owner" }, channel: "group", actorIsAdult: false, actorRole: "Limited Member" });
+  assert.deepEqual({ channel: stamped.run.sourceRef.channel, actorIsAdult: stamped.run.sourceRef.actorIsAdult, actorRole: stamped.run.sourceRef.actorRole },
+    { channel: "group", actorIsAdult: false, actorRole: "Limited Member" }, "only the server's own parameters set them — the caller's copy never wins");
+});
+
+test("…and a hand-rolled plan naming a NATIVE write cannot buy a role with them: it runs as no one, so it does not run", async () => {
+  /* The run engine resolves famili.* ids now (a step parked for an adult has to run once one
+   * approves), and a native step runs as the role its run recorded. A forged actorRole is
+   * stripped, so this run records none — and a native step with no requester is refused
+   * before its body is reached. */
+  const made = await owner.req("/api/tasks", { method: "POST", body: JSON.stringify({ title: "TG native forgery target" }) });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  const r = await owner.req("/api/runs/start", {
+    method: "POST",
+    body: JSON.stringify({
+      plan: { title: "TG-native", summary: "", steps: [{ toolId: "famili.delete_task", title: "Delete", detail: "", input: { taskId: made.data.task.id } }] },
+      sourceRef: { actorRole: "Owner", channel: "personal", actorIsAdult: true },
+    }),
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const run = await waitTerminal(owner, r.data.run.id, ["waiting_for_approval"]);
+  assert.equal(run.steps[0].attribution, "native", "resolved — the engine knows the id");
+  assert.equal(run.status, "failed");
+  assert.equal(run.error, "no_requester_role", JSON.stringify(run.steps[0]));
+  assert.ok((await owner.req("/api/tasks")).data.tasks.some((t) => t.id === made.data.task.id), "and the task is still there");
 });
 
 test("a member with no standing cannot launder the Owner's grant into a run of their own", async () => {
