@@ -5221,12 +5221,16 @@ function mayWriteAgent(session, agent, nextVisibility) {
 // Only the AUTHORITY-BEARING fields are stripped. The rest of sourceRef is benign
 // correlation metadata (conversationId, isRepair, repairedFrom, via …) that the chat
 // layer legitimately sets and depends on, so a blanket allow-list would break it.
-// These four are exactly the fields the server reads to decide what a run MAY DO:
+// These are exactly the fields the server reads to decide what a run MAY DO:
 //   agentId      → whose tool policy applies, and (WP-005) whose send consent applies
 //   skillId      → attribution the policy path and save-offer gating key off
 //   triggerId    → which automation's status this run writes back to
 //   automationId → the same, on the legacy field name
-const SERVER_ASSIGNED_SOURCEREF = ["agentId", "skillId", "triggerId", "automationId"];
+//   channel, actorIsAdult, actorRole → what a queued chat step was judged on (ADR-004
+//                  Stage 2): whether policy rule 4b applies in the run, whether a native
+//                  write is held for an adult, and the role a native step runs as. A body
+//                  that could set them could clear its own park or run as an Owner.
+const SERVER_ASSIGNED_SOURCEREF = ["agentId", "skillId", "triggerId", "automationId", "channel", "actorIsAdult", "actorRole"];
 function clientSourceRef(raw) {
   if (!raw || typeof raw !== "object") return {};
   const out = { ...raw };

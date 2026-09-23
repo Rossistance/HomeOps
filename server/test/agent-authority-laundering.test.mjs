@@ -112,6 +112,26 @@ test("SOURCEREF: every authority-bearing field is stripped, not just agentId", a
   assert.equal(run.sourceRef.isRepair, true);
 });
 
+test("SOURCEREF (ADR-004 Stage 2): what a queued chat step was JUDGED ON is server-assigned too", async () => {
+  /* channel, actorIsAdult and actorRole decide whether policy rule 4b applies when a run
+   * re-judges a parked step, whether a native write waits for an adult, and the role a native
+   * step runs as. A body that could set them could clear a child's park (actorIsAdult:true) or
+   * run a native step as an Owner, so they are stripped with the other four. */
+  const r = await owner.req("/api/runs/start", {
+    method: "POST",
+    body: JSON.stringify({
+      plan: { title: "TG-verdict", summary: "", steps: [{ toolId: "homeops.write_memory", title: "Note", detail: "", input: { text: "TG verdict forgery probe", scope: "household" } }] },
+      sourceRef: { channel: "personal", actorIsAdult: true, actorRole: "Owner", conversationId: "conv_keepme_2" },
+    }),
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const run = await waitTerminal(owner, r.data.run.id, ["waiting_for_approval", "waiting_for_connector"]);
+  for (const field of ["channel", "actorIsAdult", "actorRole"]) {
+    assert.ok(run.sourceRef?.[field] == null, `${field} must not survive from a request body: ${JSON.stringify(run.sourceRef)}`);
+  }
+  assert.equal(run.sourceRef.conversationId, "conv_keepme_2", "and the correlation field beside them still does");
+});
+
 test("a member with no standing cannot launder the Owner's grant into a run of their own", async () => {
   // The original attack in its most direct form: read the allowlists, name the helper that is
   // on them, and post a plan. The role floor stops this one before the strip even matters —

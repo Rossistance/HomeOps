@@ -263,6 +263,10 @@ async function fillStepInput(run, stepIndex, step, schema) {
   return { filled, note: null };
 }
 
+/* What the chat verdict for a queued step was computed from (orchestrate stamps it on
+ * sourceRef; clientSourceRef strips it from a request body). Only a boolean counts. */
+const actorIsAdultOf = (run) => (typeof run?.sourceRef?.actorIsAdult === "boolean" ? run.sourceRef.actorIsAdult : null);
+
 /* ---- authoritative tool resolution (server decides requiresApproval, NOT client) ---- */
 function resolveToolBase(toolId) {
   const internal = getInternalFunction(toolId);
@@ -858,6 +862,12 @@ async function _drive(runId) {
           agent,
           settings: getSettings(run.householdId),
           override: getRiskOverride(run.householdId, step.toolId, run.actorId ?? null),
+          /* The chat verdict's own input (ADR-004 Stage 2). A step parked under rule 4b — a
+           * non-adult asking in the group thread — used to be re-judged here without it, so a
+           * Trusted or Balanced stance cleared it and it ran with no approval. It is recorded on
+           * the run by queueApprovalRun and is never client-writable; absent, the rule is off,
+           * exactly as before. */
+          actorIsAdult: actorIsAdultOf(run),
         });
         // A BLOCKED verdict is a REFUSAL, and until now nothing read it. `decide()` reports
         // requiresApproval:false for every verdict that isn't NEEDS_APPROVAL, so consuming

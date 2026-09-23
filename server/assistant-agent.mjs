@@ -201,16 +201,16 @@ function buildToolSet(ctx) {
          * household did not hand a session to. In the group thread a Limited Member's
          * consequential call is drafted and parked for an adult (policy.mjs rule 4b) rather
          * than executed. `null` everywhere else leaves the ladder exactly as it was. */
+        const actorIsAdult = ctx.channel === "group" ? isAdultRole(session.role) : null;
         const out = await executeToolForChat({
-          toolId: t.toolId, input, session, agent, conversationId,
-          actorIsAdult: ctx.channel === "group" ? isAdultRole(session.role) : null,
+          toolId: t.toolId, input, session, agent, conversationId, actorIsAdult,
         });
         if (out.ok) {
           record(entry, "done", { summary: summarizeForCard(t.toolId, out.result), ok: true });
           return { ok: true, result: boundResult(out.result) };
         }
         if (out.needsApproval) {
-          const q = await queueApprovalRun({ toolId: t.toolId, input, title: t.name, session, conversationId, goal: message, visibility });
+          const q = await queueApprovalRun({ toolId: t.toolId, input, title: t.name, session, conversationId, goal: message, visibility, agentId: agent?.id ?? null, channel: ctx.channel, actorIsAdult });
           if (!q.ok) { record(entry, "failed", { ok: false, summary: q.message ?? q.error }); return { ok: false, error: q.error, message: q.message }; }
           if (q.status === "completed") { record(entry, "done", { ok: true, summary: summarizeForCard(t.toolId, q.result), runId: q.runId }); return { ok: true, result: boundResult(q.result), runId: q.runId }; }
           if (!ctx.firstRunId) ctx.firstRunId = q.runId;
@@ -262,16 +262,28 @@ function buildToolSet(ctx) {
  *
  *  The 5s poll below belongs on a REQUEST path, never inside a swept pass: it is bounded
  *  and it is why a caller can name the approval in its reply, but it would hold a sweep
- *  that has no reentrancy protection of its own. */
+ *  that has no reentrancy protection of its own.
+ *
+ *  THE RUN RE-JUDGES THE STEP, so it is handed what the chat judged it on (ADR-004 Stage 2):
+ *  the helper that evaluated it (`agentId`), the channel, and whether the asker is an adult —
+ *  plus the asker's role, which a native step runs as. Without them the run re-derived the
+ *  verdict from less: a Limited Member's step parked under rule 4b in the group thread was
+ *  re-judged with no `actorIsAdult`, cleared by a Trusted stance, and executed with no
+ *  approval while this function reported it "completed"; and a helper's step was re-judged as
+ *  the household assistant, whose lists and dials are not the helper's. A caller that passes
+ *  none of them (the group listener's own proposals) gets the household assistant and no
+ *  recorded channel, exactly as before. */
 export async function queueApprovalRun({
   toolId, input, title, session, conversationId, goal, visibility,
   source = "assistant", via = "chat", summaryPrefix = "Asked in chat",
+  agentId = null, channel = null, actorIsAdult = null,
 }) {
   if (!roleAtLeast(session.role, "Limited Member")) return { ok: false, error: "insufficient_role", message: "This profile can't start actions that need approval." };
   let r;
   try {
     r = await orchestrate({
       source, via, session, conversationId, goal, visibility,
+      agentId, channel, actorIsAdult, actorRole: session.role ?? null,
       plan: { title, summary: `${summaryPrefix}: ${String(goal).slice(0, 140)}`, steps: [{ toolId, title, detail: String(goal).slice(0, 240), input, requiresApproval: true }] },
     });
   } catch (e) { return { ok: false, error: "run_failed", message: String(e?.message ?? e) }; }

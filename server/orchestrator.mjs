@@ -87,9 +87,20 @@ export function resolveActingHelper({ agentId = null, session = null } = {}) {
  *
  * @returns {Promise<{ok:true, run:object, droppedSteps:number} | {error:string, message?:string}>}
  */
+/* WHAT A CHAT VERDICT WAS COMPUTED FROM (ADR-004 Stage 2). A step the chat turn parked is
+ * re-judged by the run engine when the run drives, and it has to be judged on the same
+ * inputs or the verdict can change on the way: policy rule 4b needs to know the asker was
+ * not an adult, and the native lane needs the channel and the asker's role. They ride on
+ * sourceRef — where the engine reads authority — and, like agentId, they are SERVER-ASSIGNED:
+ * a caller's sourceRef can never carry them in (they are dropped from it here, and
+ * index.mjs clientSourceRef strips them from a request body), and only the parameters below,
+ * which only server code passes, can put them on a run. */
+const VERDICT_INPUTS = ["channel", "actorIsAdult", "actorRole"];
+
 export async function orchestrate({
   source = "manual", via, plan = null, goal = null, agentId = null,
   params = {}, session, conversationId = null, sourceRef = {}, visibility,
+  channel = null, actorIsAdult = null, actorRole = null,
 } = {}) {
   if (!plan || typeof plan !== "object") {
     return { error: "nothing_to_run", message: "A run needs a plan." };
@@ -123,10 +134,19 @@ export async function orchestrate({
   });
   const droppedSteps = steps.filter((s) => s.clampedOut).length;
 
+  const callerRef = { ...sourceRef };
+  for (const k of VERDICT_INPUTS) delete callerRef[k];
+  const verdictInputs = {
+    ...(typeof channel === "string" && channel ? { channel } : {}),
+    ...(typeof actorIsAdult === "boolean" ? { actorIsAdult } : {}),
+    ...(typeof actorRole === "string" && actorRole ? { actorRole } : {}),
+  };
+
   const run = await startRun({
     source,
-    // agentId is stamped LAST so nothing in a caller's sourceRef can null it back out.
-    sourceRef: { via: viaLabel, conversationId, ...sourceRef, agentId: helper?.id ?? null, skillId: null },
+    // agentId is stamped LAST so nothing in a caller's sourceRef can null it back out; the
+    // verdict inputs likewise come only from this function's own parameters.
+    sourceRef: { via: viaLabel, conversationId, ...callerRef, ...verdictInputs, agentId: helper?.id ?? null, skillId: null },
     plan: { ...plan, steps },
     params, session, goal,
     title: plan.title ?? "Run",
