@@ -11,6 +11,10 @@
  *      call in the group thread was parked by the chat turn (rule 4b), then re-judged by the
  *      run without `actorIsAdult`, cleared by Trusted, and executed with no approval while
  *      the model was told it was done. The run now carries what the chat judged it on.
+ *   2. DECISION C. A Limited Member's native write in the group thread is queued for an adult
+ *      the same way; an Owner's yes runs it AS THE CHILD (so it still cannot reach someone
+ *      else's task), a no leaves it; the same child in the app, an adult in the group, and a
+ *      child's read are never held (decision A).
  */
 import test, { before, after, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -42,7 +46,7 @@ async function waitFor(fn, ms = 12000) {
 }
 
 describe("the group thread, through the real BlueBubbles lane", () => {
-  let ctx, alex, fake;
+  let ctx, alex, maya, fake;
   let n = 0;
 
   async function post(address, text) {
@@ -63,6 +67,29 @@ describe("the group thread, through the real BlueBubbles lane", () => {
   const wakeTurns = async () => (await audit()).filter((a) => a.type === "imessage.wake_turn").length;
   const pendingFor = async (toolId) => ((await alex.req("/api/approvals")).data.approvals ?? []).filter((a) => a.status === "pending" && a.toolId === toolId);
   const runOf = async (id) => (await alex.req(`/api/runs/${id}`)).data?.run ?? null;
+  const settled = (id) => waitFor(async () => { const r = await runOf(id); return ["completed", "failed", "partially_failed", "expired"].includes(r?.status) ? r : null; });
+  const taskExists = async (id) => ((await alex.req("/api/tasks")).data.tasks ?? []).some((t) => t.id === id);
+  const makeTask = async (client, title) => {
+    const r = await client.req("/api/tasks", { method: "POST", body: JSON.stringify({ title, visibility: "household" }) });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    return r.data.task;
+  };
+  // The one tool result in a turn's replies that is an object the tool returned.
+  const outcome = (told) => told.find((t) => t && typeof t === "object" && ("ok" in t || "status" in t));
+  const decide = async (id, decision) => {
+    const r = await alex.req(`/api/approvals/${id}/decide`, { method: "POST", body: JSON.stringify({ decision }) });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+  };
+  /** A Limited Member asks, in the group thread, for a native write; returns the parked run. */
+  async function childParks(toolName, args, ask) {
+    const told = await groupTurn(KID_NUM, ask, [{ toolCalls: [{ name: toolName, args }] }, { text: "That one needs a grown-up." }]);
+    const out = outcome(told);
+    assert.equal(out?.status, "awaiting_approval", `the model is told it is waiting: ${JSON.stringify(told)}`);
+    assert.match(String(out.message), /Queued for the family's approval/, "the same sentence a parked catalog call gets");
+    const runId = RUN_ID.exec(JSON.stringify(out))?.[0];
+    assert.ok(runId, "and it names the parked run");
+    return { out, runId };
+  }
 
   /** One Lane 2 turn: script the model, wake Famili from `address`, and wait for the turn to
    *  finish (its imessage.wake_turn row). Returns every tool result the model was shown,
@@ -86,6 +113,8 @@ describe("the group thread, through the real BlueBubbles lane", () => {
     fake = await useFakeModel(alex);
     const m = await alex.req("/api/members", { method: "POST", body: JSON.stringify({ actorId: "m-maya", displayName: "Maya Harper", role: "Limited Member", relationship: "Child (age 14)" }) });
     assert.equal(m.status, 200, JSON.stringify(m.data));
+    maya = await makeSession(ctx, "m-maya");
+    assert.equal(maya.role, "Limited Member");
     for (const [memberId, value] of [["m-alex", OWNER_NUM], ["m-maya", KID_NUM]]) {
       const cm = await alex.req("/api/contact-methods", { method: "POST", body: JSON.stringify({ memberId, label: "Mobile", type: "Phone/Text", value, verified: true, optInStatus: "Opted In" }) });
       assert.equal(cm.status, 200, JSON.stringify(cm.data));
@@ -137,5 +166,99 @@ describe("the group thread, through the real BlueBubbles lane", () => {
     assert.equal(out?.ok, true, `it ran in the turn, as it always did: ${JSON.stringify(told)}`);
     assert.equal(out?.result?.subject, "Campsite for the long weekend");
     assert.equal((await pendingFor("homeops.create_approval")).length, 1, "no new approval — only the Limited Member's is waiting");
+  });
+
+  /* ─────────── 2. decision C: a non-adult's NATIVE write waits for an adult ─────────── */
+
+  let parked; // { runId, taskId } — parked by the first test below, decided by the next
+  test("DECISION C: a Limited Member's famili.delete_task in the group thread waits for an adult — nothing is deleted, one approval is pending, and Trusted does not clear it", async () => {
+    /* Stage 1 pinned the opposite: this ran at once. Now the chat lane queues it exactly as a
+     * gated catalog call (the receipt the family's Ask screen would show is awaiting_approval;
+     * the model is told the same), and the run re-judges it as a child's under the Owner's
+     * Trusted stance — and still waits. */
+    const tk = await makeTask(maya, "Take out the trash");
+    const { runId } = await childParks("famili__delete_task", { taskId: tk.id }, "delete my trash task");
+    await sleep(400); // nothing further may happen on its own
+    const run = await runOf(runId);
+    assert.equal(run.status, "waiting_for_approval", `still waiting under Trusted-by-an-Owner: ${JSON.stringify(run)}`);
+    assert.equal(run.steps[0].attribution, "native", "the run engine resolved the native id");
+    assert.equal(run.steps[0].requiresApproval, true, "gated by what the run recorded (decision C)");
+    assert.equal(run.steps[0].toolId, "famili.delete_task");
+    assert.deepEqual({ channel: run.sourceRef.channel, actorIsAdult: run.sourceRef.actorIsAdult, actorRole: run.sourceRef.actorRole, agentId: run.sourceRef.agentId },
+      { channel: "group", actorIsAdult: false, actorRole: "Limited Member", agentId: "agt_household" });
+    assert.ok(await taskExists(tk.id), "the task is untouched");
+    const pending = await pendingFor("famili.delete_task");
+    assert.equal(pending.length, 1, "one real approval");
+    assert.equal(pending[0].id, run.steps[0].approvalId);
+    assert.equal(pending[0].requestedBy, "m-maya");
+    assert.deepEqual(pending[0].allowedApproverRoles, ["Owner", "Adult Admin", "Adult Member"], "an adult answers it");
+    parked = { runId, taskId: tk.id, approvalId: pending[0].id };
+  });
+
+  test("…an Owner approves it (POST /api/approvals/:id/decide): the run completes, as the child, and the task is gone", async () => {
+    assert.ok(parked, "the park above ran");
+    await decide(parked.approvalId, "approve");
+    const run = await settled(parked.runId);
+    assert.equal(run?.status, "completed", JSON.stringify(run?.steps?.[0]));
+    assert.deepEqual(run.steps[0].result, { deleted: true, title: "Take out the trash" });
+    assert.equal(await taskExists(parked.taskId), false, "deleted once an adult said yes");
+  });
+
+  test("…a DENIAL leaves the task where it was", async () => {
+    const tk = await makeTask(maya, "Walk the dog");
+    const { runId } = await childParks("famili__delete_task", { taskId: tk.id }, "delete my dog walk task");
+    const [appr] = await pendingFor("famili.delete_task");
+    assert.ok(appr, "parked");
+    await decide(appr.id, "deny");
+    const run = await settled(runId);
+    assert.equal(run?.status, "failed");
+    assert.equal(run.error, "approval_denied");
+    assert.equal(run.steps[0].status, "skipped");
+    assert.ok(await taskExists(tk.id), "still there");
+  });
+
+  test("THE REQUESTER'S ROLE RUNS, NOT THE APPROVER'S: an Owner's yes cannot let a child delete someone else's task", async () => {
+    /* The park does not judge ownership — the body does, when it runs — and it runs as the
+     * Limited Member who asked. So approving a child's request to delete the Owner's task ends
+     * in the body's own refusal, and the task survives. */
+    const tk = await makeTask(alex, "Pay the water bill");
+    const { runId } = await childParks("famili__delete_task", { taskId: tk.id }, "delete the water bill task");
+    const [appr] = await pendingFor("famili.delete_task");
+    await decide(appr.id, "approve");
+    const run = await settled(runId);
+    assert.equal(run?.status, "failed");
+    assert.equal(run.error, "forbidden", JSON.stringify(run.steps[0]));
+    assert.equal(run.steps[0].detail, "Only an adult or the person who created it can delete this.");
+    assert.ok(await taskExists(tk.id), "the Owner's task is untouched");
+  });
+
+  test("the same child IN THE APP deletes their own task immediately (decision A) — no approval", async () => {
+    const tk = await makeTask(maya, "Put away the laundry");
+    fake.state.script.push({ toolCalls: [{ name: "famili__delete_task", args: { taskId: tk.id } }] }, { text: "Done." });
+    const r = await maya.req("/api/assistant", { method: "POST", body: JSON.stringify({ message: "delete my laundry task" }) });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    assert.equal(r.data.toolCalls?.[0]?.tool, "famili.delete_task");
+    assert.equal(r.data.toolCalls?.[0]?.status, "done", JSON.stringify(r.data.toolCalls));
+    assert.equal(await taskExists(tk.id), false);
+    assert.equal((await pendingFor("famili.delete_task")).length, 0, "nothing parked");
+  });
+
+  test("an ADULT in the group thread deletes immediately — decision C is about who asks, not where", async () => {
+    const tk = await makeTask(alex, "Return the library books");
+    const told = await groupTurn(OWNER_NUM, "delete the library task", [{ toolCalls: [{ name: "famili__delete_task", args: { taskId: tk.id } }] }, { text: "Deleted." }]);
+    const out = outcome(told);
+    assert.equal(out?.ok, true, JSON.stringify(told));
+    assert.deepEqual(out.result, { deleted: true, title: "Return the library books" });
+    assert.equal(await taskExists(tk.id), false);
+    assert.equal((await pendingFor("famili.delete_task")).length, 0);
+  });
+
+  test("a child's native READ in the group thread is never parked", async () => {
+    const approvalsBefore = ((await alex.req("/api/approvals")).data.approvals ?? []).length;
+    const told = await groupTurn(KID_NUM, "what's on the task list", [{ toolCalls: [{ name: "famili__list_tasks", args: {} }] }, { text: "Here's the list." }]);
+    const out = outcome(told);
+    assert.equal(out?.ok, true, JSON.stringify(told));
+    assert.ok(Array.isArray(out.result?.tasks), "the read ran in the turn");
+    assert.equal(((await alex.req("/api/approvals")).data.approvals ?? []).length, approvalsBefore, "no approval of any kind");
   });
 });

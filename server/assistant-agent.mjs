@@ -183,6 +183,24 @@ function buildToolSet(ctx) {
     return call;
   };
 
+  /* A call the policy says a person must sign off on becomes a durable run parked for one —
+   * ONE path for a catalog tool and for the one native call that asks (a non-adult's write in
+   * the group thread, ADR-004 decision C): the same queueApprovalRun, the same receipts
+   * (awaiting_approval, or blocked on a connection) and the same sentence to the model. The
+   * run is handed what this turn judged the call on, so it re-judges it the same way. */
+  const queueForApproval = async (entry, { toolId, input, title, actorIsAdult }) => {
+    const q = await queueApprovalRun({ toolId, input, title, session, conversationId, goal: message, visibility, agentId: agent?.id ?? null, channel: ctx.channel, actorIsAdult });
+    if (!q.ok) { record(entry, "failed", { ok: false, summary: q.message ?? q.error }); return { ok: false, error: q.error, message: q.message }; }
+    if (q.status === "completed") { record(entry, "done", { ok: true, summary: summarizeForCard(toolId, q.result), runId: q.runId }); return { ok: true, result: boundResult(q.result), runId: q.runId }; }
+    if (!ctx.firstRunId) ctx.firstRunId = q.runId;
+    ctx.runIds.push(q.runId);
+    const waiting = q.status === "waiting_for_connector";
+    record(entry, waiting ? "blocked" : "awaiting_approval", { ok: false, summary: waiting ? "Needs a connection first" : "Waiting for approval", runId: q.runId, approvalId: q.approvalId ?? undefined });
+    return waiting
+      ? { ok: false, status: "waiting_for_connector", runId: q.runId, message: "This step is parked until the service it needs is connected in Connections. Nothing was sent." }
+      : { ok: false, status: "awaiting_approval", runId: q.runId, approvalId: q.approvalId, message: `Queued for the family's approval (run ${q.runId}). Nothing has been sent or changed yet — an approver will see it in Approvals. Tell the person this is waiting on their approval; do not retry the call.` };
+  };
+
   for (const t of catalog) {
     if (!permittedIds.has(t.toolId)) continue;
     if (!t.connected) { if (t.connectorName) notConnected.push(`${t.connectorName} (${t.name})`); continue; }
@@ -209,18 +227,7 @@ function buildToolSet(ctx) {
           record(entry, "done", { summary: summarizeForCard(t.toolId, out.result), ok: true });
           return { ok: true, result: boundResult(out.result) };
         }
-        if (out.needsApproval) {
-          const q = await queueApprovalRun({ toolId: t.toolId, input, title: t.name, session, conversationId, goal: message, visibility, agentId: agent?.id ?? null, channel: ctx.channel, actorIsAdult });
-          if (!q.ok) { record(entry, "failed", { ok: false, summary: q.message ?? q.error }); return { ok: false, error: q.error, message: q.message }; }
-          if (q.status === "completed") { record(entry, "done", { ok: true, summary: summarizeForCard(t.toolId, q.result), runId: q.runId }); return { ok: true, result: boundResult(q.result), runId: q.runId }; }
-          if (!ctx.firstRunId) ctx.firstRunId = q.runId;
-          ctx.runIds.push(q.runId);
-          const waiting = q.status === "waiting_for_connector";
-          record(entry, waiting ? "blocked" : "awaiting_approval", { ok: false, summary: waiting ? "Needs a connection first" : "Waiting for approval", runId: q.runId, approvalId: q.approvalId ?? undefined });
-          return waiting
-            ? { ok: false, status: "waiting_for_connector", runId: q.runId, message: "This step is parked until the service it needs is connected in Connections. Nothing was sent." }
-            : { ok: false, status: "awaiting_approval", runId: q.runId, approvalId: q.approvalId, message: `Queued for the family's approval (run ${q.runId}). Nothing has been sent or changed yet — an approver will see it in Approvals. Tell the person this is waiting on their approval; do not retry the call.` };
-        }
+        if (out.needsApproval) return queueForApproval(entry, { toolId: t.toolId, input, title: t.name, actorIsAdult });
         record(entry, out.policyBlocked ? "blocked" : "failed", { ok: false, summary: out.message ?? out.error });
         return { ok: false, error: out.error, message: out.message, ...(out.needsSetup ? { needsSetup: out.needsSetup } : {}) };
       },
@@ -237,11 +244,14 @@ function buildToolSet(ctx) {
       execute: async (rawInput) => {
         const input = coerceInput(rawInput, action.input);
         ctx.onToolStart?.(entry);
+        const actorIsAdult = ctx.channel === "group" ? isAdultRole(session.role) : null;
         const out = await runNativeAction({
-          action, input, session, agent, channel: ctx.channel, conversationId, asHelper: !!ctx.asHelper,
-          actorIsAdult: ctx.channel === "group" ? isAdultRole(session.role) : null,
+          action, input, session, agent, channel: ctx.channel, conversationId, asHelper: !!ctx.asHelper, actorIsAdult,
         });
         if (out?.ok) { record(entry, "done", { ok: true, summary: summarizeForCard(action.id, out.result) }); return { ok: true, result: boundResult(out.result) }; }
+        // Decision C: a non-adult's write in the group thread waits for an adult, exactly as a
+        // gated catalog call does. Every other native refusal stays a refusal (decision A).
+        if (out?.needsApproval) return queueForApproval(entry, { toolId: action.id, input, title: action.name, actorIsAdult });
         record(entry, out?.policyBlocked ? "blocked" : "failed", { ok: false, summary: out?.message ?? out?.error });
         return { ok: false, error: out?.error ?? "tool_failed", message: out?.message ?? "The tool failed." };
       },
