@@ -100,7 +100,10 @@ test("create_event_draft: an end BEFORE the start is an error, not a silent null
 test("plan_meal: an unknown slot is refused rather than quietly becoming dinner", async () => {
   const bad = await run("homeops.plan_meal", { title: "QA Brunch", date: "2031-05-03", slot: "brunch", ingredients: ["eggs"] });
   assert.equal(bad.ok, false);
-  assert.equal(bad.error, "bad_slot");
+  // plan_meal is declared now (ADR-004): slot is an enum in its schema, so the SHAPE gate
+  // refuses "brunch" first and names the field — the create_task precedent above.
+  assert.equal(bad.error, "invalid_input");
+  assert.equal(bad.field, "slot");
   assert.ok(!store.listMeals((m) => m.title === "QA Brunch").length, "nothing was planned");
 
   const ok = await run("homeops.plan_meal", { title: "QA Lunch", date: "2031-05-03", slot: "lunch", ingredients: ["bread"] });

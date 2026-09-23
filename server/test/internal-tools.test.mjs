@@ -74,6 +74,8 @@ test("plan_meal wires one approved meal end-to-end: planner + groceries + calend
   });
   assert.equal(r.ok, true);
   assert.equal(r.result.groceryItems, 2, "only the not-yet-have ingredients hit the grocery list");
+  // Declared (ADR-004): the record travels beside the flat keys every consumer reads.
+  assert.equal(r.result.meal.id, r.result.mealId);
   // Meal is durable with instructions.
   const meal = store.getMeal(r.result.mealId);
   assert.deepEqual(meal.instructions, ["Brown the beef.", "Simmer 30 minutes."]);
