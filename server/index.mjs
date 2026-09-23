@@ -44,7 +44,7 @@ import { exportHouseholdWithAudit } from "./export.mjs";
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { platformMailReady, sendPlatformEmail, platformMailStatus } from "./mailer.mjs";
 import { closeBrowser } from "./browser.mjs";
-import { orchestrate, ensureDefaultHelper } from "./orchestrator.mjs";
+import { orchestrate, ensureDefaultHelper, clientSourceRef } from "./orchestrator.mjs";
 import { sandboxEnabled, seedSandboxAccounts, listSandboxEffects } from "./sandbox-connectors.mjs";
 import { seedDefaults } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
@@ -5207,36 +5207,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
 };
 
 /* ---- SECURITY (WP-005 adversarial review, finding C1) ----
- * `sourceRef` is not decoration: the engine reads `sourceRef.agentId` to decide which
- * agent's POLICY applies (engine.mjs) and, since WP-005, which agent's standing
- * send-consent applies (a contact method's per-agent allowlist). POST /api/runs/start
- * previously forwarded the caller's `sourceRef` verbatim, so any Limited Member could
- * name any agent and inherit its send authority — reading the allowlists first from
- * GET /api/contact-methods. That turns "the allowlist IS the approval" into "the
- * caller picks their own identity", which is not an allowlist at all.
- *
- * Agent identity is therefore SERVER-ASSIGNED ONLY: it is set by runAgent/runSkill/
- * fireTrigger, never accepted from a request body. Clients may still pass harmless
- * correlation fields. */
-// Only the AUTHORITY-BEARING fields are stripped. The rest of sourceRef is benign
-// correlation metadata (conversationId, isRepair, repairedFrom, via …) that the chat
-// layer legitimately sets and depends on, so a blanket allow-list would break it.
-// These are exactly the fields the server reads to decide what a run MAY DO:
-//   agentId      → whose tool policy applies, and (WP-005) whose send consent applies
-//   skillId      → attribution the policy path and save-offer gating key off
-//   triggerId    → which automation's status this run writes back to
-//   automationId → the same, on the legacy field name
-//   channel, actorIsAdult, actorRole → what a queued chat step was judged on (ADR-004
-//                  Stage 2): whether policy rule 4b applies in the run, whether a native
-//                  write is held for an adult, and the role a native step runs as. A body
-//                  that could set them could clear its own park or run as an Owner.
-const SERVER_ASSIGNED_SOURCEREF = ["agentId", "skillId", "triggerId", "automationId", "channel", "actorIsAdult", "actorRole"];
-function clientSourceRef(raw) {
-  if (!raw || typeof raw !== "object") return {};
-  const out = { ...raw };
-  for (const k of SERVER_ASSIGNED_SOURCEREF) delete out[k];
-  return out;
-}
+ * POST /api/runs/start strips every authority-bearing field from a body's `sourceRef`:
+ * clientSourceRef, which lives in orchestrator.mjs beside the other half of the same guard
+ * (orchestrate's own drop of the verdict inputs) so a test can import it — this module starts
+ * a server when it loads. */
 
 
 // WP-001 slice 3 — the other half of persistBuildOutcome: when a build is REFUSED,
