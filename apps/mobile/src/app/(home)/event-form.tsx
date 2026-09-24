@@ -9,7 +9,11 @@ import { Stack, router, useLocalSearchParams } from "expo-router";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import { api, type ApprovalRec, type AttendeeRec, type EventRec, type MemberRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { refreshCalendars } from "@/lib/calendar-refresh";
+import { eventFace, isBlock } from "@/lib/event-face";
+import { isAdultRole } from "@/lib/roles";
 import { loadDraft, saveDraft, clearDraft, isEmptyDraft, type EventDraft } from "@/lib/event-drafts";
+import { MemberAvatar } from "./profile";
 import { useTheme, tapHaptic } from "@/theme";
 import { depth, rimColor, rimGlow } from "@/theme/neumorph";
 import { AddressField } from "@/components/AddressField";
@@ -43,6 +47,22 @@ const REMINDERS: { minutes: number | null; label: string }[] = [
   { minutes: 60, label: "1 hour before" },
   { minutes: 1440, label: "1 day before" },
 ];
+
+/** ADR-005 — the words that make a hidden event look like a surprise (the server's rule, used
+ *  here only to pre-set "Keep it a surprise" on a NEW event before the server has seen it). */
+const SURPRISE_WORDS = /\b(birthday|bday|anniversary|gifts?|vacation|surprise)\b|🎂|🎁/i;
+
+/** "Tue, Sep 24 · 9:00 AM – 5:00 PM" — or the day(s) alone for all-day time. */
+function timeRange(e: Pick<EventRec, "startAt" | "endAt" | "allDay">): string {
+  const s = e.startAt ? new Date(e.startAt) : null;
+  if (!s || isNaN(+s)) return "No time set";
+  const en = e.endAt ? new Date(e.endAt) : null;
+  const dayOf = (d: Date) => d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  const timeOf = (d: Date) => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  if (e.allDay) return en && !isNaN(+en) && dayOf(en) !== dayOf(s) ? `${dayOf(s)} – ${dayOf(en)} · All day` : `${dayOf(s)} · All day`;
+  if (!en || isNaN(+en)) return `${dayOf(s)} · ${timeOf(s)}`;
+  return dayOf(en) === dayOf(s) ? `${dayOf(s)} · ${timeOf(s)} – ${timeOf(en)}` : `${dayOf(s)} ${timeOf(s)} – ${dayOf(en)} ${timeOf(en)}`;
+}
 
 /** Merge a calendar day and a clock time into one local Date. */
 function stamp(day: Date, time: Date): Date {
@@ -140,6 +160,15 @@ export default function EventFormScreen() {
   // edit to Google first, then mirrors it locally. ICS-fed events stay read-only.
   const [linkedGoogle, setLinkedGoogle] = useState(false);
   const [members, setMembers] = useState<MemberRec[]>([]);
+  /* ADR-005 — someone else's hidden time arrives as a stand-in ("Beannie working"). It is not
+   * an event anyone here may open, edit or act on, so it gets a read-only sheet, not the form. */
+  const [blockEvent, setBlockEvent] = useState<EventRec | null>(null);
+  /* The owner's own sharing, as the server last answered it (edit), or the choice for a new
+   * event (create — sent with it). secretNew null = untouched: the words decide. */
+  const [privacy, setPrivacy] = useState<EventRec["privacy"] | null>(null);
+  const [hideNew, setHideNew] = useState(false);
+  const [secretNew, setSecretNew] = useState<boolean | null>(null);
+  const [sharingBusy, setSharingBusy] = useState(false);
 
   // Fields
   const [title, setTitle] = useState("");
@@ -199,6 +228,9 @@ export default function EventFormScreen() {
   };
 
   useEffect(() => {
+    // Opening an event is a moment to freshen the calendars (ADR-005). Never waited on: the
+    // form draws from what the server has now.
+    if (id) void refreshCalendars("event_open");
     void (async () => {
       const [mem, evs] = await Promise.all([api.members(), id ? api.events() : Promise.resolve([] as EventRec[])]);
       setMembers(mem);
@@ -206,7 +238,10 @@ export default function EventFormScreen() {
         const e = evs.find((x) => x.id === id);
         if (!e) {
           setNotFound(true);
+        } else if (isBlock(e)) {
+          setBlockEvent(e); setReadOnly(true);
         } else {
+          setPrivacy(e.privacy ?? null);
           // Edit-own-only: the server tells us whether THIS member may edit this event
           // (a linked Google event is editable only by the member who connected it).
           const canEdit = e.editable !== false;
@@ -351,6 +386,25 @@ export default function EventFormScreen() {
   const pendingAttend = (requests.attend ?? []).some((r) => r.actorId === session?.actorId);
   const pendingDrive = (requests.drive ?? []).some((r) => r.actorId === session?.actorId);
 
+  /* ADR-005 — "Hide details from family". Any adult may hide an event they own; on an existing
+   * event the server says so per event (privacy.canToggle), on a new one the role does. */
+  const showPrivacy = canManage && !blockEvent && (isEdit ? privacy?.canToggle === true : isAdultRole(session?.role));
+  const hiddenNow = isEdit ? privacy?.obscured === true : hideNew;
+  const secretNow = isEdit
+    ? privacy?.secret === true
+    : (secretNew ?? SURPRISE_WORDS.test(`${title} ${notes}`));
+  const myFirstName = members.find((m) => m.actorId === session?.actorId)?.displayName.split(" ")[0] ?? "Your name";
+  /** Hide or share an existing event at once (like attendees: it changes what others see). */
+  const setSharing = async (hidden: boolean, secret?: boolean) => {
+    if (!id) return;
+    setSharingBusy(true); setNotice(null);
+    const r = await api.setEventSharing(id, hidden, secret);
+    setSharingBusy(false);
+    if (!r.event) { setNotice({ text: r.message ?? "Couldn't change who sees this. Try again.", ok: false }); return; }
+    tapHaptic("select");
+    setPrivacy(r.event.privacy ?? { obscured: hidden, kind: privacy?.kind, secret: secret ?? privacy?.secret, canToggle: true });
+  };
+
   const addBring = useCallback(() => {
     const items = bringInput.split(",").map((s) => s.trim()).filter(Boolean);
     if (items.length === 0) return;
@@ -381,8 +435,13 @@ export default function EventFormScreen() {
      * back unchanged would be refused by the server (correctly — it can't tell "unchanged"
      * from "changed back"), and the append would go down with them. Attendees aren't here:
      * they save on their own as they're tapped, because adding someone notifies them. */
+    // ADR-005 — a new event an adult hides goes up hidden; "Keep it a surprise" rides along
+    // only when they set it by hand (untouched, the server reads the words, as we did).
+    const sharing: { hidden?: boolean; secret?: boolean } = showPrivacy && hideNew
+      ? { hidden: true, ...(secretNew !== null ? { secret: secretNew } : {}) }
+      : {};
     const r = !isEdit
-      ? await api.createEvent({ ...body, visibility: "household" })
+      ? await api.createEvent({ ...body, visibility: "household", ...sharing })
       : await api.updateEvent(id, !isOwnerOfEvent
         // Someone else's event: the ONLY two fields that exist for us. Sending anything
         // more would be refused by name, and rightly.
@@ -544,6 +603,39 @@ export default function EventFormScreen() {
           hint="It may have been removed or synced away."
           action={{ title: "Close", onPress: () => router.back() }}
         />
+      </HScreen>
+    );
+  }
+
+  /* ADR-005 — someone else's hidden time. Their photo, "<Name> working", when, and nothing
+   * else: no fields, no actions. The server never sent what is inside, so there is nothing to
+   * show even by accident. */
+  if (blockEvent) {
+    const face = eventFace(blockEvent);
+    const label = face.mode === "block" ? face.label : blockEvent.title;
+    const ownerId = face.mode === "block" ? face.ownerId : blockEvent.ownerId;
+    const owner = members.find((m) => m.actorId === ownerId) ?? null;
+    const first = owner?.displayName.split(" ")[0] ?? label.split(" ")[0];
+    const range = timeRange(blockEvent);
+    return (
+      <HScreen>
+        <Stack.Screen options={{ title: "Private time" }} />
+        <View
+          testID="event-block-sheet"
+          accessible
+          accessibilityLabel={`${label}, ${range}`}
+          style={{ alignItems: "center", gap: spacing.sm, paddingTop: spacing.lg }}
+        >
+          <MemberAvatar member={owner} size={72} ringWidth={3} />
+          <T kind="h2" center>{label}</T>
+          <T kind="detail" center>{range}</T>
+        </View>
+        <Well style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+          <Sym name="eye.slash" size={14} color={colors.textFaint} />
+          <T kind="sub" style={{ flex: 1 }}>
+            {first} keeps the details of this time private. If {first} shares it, it shows here like any other event.
+          </T>
+        </Well>
       </HScreen>
     );
   }
@@ -746,6 +838,62 @@ export default function EventFormScreen() {
           accessibilityLabel="Event notes"
         />
       </Well>
+
+      {/* ADR-005 — the owner's own choice of who sees this. Hiding shows the family only
+          "<Name> busy" (or "working") for the time; a surprise is also kept from the assistant
+          wherever others could hear. On an existing event each switch takes effect at once,
+          because it changes what everyone else sees; on a new one it goes up with Add event. */}
+      {showPrivacy ? (
+        <>
+          <SectionHeader title="Privacy" />
+          <Well style={{ gap: 2 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, minHeight: 40 }}>
+              <View style={{ flex: 1 }}>
+                <T kind="bodyMedium" color={colors.textSecondary}>Hide details from family</T>
+                <T kind="sub" color={colors.textFaint}>
+                  {hiddenNow
+                    ? `The family sees “${myFirstName} ${privacy?.kind === "work" ? "working" : "busy"}” for this time, and nothing more.`
+                    : "Everyone in the family can see this event."}
+                </T>
+              </View>
+              <Switch
+                testID="event-form-hide-switch"
+                value={hiddenNow}
+                onValueChange={(v) => {
+                  tapHaptic("select");
+                  if (isEdit) void setSharing(v);
+                  else setHideNew(v);
+                }}
+                trackColor={{ true: colors.ember }}
+                disabled={sharingBusy || busy !== null}
+                accessibilityLabel="Hide details from family"
+              />
+            </View>
+            {hiddenNow ? (
+              <View style={{ borderTopWidth: 1, borderTopColor: colors.border, paddingTop: spacing.sm, gap: 4 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, minHeight: 40 }}>
+                  <T kind="bodyMedium" color={colors.textSecondary} style={{ flex: 1 }}>Keep it a surprise</T>
+                  <Switch
+                    testID="event-form-surprise-switch"
+                    value={secretNow}
+                    onValueChange={(v) => {
+                      tapHaptic("select");
+                      if (isEdit) void setSharing(true, v);
+                      else setSecretNew(v);
+                    }}
+                    trackColor={{ true: colors.ember }}
+                    disabled={sharingBusy || busy !== null}
+                    accessibilityLabel="Keep it a surprise"
+                  />
+                </View>
+                <T kind="sub" color={colors.textFaint}>
+                  Famili won&apos;t mention it where anyone else could hear, and nothing about it is remembered.
+                </T>
+              </View>
+            ) : null}
+          </Well>
+        </>
+      ) : null}
 
       {/* Q2 — "let me append to it here without syncing it back out." A second, separate
           field rather than unlocking the one above, because the one above IS the event's

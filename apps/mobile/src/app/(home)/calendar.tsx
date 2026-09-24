@@ -4,8 +4,9 @@
 // Canonical events and Google-linked events open the form sheet to edit (Google
 // edits write back two-way); ICS-fed events are read-only mirrors that expand
 // inline. Each subscribed calendar gets its own accent color on its cards.
-// Calendar subscriptions with sync status sit beside the Sync control, folded behind an
-// expander (feeds managed in Connections) — they used to trail every agenda day as a card.
+// Calendars refresh by themselves (ADR-005): on focus, every minute while open, and whenever
+// anyone changes something. There is no Sync button here any more — manual sync lives only in
+// Connections. The connected calendars fold is a read-only legend.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
@@ -15,6 +16,8 @@ import { LinearGradient } from "expo-linear-gradient";
 import { fade, memberAccent, memberColor } from "@/lib/member-colors";
 import * as SecureStore from "expo-secure-store";
 import { useSession } from "@/lib/session";
+import { refreshCalendars } from "@/lib/calendar-refresh";
+import { useRevSync } from "@/lib/rev-sync";
 import { isOpen } from "@/lib/task-state";
 import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
@@ -120,18 +123,19 @@ export default function CalendarScreen() {
     const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d;
   });
   const [expanded, setExpanded] = useState<string | null>(null);
-  // Subscriptions fold shut by default: sync status is a glance, not a section you scroll past.
+  // The calendars legend folds shut by default: whose colour is whose is a glance, not a
+  // section you scroll past.
   const [subsOpen, setSubsOpen] = useState(false);
-  const [syncing, setSyncing] = useState<string | null>(null);
-  const [syncingAll, setSyncingAll] = useState(false);
-  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
   const [nests, setNests] = useState<NestRec[]>([]);
   // The household's zone, for placing all-day events on the right DATE on a phone that is
   // somewhere else. Settings may be refused for a child session; the helper then falls back.
   const [householdTz, setHouseholdTz] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
-  // Guards the auto-sync interval against overlapping runs (a slow sync + a 60s tick).
-  const syncBusyRef = useRef(false);
+  // Connections exists for every role that may hold a calendar; Child View (and a guest) has
+  // none, so no link may point there. The server decides what each role may do inside it.
+  const hasConnections = canManage;
+  // Whether the first load has landed — a focus after that keeps the screen as it is while
+  // the refresh runs, instead of flashing a skeleton.
+  const readyRef = useRef(false);
 
   /* Cluster H — "a filter right next to the sync button that allows me to select from
    * seeing the entire family's calendar, my nest's calendar, or just my calendar… that
@@ -163,11 +167,24 @@ export default function CalendarScreen() {
     if (!health) { setPhase("error"); return; }
     setEvents(ev); setMembers(mem); setSubs(s); setTasks(tks); setNests(ns.nests);
     if (st?.timezone) setHouseholdTz(st.timezone);
+    readyRef.current = true;
     setPhase("ready");
   }, []);
 
-  // Reload on every focus so edits made in the form sheet show up immediately.
-  useFocusEffect(useCallback(() => { if (session) void load(); }, [session, load]));
+  // On every focus: ask the household's calendars to refresh and load once that has answered,
+  // so edits made in the form sheet and changes at the source both show up. The very first
+  // focus also loads straight away, so the screen never waits on Google to draw.
+  useFocusEffect(useCallback(() => {
+    if (!session) return;
+    let alive = true;
+    if (!readyRef.current) void load();
+    void refreshCalendars("calendar_open", { wait: true }).then(() => { if (alive) void load(); });
+    return () => { alive = false; };
+  }, [session, load]));
+
+  // A refresh finished in the background, or someone changed something elsewhere: the data
+  // revision moves and the screen reloads.
+  useRevSync(useCallback(() => { void load(); }, [load]));
 
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
@@ -207,52 +224,17 @@ export default function CalendarScreen() {
     return map;
   }, [tasks]);
 
-  // ONE sync: every subscription syncs and Google-side edits pull back in a single
-  // pass (POST /calendar/sync-all). Also runs silently every ~60s while the screen
-  // is focused, so the calendar keeps itself fresh without any button-pressing.
-  const syncAll = useCallback(async (opts?: { silent?: boolean }) => {
-    if (syncBusyRef.current) return;
-    syncBusyRef.current = true;
-    if (!opts?.silent) { setSyncingAll(true); setNotice(null); }
-    try {
-      const r = await api.syncAllCalendars();
-      if (r.ok) {
-        setLastSyncedAt(new Date());
-        await load();
-        if (!opts?.silent) {
-          const bits = [
-            r.imported ? `${r.imported} new` : null,
-            r.updated ? `${r.updated} updated` : null,
-            r.removed ? `${r.removed} removed` : null,
-            r.pulled?.merged ? `${r.pulled.merged} merged from Google` : null,
-            r.pulled?.conflicts ? `${r.pulled.conflicts} conflict${r.pulled.conflicts === 1 ? "" : "s"} to review` : null,
-            r.errors?.length ? `${r.errors.length} feed${r.errors.length === 1 ? "" : "s"} failed` : null,
-          ].filter(Boolean);
-          setNotice({
-            text: `Synced ${r.synced ?? 0} calendar${(r.synced ?? 0) === 1 ? "" : "s"}. ${bits.length ? bits.join(" · ") : "Everything already up to date."}`,
-            ok: !r.pulled?.conflicts && !r.errors?.length,
-          });
-        }
-      } else if (!opts?.silent) {
-        setNotice({
-          text: r.error === "insufficient_role"
-            ? "Syncing needs Adult Member or higher."
-            : `Couldn't sync: ${r.message ?? r.error ?? "unknown error"}`,
-          ok: false,
-        });
-      }
-    } finally {
-      syncBusyRef.current = false;
-      setSyncingAll(false);
-    }
-  }, [load]);
-
-  // Auto-sync: a silent sync-all every ~60s while this screen is focused.
+  // Every minute while this screen is open, for every role (a child's calendar goes stale just
+  // the same): refresh the household's calendars, then reload. Anyone may start a refresh; the
+  // server runs one at a time and at most once a minute.
   useFocusEffect(useCallback(() => {
-    if (!canManage) return;
-    const t = setInterval(() => { void syncAll({ silent: true }); }, 60_000);
-    return () => clearInterval(t);
-  }, [canManage, syncAll]));
+    if (!session) return;
+    let alive = true;
+    const t = setInterval(() => {
+      void refreshCalendars("calendar_tick", { wait: true }).then(() => { if (alive) void load(); });
+    }, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [session, load]));
 
   const nameOf = useCallback(
     (id: string | null) => (id ? members.find((m) => m.actorId === id)?.displayName ?? null : null),
@@ -390,20 +372,9 @@ export default function CalendarScreen() {
     router.push(date ? { pathname: "/event-form", params: { date } } : "/event-form");
   }, []);
 
-  const syncLabel = (s: CalendarSubscription) => {
-    if (s.lastResult?.error) return `Sync failed: ${s.lastResult.error}`;
-    if (s.lastSyncAt) return `Synced ${new Date(s.lastSyncAt).toLocaleString()} · ${s.eventCount} event${s.eventCount === 1 ? "" : "s"}`;
-    return "Not synced yet";
-  };
-
-  const syncNow = async (s: CalendarSubscription) => {
-    setSyncing(s.id); setNotice(null);
-    const r = await api.syncCalendar(s.id);
-    setSyncing(null);
-    if (r.sync?.ok) setNotice({ text: `${s.name}: ${r.sync.imported ?? 0} new, ${r.sync.updated ?? 0} updated, ${r.sync.removed ?? 0} removed.`, ok: true });
-    else setNotice({ text: `Sync failed: ${r.sync?.error ?? r.error ?? "unknown error"}`, ok: false });
-    await load();
-  };
+  /** Whose calendar a legend row is: the owning member, else the account, else the source. */
+  const legendOwner = (s: CalendarSubscription) =>
+    s.ownerName ?? (s.ownerActorId ? nameOf(s.ownerActorId) : null) ?? s.accountEmail ?? s.source;
 
   const header = (
     <Stack.Screen
@@ -446,9 +417,10 @@ export default function CalendarScreen() {
     <HScreen refreshing={refreshing} onRefresh={() => void onRefresh()}>
       {header}
 
-      {/* Agenda ⇄ Month view toggle */}
+      {/* Agenda ⇄ Month view toggle. It carries the screen's testID: HScreen takes none, and
+          this row is always the first thing on a loaded calendar. */}
       <Rise index={0}>
-        <View style={{ flexDirection: "row", gap: spacing.sm }}>
+        <View testID="calendar-screen" style={{ flexDirection: "row", gap: spacing.sm }}>
           {(["agenda", "month"] as const).map((v) => (
             <PressableScale
               key={v}
@@ -580,86 +552,78 @@ export default function CalendarScreen() {
       </Rise>
       ) : null}
 
-      {/* One Sync: every subscription + Google-edit pull in a single pass (and it
-          re-runs silently every minute while this screen is open). */}
+      {/* Cluster H — the lens, in his order, remembered across launches. My Nest only
+          offers itself when a nest exists to mean something by it. No Sync button: the
+          calendars refresh by themselves (ADR-005). */}
       {canManage ? (
-        <View style={{ gap: 4 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
-            <Button
-              small
-              variant="neutral"
-              icon="arrow.triangle.2.circlepath"
-              title={syncingAll ? "Syncing…" : "Sync"}
-              loading={syncingAll}
-              onPress={() => void syncAll()}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
+          <Chip label="Family" icon="house.fill" selected={calScope === "family"} onPress={() => pickScope("family")} />
+          {nests.length > 0 ? <Chip label="My Nest" icon="person.2.fill" selected={calScope === "nest"} onPress={() => pickScope("nest")} /> : null}
+          <Chip label="Just me" icon="lock" selected={calScope === "me"} onPress={() => pickScope("me")} />
+          {conflictCount > 0 ? (
+            <Badge
+              label={`${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`}
+              fg={colors.coral}
+              bg={colors.coralBg}
+              icon="exclamationmark.triangle.fill"
             />
-            {/* Cluster H — the lens, in his order, remembered across launches. My Nest only
-                offers itself when a nest exists to mean something by it. */}
-            <Chip label="Family" icon="house.fill" selected={calScope === "family"} onPress={() => pickScope("family")} />
-            {nests.length > 0 ? <Chip label="My Nest" icon="person.2.fill" selected={calScope === "nest"} onPress={() => pickScope("nest")} /> : null}
-            <Chip label="Just me" icon="lock" selected={calScope === "me"} onPress={() => pickScope("me")} />
-            {conflictCount > 0 ? (
-              <Badge
-                label={`${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`}
-                fg={colors.coral}
-                bg={colors.coralBg}
-                icon="exclamationmark.triangle.fill"
-              />
-            ) : null}
-          </View>
-          {lastSyncedAt ? (
-            <T kind="caption" color={colors.textFaint}>
-              Last synced {lastSyncedAt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
-            </T>
           ) : null}
         </View>
       ) : null}
 
-      {/* Synced feeds — the read-only "linked" layer, next to the Sync that drives them and
-          folded shut. Feeds are added/removed in Connections. */}
+      {/* The connected calendars, as a legend: whose colour is whose, and which ones are Work.
+          Read-only — adding, syncing and editing live in Connections. */}
       <View>
         <PressableScale
           haptic="select"
           onPress={() => setSubsOpen((v) => !v)}
           accessibilityRole="button"
           accessibilityState={{ expanded: subsOpen }}
-          accessibilityLabel={`Subscriptions, ${subs.length} synced calendar${subs.length === 1 ? "" : "s"}`}
+          accessibilityLabel={`Calendars, ${subs.length} connected`}
         >
           <SectionHeader
-            title={`Subscriptions${subs.length ? ` · ${subs.length}` : ""}`}
+            title={`Calendars${subs.length ? ` · ${subs.length}` : ""}`}
             trailing={<Expander open={subsOpen} size={26} />}
           />
         </PressableScale>
         {subsOpen ? (
-          subs.length === 0 ? (
-            <Card>
-              <T kind="sub">No synced calendars yet. Subscribe to school or team feeds in More → Connections.</T>
-            </Card>
-          ) : (
-            <Card padded={false}>
-              {subs.map((s, i) => {
-                // Whose calendar this is: "Ross · wrhixon@gmail.com" when the server
-                // knows the owning account; otherwise fall back to the source label.
-                const owner = [s.ownerName, s.accountEmail].filter(Boolean).join(" · ") || s.source;
-                return (
+          <View style={{ gap: spacing.sm }}>
+            {subs.length === 0 ? (
+              <Card>
+                <T kind="sub">
+                  {hasConnections ? "No connected calendars yet. Add school, team or work calendars in Connections." : "No connected calendars yet."}
+                </T>
+              </Card>
+            ) : (
+              <Card padded={false}>
+                {subs.map((s, i) => (
                   <Row
                     key={s.id}
-                    icon="antenna.radiowaves.left.and.right"
+                    icon="calendar"
                     iconColor={subColorForId(s.id) ?? colors.sky}
-                    iconBg={colors.skyBg}
+                    iconBg={fade(subColorForId(s.id) ?? colors.sky, 0.14)}
                     title={s.name}
-                    subtitle={`${owner}\n${syncLabel(s)}`}
+                    subtitle={legendOwner(s)}
                     last={i === subs.length - 1}
-                    trailing={<Button small title="Sync" loading={syncing === s.id} onPress={() => void syncNow(s)} />}
+                    trailing={s.isWork ? <Badge label="Work" fg={colors.textMuted} bg={colors.surfaceSunken} icon="briefcase.fill" /> : undefined}
                   />
-                );
-              })}
-            </Card>
-          )
+                ))}
+              </Card>
+            )}
+            {hasConnections ? (
+              <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+                <PressableScale
+                  onPress={() => router.push({ pathname: "/connections", params: { from: "/(home)/calendar" } })}
+                  haptic="select" hitSlop={8} accessibilityRole="link" accessibilityLabel="Manage calendars in Connections"
+                  testID="calendar-manage-connections"
+                >
+                  <T kind="subMedium" color={colors.ember}>Manage in Connections</T>
+                </PressableScale>
+              </View>
+            ) : null}
+          </View>
         ) : null}
       </View>
-
-      {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
 
       {/* ISS-121: a connected calendar that can no longer refresh must never contribute
           SILENTLY. Its events stay visible — hiding a family's events would be the worse
@@ -671,6 +635,8 @@ export default function CalendarScreen() {
             text={`${staleEvents.length} event${staleEvents.length === 1 ? "" : "s"} here ${staleEvents.length === 1 ? "comes" : "come"} from a calendar that can't refresh — ${staleEvents.length === 1 ? "it" : "they"} may be out of date until it's reconnected.`}
             ok={false}
           />
+          {/* Child View has no Connections, so no Reconnect for them — the notice still says why. */}
+          {hasConnections ? (
           <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
             {/* F2/F4 — say WHICH provider needs attention and WHERE we came from, so
                 Connections can scroll to that card, ring it, and give Back a real
@@ -686,6 +652,7 @@ export default function CalendarScreen() {
               <T kind="subMedium" color={colors.ember}>Reconnect</T>
             </PressableScale>
           </View>
+          ) : null}
         </View>
       ) : null}
 
@@ -727,7 +694,7 @@ export default function CalendarScreen() {
           title="Nothing on the calendar yet"
           hint={canManage
             ? "Add an event with the + button, subscribe to a school or team feed in Connections, or ask Famili to plan something."
-            : "Subscribe to a school or team feed in Connections, or ask Famili to plan something."}
+            : "When someone in the family adds a plan or connects a calendar, it shows up here."}
           action={canManage ? { title: "New event", onPress: () => openCreate() } : undefined}
         />
       ) : selectedDay && visibleDays.length === 0 ? (
