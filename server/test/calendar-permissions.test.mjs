@@ -81,6 +81,7 @@ test("calendarCan: a legacy calendar with no owner — Owner everything, Admin v
   const sub = { id: "sub_legacy" };
   const o = calendarCan({ actorId: "a", role: "Owner" }, sub, null);
   assert.ok(o.view && o.sync && o.edit && o.assign && o.remove);
+  assert.equal(o.markWork, false, "Work needs an adult OWNER, and a legacy calendar has none until assigned");
   assert.deepEqual(calendarCan({ actorId: "m", role: "Adult Admin" }, sub, null),
     { view: true, sync: true, edit: true, markWork: false, assign: false, remove: false, scope: false });
   for (const role of ["Adult Member", "Limited Member", "Child View", "Guest/Helper"]) {
@@ -202,6 +203,18 @@ test("the Owner adds a calendar FOR the Limited Member (past their cap); it is t
   assert.ok(list.canAdd.forMembers.includes(limited.actorId) && !list.canAdd.forMembers.includes(owner.actorId));
 });
 
+test("a calendar the Owner added for a Limited Member does not use up their own one", async () => {
+  const lm2 = await owner.req("/api/members", { method: "POST", body: JSON.stringify({ displayName: "Jo Quinn", role: "Limited Member" }) });
+  const jo = await makeSession(ctx, lm2.data.member.actorId);
+  const forJo = await owner.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Jo school", ics: ics("joschool"), forMemberId: jo.actorId }) });
+  assert.equal(forJo.status, 200, JSON.stringify(forJo.data));
+  assert.equal((await jo.req("/api/calendar/subscriptions")).data.canAdd.self, true, "the cap limits what they add themselves");
+  const own = await jo.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Jo own", ics: ics("joown") }) });
+  assert.equal(own.status, 200, JSON.stringify(own.data));
+  const again = await jo.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Jo two", ics: ics("jotwo") }) });
+  assert.equal(again.data.error, "calendar_limit");
+});
+
 test("only the Owner adds for someone else: an Adult Admin with forMemberId is owner_only", async () => {
   const r = await admin.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ ics: ics("adminfor"), forMemberId: limited.actorId }) });
   assert.equal(r.status, 403);
@@ -280,6 +293,30 @@ test("an Adult Member marks their own calendar as work; a Limited Member cannot 
   const kid = await owner.req(`/api/calendar/subscriptions/${subs["Noah school"]}`, { method: "PATCH", body: JSON.stringify({ isWork: true }) });
   assert.equal(kid.status, 403);
   assert.equal(kid.data.message, "Only an adult's calendar can be marked as work.");
+});
+
+test("saving with the SAME owner is not a reassignment (the build-79 edit sheet always sends it)", async () => {
+  const r = await member.req(`/api/calendar/subscriptions/${subs["Casey own"]}`, { method: "PATCH", body: JSON.stringify({ name: "Casey work", ownerActorId: member.actorId }) });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.subscription.name, "Casey work");
+});
+
+test("a shared card handed to another calendar becomes that calendar owner's event (createdBy too)", async () => {
+  const a = await member.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Shared A", ics: ics("sharedtag") }) });
+  const b = await admin.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Shared B", ics: ics("sharedtag") }) });
+  assert.equal(a.status, 200, JSON.stringify(a.data));
+  assert.equal(b.status, 200, JSON.stringify(b.data));
+  const aId = a.data.subscription.id, bId = b.data.subscription.id;
+  const cards = (await owner.req("/api/events")).data.events.filter((e) => e.provenance?.subscriptionId === aId);
+  assert.equal(cards.length, 2, "one card per event, owned by the first calendar");
+  assert.ok(cards.every((e) => (e.provenance.alsoSubscriptionIds ?? []).includes(bId)), "the second calendar rides along");
+  assert.equal((await member.req(`/api/calendar/subscriptions/${aId}`, { method: "DELETE" })).status, 200);
+  for (const c of cards) {
+    const rec = readStoreRecord(ctx, "events", c.id);
+    assert.equal(rec.provenance.subscriptionId, bId);
+    assert.equal(rec.ownerId, admin.actorId);
+    assert.equal(rec.createdBy, admin.actorId, "canSeeEntity counts createdBy as ownership — it must not keep naming Casey");
+  }
 });
 
 test("an Adult Admin cannot reassign a calendar", async () => {

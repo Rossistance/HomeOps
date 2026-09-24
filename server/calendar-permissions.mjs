@@ -45,7 +45,8 @@ export function calendarCan(viewer, sub, owner) {
     // Legacy, unassigned: someone has to be able to clean it up (the Owner), and an Admin
     // may keep it running and give it a name — but not delete what may be another adult's.
     // No scope: scope is about what a Limited Member sees, and there is no member here.
-    if (role === "Owner") return { view: true, sync: true, edit: true, markWork: true, assign: true, remove: true, scope: false };
+    // markWork false: Work needs an adult OWNER, and this calendar has none until assigned.
+    if (role === "Owner") return { view: true, sync: true, edit: true, markWork: false, assign: true, remove: true, scope: false };
     if (role === "Adult Admin") return { ...NONE, view: true, sync: true, edit: true };
     return { ...NONE };
   }
