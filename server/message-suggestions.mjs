@@ -39,8 +39,10 @@ import { privacyContext, presentEvents, obscureStateOf, obscuredLabel, hiddenEve
 /* Hidden events (ADR-005). Everything this module writes lands in a SHARED thread — the
  * suggestion chip, the "Already on the calendar" note, the system line — so a hidden event
  * is spoken of by its block ("Beannie working") here even when the person acting owns it.
- * Only the context handed to the model may carry the poster's OWN hidden events in full
- * (surprises excepted — audience "shared"), because the poster asking is the owner asking. */
+ * That holds for the context handed to the model too: the model's output (the chip's title,
+ * summary and patch) is stored on the message and read by everyone in the thread, so the
+ * poster's OWN hidden events go in as blocks as well (presentEvents asOthers) — otherwise
+ * "Move Interview at Globex to 3pm" is one chip away (ADR-005 privacy review). */
 function shownTitle(e, pc) {
   const st = obscureStateOf(e, pc ?? privacyContext(e.householdId));
   return st.obscured ? obscuredLabel(st.kind, st.owner) : e.title;
@@ -67,11 +69,12 @@ function visibleItems(session, days = 30) {
   const now = Date.now();
   const horizon = now + days * 86400e3;
   const view = { role: session.role, actorId: session.actorId };
-  // Through presentEvents (which applies the same canSeeEntity gate): someone else's hidden
-  // event reaches the model as its block — busy time, with an id that matches nothing, so it
-  // can never become an update target or a coordination proposal.
+  // Through presentEvents (which applies the same canSeeEntity gate): every hidden event —
+  // the poster's own included (asOthers), since what the model writes lands in the shared
+  // thread — reaches the model as its block: busy time, with an id that matches nothing, so
+  // it can never become an update target or a coordination proposal.
   const inWindow = listEvents((e) => e.householdId === session.householdId && !e.deletedAt && (e.startAt ? Date.parse(e.startAt) : 0) >= now - 86400e3 && (e.startAt ? Date.parse(e.startAt) : 0) <= horizon);
-  const events = presentEvents(inWindow, view, { purpose: "assistant", audience: "shared", pc: privacyContext(session.householdId) })
+  const events = presentEvents(inWindow, view, { purpose: "assistant", audience: "shared", asOthers: true, pc: privacyContext(session.householdId) })
     .slice(0, 60).map((e) => ({ id: e.id, type: "event", title: e.title, startAt: e.startAt ?? null, allDay: !!e.allDay, location: e.location || null, owner: e.ownerId ?? e.createdBy ?? null }));
   const tasks = listTasks((t) => t.householdId === session.householdId && t.status !== "done" && t.type !== "list" && canSeeEntity(t, view))
     .slice(0, 60).map((t) => ({ id: t.id, type: "task", title: t.title, dueAt: t.dueAt ?? null, assignedMemberId: t.assignedMemberId ?? null }));
