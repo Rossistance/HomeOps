@@ -9,6 +9,8 @@
 import { getEvent, patchEvent, deleteEventRec, getMember, isAdultRole, getSettings, appendAudit } from "../../store.mjs";
 import { isEditableLinkedGoogle, editLinkedGoogleEvent, pushEventToGoogle, deleteLinkedGoogleEvent, deleteGoogleCopy, googleReachAllowed } from "../../calendar.mjs";
 import { defineAction } from "../define-action.mjs";
+// Every successful write below refreshes the household's calendars, as the app's routes do.
+import { kickCalendarRefresh } from "../../calendar-refresh.mjs";
 import { badStamp } from "../shared.mjs";
 import { KEY_HINTS, publicEvent, readOnly, nativeScope, always, PROJECTION } from "./shared.mjs";
 
@@ -63,6 +65,7 @@ export const familiUpdateEvent = defineAction({
       if (claimed.length) return { ok: false, error: "read_only_layer", message: `This event comes from a calendar outside FamiliOS, so its ${claimed.join(", ")} can only change there. Notes, who's going and a driver can still be added here.` };
       const updated = patchEvent(ev.id, patch);
       appendAudit({ type: "event.append", eventId: ev.id, fields: Object.keys(patch), via: "assistant", householdId: hh, actorId: session.actorId });
+      kickCalendarRefresh(hh, "event.update");
       return { ok: true, result: { event: publicEvent(hh, updated), localOnly: true } };
     }
     if (linkedGoogle) {
@@ -75,6 +78,7 @@ export const familiUpdateEvent = defineAction({
         if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "Google rejected the change." };
       }
       const updated = Object.keys(localOnly).length ? patchEvent(ev.id, localOnly) : getEvent(ev.id);
+      kickCalendarRefresh(hh, "event.update");
       return { ok: true, result: { event: publicEvent(hh, updated), google: "updated" } };
     }
     const updated = patchEvent(ev.id, patch);
@@ -84,6 +88,7 @@ export const familiUpdateEvent = defineAction({
       const r = await pushEventToGoogle({ ev: updated, householdId: hh, actorId: session.actorId }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
       google = r.ok ? "updated" : `not updated (${r.error})`;
     }
+    kickCalendarRefresh(hh, "event.update");
     return { ok: true, result: { event: publicEvent(hh, updated), ...(google ? { google } : {}) } };
   },
 });
@@ -118,6 +123,7 @@ export const familiDeleteEvent = defineAction({
       const r = await deleteLinkedGoogleEvent({ ev, householdId: hh, actorId: session.actorId });
       appendAudit({ type: "event.delete", eventId: ev.id, ok: r.ok, target: "google-linked", via: "assistant", householdId: hh, actorId: session.actorId });
       if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "Google rejected the delete." };
+      kickCalendarRefresh(hh, "event.delete");
       return { ok: true, result: { deleted: true, title: ev.title, google: "deleted" } };
     }
     let google = null;
@@ -127,6 +133,7 @@ export const familiDeleteEvent = defineAction({
     }
     deleteEventRec(ev.id);
     appendAudit({ type: "event.delete", eventId: ev.id, ok: true, via: "assistant", ...(google ? { google } : {}), householdId: hh, actorId: session.actorId });
+    kickCalendarRefresh(hh, "event.delete");
     return { ok: true, result: { deleted: true, title: ev.title, ...(google ? { google } : {}) } };
   },
 });

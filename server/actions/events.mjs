@@ -18,6 +18,7 @@ import { roleAtLeast } from "../auth.mjs";
 import { defineAction } from "./define-action.mjs";
 import { badStamp, DATE_ONLY_RE, unknownMember, ghostMessage } from "./shared.mjs";
 import { EVENT_RECORD, newEventRecord } from "./schemas/event.mjs";
+import { kickCalendarRefresh } from "../calendar-refresh.mjs";
 
 const err = (error, message) => ({ ok: false, error, message });
 const str = { type: "string" };
@@ -117,6 +118,9 @@ export const createEvent = defineAction({
       source: via === "agent" ? "FamiliOS Assistant" : "FamiliOS",
       provenance: { via, actorId: ctx.actorId, ...(ctx.runId ? { runId: ctx.runId } : {}) },
     }, ctx));
+    // Here, in the one run, so the app's POST /api/events and the assistant's tool both
+    // refresh the household's calendars — after the write, and only once it succeeded.
+    kickCalendarRefresh(ctx.householdId, "event.create");
     return { ok: true, result: { event: rec } };
   },
 });

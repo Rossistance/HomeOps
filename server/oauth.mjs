@@ -6,10 +6,24 @@ import { clientCreds, providerById } from "./providers.mjs";
 import { getAccountTokens, setAccountTokens, getAccountRaw, putAccount } from "./store.mjs";
 import { sandboxEnabled, sandboxApiFor } from "./sandbox-connectors.mjs";
 
+// Every provider call has a deadline. Calendar refreshes now run in the background on the
+// household's behalf (any member opening the app starts one), so one Google request that
+// never answers used to hold the single-flight refresh — and every later refresh queued
+// behind it — forever. 20 s is generous for one API page; opts.timeoutMs overrides it. A
+// timeout answers in the same { ok:false, status:0, error } shape a network failure does,
+// so every caller's existing "transient — skip, don't guess" branch already handles it.
+const DEFAULT_TIMEOUT_MS = 20_000;
 async function rawFetch(url, opts = {}) {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...init } = opts;
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const signal = init.signal ? AbortSignal.any([init.signal, deadline]) : deadline;
+  const failed = (e) => ({ ok: false, status: 0, json: null, text: "", error: e?.name === "TimeoutError" || deadline.aborted ? `timeout after ${timeoutMs}ms` : String(e?.message ?? e) });
   let res;
-  try { res = await fetch(url, opts); } catch (e) { return { ok: false, status: 0, json: null, text: "", error: String(e?.message ?? e) }; }
-  const text = await res.text();
+  try { res = await fetch(url, { ...init, signal }); } catch (e) { return failed(e); }
+  // The body read is covered by the same deadline — a server that sends headers and then
+  // stalls must not hang the caller either.
+  let text;
+  try { text = await res.text(); } catch (e) { return failed(e); }
   let json = null; try { json = text ? JSON.parse(text) : null; } catch { /* non-json */ }
   return { ok: res.ok, status: res.status, json, text };
 }

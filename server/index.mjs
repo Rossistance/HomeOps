@@ -48,6 +48,7 @@ import { orchestrate, ensureDefaultHelper, clientSourceRef } from "./orchestrato
 import { sandboxEnabled, seedSandboxAccounts, listSandboxEffects } from "./sandbox-connectors.mjs";
 import { seedDefaults } from "./seed.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
+import { refreshHouseholdCalendars, kickCalendarRefresh, awaitCalendarRefresh } from "./calendar-refresh.mjs";
 import { handleInboundSms, replyToSender, setLoopReplyHandler } from "./sms.mjs";
 import { bluebubblesConfig, parseInboundWebhook, webhookSecretPresented, secretMatches } from "./bluebubbles.mjs";
 import {
@@ -2943,6 +2944,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         }
         const updated = patchEvent(ev.id, patch);
         audit({ type: "event.append", eventId: ev.id, fields: Object.keys(patch), ok: true }, req, g.session);
+        kickCalendarRefresh(g.session.householdId, "event.update");
         // localOnly is the honest part: nothing left this app.
         return json(res, 200, { event: updated, localOnly: true }, req);
       }
@@ -2958,10 +2960,14 @@ function mayWriteAgent(session, agent, nextVisibility) {
           if (!r.ok) return json(res, 422, { error: r.error, message: r.message ?? "Couldn't update the event in Google Calendar." }, req);
         }
         const updated = Object.keys(localOnly).length > 0 ? patchEvent(ev.id, localOnly) : getEvent(ev.id);
+        kickCalendarRefresh(g.session.householdId, "event.update");
         return json(res, 200, { event: updated }, req);
       }
       const updated = patchEvent(ev.id, patch);
       audit({ type: "event.update", eventId: ev.id, ok: true }, req, g.session);
+      // After the write, never before: the refresh then sees (and, via the sweep's two-way
+      // pass, carries) the change. Fire-and-forget — the response does not wait on Google.
+      kickCalendarRefresh(g.session.householdId, "event.update");
       // Auto-sync: a local edit to a Google-linked event mirrors to Google immediately
       // (server-triggered, no approval) when the household enabled calendar auto-sync.
       if (getSettings(g.session.householdId).calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
@@ -2988,6 +2994,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         const r = await deleteLinkedGoogleEvent({ ev, householdId: g.session.householdId, actorId: g.session.actorId });
         audit({ type: "event.delete", eventId: ev.id, ok: r.ok, target: "google-linked", ...(r.ok ? {} : { error: r.error }) }, req, g.session);
         if (!r.ok) return json(res, 422, { error: r.error, message: r.message ?? "Couldn't delete the event in Google Calendar." }, req);
+        kickCalendarRefresh(g.session.householdId, "event.delete");
         return json(res, 200, { ok: true, google: "deleted" }, req);
       }
       // ISS-106: a CANONICAL event that was pushed to Google keeps a googleEventId.
@@ -3012,6 +3019,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       }
       deleteEventRec(ev.id);
       audit({ type: "event.delete", eventId: ev.id, ok: true, ...(googleOutcome ? { google: googleOutcome } : {}) }, req, g.session);
+      kickCalendarRefresh(g.session.householdId, "event.delete");
       return json(res, 200, { ok: true, ...(googleOutcome ? { google: googleOutcome } : {}) }, req);
     }
     /* ---- Task lists as REAL records (Cluster L) ----
@@ -3047,6 +3055,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         name, ...vis, createdBy: g.session.actorId, createdAt: new Date().toISOString(),
       });
       audit({ type: "tasklist.create", listId: rec.id, name, ok: true }, req, g.session);
+      kickCalendarRefresh(g.session.householdId, "tasklist.create");
       return json(res, 200, { list: rec }, req);
     }
     const taskListOne = path.match(/^\/api\/task-lists\/([^/]+)$/);
@@ -3063,6 +3072,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const doomed = listTasks((t) => t.householdId === g.session.householdId && t.type === "list" && t.listName === l.name && (t.visibility ?? "household") === l.visibility && (t.nestId ?? null) === (l.nestId ?? null));
       for (const t of doomed) deleteTaskRec(t.id);
       audit({ type: "tasklist.delete", listId: l.id, name: l.name, tasksRemoved: doomed.length, ok: true }, req, g.session);
+      kickCalendarRefresh(g.session.householdId, "tasklist.delete");
       return json(res, 200, { ok: true, tasksRemoved: doomed.length }, req);
     }
     /* GET /api/tasks is a DECLARED READ (server/actions/reads.mjs), answered by
@@ -3133,6 +3143,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         }
       }
       audit({ type: "task.update", taskId: tk.id, ok: true }, req, g.session);
+      kickCalendarRefresh(g.session.householdId, "task.update");
       return json(res, 200, { task: updated }, req);
     }
     if (taskOne && method === "DELETE") {
@@ -3153,6 +3164,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         deleteEventRec(e.id);
       }
       audit({ type: "task.delete", taskId: tk.id, removedEvents: linkedEvents.length, ok: true }, req, g.session);
+      kickCalendarRefresh(g.session.householdId, "task.delete");
       return json(res, 200, { ok: true, removedEvents: linkedEvents.length }, req);
     }
 
@@ -3186,6 +3198,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
             .then((r) => appendAudit({ type: "calendar.autopush", eventId: updated.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) })).catch(() => {});
         }
         audit({ type: "task.to_calendar", taskId: tk.id, eventId: existing.id, action: "updated", ok: true }, req, g.session);
+        kickCalendarRefresh(g.session.householdId, "task.to-calendar");
         return json(res, 200, { ok: true, event: updated, action: "updated" }, req);
       }
       const ev = putEvent(newEventRecord({
@@ -3196,6 +3209,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       }, g.session));
       patchTask(tk.id, { eventId: ev.id });   // so the task row can say it's on the calendar
       audit({ type: "task.to_calendar", taskId: tk.id, eventId: ev.id, action: "created", ok: true }, req, g.session);
+      kickCalendarRefresh(g.session.householdId, "task.to-calendar");
       return json(res, 200, { ok: true, event: ev, action: "created" }, req);
     }
 
@@ -3521,32 +3535,34 @@ function mayWriteAgent(session, agent, nextVisibility) {
       });
       return json(res, 200, { subscriptions: subs }, req);
     }
-    // One-call calendar sync: re-pull EVERY subscription (google + ics feeds), then merge
-    // Google-side edits back into pushed canonical events — a single "sync now" for
-    // clients, tolerant of individual feed failures.
+    /* Refresh the WHOLE household's calendars (server/calendar-refresh.mjs). Any signed-in
+     * member may ask — a child opening the app included — because asking is safe: the
+     * engine syncs each calendar as its owner, runs one refresh per household at a time and
+     * at most once a minute. gate() on a POST still demands CSRF from cookie clients.
+     * { wait:true } waits (up to 8 s) and answers with the summary, or { pending:true } if
+     * it is still going; otherwise the refresh is started and the answer is immediate. */
+    if (path === "/api/calendar/refresh" && method === "POST") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      const body = (await readBody(req)) ?? {};
+      const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason : "manual";
+      if (body.wait === true) return json(res, 200, await awaitCalendarRefresh(g.session.householdId, { reason }), req);
+      kickCalendarRefresh(g.session.householdId, reason);
+      return json(res, 200, { ok: true, pending: true }, req);
+    }
+    // Kept for old app builds (build-79 iOS calls this every 60 s): an alias of the refresh
+    // above, open to any signed-in member, never forced past the one-minute floor, and
+    // answering in its original shape — zeros when the floor skipped it or it is still running.
     if (path === "/api/calendar/sync-all" && method === "POST") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
-      const subs = listSubscriptions((s) => s.householdId === g.session.householdId);
-      let synced = 0, imported = 0, updated = 0, removed = 0;
-      const errors = [];
-      for (const sub of subs) {
-        try {
-          const r = await syncSubscription({ sub, session: g.session });
-          patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed } : { error: r.error }, eventCount: r.ok ? r.total : (sub.eventCount ?? 0) });
-          if (r.ok) { synced++; imported += r.imported; updated += r.updated; removed += r.removed; }
-          else errors.push({ id: sub.id, error: r.error });
-        } catch (e) { errors.push({ id: sub.id, error: String(e?.message ?? e) }); }
-      }
-      // Merge-back half (same as POST /api/calendar/pull-google-edits) — best-effort:
-      // no connected Google account just means nothing to pull, not a failure.
-      let pulled = { checked: 0, merged: 0, conflicts: 0, unlinked: 0 };
-      try {
-        const p = await pullGoogleEdits({ session: g.session });
-        if (p.ok) pulled = { checked: p.checked, merged: p.merged, conflicts: p.conflicts, unlinked: p.unlinked };
-      } catch { /* best effort */ }
-      audit({ type: "calendar.sync_all", synced, imported, updated, removed, pulled, failed: errors.length, ok: true }, req, g.session);
-      return json(res, 200, { ok: true, synced, imported, updated, removed, pulled, errors }, req);
+      const r = await awaitCalendarRefresh(g.session.householdId, { reason: "sync-all" });
+      const ran = r.ok && !r.skipped && !r.pending && r.synced != null;
+      const pulled = ran ? r.pulled : { checked: 0, merged: 0, conflicts: 0, unlinked: 0 };
+      return json(res, 200, {
+        ok: true,
+        synced: ran ? r.synced : 0, imported: ran ? r.imported : 0, updated: ran ? r.updated : 0, removed: ran ? r.removed : 0,
+        pulled: { checked: pulled.checked, merged: pulled.merged, conflicts: pulled.conflicts, unlinked: pulled.unlinked },
+        errors: ran ? r.errors : [],
+      }, req);
     }
     if (path === "/api/calendar/subscriptions" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -3607,7 +3623,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (path === "/api/calendar/pull-google-edits" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
-      const r = await pullGoogleEdits({ session: g.session });
+      // This member's own pushed events only, each checked with the account it lives in.
+      const r = await pullGoogleEdits({ householdId: g.session.householdId, actorId: g.session.actorId });
       audit({ type: "calendar.pull_edits", ok: r.ok, ...(r.ok ? { checked: r.checked, merged: r.merged, conflicts: r.conflicts, unlinked: r.unlinked, errors: r.errors } : { error: r.error }) }, req, g.session);
       if (!r.ok) return json(res, 422, { error: r.error, message: r.error === "no_account" ? "Connect your Google account (with calendar access) in Connections first." : undefined }, req);
       return json(res, 200, r, req);
@@ -3628,6 +3645,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (!patch) return json(res, 400, { error: ev.provenance?.conflict ? "bad_choice" : "no_conflict", message: ev.provenance?.conflict ? 'choice must be "google" or "local".' : "This event has no pending sync conflict." }, req);
       const updated = patchEvent(ev.id, patch);
       audit({ type: "calendar.resolve_conflict", eventId: ev.id, choice: body.choice, ok: true }, req, g.session);
+      kickCalendarRefresh(g.session.householdId, "event.resolve-conflict");
       return json(res, 200, { ok: true, event: updated }, req);
     }
     // Connect the actor's Google Calendar as a read-only linked source (pull sync). Needs a
@@ -5391,37 +5409,36 @@ server.listen(PORT, () => {
   // Calendar auto-sync: re-pull url/google subscriptions that have gone stale so linked
   // events stay fresh without a manual "Sync now". Pasted imports are static — skipped.
   // Staleness window via HOMEOPS_CAL_SYNC_MINUTES (default 6h); swept every 15 minutes.
+  // The staleness check still decides WHICH households are due; the refresh itself is the one
+  // engine every other door uses (calendar-refresh.mjs) — each calendar synced as its owner,
+  // single-flight with any refresh a member's app already started, audited only on change.
+  // A slow sweep (many households, a Google that answers slowly) never overlaps the next.
   const calSyncMs = Math.max(5, parseInt(process.env.HOMEOPS_CAL_SYNC_MINUTES ?? "360", 10) || 360) * 60_000;
-  setInterval(() => void forEachTenant(async () => {
-    const due = listSubscriptions((s) => s.source !== "import" && (Date.now() - (s.lastSyncAt ?? 0)) > calSyncMs);
-    for (const sub of due) {
-      try {
-        // The subscription's creator is the acting identity (their Google account, their household).
-        const session = { householdId: sub.householdId, actorId: sub.createdBy };
-        const r = await syncSubscription({ sub, session });
-        patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed, auto: true } : { error: r.error, auto: true }, eventCount: r.ok ? r.total : (sub.eventCount ?? 0) });
-        audit({ type: "calendar.auto_sync", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, null, session);
-      } catch { /* one bad feed must not stop the sweep */ }
-    }
-    // Two-way Google sweep (opt-in via Settings → calendar auto-sync): server-triggered,
-    // no approvals — pull Google-side edits into pushed events AND push local edits back,
-    // so both calendars mirror each other without anyone opening the app. Conflicts
-    // (both sides changed) still flag for human review — auto-sync never clobbers.
-    {
-      const googleSubs = listSubscriptions((s) => s.source === "google");
-      const seen = new Set();
-      for (const sub of googleSubs) {
-        // Auto-sync is a per-household opt-in — gate each subscription on ITS household.
-        if (getSettings(sub.householdId).calendarAutoSync !== true || !externalActionsEnabled(sub.householdId)) continue;
-        const key = `${sub.householdId}:${sub.createdBy}`;
-        if (seen.has(key)) continue; seen.add(key);
-        try {
-          const r = await autoSyncGoogle({ householdId: sub.householdId, actorId: sub.createdBy });
-          appendAudit({ type: "calendar.auto_two_way", householdId: sub.householdId, ok: true, merged: r.pull?.merged ?? 0, conflicts: r.pull?.conflicts ?? 0, pushed: r.pushed, pushErrors: r.pushErrors });
-        } catch { /* one account must not stop the sweep */ }
+  let _calSweepInFlight = false;
+  setInterval(() => {
+    if (_calSweepInFlight) return;
+    _calSweepInFlight = true;
+    void forEachTenant(async () => {
+      const due = new Set(listSubscriptions((s) => s.source !== "import" && (Date.now() - (s.lastSyncAt ?? 0)) > calSyncMs).map((s) => s.householdId));
+      for (const hh of due) {
+        try { await refreshHouseholdCalendars(hh, { reason: "sweep" }); } catch { /* one household must not stop the sweep */ }
       }
-    }
-  }), 15 * 60_000);
+      // Two-way Google sweep (opt-in via Settings → calendar auto-sync): server-triggered,
+      // no approvals — pull Google-side edits into pushed events AND push local edits back,
+      // so both calendars mirror each other without anyone opening the app. Conflicts
+      // (both sides changed) still flag for human review — auto-sync never clobbers. Once
+      // per HOUSEHOLD now: each event goes through the account it lives in (calendar.mjs).
+      const googleHouseholds = new Set(listSubscriptions((s) => s.source === "google").map((s) => s.householdId));
+      for (const hh of googleHouseholds) {
+        // Auto-sync is a per-household opt-in — gate on THAT household.
+        if (getSettings(hh).calendarAutoSync !== true || !externalActionsEnabled(hh)) continue;
+        try {
+          const r = await runWithTenant(hh, () => autoSyncGoogle({ householdId: hh }));
+          runWithTenant(hh, () => appendAudit({ type: "calendar.auto_two_way", householdId: hh, ok: true, merged: r.pull?.merged ?? 0, conflicts: r.pull?.conflicts ?? 0, pushed: r.pushed, pushErrors: r.pushErrors, pushSkipped: r.pushSkipped }));
+        } catch { /* one household must not stop the sweep */ }
+      }
+    }).finally(() => { _calSweepInFlight = false; });
+  }, 15 * 60_000);
   startScheduler();
   /* Move each household's connector secrets onto its OWN derived vault key (see store.mjs).
    *
