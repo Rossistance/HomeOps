@@ -265,7 +265,7 @@ export default function ConnectionsScreen() {
     const name = editName.trim();
     if (!name) { setNotice({ text: "Give the calendar a name.", ok: false }); return; }
     setSubBusy(`edit:${editSub.id}`); setNotice(null);
-    const r = await api.updateCalendarSubscription(editSub.id, { name, ownerActorId: editOwner });
+    const r = await api.updateCalendarSubscription(editSub.id, { name, ownerActorId: editOwner ?? undefined });
     setSubBusy(null);
     if (r.subscription) {
       tapHaptic("success");

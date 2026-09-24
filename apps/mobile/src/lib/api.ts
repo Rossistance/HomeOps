@@ -267,8 +267,24 @@ export interface MealIngredient { item: string; have?: boolean }
 /* Generated from server/actions/schemas/meal.mjs, like EventRec and TaskRec. */
 import type { MealRecord } from "@/generated/actions";
 export type Meal = MealRecord;
+/** What the SIGNED-IN member may do with one calendar — the server's answer (ADR-005,
+ *  server/calendar-permissions.mjs). Draw buttons from this; never re-derive it from roles. */
+export interface CalendarCan { view: boolean; sync: boolean; edit: boolean; markWork: boolean; assign: boolean; remove: boolean; scope: boolean }
+/** What the Add button may offer: self = may add for themselves now; limitReached = a Limited
+ *  Member who already added their one; forMembers = who the Owner may add a calendar for. */
+export interface CalendarCanAdd { self: boolean; limitReached: boolean; forMembers: string[] }
+/** The Owner's narrowing of what a Limited Member's calendar shows, per other member:
+ *  everything, nothing, or chosen calendars ("app" = events made in FamiliOS). */
+export type CalendarScopeRule = "all" | "none" | { calendars: string[] };
+export interface CalendarScope { members: Record<string, CalendarScopeRule> }
+/** A connected calendar. Every member gets the legend fields (id, name, source, colour, owner,
+ *  isWork). The management fields — url, sync status, counts, can — come only on calendars the
+ *  viewer may manage (can.view); on everyone else's they are absent. */
 export interface CalendarSubscription {
-  id: string; name: string; url: string | null; source: string;
+  id: string; name: string; url?: string | null; source: string;
+  /** A Work calendar: its events are hidden from everyone but its owner until shared. */
+  isWork?: boolean;
+  can?: CalendarCan;
   /** Per-calendar accent (name or hex) — each connected calendar's events render as distinctly colored cards. */
   color?: string | null;
   /** Owning connected account (Google) — which member's calendar this is. All possibly null (ICS feeds). */
@@ -279,10 +295,12 @@ export interface CalendarSubscription {
   /** True when a member assigned this calendar by hand (vs. inferred from the connecting account). */
   assigned?: boolean;
   createdBy?: string | null;
-  lastSyncAt: number | null;
-  lastResult: { imported?: number; updated?: number; removed?: number; error?: string } | null;
-  eventCount: number; createdAt: number;
+  lastSyncAt?: number | null;
+  lastResult?: { imported?: number; updated?: number; removed?: number; error?: string; via?: string } | null;
+  eventCount?: number; createdAt?: number;
 }
+/** A server refusal carries its own sentence (who CAN do it) — show it rather than a generic one. */
+export interface CalendarRefusal { error?: string; message?: string }
 export interface CalendarSync { ok: boolean; imported?: number; updated?: number; removed?: number; total?: number; error?: string }
 // Household files (server-owned library) + read-only knowledge (memory/artifacts).
 /** One in-app delivery. `source` says who sent it (a helper, a person, a family thread);
@@ -350,7 +368,9 @@ export interface KnowledgeRec {
 }
 export interface MemoryRec { id: string; scope: string; type: string; text: string; createdAt: number; source?: { runId?: string; actorId?: string } }
 export interface ArtifactRec { id: string; runId?: string; kind: string; title: string; body?: string; createdAt: number }
-export interface MemberRec { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean; color?: string | null; photoFileId?: string | null; aiEnabled?: boolean }
+export interface MemberRec { actorId: string; displayName: string; role: string; relationship: string | null; spaceIds: string[]; isCurrentUser: boolean; color?: string | null; photoFileId?: string | null; aiEnabled?: boolean;
+  /** Only returned to the Owner, only meaningful on a Limited Member: null = sees everything. */
+  calendarScope?: CalendarScope | null }
 // Contact methods — the server-owned delivery registry (per-member email/phone/in-app/
 // dashboard entries with verified + opt-in state and a per-agent allowlist). Same
 // records the web Contacts tab manages; the server enforces the role gates.
@@ -426,6 +446,13 @@ const OFFLINE_QUEUEABLE = (path: string, method?: string) =>
   (method === "PATCH" && /^\/tasks\//.test(path)) || (method === "POST" && path === "/tasks")
   // A message typed from the lock screen or on a dead connection is kept, not lost.
   || (method === "POST" && /^\/threads\/[^/]+\/messages$/.test(path));
+
+/** A refusal keeps the server's own sentence ("Only Casey or the Owner can remove this
+ *  calendar."); a missing body is a network failure. */
+function refusalOr<T extends CalendarRefusal>(r: Res<T>): T {
+  if (r.data && typeof r.data === "object") return r.data;
+  return { error: r.status === 403 ? "insufficient_role" : "network" } as T;
+}
 
 async function req<T = unknown>(path: string, init?: RequestInit): Promise<Res<T>> {
   const headers: Record<string, string> = { "content-type": "application/json", ...(init?.headers as Record<string, string> | undefined) };
@@ -1005,35 +1032,56 @@ export const api = {
     const r = await req<{ subscriptions: CalendarSubscription[] }>("/calendar/subscriptions");
     return r.data?.subscriptions ?? [];
   },
-  async subscribeCalendar(body: { name?: string; url: string }): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string; message?: string }> {
-    const r = await req<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string; message?: string }>("/calendar/subscriptions", { method: "POST", body: JSON.stringify(body) });
-    if (r.status === 403) return { error: "insufficient_role" };
+  /** The Connections view: every calendar (legend rows for ones the viewer can't manage) plus
+   *  what the Add button may offer. */
+  async calendarConnections(): Promise<{ subscriptions: CalendarSubscription[]; canAdd: CalendarCanAdd }> {
+    const r = await req<{ subscriptions: CalendarSubscription[]; canAdd?: CalendarCanAdd }>("/calendar/subscriptions");
+    return { subscriptions: r.data?.subscriptions ?? [], canAdd: r.data?.canAdd ?? { self: false, limitReached: false, forMembers: [] } };
+  },
+  /** forMemberId: the Owner adding a calendar for someone else (the server refuses anyone else). */
+  async subscribeCalendar(body: { name?: string; url: string; forMemberId?: string }): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync } & CalendarRefusal> {
+    const r = await req<{ subscription?: CalendarSubscription; sync?: CalendarSync } & CalendarRefusal>("/calendar/subscriptions", { method: "POST", body: JSON.stringify(body) });
+    return refusalOr(r);
+  },
+  async importIcs(body: { name?: string; ics: string; forMemberId?: string }): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync } & CalendarRefusal> {
+    const r = await req<{ subscription?: CalendarSubscription; sync?: CalendarSync } & CalendarRefusal>("/calendar/import-ics", { method: "POST", body: JSON.stringify(body) });
+    return refusalOr(r);
+  },
+  /** accountId picks one of the signed-in member's own Google accounts (default: the first). */
+  async connectGoogleCalendar(body: { forMemberId?: string; accountId?: string } = {}): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync } & CalendarRefusal> {
+    const r = await req<{ subscription?: CalendarSubscription; sync?: CalendarSync } & CalendarRefusal>("/calendar/connect-google", { method: "POST", body: JSON.stringify(body) });
+    return refusalOr(r);
+  },
+  /** Refresh every calendar in the household (any member may; the server runs one at a time and
+   *  at most once a minute). wait:true answers when it is done (or after ~8 s with pending). */
+  async refreshCalendars(reason: string, wait = false): Promise<{ ok?: boolean; pending?: boolean; skipped?: string; at?: number; error?: string }> {
+    const r = await req<{ ok?: boolean; pending?: boolean; skipped?: string; at?: number; error?: string }>("/calendar/refresh", { method: "POST", body: JSON.stringify({ reason, wait }) });
     return r.data ?? { error: "network" };
   },
-  async importIcs(body: { name?: string; ics: string }): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string; message?: string }> {
-    const r = await req<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string; message?: string }>("/calendar/import-ics", { method: "POST", body: JSON.stringify(body) });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
+  /** The eye toggle: hide (true) or share (false) one of YOUR events; secret = "Keep it a
+   *  surprise" (null = let the words decide). Only the event's owner, an adult, may. */
+  async setEventSharing(id: string, hidden: boolean, secret?: boolean | null): Promise<{ event?: EventRec } & CalendarRefusal> {
+    const r = await req<{ event?: EventRec } & CalendarRefusal>("/events/sharing", { method: "POST", body: JSON.stringify(secret === undefined ? { id, hidden } : { id, hidden, secret }) });
+    return refusalOr(r);
   },
-  async connectGoogleCalendar(): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string; message?: string }> {
-    const r = await req<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string; message?: string }>("/calendar/connect-google", { method: "POST", body: "{}" });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
+  /** Owner only: what a Limited Member's calendar shows (null = everything). */
+  async setCalendarScope(memberId: string, scope: CalendarScope | null): Promise<{ member?: MemberRec; ok?: boolean } & CalendarRefusal> {
+    const r = await req<{ member?: MemberRec; ok?: boolean } & CalendarRefusal>(`/members/${encodeURIComponent(memberId)}/calendar-scope`, { method: "PUT", body: JSON.stringify({ scope }) });
+    return refusalOr(r);
   },
   async syncCalendar(id: string): Promise<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string }> {
     const r = await req<{ subscription?: CalendarSubscription; sync?: CalendarSync; error?: string }>(`/calendar/subscriptions/${encodeURIComponent(id)}/sync`, { method: "POST", body: "{}" });
     return r.data ?? { error: "network" };
   },
   /** Rename a feed and/or say whose calendar it is; its imported events take the owner at once. */
-  async updateCalendarSubscription(id: string, patch: { name?: string; ownerActorId?: string | null }): Promise<{ subscription?: CalendarSubscription; restamped?: number; error?: string }> {
-    const r = await req<{ subscription?: CalendarSubscription; restamped?: number; error?: string }>(`/calendar/subscriptions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
+  /** Rename, recolour, mark as Work, or (Owner only) reassign. Send only what changed. */
+  async updateCalendarSubscription(id: string, patch: { name?: string; color?: string; isWork?: boolean; ownerActorId?: string }): Promise<{ subscription?: CalendarSubscription; restamped?: number } & CalendarRefusal> {
+    const r = await req<{ subscription?: CalendarSubscription; restamped?: number } & CalendarRefusal>(`/calendar/subscriptions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+    return refusalOr(r);
   },
-  async deleteCalendarSubscription(id: string): Promise<{ ok?: boolean; removedEvents?: number; error?: string }> {
-    const r = await req<{ ok?: boolean; removedEvents?: number; error?: string }>(`/calendar/subscriptions/${encodeURIComponent(id)}`, { method: "DELETE" });
-    if (r.status === 403) return { error: "insufficient_role" };
-    return r.data ?? { error: "network" };
+  async deleteCalendarSubscription(id: string): Promise<{ ok?: boolean; removedEvents?: number } & CalendarRefusal> {
+    const r = await req<{ ok?: boolean; removedEvents?: number } & CalendarRefusal>(`/calendar/subscriptions/${encodeURIComponent(id)}`, { method: "DELETE" });
+    return refusalOr(r);
   },
   /* ---- Two-way Google Calendar sync (canonical events only; approval-gated push) ---- */
   // Push a FamiliOS canonical event TO Google. Approval-first: with no approvalId the
