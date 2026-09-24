@@ -14,6 +14,14 @@ export async function loadToken(): Promise<string | null> {
   try { token = await SecureStore.getItemAsync(TOKEN_KEY); } catch { token = null; }
   return token;
 }
+/* A SIGNED-IN PHONE WHOSE SESSION HAS ENDED MUST SAY SO. The server refuses an expired token
+ * with 401 authentication_required; this app used to check its session only on a cold start,
+ * so a phone left running kept its signed-in screens and every request failed — Ask showed
+ * "couldn't reach the AI provider", read as an API-key problem (2026-09-24). Now the session
+ * provider is told, and the profile picker comes back. */
+let sessionExpiredHandler: (() => void) | null = null;
+export function onSessionExpired(handler: (() => void) | null): void { sessionExpiredHandler = handler; }
+
 export async function setToken(t: string | null): Promise<void> {
   token = t;
   try {
@@ -438,6 +446,10 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<Res<T
   const text = await res.text();
   let data: unknown;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { error: "bad_json" }; }
+  // Only a request that carried a token can have outlived it.
+  if (res.status === 401 && headers["authorization"] && (data as { error?: string })?.error === "authentication_required") {
+    try { sessionExpiredHandler?.(); } catch { /* never let the handler break the caller */ }
+  }
   return { status: res.status, ok: res.ok, data: data as T };
 }
 
@@ -455,6 +467,12 @@ export const api = {
   async getSession(): Promise<Session | null> {
     const r = await req<{ session: Session | null }>("/session");
     return r.data?.session ?? null;
+  },
+  /** The session as the server sees it — and whether the server answered at all, so that
+   *  opening the app with no signal never signs anyone out (only a real "no session" does). */
+  async sessionStatus(): Promise<{ answered: boolean; session: Session | null }> {
+    const r = await req<{ session: Session | null }>("/session");
+    return { answered: r.status >= 200 && r.status < 500, session: r.data?.session ?? null };
   },
   // Pre-auth profile picker — who can sign in on this household's backend.
   async profiles(): Promise<{ profiles: ProfileRec[]; claimed: boolean } | null> {

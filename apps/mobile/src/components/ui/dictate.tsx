@@ -24,6 +24,7 @@ import Animated, { Easing, ReduceMotion, useAnimatedStyle, useSharedValue, withR
 import { useTheme, tapHaptic } from "@/theme";
 import { PressableScale } from "./pressable-scale";
 import { Sym } from "./symbol";
+import { CALL_HINT, dictationErrorMessage, endedWithoutHearing } from "@/lib/dictation-errors";
 
 /**
  * @param onText  Called with the transcript so far. The caller decides where it goes — the
@@ -33,18 +34,33 @@ export function useDictation(onText: (text: string) => void) {
   const [listening, setListening] = useState(false);
   // What the field held before we started, so interim results extend it instead of erasing it.
   const baseRef = useRef("");
+  /* One listening attempt, so an attempt that ends at once having heard nothing can say why.
+   * On a phone call iOS gives the call the microphone: recognition either errors or simply
+   * ends, and "Dictation stopped" read like a broken feature (2026-09-24). */
+  const attemptRef = useRef({ startedAt: null as number | null, heard: false, userStopped: false, hadError: false, alerted: false });
 
   useSpeechRecognitionEvent("result", (e) => {
     const said = e.results?.[0]?.transcript ?? "";
     if (!said) return;
+    attemptRef.current.heard = true;
     onText(`${baseRef.current}${baseRef.current && !baseRef.current.endsWith(" ") ? " " : ""}${said}`);
   });
-  useSpeechRecognitionEvent("end", () => setListening(false));
+  useSpeechRecognitionEvent("end", () => {
+    setListening(false);
+    const a = attemptRef.current;
+    if (endedWithoutHearing({ startedAt: a.startedAt, endedAt: Date.now(), heardSomething: a.heard, userStopped: a.userStopped, hadError: a.hadError })) {
+      attemptRef.current.alerted = true;
+      Alert.alert("Dictation isn't available", CALL_HINT);
+    }
+    attemptRef.current.startedAt = null;
+  });
   useSpeechRecognitionEvent("error", (e) => {
     setListening(false);
-    // "no-speech" is someone tapping the mic and thinking — not a failure worth an alert.
-    if (e.error === "no-speech" || e.error === "aborted") return;
-    Alert.alert("Dictation stopped", e.message || "Try again in a moment.");
+    attemptRef.current.hadError = true;
+    // "no-speech" / "aborted" are someone thinking or stopping it — no alert.
+    const message = dictationErrorMessage(e.error, e.message);
+    // One alert per attempt: if the attempt already ended and said why, do not say it twice.
+    if (message && !attemptRef.current.alerted) { attemptRef.current.alerted = true; Alert.alert("Dictation stopped", message); }
   });
 
   // Never leave the microphone open behind a screen the user has left.
@@ -52,6 +68,7 @@ export function useDictation(onText: (text: string) => void) {
 
   const toggle = useCallback(async (currentText = "") => {
     if (listening) {
+      attemptRef.current.userStopped = true;
       ExpoSpeechRecognitionModule.stop();
       setListening(false);
       return;
@@ -66,15 +83,24 @@ export function useDictation(onText: (text: string) => void) {
     }
     baseRef.current = currentText;
     tapHaptic("light");
+    attemptRef.current = { startedAt: Date.now(), heard: false, userStopped: false, hadError: false, alerted: false };
     setListening(true);
-    ExpoSpeechRecognitionModule.start({
-      lang: "en-US",
-      // Words as they're spoken: the feedback IS the affordance.
-      interimResults: true,
-      continuous: false,
-      // Punctuation makes a dictated message readable without editing it afterwards.
-      addsPunctuation: true,
-    });
+    try {
+      ExpoSpeechRecognitionModule.start({
+        lang: "en-US",
+        // Words as they're spoken: the feedback IS the affordance.
+        interimResults: true,
+        continuous: false,
+        // Punctuation makes a dictated message readable without editing it afterwards.
+        addsPunctuation: true,
+      });
+    } catch {
+      // A start that throws is the audio session refusing — almost always the microphone
+      // being in use (a call). Say so rather than leave a mic that looks like it's listening.
+      attemptRef.current.hadError = true;
+      setListening(false);
+      Alert.alert("Dictation isn't available", CALL_HINT);
+    }
   }, [listening]);
 
   return { listening, toggle };
