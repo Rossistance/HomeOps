@@ -2,7 +2,7 @@
 // The control plane is deny-by-default: mutations require a valid session cookie,
 // a matching CSRF token, and an allowed Origin. Reads of sensitive state
 // (audit, settings, connector config, webhook history) require a session too.
-import { getSession, SESSION_MAX_LIFETIME_MS } from "./store.mjs";
+import { getSession, touchSession, SESSION_MAX_LIFETIME_MS } from "./store.mjs";
 import { setTenant } from "./tenant-context.mjs";
 
 const IS_PROD = (process.env.HOMEOPS_ENV || process.env.NODE_ENV) === "production";
@@ -118,6 +118,8 @@ export function gate(req, opts = {}) {
   if (opts.minRole && session && !roleAtLeast(session.role, opts.minRole)) {
     return { ok: false, status: 403, error: "insufficient_role" };
   }
+  // Only a request that passed every check renews its session's idle clock (store.mjs).
+  if (session) touchSession(session.token);
   return { ok: true, session };
 }
 

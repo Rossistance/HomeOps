@@ -38,6 +38,11 @@ export function useDictation(onText: (text: string) => void) {
    * On a phone call iOS gives the call the microphone: recognition either errors or simply
    * ends, and "Dictation stopped" read like a broken feature (2026-09-24). */
   const attemptRef = useRef({ startedAt: null as number | null, heard: false, userStopped: false, hadError: false, alerted: false });
+  /* Stop, then start again quickly, and the OLD attempt's "end" can arrive after the new one
+   * began — it would end the new one's pulse while the mic is live, and look like a start that
+   * heard nothing. One such late "end" is skipped, for a short window only, so a missing one can
+   * never leave the mic looking stuck on. */
+  const skipLateEndUntil = useRef(0);
 
   useSpeechRecognitionEvent("result", (e) => {
     const said = e.results?.[0]?.transcript ?? "";
@@ -46,6 +51,7 @@ export function useDictation(onText: (text: string) => void) {
     onText(`${baseRef.current}${baseRef.current && !baseRef.current.endsWith(" ") ? " " : ""}${said}`);
   });
   useSpeechRecognitionEvent("end", () => {
+    if (Date.now() < skipLateEndUntil.current) { skipLateEndUntil.current = 0; return; }
     setListening(false);
     const a = attemptRef.current;
     if (endedWithoutHearing({ startedAt: a.startedAt, endedAt: Date.now(), heardSomething: a.heard, userStopped: a.userStopped, hadError: a.hadError })) {
@@ -83,6 +89,9 @@ export function useDictation(onText: (text: string) => void) {
     }
     baseRef.current = currentText;
     tapHaptic("light");
+    // The previous attempt was stopped but has not ended yet: its "end" is still on the way.
+    const prev = attemptRef.current;
+    skipLateEndUntil.current = prev.startedAt != null && prev.userStopped ? Date.now() + 1500 : 0;
     attemptRef.current = { startedAt: Date.now(), heard: false, userStopped: false, hadError: false, alerted: false };
     setListening(true);
     try {
@@ -95,9 +104,11 @@ export function useDictation(onText: (text: string) => void) {
         addsPunctuation: true,
       });
     } catch {
-      // A start that throws is the audio session refusing — almost always the microphone
-      // being in use (a call). Say so rather than leave a mic that looks like it's listening.
+      // On iOS start() reports its failures as "error" events; a synchronous throw is the rare
+      // case of the module refusing outright. Say what is most likely rather than leave a mic
+      // that looks like it's listening — once, as for every attempt.
       attemptRef.current.hadError = true;
+      attemptRef.current.alerted = true;
       setListening(false);
       Alert.alert("Dictation isn't available", CALL_HINT);
     }

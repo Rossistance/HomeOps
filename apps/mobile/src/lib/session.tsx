@@ -47,6 +47,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         // The same session keeps its object, so nothing downstream re-subscribes for nothing.
         void api.sessionStatus().then((st) => {
           if (!st.answered) return;
+          // The server really said "no session": drop the dead token too, as a 401 would.
+          if (!st.session) void setToken(null);
           setSession((cur) => (st.session && cur && cur.actorId === st.session.actorId && cur.householdId === st.session.householdId
             && cur.role === st.session.role && cur.csrf === st.session.csrf ? cur : st.session));
         });
