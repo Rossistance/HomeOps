@@ -1,0 +1,59 @@
+# Alex (Owner) sees Beannie's Work calendar only as "Beannie working" blocks: frosted cards with
+# her photo, never a meeting title, never openable.
+appId: ai.familios.app
+name: owner-calendar
+tags: [calendar, privacy]
+---
+# Start from the seed state: the next "Q3 roadmap review" hidden again if an earlier run shared it.
+- runScript:
+    file: scripts/demo-api.js
+    env:
+      ACTION: prepare
+      HIDE: "true"
+- runFlow:
+    file: subflows/sign-in.yaml
+    env:
+      NAME: Alex
+- runFlow: subflows/open-calendar.yaml
+# (Scroll, not wait: in the evening today's blocks may be over and the next ones are tomorrow's.)
+- scrollUntilVisible:
+    element:
+      id: "event-block"
+    direction: DOWN
+    timeout: 30000
+- assertVisible: "Beannie working.*"
+- assertNotVisible: "Team standup"
+- assertNotVisible: "Q3 roadmap review"
+- assertNotVisible: "1:1 with Priya"
+- assertNotVisible: "Vendor call with Acme"
+- assertNotVisible: "Design critique"
+- assertNotVisible: "Budget sync"
+- assertNotVisible: "Hiring panel debrief"
+- takeScreenshot: owner-calendar-01-beannie-working-blocks
+# A block never opens: tapping it leaves Alex on the calendar with no form and no eye.
+- tapOn:
+    id: "event-block"
+    index: 0
+- waitForAnimationToEnd:
+    timeout: 3000
+- assertVisible:
+    id: "calendar-screen"
+- assertNotVisible:
+    id: "event-form-hide-switch"
+- assertNotVisible:
+    id: "eye-toggle-.*"
+- takeScreenshot: owner-calendar-02-block-tapped-nothing-opens
+# Further down the week: still blocks, still no titles.
+- scroll
+- assertNotVisible: "Q3 roadmap review"
+- assertNotVisible: "Budget sync"
+- takeScreenshot: owner-calendar-03-scrolled
+# What the server gave Alex, checked directly (the whole list, not only what is on screen).
+- runScript:
+    file: scripts/demo-api.js
+    env:
+      ACTION: view
+      VIEWER: m-alex
+- assertTrue: ${output.view.workTitleCount == 0}
+# Two blocks on the share day: 9:00-12:00 and 13:00-15:30, split by lunch.
+- assertTrue: ${output.view.blocksToday == 2}

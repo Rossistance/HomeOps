@@ -1,0 +1,100 @@
+# Connections draws its buttons from the server's per-calendar "can" flags (ADR-005 matrix).
+# Gpop (Adult Admin): Sync on Beannie's calendars but no Remove; nothing but the legend on the
+# Owner's; Remove on the Limited Member's. Alex (Owner): Remove on every calendar.
+appId: ai.familios.app
+name: connections-by-role
+tags: [connections, roles]
+---
+# Calendar ids are dynamic. → output.subs.{alexFamily,beannieWork,beanniePersonal,samSchool}
+- runScript:
+    file: scripts/demo-api.js
+    env:
+      ACTION: prepare
+- runFlow:
+    file: subflows/sign-in.yaml
+    env:
+      NAME: Gpop
+- runFlow: subflows/open-connections.yaml
+- takeScreenshot: gpop-01-connections
+- scrollUntilVisible:
+    element:
+      id: "calendar-row-${output.subs.beannieWork}"
+    direction: DOWN
+    timeout: 20000
+    centerElement: true
+- assertVisible:
+    id: "calendar-sync-${output.subs.beannieWork}"
+- assertNotVisible:
+    id: "calendar-remove-${output.subs.beannieWork}"
+- takeScreenshot: gpop-02-beannie-work-sync-no-remove
+- scrollUntilVisible:
+    element:
+      id: "calendar-row-${output.subs.beanniePersonal}"
+    direction: DOWN
+    timeout: 20000
+    centerElement: true
+- assertVisible:
+    id: "calendar-sync-${output.subs.beanniePersonal}"
+- assertNotVisible:
+    id: "calendar-remove-${output.subs.beanniePersonal}"
+- scrollUntilVisible:
+    element:
+      id: "calendar-row-${output.subs.alexFamily}"
+    direction: DOWN
+    timeout: 20000
+    centerElement: true
+- assertNotVisible:
+    id: "calendar-sync-${output.subs.alexFamily}"
+- assertNotVisible:
+    id: "calendar-remove-${output.subs.alexFamily}"
+- takeScreenshot: gpop-03-owner-calendar-read-only
+# An Adult Admin may remove a Limited Member's calendar.
+- scrollUntilVisible:
+    element:
+      id: "calendar-row-${output.subs.samSchool}"
+    direction: DOWN
+    timeout: 20000
+    centerElement: true
+- assertVisible:
+    id: "calendar-remove-${output.subs.samSchool}"
+- takeScreenshot: gpop-04-sam-calendar-removable
+# Alex: Remove everywhere.
+- runFlow:
+    file: subflows/sign-in.yaml
+    env:
+      NAME: Alex
+- runFlow: subflows/open-connections.yaml
+- takeScreenshot: alex-01-connections
+- scrollUntilVisible:
+    element:
+      id: "calendar-remove-${output.subs.alexFamily}"
+    direction: DOWN
+    timeout: 20000
+- scrollUntilVisible:
+    element:
+      id: "calendar-remove-${output.subs.beannieWork}"
+    direction: DOWN
+    timeout: 20000
+    centerElement: true
+- assertVisible:
+    id: "calendar-sync-${output.subs.beannieWork}"
+- assertVisible:
+    id: "calendar-edit-${output.subs.beannieWork}"
+- takeScreenshot: alex-02-beannie-work-remove-sync-edit
+- scrollUntilVisible:
+    element:
+      id: "calendar-remove-${output.subs.beanniePersonal}"
+    direction: DOWN
+    timeout: 20000
+- scrollUntilVisible:
+    element:
+      id: "calendar-remove-${output.subs.samSchool}"
+    direction: DOWN
+    timeout: 20000
+- takeScreenshot: alex-03-remove-on-every-calendar
+- scrollUntilVisible:
+    element:
+      id: "calendar-add-card"
+    direction: DOWN
+    timeout: 20000
+- takeScreenshot: alex-04-add-card

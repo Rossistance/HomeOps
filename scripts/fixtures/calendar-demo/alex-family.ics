@@ -1,0 +1,18 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//FamiliOS//Calendar demo fixture//EN
+X-WR-CALNAME:Harper family
+X-DEMO-NOTE:Template. scripts/seed-calendar-demo.mjs renders {{DAY+N}} (all-day date) and {{DAY+N HH:MM}} relative to today (local time).
+BEGIN:VEVENT
+UID:noah-soccer@demo.familios
+SUMMARY:Noah soccer practice
+DTSTART:{{DAY+1 16:30}}
+DTEND:{{DAY+1 17:30}}
+END:VEVENT
+BEGIN:VEVENT
+UID:picture-day@demo.familios
+SUMMARY:School picture day
+DTSTART;VALUE=DATE:{{DAY+3}}
+DTEND;VALUE=DATE:{{DAY+4}}
+END:VEVENT
+END:VCALENDAR

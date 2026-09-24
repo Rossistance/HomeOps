@@ -1,0 +1,27 @@
+# Sign in as one demo profile from a clean app. env: NAME (the Lock screen name, e.g. Alex).
+# The demo household has no PIN, so one tap on the profile signs in. The session token and the
+# "onboarded" flag live in the keychain, which clearState does not touch — hence clearKeychain.
+appId: ai.familios.app
+---
+- clearKeychain
+- launchApp:
+    clearState: true
+    permissions:
+      all: deny
+- extendedWaitUntil:
+    visible: "Sign in as ${NAME}.*"
+    timeout: 45000
+- tapOn: "Sign in as ${NAME}.*"
+# First sign-in on a clean device walks through onboarding. Step through it with its own
+# buttons; nothing is typed, so the profile keeps the seeded name.
+- repeat:
+    times: 10
+    while:
+      visible: "Get started|Continue|Skip for now|Got it|Enter FamiliOS"
+    commands:
+      - tapOn: "Get started|Continue|Skip for now|Got it|Enter FamiliOS"
+- waitForAnimationToEnd:
+    timeout: 5000
+- tapOn:
+    text: "End the walkthrough"
+    optional: true
