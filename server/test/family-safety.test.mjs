@@ -157,9 +157,14 @@ test("all-day date and midnight-UTC instant produce the SAME fingerprint; real t
 });
 
 /* ---- One-call calendar sync ---- */
-test("POST /api/calendar/sync-all returns the aggregate shape and respects the role floor", async () => {
-  const denied = await child.req("/api/calendar/sync-all", { method: "POST", body: "{}" });
-  assert.equal(denied.status, 403);
+// sync-all is now an alias of POST /api/calendar/refresh, which ANY signed-in member may
+// call (the server syncs each calendar as its owner, single-flight, once a minute at most) —
+// so a child is no longer refused; a request with no session still is.
+test("POST /api/calendar/sync-all returns the aggregate shape to any signed-in member", async () => {
+  const childSync = await child.req("/api/calendar/sync-all", { method: "POST", body: "{}" });
+  assert.equal(childSync.status, 200, JSON.stringify(childSync.data));
+  const anon = await ctx.fetch("/api/calendar/sync-all", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  assert.equal(anon.status, 401);
   const r = await alex.req("/api/calendar/sync-all", { method: "POST", body: "{}" });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   assert.equal(r.data.ok, true);

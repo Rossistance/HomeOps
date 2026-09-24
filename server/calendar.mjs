@@ -257,11 +257,18 @@ export async function syncSubscription({ sub, icsText, session }) {
     if (other) { attachTo(other); seenAlso.add(other.id); merged++; continue; }
     // A mirrored event: only the feed's fields, its owner, its layer and where it came from.
     // Everything else is the record's default, filled by the one helper every writer uses.
+    //
+    // createdBy is the CALENDAR's owner, never whoever happened to set this sync off.
+    // canSeeEntity reads createdBy as ownership, and syncs are now started by anyone in the
+    // household (a child opening the app refreshes every calendar) — stamping the session's
+    // actor would hand Noah the authorship of his father's work meetings. The session actor
+    // is the last resort only for a calendar with no owner of any kind on record.
+    const attributedTo = ownerActorId ?? sub?.ownerActorId ?? sub?.createdBy ?? session.actorId;
     putEvent(newEventRecord({
       ...fields, endAt: ev.endAt ?? null, ownerId: ownerActorId ?? null,
       category: "Calendar", layer: "linked", source: sub?.name ?? "Subscribed calendar",
       provenance: { via: gprov ? "google" : "ics", subscriptionId: subId, uid, ...(gprov ?? {}) },
-    }, { householdId: hh, actorId: session.actorId }));
+    }, { householdId: hh, actorId: attributedTo }));
     imported++;
   }
   // This sub no longer sees events it previously attached to (invite withdrawn) —
@@ -365,18 +372,46 @@ export function mergeGoogleEdit({ ev, gev, tz }) {
   return { action: "merge", fields, googleUpdated: gev.updated ?? null };
 }
 
+// A Google account this household may still call: its own, Google, and not disconnected.
+const usableGoogle = (a, householdId) => !!a && a.provider === "google" && a.householdId === householdId && a.status !== "revoked";
+
+/** The Google account a pushed canonical event LIVES in — the only account that can see it.
+ * The one recorded at push time (provenance.googleAccountId) if it is still usable; for a
+ * legacy event pushed before that was recorded, its owner's own Google account. Never
+ * anyone else's: a Google event id is private to the calendar it was created in, so asking
+ * a different member's account for it answers 404 — which the merge-back reads as "deleted
+ * on Google" and unlinks the event. That was the cross-account unlink bug: whoever ran the
+ * pull lent their account to every event in the house. Null means "nobody can check this". */
+export function pushedEventAccount(ev, householdId) {
+  const recorded = ev?.provenance?.googleAccountId;
+  if (recorded) {
+    const a = getAccountRaw(recorded);
+    return usableGoogle(a, householdId) ? a : null;
+  }
+  const owner = ev?.ownerId ?? ev?.createdBy ?? null;
+  if (!owner) return null;
+  return listAccountsFor(householdId, owner).find((a) => usableGoogle(a, householdId)) ?? null;
+}
+
 /**
  * Pull Google-side edits back into this household's pushed canonical events.
- * Returns { ok, checked, merged, conflicts, unlinked, errors } | { ok:false, error }.
+ * Household-wide by default (the refresh engine and the sweep): each event is checked with
+ * the account it lives in (pushedEventAccount); one nobody's account can reach is SKIPPED,
+ * never checked with a borrowed account. With actorId (the manual route) only the events
+ * living in that member's own Google accounts are checked, and a member with no Google
+ * account at all still answers no_account.
+ * Returns { ok, checked, merged, conflicts, unlinked, errors, skipped } | { ok:false, error }.
  */
-export async function pullGoogleEdits({ session }) {
-  const mine = listAccountsFor(session.householdId, session.actorId).filter((a) => a.provider === "google");
-  if (mine.length === 0) return { ok: false, error: "no_account" };
-  const pushed = listEvents((e) => e.householdId === session.householdId
+export async function pullGoogleEdits({ householdId, actorId = null } = {}) {
+  const hh = householdId;
+  if (actorId != null && !listAccountsFor(hh, actorId).some((a) => usableGoogle(a, hh))) return { ok: false, error: "no_account" };
+  const pushed = listEvents((e) => e.householdId === hh
     && (e.layer ?? "canonical") === "canonical" && e.provenance?.googleEventId);
-  let checked = 0, merged = 0, conflicts = 0, unlinked = 0, errors = 0;
+  let checked = 0, merged = 0, conflicts = 0, unlinked = 0, errors = 0, skipped = 0;
   for (const ev of pushed) {
-    const account = mine.find((a) => a.id === ev.provenance?.googleAccountId) ?? mine[0];
+    const account = pushedEventAccount(ev, hh);
+    if (!account) { skipped++; continue; }
+    if (actorId != null && account.connectedByActorId !== actorId) continue; // someone else's — not this member's pull
     const api = apiForAccount(account);
     const r = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(ev.provenance.googleEventId)}`);
     checked++;
@@ -384,7 +419,7 @@ export async function pullGoogleEdits({ session }) {
     if (r.ok) gev = r.json;
     else if (r.status === 404 || r.status === 410) gev = null; // deleted on Google
     else { errors++; continue; } // auth/transient — skip, don't guess
-    const d = mergeGoogleEdit({ ev, gev, tz: householdTimeZone(session.householdId) });
+    const d = mergeGoogleEdit({ ev, gev, tz: householdTimeZone(hh) });
     if (d.action === "merge") {
       patchEvent(ev.id, { ...d.fields, provenance: { ...(ev.provenance ?? {}), lastGoogleUpdated: d.googleUpdated, lastMergeAt: Date.now(), conflict: null } });
       merged++;
@@ -396,7 +431,7 @@ export async function pullGoogleEdits({ session }) {
       unlinked++;
     }
   }
-  return { ok: true, checked, merged, conflicts, unlinked, errors };
+  return { ok: true, checked, merged, conflicts, unlinked, errors, skipped };
 }
 
 /* ---- Conflict resolution (the human half of merge-back) ----
@@ -601,24 +636,32 @@ export async function deleteGoogleCopy({ ev, householdId, actorId }) {
 }
 
 /**
- * Server-triggered two-way sync pass for one household+actor pairing (used by the
- * background sweep when calendar auto-sync is enabled — no session, no approvals):
+ * Server-triggered two-way sync pass for one HOUSEHOLD (used by the background sweep when
+ * calendar auto-sync is enabled — no session, no approvals):
  *   1. pull Google-side edits into pushed events (conflicts still flag for review),
  *   2. push local edits that happened after the last push/merge back to Google.
+ * It used to run once per (household, subscription creator) and push every dirty event in
+ * the house with THAT member's account. Now each event goes back through the account it
+ * lives in (pushedEventAccount) — the same rule the pull uses — and one nobody's account
+ * can reach is skipped rather than re-created in the wrong member's calendar.
  */
-export async function autoSyncGoogle({ householdId, actorId }) {
-  const pull = await pullGoogleEdits({ session: { householdId, actorId } });
-  let pushed = 0, pushErrors = 0;
+export async function autoSyncGoogle({ householdId }) {
+  const pull = await pullGoogleEdits({ householdId });
+  let pushed = 0, pushErrors = 0, pushSkipped = 0;
   const dirty = listEvents((e) => e.householdId === householdId
     && (e.layer ?? "canonical") === "canonical"
     && e.provenance?.googleEventId
     && !e.provenance?.conflict
     && Date.parse(e.updatedAt ?? 0) > Math.max(e.provenance?.pushedAt ?? 0, e.provenance?.lastMergeAt ?? 0) + 2000);
   for (const ev of dirty) {
-    const r = await pushEventToGoogle({ ev, householdId, actorId });
+    const account = pushedEventAccount(ev, householdId);
+    if (!account) { pushSkipped++; continue; }
+    // actorId = the account's own member: pushEventToGoogle prefers the recorded account,
+    // and for a legacy event its fallback is then the owner's account — the one we found.
+    const r = await pushEventToGoogle({ ev, householdId, actorId: account.connectedByActorId });
     if (r.ok) pushed++; else pushErrors++;
   }
-  return { ok: true, pull, pushed, pushErrors };
+  return { ok: true, pull, pushed, pushErrors, pushSkipped };
 }
 
 /** Remove every linked event belonging to a subscription (used when it's deleted). */

@@ -6,6 +6,8 @@
 import { getTask, patchTask, deleteTaskRec, getMember, isAdultRole, appendAudit } from "../../store.mjs";
 import { isValidReminder, isValidReminderList } from "../../reminders.mjs";
 import { defineAction } from "../define-action.mjs";
+// Every successful write below refreshes the household's calendars, as the app's routes do.
+import { kickCalendarRefresh } from "../../calendar-refresh.mjs";
 import { badStamp } from "../shared.mjs";
 import { KEY_HINTS, publicTask, readOnly, nativeScope, always, PROJECTION } from "./shared.mjs";
 
@@ -48,6 +50,7 @@ export const familiUpdateTask = defineAction({
     patch.updatedAt = new Date().toISOString();
     const updated = patchTask(tk.id, patch);
     appendAudit({ type: "task.update", taskId: tk.id, fields: Object.keys(patch), via: "assistant", householdId: hh, actorId: session.actorId });
+    kickCalendarRefresh(hh, "task.update");
     return { ok: true, result: { task: publicTask(hh, updated) } };
   },
 });
@@ -74,6 +77,7 @@ export const familiDeleteTask = defineAction({
     if (!isAdultRole(session.role) && tk.createdBy !== session.actorId) return { ok: false, error: "forbidden", message: "Only an adult or the person who created it can delete this." };
     deleteTaskRec(tk.id);
     appendAudit({ type: "task.delete", taskId: tk.id, via: "assistant", householdId: hh, actorId: session.actorId });
+    kickCalendarRefresh(hh, "task.delete");
     return { ok: true, result: { deleted: true, title: tk.title } };
   },
 });
