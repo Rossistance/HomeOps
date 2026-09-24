@@ -1,0 +1,48 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//FamiliOS//Calendar demo fixture//EN
+X-WR-CALNAME:Beannie work
+X-DEMO-NOTE:Template. scripts/seed-calendar-demo.mjs renders the {{...}} tokens relative to today (local time) and repeats every {{WORKDAY}} event on each workday. Back-to-back 9:00-12:00, lunch gap 12:00-13:00, back-to-back 13:00-15:30.
+BEGIN:VEVENT
+UID:standup-{{WORKDAY}}@demo.familios
+SUMMARY:Team standup
+DTSTART:{{WORKDAY 09:00}}
+DTEND:{{WORKDAY 09:30}}
+END:VEVENT
+BEGIN:VEVENT
+UID:roadmap-{{WORKDAY}}@demo.familios
+SUMMARY:Q3 roadmap review
+DTSTART:{{WORKDAY 09:30}}
+DTEND:{{WORKDAY 10:30}}
+END:VEVENT
+BEGIN:VEVENT
+UID:one-on-one-{{WORKDAY}}@demo.familios
+SUMMARY:1:1 with Priya
+DTSTART:{{WORKDAY 10:30}}
+DTEND:{{WORKDAY 11:15}}
+END:VEVENT
+BEGIN:VEVENT
+UID:vendor-{{WORKDAY}}@demo.familios
+SUMMARY:Vendor call with Acme
+DTSTART:{{WORKDAY 11:15}}
+DTEND:{{WORKDAY 12:00}}
+END:VEVENT
+BEGIN:VEVENT
+UID:critique-{{WORKDAY}}@demo.familios
+SUMMARY:Design critique
+DTSTART:{{WORKDAY 13:00}}
+DTEND:{{WORKDAY 14:00}}
+END:VEVENT
+BEGIN:VEVENT
+UID:budget-{{WORKDAY}}@demo.familios
+SUMMARY:Budget sync
+DTSTART:{{WORKDAY 14:00}}
+DTEND:{{WORKDAY 15:00}}
+END:VEVENT
+BEGIN:VEVENT
+UID:hiring-{{WORKDAY}}@demo.familios
+SUMMARY:Hiring panel debrief
+DTSTART:{{WORKDAY 15:00}}
+DTEND:{{WORKDAY 15:30}}
+END:VEVENT
+END:VCALENDAR

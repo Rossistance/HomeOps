@@ -1,0 +1,18 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//FamiliOS//Calendar demo fixture//EN
+X-WR-CALNAME:Sam school
+X-DEMO-NOTE:Template. scripts/seed-calendar-demo.mjs renders {{DAY+N HH:MM}} relative to today (local time).
+BEGIN:VEVENT
+UID:sam-study-group@demo.familios
+SUMMARY:Sam chemistry study group
+DTSTART:{{DAY+1 15:30}}
+DTEND:{{DAY+1 16:30}}
+END:VEVENT
+BEGIN:VEVENT
+UID:sam-driving@demo.familios
+SUMMARY:Sam driving lesson
+DTSTART:{{DAY+2 10:00}}
+DTEND:{{DAY+2 11:00}}
+END:VEVENT
+END:VCALENDAR

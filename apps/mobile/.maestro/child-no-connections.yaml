@@ -1,0 +1,38 @@
+# Noah (Child View): his calendar shows Beannie's Work time as blocks, and Connections is not a
+# place he can reach: no Settings tab, no Connect shortcut, and the deep link lands elsewhere.
+appId: ai.familios.app
+name: child-no-connections
+tags: [calendar, privacy, roles]
+---
+- runFlow:
+    file: subflows/sign-in.yaml
+    env:
+      NAME: Noah
+- takeScreenshot: noah-01-home
+- assertNotVisible: "Settings"
+- assertNotVisible: "Connect"
+- assertNotVisible: "All connections & calendars.*"
+- runFlow: subflows/open-calendar.yaml
+- scrollUntilVisible:
+    element:
+      id: "event-block"
+    direction: DOWN
+    timeout: 30000
+- assertVisible: "Beannie working.*"
+- assertNotVisible: "Q3 roadmap review"
+- assertNotVisible: "Budget sync"
+- takeScreenshot: noah-02-calendar-blocks
+# Straight at the route: whatever the app does, it is not the Connections screen.
+- openLink: "familios://connections"
+- tapOn:
+    text: "Open"
+    optional: true
+- waitForAnimationToEnd:
+    timeout: 5000
+- assertNotVisible:
+    id: "connections-screen"
+- assertNotVisible:
+    id: "calendar-add-card"
+- assertNotVisible:
+    id: "calendar-row-.*"
+- takeScreenshot: noah-03-connections-deep-link-refused
