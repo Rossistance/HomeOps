@@ -109,8 +109,8 @@ export const EVENT_RECORD = {
     },
     block: {
       type: "object",
-      properties: { kind: { type: "string", enum: ["work", "busy"] }, count: num },
-      required: ["kind", "count"],
+      properties: { kind: { type: "string", enum: ["work", "busy"] } },
+      required: ["kind"],
       additionalProperties: false,
       description: "Present on a stand-in for someone else's hidden time: <Name> working, merged back-to-back.",
     },

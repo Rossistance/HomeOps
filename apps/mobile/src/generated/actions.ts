@@ -125,7 +125,6 @@ export interface EventRecord {
   /** Present on a stand-in for someone else's hidden time: <Name> working, merged back-to-back. */
   block?: {
     kind: "work" | "busy";
-    count: number;
   };
   /** Present when the synced calendar this came from can no longer refresh. */
   staleSource?: {

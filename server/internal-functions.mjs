@@ -18,6 +18,9 @@ import { ACTION_INTERNAL_FUNCTIONS } from "./actions/registry.mjs";
 import crypto from "node:crypto";
 
 const MEMORY_SCOPES = ["household", "personal", "nest"];
+/** The refusal create_artifact and send_notification_draft give in a turn (or conversation)
+ * that handed a surprise over — see homeops.write_memory for the rule. */
+const PRIVATE_TURN_ARTIFACT = Object.freeze({ ok: false, error: "private_turn", message: "I can't save that as a document, because this conversation included a private surprise and anything saved there would be visible to the household. I haven't saved anything — I can write it out here instead." });
 const PRIORITIES = ["low", "medium", "high"];
 
 /* The four event-editing tools below (checklist, driver, what-to-bring, attach) once took any
@@ -197,6 +200,11 @@ export const INTERNAL_FUNCTIONS = {
     connectorName: "FamiliOS",
     // Produce a durable artifact (briefing / report / checklist) tied to the run.
     async run(ctx, input) {
+      /* A turn that handed an owner's surprise over records nothing (ADR-005), and an artifact
+       * is a record — a chat turn's has no run, so the Library lists it to the WHOLE household,
+       * the person the surprise is for included. The artifact store has no personal scope to
+       * narrow it to, so it is refused, with a sentence the model can repeat. */
+      if (ctx?.ledger?.secretReleased) return PRIVATE_TURN_ARTIFACT;
       const title = String(input?.title ?? "Untitled").trim();
       const body = String(input?.body ?? "");
       const rec = addArtifact({
@@ -351,6 +359,8 @@ export const INTERNAL_FUNCTIONS = {
     // Review-first: produces a DRAFT artifact for a human to review, never sends.
     // Actually sending goes through a gated connector tool (sms/gmail) + approval.
     async run(ctx, input) {
+      // A draft is an artifact too, listed to the household — same refusal as create_artifact.
+      if (ctx?.ledger?.secretReleased) return PRIVATE_TURN_ARTIFACT;
       const to = String(input?.to ?? "").trim();
       const body = String(input?.body ?? input?.message ?? "").trim();
       if (!body) return { ok: false, error: "empty_body", message: "Nothing to draft." };

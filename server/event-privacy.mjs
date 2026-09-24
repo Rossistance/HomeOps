@@ -89,12 +89,14 @@ export function obscureStateOf(e, pc) {
   const owner = ownerId ? (pc?.membersById?.get(ownerId) ?? null) : null;
   const sub = e?.layer === "linked" ? subscriptionOf(e, pc) : null;
   const workCalendar = sub?.isWork === true;
-  // Hiding is an adult's choice. An owner who is not (or no longer) an adult cannot hide —
-  // and a stored choice is not honoured for them either, so a demotion reveals rather than
-  // leaving events hidden that nobody can un-hide.
+  // HIDING is an adult's choice (canHide). But a hide already made is honoured whatever the
+  // owner's role is now: if a demotion revealed it, the household Owner could demote an adult
+  // and read every hidden event and surprise they have (found by the ADR-005 privacy review).
+  // A demoted owner can still SHARE their own hidden events (privacy.canToggle stays true
+  // on an obscured event, and the sharing action lets any owner un-hide) — so nothing is
+  // stranded; they just cannot hide new ones.
   const canHide = !!owner && isAdultRole(owner.role);
   const base = { ownerId, owner, workCalendar, canHide };
-  if (!canHide) return { ...base, obscured: false };
   const obscured = e?.shareState === "hidden" ? true : e?.shareState === "shared" ? false : workCalendar;
   if (!obscured) return { ...base, obscured: false };
   return { ...base, obscured: true, kind: workCalendar ? "work" : "busy", secret: isSecret(e) };
@@ -178,20 +180,23 @@ function blockId(ownerId, kind, allDay, startAt, endAt) {
  * read-only event with that title. createdBy is the OWNER (never the viewer), so no client
  * rule that treats createdBy as ownership can make a block editable.
  */
-function blockRecord({ householdId, ownerId, owner, kind, allDay, startAt, endAt, count, updatedAt }) {
+function blockRecord({ householdId, ownerId, owner, kind, allDay, startAt, endAt }) {
   const rec = newEventRecord({
     title: obscuredLabel(kind, owner), startAt, endAt: endAt ?? null, allDay,
     ownerId, participantIds: [], visibility: "household",
     category: kind === "work" ? "Work" : "Busy", layer: "canonical", status: "confirmed", source: "FamiliOS",
     provenance: { via: "privacy" },
   }, { householdId, actorId: ownerId ?? "unknown" });
+  // Every stamp comes from the SPAN: a count of merged pieces would say "three meetings", and
+  // the newest updatedAt would say when the owner last touched a surprise (privacy review).
+  const spanStamp = Date.parse(startAt ?? "") || 0;
   return {
     ...rec,
     id: blockId(ownerId, kind, allDay, startAt, endAt),
-    createdAt: Date.parse(startAt ?? "") || 0,
-    updatedAt: updatedAt ?? rec.updatedAt,
+    createdAt: spanStamp,
+    updatedAt: new Date(spanStamp).toISOString(),
     editable: false, appendable: false, myNotes: null,
-    block: { kind, count },
+    block: { kind },
   };
 }
 
@@ -240,7 +245,6 @@ function mergeBlocks(pieces, pc) {
         householdId: pc.householdId, ownerId: cur.ownerId, owner: pc.membersById.get(cur.ownerId), kind: cur.kind,
         allDay: cur.allDay, startAt: cur.startAt,
         endAt: single ? cur.endAt : (cur.e > cur.s ? new Date(cur.e).toISOString() : null),
-        count: cur.count, updatedAt: cur.updatedAt,
       }));
       cur = null;
     };
@@ -249,16 +253,15 @@ function mergeBlocks(pieces, pc) {
       const tolerance = p.allDay ? DAY_MS + 60 * 60_000 : MERGE_GAP_MS;
       if (cur && sp.s <= cur.e + tolerance) {
         cur.e = Math.max(cur.e, sp.e); cur.count++;
-        if ((p.updatedAt ?? "") > (cur.updatedAt ?? "")) cur.updatedAt = p.updatedAt;
         continue;
       }
       flush();
-      cur = { ownerId: p.ownerId, kind: p.kind, allDay: p.allDay, startAt: p.startAt, endAt: p.endAt ?? null, s: sp.s, e: sp.e, count: 1, updatedAt: p.updatedAt };
+      cur = { ownerId: p.ownerId, kind: p.kind, allDay: p.allDay, startAt: p.startAt, endAt: p.endAt ?? null, s: sp.s, e: sp.e, count: 1 };
     }
     flush();
     // A hidden piece with no usable start still says someone is busy — alone, undated.
     for (const p of list.filter((q) => !spanOf(q))) {
-      out.push(blockRecord({ householdId: pc.householdId, ownerId: p.ownerId, owner: pc.membersById.get(p.ownerId), kind: p.kind, allDay: p.allDay, startAt: p.startAt ?? null, endAt: null, count: 1, updatedAt: p.updatedAt }));
+      out.push(blockRecord({ householdId: pc.householdId, ownerId: p.ownerId, owner: pc.membersById.get(p.ownerId), kind: p.kind, allDay: p.allDay, startAt: p.startAt ?? null, endAt: null }));
     }
   }
   return out;
@@ -280,11 +283,12 @@ function mergeBlocks(pieces, pc) {
  *             "self" only when the conversation is the owner's alone (see ADR-005).
  *   ledger    optional object; set ledger.secretReleased = true when a surprise was handed
  *             over in full, so the turn records nothing to memory
+ *   asOthers  present the viewer's OWN hidden events as blocks too (for text others will read)
  *   pc        optional privacyContext (built when absent)
  * @returns an array: full records (the owner's carry `privacy`), withheld records, and blocks.
  */
 export function presentEvents(events, viewer, opts = {}) {
-  const { channel = "personal", purpose = "app", audience = "shared", ledger = null } = opts;
+  const { channel = "personal", purpose = "app", audience = "shared", ledger = null, asOthers = false } = opts;
   const list = (events ?? []).filter(Boolean);
   if (!list.length) return [];
   const pc = opts.pc ?? privacyContext(list[0].householdId);
@@ -294,15 +298,19 @@ export function presentEvents(events, viewer, opts = {}) {
     if (!canSeeEntityInChannel(e, viewer, channel)) continue;
     if (!calendarScopeAllows(e, viewer, pc)) continue;
     const st = obscureStateOf(e, pc);
-    const mine = !!viewer?.actorId && st.ownerId === viewer.actorId;
+    // asOthers: the result will be written where the rest of the family reads it (a shared
+    // thread's suggestion, a note) — so even the owner's own hidden events go in as blocks.
+    const mine = !asOthers && !!viewer?.actorId && st.ownerId === viewer.actorId;
     if (!st.obscured) {
       out.push(mine && st.canHide ? { ...e, privacy: { obscured: false, secret: isSecret(e), canToggle: true } } : e);
       continue;
     }
     if (!mine) {
-      pieces.push({ ownerId: st.ownerId, kind: st.kind, allDay: e.allDay === true, startAt: e.startAt ?? null, endAt: e.endAt ?? null, updatedAt: e.updatedAt });
+      pieces.push({ ownerId: st.ownerId, kind: st.kind, allDay: e.allDay === true, startAt: e.startAt ?? null, endAt: e.endAt ?? null });
       continue;
     }
+    // canToggle: an owner may always SHARE their own hidden event (even after a demotion);
+    // hiding again is checked by the sharing action (adults only).
     const privacy = { obscured: true, kind: st.kind, secret: st.secret, canToggle: true };
     if (purpose === "app") { out.push({ ...e, privacy }); continue; }
     if (st.secret && (purpose === "snapshot" || audience !== "self")) { out.push(withheldRecord(e, st)); continue; }

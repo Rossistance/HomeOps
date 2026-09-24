@@ -11,7 +11,7 @@
 // The id `homeops.create_event_draft` is kept on purpose: it is in stored per-agent
 // allow-lists, in the prompt, and in run-engine tests. The name says what it now does.
 import { putEvent, patchEvent, normalizeVisibility, getEvent, getMember, isAdultRole, canSeeEntity } from "../store.mjs";
-import { privacyContext, eventOwnerOf, presentEvent } from "../event-privacy.mjs";
+import { privacyContext, eventOwnerOf, presentEvent, isSecret, calendarScopeAllows } from "../event-privacy.mjs";
 import { resolveVisibility } from "../nests.mjs";
 import { householdTimeZone, localMidnightISO } from "../household-time.mjs";
 import { isValidReminderList } from "../reminders.mjs";
@@ -137,6 +137,11 @@ export const createEvent = defineAction({
     // Here, in the one run, so the app's POST /api/events and the assistant's tool both
     // refresh the household's calendars — after the write, and only once it succeeded.
     kickCalendarRefresh(ctx.householdId, "event.create");
+    /* ADR-005: a surprise the ASSISTANT just wrote down was handed over in full as surely as
+     * one it read — the turn now holds its title, and the full record goes back to the model.
+     * So the turn records nothing, exactly as when presentEvents releases one. (The app's
+     * door has no ledger; the person typed it, nothing is being remembered.) */
+    if (ctx?.ledger && isSecret(rec)) ctx.ledger.secretReleased = true;
     return { ok: true, result: { event: rec } };
   },
 });
@@ -181,10 +186,15 @@ export const setEventSharing = defineAction({
     const viewer = { role: ctx.role, actorId: ctx.actorId };
     if (!ev || ev.householdId !== ctx.householdId || !canSeeEntity(ev, viewer)) return err("not_found", "No such event.");
     const pc = privacyContext(ctx.householdId);
+    // Outside a Limited Member's Owner-set calendar scope is also "does not exist" — a
+    // not_event_owner here would confirm whose event sits behind an id they were not shown.
+    if (!calendarScopeAllows(ev, viewer, pc)) return err("not_found", "No such event.");
     // The event's OWNER (a synced event's calendar owner) — not the household Owner, not a
     // participant. Hiding someone else's time is not a thing anyone may do for them.
     if (eventOwnerOf(ev, pc) !== ctx.actorId) return err("not_event_owner", "Only the person whose event this is can hide or share it.");
-    if (!isAdultRole(pc.membersById.get(ctx.actorId)?.role ?? ctx.role)) return err("cannot_hide", "Only adults can hide events.");
+    // HIDING needs an adult; SHARING does not — a hide made before a demotion is still honoured
+    // (event-privacy.mjs), and its owner must be able to lift it, not be left with it.
+    if (input.hidden && !isAdultRole(pc.membersById.get(ctx.actorId)?.role ?? ctx.role)) return err("cannot_hide", "Only adults can hide events.");
     // secret: null REMOVES the switch (an undefined value is not stored), so the event goes
     // back to being judged by its words; absent leaves it as it was.
     patchEvent(ev.id, { shareState: input.hidden ? "hidden" : "shared", ...(input.secret !== undefined ? { secret: input.secret ?? undefined } : {}) });
