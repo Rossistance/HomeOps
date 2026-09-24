@@ -583,7 +583,7 @@ export interface CalendarEvent {
   /** ADR-005 — only on the viewer's OWN events: hidden from the family (obscured), and why. */
   privacy?: { obscured: boolean; kind?: "work" | "busy"; secret?: boolean; canToggle?: boolean; withheld?: boolean } | null;
   /** ADR-005 — a stand-in for someone else's hidden time ("<Name> working"): never open it. */
-  block?: { kind: "work" | "busy"; count: number } | null;
+  block?: { kind: "work" | "busy" } | null;
 }
 
 export interface Task {
