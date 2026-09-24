@@ -35,6 +35,7 @@ import { deliverNotification } from "./notify.mjs";
 import { pushToMember } from "./notify.mjs";
 import { householdTimeZone, localParts, wallClockToUtc } from "./household-time.mjs";
 import { messagesBetween, speakToChat, chatByGuid } from "./group-chat.mjs";
+import { presentEvents, privacyContext } from "./event-privacy.mjs";
 
 const loopId = () => "cl_" + crypto.randomBytes(8).toString("hex");
 const nowISO = () => new Date().toISOString();
@@ -99,8 +100,17 @@ export function calendarResolution(loop, nowMs) {
   const wantedTitle = norm(loop.intent?.text ?? "");
   const view = { role: "Owner", actorId: loop.targetActorId };
 
-  const rows = listEvents((e) => e.householdId === loop.householdId && !e.deletedAt && e.status !== "cancelled");
+  /* As the target sees their calendar (ADR-005): their own hidden events in full, anyone
+   * else's as that person's block. A block is busy time, never evidence — its owner is not
+   * the target and it carries no title to match — so a hidden event someone else owns can
+   * never close (and later be reported as closing) a loop about the target. presentEvents
+   * applies the same canSeeEntity gate this loop used to apply by hand. */
+  const rows = presentEvents(
+    listEvents((e) => e.householdId === loop.householdId && !e.deletedAt && e.status !== "cancelled"),
+    view, { purpose: "app", pc: privacyContext(loop.householdId) },
+  );
   for (const e of rows) {
+    if (e.block) continue;
     const startMs = Date.parse(e.startAt ?? "");
     if (!Number.isFinite(startMs)) continue;               // undated cannot answer anything
     if (startMs < from || startMs > horizon) continue;

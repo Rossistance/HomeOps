@@ -15,6 +15,7 @@
 import { listTasks, patchTask, getMember, listEvents, patchEvent, appendAudit } from "./store.mjs";
 import { pushToMember } from "./notify.mjs";
 import { householdTimeZone, formatInZone, stampToMs } from "./household-time.mjs";
+import { privacyContext, obscureStateOf } from "./event-privacy.mjs";
 
 /** The minute-offsets a family can choose. "None" is null, not 0 — 0 means "at the time". */
 export const REMINDER_CHOICES = [
@@ -165,7 +166,12 @@ export function sweepTaskArchive(now = Date.now()) {
  * not. Same shape as tasks: `remindOffsets` (minutes before the start), fired once per
  * offset per event, stamped BEFORE the push, retired quietly when more than a day late.
  * Recipients are the people on the event: its participants, else its owner (else whoever
- * created it). Archived members never get one (pushToMember refuses). */
+ * created it). Archived members never get one (pushToMember refuses).
+ *
+ * A HIDDEN event (ADR-005: a Work calendar's, or one its owner hid by hand) reminds its owner
+ * and nobody else. The push carries the title and the place, and a lock screen is read by
+ * whoever is holding the phone — a participant's reminder for "Mom's surprise party" is the
+ * surprise, delivered. Participants still see the owner's block on their calendar. */
 export function eventReminderPlan(ev) {
   const offsets = isValidReminderList(ev?.remindOffsets) && ev.remindOffsets.length > 0 ? [...new Set(ev.remindOffsets)] : [];
   const sent = new Set(Array.isArray(ev?.remindersSent) ? ev.remindersSent : []);
@@ -177,6 +183,10 @@ export async function sweepEventReminders(now = Date.now()) {
   try {
     candidates = listEvents((e) => e.startAt && e.status !== "cancelled" && Array.isArray(e.remindOffsets) && e.remindOffsets.length > 0);
   } catch { return out; }
+  // One privacy context per household per sweep (the sweep runs per tenant, but a context
+  // is cheap to key rather than assume).
+  const pcs = new Map();
+  const pcFor = (hh) => { if (!pcs.has(hh)) pcs.set(hh, privacyContext(hh)); return pcs.get(hh); };
   for (const ev of candidates) {
     const { offsets, sent } = eventReminderPlan(ev);
     const tz = householdTimeZone(ev.householdId);
@@ -192,7 +202,10 @@ export async function sweepEventReminders(now = Date.now()) {
         sent.add(mins);
         patchEvent(ev.id, { remindersSent: [...sent] });
         if (stale) { out.skipped++; continue; }
-        const people = new Set([...(ev.participantIds ?? []), ...(ev.attendees ?? []).map((a) => a?.memberId).filter(Boolean)]);
+        const st = obscureStateOf(ev, pcFor(ev.householdId));
+        const people = st.obscured
+          ? new Set(st.ownerId ? [st.ownerId] : [])
+          : new Set([...(ev.participantIds ?? []), ...(ev.attendees ?? []).map((a) => a?.memberId).filter(Boolean)]);
         if (people.size === 0 && (ev.ownerId || ev.createdBy)) people.add(ev.ownerId || ev.createdBy);
         const when = ev.allDay
           ? formatInZone(new Date(anchorMs).toISOString(), tz, { weekday: "short", month: "short", day: "numeric" })

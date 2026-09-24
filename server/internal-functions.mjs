@@ -2,7 +2,8 @@
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
-import { addMemory, addArtifact, getEvent, patchEvent, listContactMethods, listAgents, getAgent, getMember } from "./store.mjs";
+import { addMemory, addArtifact, getEvent, patchEvent, listContactMethods, listAgents, getAgent, getMember, canSeeEntity } from "./store.mjs";
+import { hiddenEventRefusal } from "./event-privacy.mjs";
 import { localMidnightISO } from "./household-time.mjs";
 import { searchPlaces } from "./places.mjs";
 import { understandFile } from "./file-understanding.mjs";
@@ -18,6 +19,27 @@ import crypto from "node:crypto";
 
 const MEMORY_SCOPES = ["household", "personal", "nest"];
 const PRIORITIES = ["low", "medium", "high"];
+
+/* The four event-editing tools below (checklist, driver, what-to-bring, attach) once took any
+ * event id in the household and wrote to it: no visibility check, no owner check, and a ctx
+ * with no role in it (engine.mjs hands an internal tool householdId/actorId/runId only). So
+ * the actor is resolved from the roster here — the role is the store's, never the run's — and
+ * the event is refused when that person could not see it, or when it is someone else's hidden
+ * event (ADR-005: a hidden event is its owner's alone to change).
+ * @returns {{ ev } | { error: { ok: false, error, message } }} */
+function eventForActor(ctx, eventId) {
+  const ev = getEvent(eventId);
+  if (!ev || ev.householdId !== ctx.householdId) return { error: { ok: false, error: "event_not_found", message: "No such event." } };
+  const m = getMember(ctx.actorId);
+  if (!m || m.archived || (m.householdId && m.householdId !== ctx.householdId)) {
+    return { error: { ok: false, error: "forbidden", message: "This can only be done for a current member of the household — nothing was changed." } };
+  }
+  const actor = { actorId: m.actorId, role: m.role };
+  if (!canSeeEntity(ev, actor)) return { error: { ok: false, error: "forbidden", message: "That event isn't one you can change — nothing was changed." } };
+  const hidden = hiddenEventRefusal(ev, actor);
+  if (hidden) return { error: { ok: false, error: hidden.error, message: hidden.message } };
+  return { ev };
+}
 
 export const INTERNAL_FUNCTIONS = {
   /* ---- Helper (agent) inspection + iteration is NOT in this registry ----------------
@@ -230,8 +252,8 @@ export const INTERNAL_FUNCTIONS = {
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
-      const ev = getEvent(input?.eventId);
-      if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
+      const { ev, error } = eventForActor(ctx, input?.eventId);
+      if (error) return error;
       const items = Array.isArray(input?.items) ? input.items : [];
       const checklist = items.map((it) => (typeof it === "string" ? { text: it, done: false } : { text: String(it.text ?? ""), done: !!it.done }));
       const rec = patchEvent(ev.id, { checklist });
@@ -249,8 +271,8 @@ export const INTERNAL_FUNCTIONS = {
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
-      const ev = getEvent(input?.eventId);
-      if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
+      const { ev, error } = eventForActor(ctx, input?.eventId);
+      if (error) return error;
       const rec = patchEvent(ev.id, { driverId: input?.driverId ?? null });
       return { ok: true, result: { id: rec.id, driverId: rec.driverId } };
     },
@@ -266,8 +288,8 @@ export const INTERNAL_FUNCTIONS = {
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
-      const ev = getEvent(input?.eventId);
-      if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
+      const { ev, error } = eventForActor(ctx, input?.eventId);
+      if (error) return error;
       const items = Array.isArray(input?.items) ? input.items : [];
       const whatToBring = items.map((it) => (typeof it === "string" ? { item: it, memberId: null } : { item: String(it.item ?? ""), memberId: it.memberId ?? null }));
       const rec = patchEvent(ev.id, { whatToBring });
@@ -296,8 +318,8 @@ export const INTERNAL_FUNCTIONS = {
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
-      const ev = getEvent(input?.eventId);
-      if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
+      const { ev, error } = eventForActor(ctx, input?.eventId);
+      if (error) return error;
       const attachment = { kind: input?.fileRef ? "file" : "note", text: String(input?.note ?? ""), fileRef: input?.fileRef ?? null, at: nowISO(), by: ctx.actorId };
       const rec = patchEvent(ev.id, { attachments: [...(ev.attachments ?? []), attachment] });
       return { ok: true, result: { id: rec.id, attachmentCount: rec.attachments.length } };
