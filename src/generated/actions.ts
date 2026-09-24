@@ -92,6 +92,10 @@ export interface EventRecord {
   localNotes?: string;
   mealId?: string;
   taskId?: string;
+  /** The owner hid or shared this event; absent = the calendar default. */
+  shareState?: "hidden" | "shared";
+  /** The owner's Keep-it-a-surprise switch; absent = decided from the text. */
+  secret?: boolean;
   createdBy: string;
   /** Epoch milliseconds. */
   createdAt: number;
@@ -110,6 +114,19 @@ export interface EventRecord {
     }>;
     [k: string]: unknown;
   } | null;
+  /** Only on the OWNER's own events: is it hidden, why, and may they toggle it. */
+  privacy?: {
+    obscured: boolean;
+    kind?: "work" | "busy";
+    secret?: boolean;
+    canToggle?: boolean;
+    withheld?: boolean;
+  };
+  /** Present on a stand-in for someone else's hidden time: <Name> working, merged back-to-back. */
+  block?: {
+    kind: "work" | "busy";
+    count: number;
+  };
   /** Present when the synced calendar this came from can no longer refresh. */
   staleSource?: {
     accountId: string;

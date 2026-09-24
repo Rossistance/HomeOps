@@ -88,6 +88,11 @@ export const EVENT_RECORD = {
     localNotes: str,
     mealId: str,
     taskId: str,
+    /* Hidden events (ADR-005). shareState is the OWNER's choice for this one event and wins
+     * over the calendar default (a Work calendar hides; any other shows). secret is their
+     * "Keep it a surprise" switch; absent means "judge by the words" (event-privacy.mjs). */
+    shareState: { type: "string", enum: ["hidden", "shared"], description: "The owner hid or shared this event; absent = the calendar default." },
+    secret: { ...bool, description: "The owner's Keep-it-a-surprise switch; absent = decided from the text." },
     createdBy: str,
     createdAt: { ...num, description: "Epoch milliseconds." },
     updatedAt: { ...str, description: "ISO 8601." },
@@ -95,6 +100,20 @@ export const EVENT_RECORD = {
     editable: { ...bool, description: "May the CURRENT viewer edit this event?" },
     appendable: { ...bool, description: "May the viewer keep a private note on it? (Anyone who can see it.)" },
     myNotes: { ...VIEWER_NOTE, description: "The viewer's own private margin, or null." },
+    privacy: {
+      type: "object",
+      properties: { obscured: bool, kind: { type: "string", enum: ["work", "busy"] }, secret: bool, canToggle: bool, withheld: bool },
+      required: ["obscured"],
+      additionalProperties: false,
+      description: "Only on the OWNER's own events: is it hidden, why, and may they toggle it.",
+    },
+    block: {
+      type: "object",
+      properties: { kind: { type: "string", enum: ["work", "busy"] }, count: num },
+      required: ["kind", "count"],
+      additionalProperties: false,
+      description: "Present on a stand-in for someone else's hidden time: <Name> working, merged back-to-back.",
+    },
     staleSource: {
       type: "object",
       properties: { accountId: str, status: str, provider: str, connectedByActorId: strOrNull },
