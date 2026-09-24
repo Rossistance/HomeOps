@@ -132,7 +132,9 @@ Respond with ONLY JSON: {"remember": boolean, "text": string, "type": "fact"|"pr
 export function markRunSecret(runId) {
   const run = getRun(runId);
   if (!run || run.sourceRef?.secret === true) return;
-  patchRun(runId, { sourceRef: { ...(run.sourceRef ?? {}), secret: true } });
+  // Personal as well: a run that touched a surprise is the asker's alone — its later approval
+  // pushes and listings follow run.visibility, and this run may predate the release.
+  patchRun(runId, { visibility: "personal", sourceRef: { ...(run.sourceRef ?? {}), secret: true } });
 }
 export const isSecretRun = (run) => run?.sourceRef?.secret === true;
 

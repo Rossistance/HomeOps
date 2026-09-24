@@ -622,7 +622,7 @@ export type FamiliUpdateEventResult = {
 };
 
 /** Error codes famili.update_event can return. */
-export type FamiliUpdateEventError = "invalid_input" | "read_only_profile" | "event_not_found" | "forbidden" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_event_owner" | "read_only_layer" | "external_actions_disabled" | "not_linked_google" | "needs_reconnect" | "google_error";
+export type FamiliUpdateEventError = "invalid_input" | "read_only_profile" | "event_not_found" | "forbidden" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_event_owner" | "event_hidden" | "read_only_layer" | "external_actions_disabled" | "not_linked_google" | "needs_reconnect" | "google_error";
 
 /** Input of famili.delete_event. Remove a calendar event the asker owns (or any event, for an adult). Look it up first and confirm it is the right one. Events mirrored from an outside calendar can't be deleted here. */
 export type FamiliDeleteEventInput = {
@@ -638,7 +638,7 @@ export type FamiliDeleteEventResult = {
 };
 
 /** Error codes famili.delete_event can return. */
-export type FamiliDeleteEventError = "invalid_input" | "read_only_profile" | "event_not_found" | "forbidden" | "read_only_layer" | "external_actions_disabled" | "not_linked_google" | "needs_reconnect" | "google_error";
+export type FamiliDeleteEventError = "invalid_input" | "read_only_profile" | "event_not_found" | "forbidden" | "event_hidden" | "read_only_layer" | "external_actions_disabled" | "not_linked_google" | "needs_reconnect" | "google_error";
 
 /** Input of famili.update_task. Update a task or list item: mark done (status "done") or reopen ("todo"), rename, change due date, assignee, priority, notes, or list. Look the task up first. */
 export type FamiliUpdateTaskInput = {

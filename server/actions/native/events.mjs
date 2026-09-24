@@ -40,7 +40,7 @@ export const familiUpdateEvent = defineAction({
     properties: { event: PROJECTION, localOnly: { type: "boolean" }, google: { type: "string" } },
     required: ["event"], additionalProperties: false,
   },
-  errorCodes: ["invalid_input", "read_only_profile", "event_not_found", "forbidden", "invalid_startAt", "invalid_endAt", "unknown_member", "not_event_owner", "read_only_layer", "external_actions_disabled", ...GOOGLE_ERRORS],
+  errorCodes: ["invalid_input", "read_only_profile", "event_not_found", "forbidden", "invalid_startAt", "invalid_endAt", "unknown_member", "not_event_owner", "event_hidden", "read_only_layer", "external_actions_disabled", ...GOOGLE_ERRORS],
   async run(ctx, input) {
     const { session, hh, channel, seeable, canWrite } = nativeScope(ctx);
     if (!canWrite) return readOnly();
@@ -117,7 +117,7 @@ export const familiDeleteEvent = defineAction({
     properties: { deleted: { type: "boolean" }, title: { type: "string" }, google: { type: "string" } },
     required: ["deleted", "title"], additionalProperties: false,
   },
-  errorCodes: ["invalid_input", "read_only_profile", "event_not_found", "forbidden", "read_only_layer", "external_actions_disabled", ...GOOGLE_ERRORS],
+  errorCodes: ["invalid_input", "read_only_profile", "event_not_found", "forbidden", "event_hidden", "read_only_layer", "external_actions_disabled", ...GOOGLE_ERRORS],
   async run(ctx, input) {
     const { session, hh, channel, seeable, canWrite } = nativeScope(ctx);
     if (!canWrite) return readOnly();
