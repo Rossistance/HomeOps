@@ -41,6 +41,12 @@ export function canManageOwn(role: string | null | undefined): boolean {
   return roleAtLeast(role, "Adult Member");
 }
 
+/** Connections (accounts and calendars) is closed to a Child View (ADR-005): the server gives
+ *  them legend rows only, and a screen of doors that are all shut is no screen at all. */
+export function canOpenConnections(role: string | null | undefined): boolean {
+  return (role ?? "") !== "Child View";
+}
+
 export interface MemberLike {
   role?: string | null;
   relationship?: string | null;

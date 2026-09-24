@@ -67,7 +67,7 @@ export function Calendar() {
   // Home hands over `{event}` to open a row and `{new}` to start composing; both used to be
   // dropped on the floor here, landing on the plain list with nothing selected.
   useEffect(() => {
-    if (params?.event && events.length) { const hit = events.find((e) => e.id === params.event); if (hit) setSelected(hit); }
+    if (params?.event && events.length) { const hit = events.find((e) => e.id === params.event); if (hit && !isBlockEv(hit)) setSelected(hit); }
   }, [params?.event, events]);
 
   const conflictCount = useMemo(() => events.filter((e) => conflictOf(e)).length, [events]);
@@ -276,7 +276,7 @@ function MonthGrid({ byDay, nameOf, dotsFor, colorsFor, onOpen }: { byDay: Recor
               <span className={`text-xs font-semibold ${k === tKey ? "text-ember-600" : "text-ink-700"}`}>{Number(k.slice(8, 10))}</span>
               <span className="mt-0.5 flex flex-wrap gap-0.5">
                 {(byDay[k] ?? []).slice(0, 3).map((e) => (
-                  <span key={e.id} title={e.title} className="h-1.5 w-1.5 rounded-full" style={{ background: barBackground(colorsFor(e)) }} />
+                  <span key={e.id} title={e.title} className={`h-1.5 w-1.5 rounded-full ${isBlockEv(e) ? "opacity-35" : ""}`} style={{ background: barBackground(colorsFor(e)) }} />
                 ))}
                 {(byDay[k]?.length ?? 0) > 3 && <span className="text-[10px] leading-none text-ink-400">+{(byDay[k]?.length ?? 0) - 3}</span>}
               </span>
@@ -301,16 +301,40 @@ function MonthGrid({ byDay, nameOf, dotsFor, colorsFor, onOpen }: { byDay: Recor
 const barBackground = (colors: string[]) =>
   colors.length > 1 ? `linear-gradient(180deg, ${colors[0]} 0%, ${colors[0]} 48%, ${colors[1]} 52%, ${colors[1]} 100%)` : colors[0];
 
+/* ADR-005 — someone else's hidden time arrives as a BLOCK: a stand-in record ("Ross working")
+ * with its own blk_ id and nothing of the events inside. It is never opened or edited; the
+ * web shows it as a muted row. The eye toggle, Work switch and scope editor are iOS only. */
+const isBlockEv = (ev: Pick<ServerEvent, "id"> & { block?: unknown }) => !!ev.block || String(ev.id ?? "").startsWith("blk_");
+/** The viewer's OWN event, hidden from the rest of the family. */
+const isHiddenOwn = (ev: ServerEvent) => !isBlockEv(ev) && ev.privacy?.obscured === true && !ev.privacy?.withheld;
+function HiddenBadge() {
+  return <Badge color="lavender"><Icon name="EyeOff" size={10} /> Hidden from family</Badge>;
+}
+
 function EventRow({ ev, driver, dots, colors, onOpen }: { ev: ServerEvent; driver: string | null; dots: MemberDot[]; colors: string[]; onOpen: () => void }) {
   // "All day" for all-day events — they used to render as 12:00 AM (the web client dropped
   // the flag entirely).
   const time = ev.startAt ? eventTimeLabel(ev) : null;
+  if (isBlockEv(ev)) {
+    return (
+      <li>
+        <div className="flex w-full items-center gap-2.5 rounded-xl border border-dashed border-ink-900/[0.08] bg-surface-sunken/30 px-3 py-2 text-left opacity-75"
+          aria-label={`${ev.title}, ${time ?? "All day"}`} data-testid="event-block">
+          <span aria-hidden="true" className="h-8 w-1.5 shrink-0 rounded-full opacity-50" style={{ background: barBackground(colors) }} />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium text-ink-500"><Icon name="Lock" size={12} className="mr-1 inline" />{ev.title}</p>
+            <p className="text-xs text-ink-400">{time ?? "All day"}</p>
+          </div>
+        </div>
+      </li>
+    );
+  }
   return (
     <li>
       <button onClick={onOpen} className="flex w-full items-center gap-2.5 rounded-xl border border-ink-900/[0.05] bg-surface-sunken/50 px-3 py-2 text-left transition-colors hover:border-ember-200" aria-label={`Open ${ev.title}`}>
         <span aria-hidden="true" className="h-8 w-1.5 shrink-0 rounded-full" style={{ background: barBackground(colors) }} />
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-ink-800">{ev.title} {conflictOf(ev) && <Badge color="coral"><Icon name="AlertTriangle" size={10} /> Sync conflict</Badge>}</p>
+          <p className="text-sm font-medium text-ink-800">{ev.title} {conflictOf(ev) && <Badge color="coral"><Icon name="AlertTriangle" size={10} /> Sync conflict</Badge>} {isHiddenOwn(ev) && <HiddenBadge />}</p>
           {/* ISS-109: this line carries the user's own location text, so a hard `truncate`
               cut it off with no way to read it in place. Wrap to two lines instead — still
               a bounded row, and the full detail is one click away in the drawer. */}
@@ -426,7 +450,9 @@ function EventDrawer({ ev, canManage, members, nameOf, onClose, onChanged, onGon
         </div>
       ) : canManage && linked ? <Button variant="ember" disabled={busy} onClick={copy}><Icon name="Copy" size={14} /> Copy to a FamiliOS event</Button> : undefined}>
       <div className="space-y-4">
-        {readOnly && <p className="rounded-2xl border border-ink-900/[0.06] bg-surface-sunken/60 px-3.5 py-2.5 text-sm text-ink-500"><Icon name="Lock" size={13} className="mr-1 inline" /> Read-only — synced from {nameOf(ev.ownerId) ?? ev.source ?? "another member"}'s calendar.</p>}
+        {isBlockEv(ev) && <p className="rounded-2xl border border-ink-900/[0.06] bg-surface-sunken/60 px-3.5 py-2.5 text-sm text-ink-500"><Icon name="Lock" size={13} className="mr-1 inline" /> {nameOf(ev.ownerId) ?? "This person"} keeps this time private. Only the time is shared.</p>}
+        {isHiddenOwn(ev) && <p className="flex items-center gap-2 text-sm text-ink-500"><HiddenBadge /> Only you see what this is. Share it from the iPhone app.</p>}
+        {readOnly && !isBlockEv(ev) && <p className="rounded-2xl border border-ink-900/[0.06] bg-surface-sunken/60 px-3.5 py-2.5 text-sm text-ink-500"><Icon name="Lock" size={13} className="mr-1 inline" /> Read-only — synced from {nameOf(ev.ownerId) ?? ev.source ?? "another member"}'s calendar.</p>}
         {linked && !readOnly && !canEdit && <p className="rounded-2xl border border-sky-200/70 bg-sky-50 px-3.5 py-2.5 text-sm text-sky-800"><Icon name="RefreshCw" size={13} className="mr-1 inline" /> Synced from {ev.source || "an external calendar"} — read-only here. Copy it to make an editable FamiliOS event.</p>}
 
         {conflict && (

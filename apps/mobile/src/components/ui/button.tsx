@@ -22,9 +22,12 @@ export interface ButtonProps {
   disabled?: boolean;
   small?: boolean;
   full?: boolean;
+  /** For UI tests (Maestro), and a label fuller than the title ("Sync Casey's calendar"). */
+  testID?: string;
+  accessibilityLabel?: string;
 }
 
-export function Button({ title, onPress, variant = "neutral", icon, loading, disabled, small, full }: ButtonProps) {
+export function Button({ title, onPress, variant = "neutral", icon, loading, disabled, small, full, testID, accessibilityLabel }: ButtonProps) {
   const { colors, dark } = useTheme();
   const palette: Record<Variant, { bg: string; fg: string; border?: string }> = {
     ember: { bg: colors.ember, fg: colors.onEmber },
@@ -43,7 +46,8 @@ export function Button({ title, onPress, variant = "neutral", icon, loading, dis
       disabled={inactive}
       haptic={inactive ? null : haptic}
       accessibilityRole="button"
-      accessibilityLabel={title}
+      accessibilityLabel={accessibilityLabel ?? title}
+      testID={testID}
       style={{
         minHeight: small ? 36 : 48,
         paddingHorizontal: small ? 14 : 20,

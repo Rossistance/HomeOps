@@ -17,7 +17,7 @@ import { eventFace } from "@/lib/event-face";
 import { blockA11yLabel, hiddenCaption, timeRangeLabel } from "@/lib/event-eye";
 import { ObscuredCard } from "@/components/calendar/obscured-card";
 import { fade, memberColor } from "@/lib/member-colors";
-import { isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
+import { canOpenConnections, isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
 import { isOpen } from "@/lib/task-state";
 import { useAdvancedMode } from "@/lib/prefs";
@@ -502,7 +502,10 @@ function AdminToday() {
     { title: "Assign Chore", ...categoryStyle(colors, "Chores"), go: () => setChoreOpen(true) },
     { title: "New Helper", icon: "sparkle", fg: colors.ember, bg: colors.emberBg, go: () => router.push("/(agents)?create=1") },
     { title: "Upload", ...categoryStyle(colors, "Documents"), go: () => router.push("/(library)?upload=1") },
-    { title: "Connect", icon: "link", fg: colors.textMuted, bg: colors.surfaceSunken, go: () => router.push("/connections") },
+    // A Child View never reaches Connections (ADR-005), so it gets no door to it either.
+    ...(canOpenConnections(session?.role)
+      ? [{ title: "Connect", icon: "link", fg: colors.textMuted, bg: colors.surfaceSunken, go: () => router.push("/connections") }]
+      : []),
   ];
 
   return (

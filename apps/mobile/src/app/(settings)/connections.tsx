@@ -2,7 +2,7 @@
 // The OAuth flow runs through ASWebAuthenticationSession; the token exchange is
 // server-side, so we always reload after the browser closes.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, type LayoutChangeEvent, ScrollView, TextInput, View } from "react-native";
+import { Alert, type LayoutChangeEvent, ScrollView, Switch, TextInput, View } from "react-native";
 import Animated, {
   ReduceMotion, useAnimatedStyle, useSharedValue, withRepeat, withSequence, withTiming,
 } from "react-native-reanimated";
@@ -11,8 +11,11 @@ import * as DocumentPicker from "expo-document-picker";
 // The legacy entry point is the one the rest of the app uses (see (ask)/index.tsx).
 import { readAsStringAsync } from "expo-file-system/legacy";
 import { Stack, router, useLocalSearchParams } from "expo-router";
-import { api, type CalendarSubscription, type MemberRec, type ProviderRec } from "@/lib/api";
+import { api, type CalendarCanAdd, type CalendarSubscription, type MemberRec, type ProviderRec } from "@/lib/api";
+import { memberAccent } from "@/lib/member-colors";
+import { canOpenConnections, isAdultRole } from "@/lib/roles";
 import { useSession } from "@/lib/session";
+import { ScopeEditor } from "@/components/calendar/scope-editor";
 import { categoryStyle } from "@/theme/categories";
 import { useTheme, riskColor, tapHaptic, type HearthColors } from "@/theme";
 import {
@@ -56,11 +59,21 @@ export default function ConnectionsScreen() {
   const [connectors, setConnectors] = useState<Array<{ id: string; name: string; readiness: string; live: boolean }>>([]);
   const [providers, setProviders] = useState<ProviderRec[]>([]);
   const [subs, setSubs] = useState<CalendarSubscription[]>([]);
+  /* ADR-005 — what the Add card may offer comes from the server, like every button below it.
+   * Nothing here re-derives a permission from a role: a row's buttons are its `can` flags. */
+  const [canAdd, setCanAdd] = useState<CalendarCanAdd>({ self: false, limitReached: false, forMembers: [] });
   const [members, setMembers] = useState<MemberRec[]>([]);
-  // Rename / assign a subscribed calendar ("Imported calendar" is nobody's name for anything).
+  // Rename / mark Work / assign a calendar ("Imported calendar" is nobody's name for anything).
   const [editSub, setEditSub] = useState<CalendarSubscription | null>(null);
   const [editName, setEditName] = useState("");
   const [editOwner, setEditOwner] = useState<string | null>(null);
+  const [editWork, setEditWork] = useState(false);
+  const [editNote, setEditNote] = useState<string | null>(null);
+  // Who a new calendar is for. The Owner may add one for anyone; everyone else, only themselves.
+  const [addFor, setAddFor] = useState<string | null>(null);
+  const [googleAccountId, setGoogleAccountId] = useState<string | null>(null);
+  const me = session?.actorId ?? null;
+  const allowed = canOpenConnections(session?.role);
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [connecting, setConnecting] = useState<string | null>(null);
@@ -104,14 +117,18 @@ export default function ConnectionsScreen() {
   const scrolledTo = useRef<string | null>(null);
 
   const load = useCallback(async () => {
-    const [c, p, s, m] = await Promise.all([api.connectors(), api.providers(), api.calendarSubscriptions(), api.members()]);
+    const [c, p, s, m] = await Promise.all([api.connectors(), api.providers(), api.calendarConnections(), api.members()]);
     setConnectors(c);
     setProviders(p);
-    setSubs(s);
+    setSubs(s.subscriptions);
+    setCanAdd(s.canAdd);
     setMembers(m);
     setLoaded(true);
   }, []);
-  useEffect(() => { if (session) void load(); }, [session, load]);
+  useEffect(() => { if (session && allowed) void load(); }, [session, allowed, load]);
+  /* A Child View has no Connections at all (ADR-005). The doors to it are hidden too, but a
+   * deep link or an old build's button could still land here — so the screen sends them home. */
+  useEffect(() => { if (session && !allowed) router.replace("/(home)"); }, [session, allowed]);
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
   /* "Reconnect" that wouldn't go away, part two.
@@ -200,17 +217,26 @@ export default function ConnectionsScreen() {
 
   const syncLabel = (s: CalendarSubscription) => {
     if (s.lastResult?.error) return `Sync failed: ${s.lastResult.error}`;
-    if (s.lastSyncAt) return `Synced ${new Date(s.lastSyncAt).toLocaleString()} · ${s.eventCount} event${s.eventCount === 1 ? "" : "s"}`;
+    if (s.lastSyncAt) return `Synced ${new Date(s.lastSyncAt).toLocaleString()} · ${s.eventCount ?? 0} event${s.eventCount === 1 ? "" : "s"}`;
     return "Not synced yet";
   };
+  const firstName = (id: string | null | undefined, fallback = "Someone") =>
+    (members.find((m) => m.actorId === id)?.displayName ?? fallback).split(" ")[0];
+  // The server's own sentence when it refuses ("Only Casey or the Owner can remove this
+  // calendar."); a short fallback only when there is no sentence to show.
+  const refusal = (r: { error?: string; message?: string }, fallback: string) =>
+    r.message ?? (r.error === "network" ? "Couldn't reach the server. Try again." : fallback);
+  // Adding for someone else is the Owner's (canAdd.forMembers); `undefined` means "for me".
+  const forMemberId = addFor && addFor !== me && canAdd.forMembers.includes(addFor) ? addFor : undefined;
+  const forLabel = forMemberId ? ` for ${firstName(forMemberId)}` : "";
 
   const subscribe = async () => {
     if (!feedUrl.trim()) return;
     setSubBusy("url"); setNotice(null);
-    const r = await api.subscribeCalendar({ url: feedUrl.trim() });
+    const r = await api.subscribeCalendar({ url: feedUrl.trim(), forMemberId });
     setSubBusy(null);
-    if (r.subscription) { setFeedUrl(""); setNotice({ text: `Subscribed — ${r.sync?.imported ?? 0} event${(r.sync?.imported ?? 0) === 1 ? "" : "s"} imported.`, ok: true }); await load(); }
-    else setNotice({ text: r.error === "insufficient_role" ? "Subscribing needs an adult member." : r.message ?? r.error ?? "Couldn't subscribe.", ok: false });
+    if (r.subscription) { setFeedUrl(""); setNotice({ text: `Subscribed${forLabel} — ${r.sync?.imported ?? 0} event${(r.sync?.imported ?? 0) === 1 ? "" : "s"} imported.`, ok: true }); await load(); }
+    else setNotice({ text: refusal(r, "Couldn't subscribe."), ok: false });
   };
 
   /* Cluster V — "I'd rather this be a file upload — import ICS file." Pasting the contents
@@ -232,10 +258,10 @@ export default function ConnectionsScreen() {
         setNotice({ text: "That doesn't look like a calendar file — pick a .ics export.", ok: false });
         return;
       }
-      const r = await api.importIcs({ ics });
+      const r = await api.importIcs({ ics, forMemberId });
       setSubBusy(null);
-      if (r.subscription) { setNotice({ text: `Imported — ${r.sync?.imported ?? 0} event${(r.sync?.imported ?? 0) === 1 ? "" : "s"} added to the calendar.`, ok: true }); await load(); }
-      else setNotice({ text: r.error === "insufficient_role" ? "Importing needs an adult member." : r.message ?? r.error ?? "Couldn't import that .ics.", ok: false });
+      if (r.subscription) { setNotice({ text: `Imported${forLabel} — ${r.sync?.imported ?? 0} event${(r.sync?.imported ?? 0) === 1 ? "" : "s"} added to the calendar.`, ok: true }); await load(); }
+      else setNotice({ text: refusal(r, "Couldn't import that .ics."), ok: false });
     } catch {
       setSubBusy(null);
       setNotice({ text: "Couldn't read that file — try exporting it again.", ok: false });
@@ -244,10 +270,10 @@ export default function ConnectionsScreen() {
 
   const connectGoogleCal = async () => {
     setSubBusy("google"); setNotice(null);
-    const r = await api.connectGoogleCalendar();
+    const r = await api.connectGoogleCalendar({ forMemberId, accountId: googleAccountId ?? undefined });
     setSubBusy(null);
-    if (r.subscription) { setNotice({ text: `Google Calendar connected — ${r.sync?.imported ?? 0} event${(r.sync?.imported ?? 0) === 1 ? "" : "s"} imported.`, ok: true }); await load(); }
-    else setNotice({ text: r.error === "connect_google_first" ? "Connect your Google account above first." : r.message ?? r.error ?? "Couldn't connect Google Calendar.", ok: false });
+    if (r.subscription) { setNotice({ text: `Google Calendar connected${forLabel} — ${r.sync?.imported ?? 0} event${(r.sync?.imported ?? 0) === 1 ? "" : "s"} imported.`, ok: true }); await load(); }
+    else setNotice({ text: refusal(r, "Couldn't connect Google Calendar."), ok: false });
   };
 
   const syncSub = async (s: CalendarSubscription) => {
@@ -255,17 +281,37 @@ export default function ConnectionsScreen() {
     const r = await api.syncCalendar(s.id);
     setSubBusy(null);
     if (r.sync?.ok) setNotice({ text: `${s.name}: ${r.sync.imported ?? 0} new, ${r.sync.updated ?? 0} updated, ${r.sync.removed ?? 0} removed.`, ok: true });
-    else setNotice({ text: `Sync failed: ${r.sync?.error ?? r.error ?? "unknown error"}`, ok: false });
+    else setNotice({ text: (r as { message?: string }).message ?? `Sync failed: ${r.sync?.error ?? r.error ?? "unknown error"}`, ok: false });
     await load();
   };
 
-  const openEditSub = (s: CalendarSubscription) => { setEditSub(s); setEditName(s.name); setEditOwner(s.ownerActorId ?? null); };
+  const openEditSub = (s: CalendarSubscription) => {
+    setEditSub(s); setEditName(s.name); setEditOwner(s.ownerActorId ?? null); setEditWork(!!s.isWork); setEditNote(null);
+  };
+  /* Work can be set only on an adult's calendar (ADR-005 decision 4). When the Owner is
+   * reassigning in the same sheet, the question is about the owner it WILL have: the server
+   * judges it that way, and drops Work outright when a calendar goes to a non-adult. */
+  const editOwnerChanged = !!editSub && (editOwner ?? null) !== (editSub.ownerActorId ?? null);
+  const editOwnerMember = members.find((m) => m.actorId === editOwner) ?? null;
+  const canMarkWorkNow = !!editSub?.can && (editOwnerChanged
+    ? editSub.can.assign && isAdultRole(editOwnerMember?.role)
+    : editSub.can.markWork);
   const saveEditSub = async () => {
     if (!editSub) return;
+    const can = editSub.can;
+    // Only what changed, and only what this person may change — the server refuses a whole
+    // patch over one field it would not allow, so an untouched field is never sent.
+    const patch: { name?: string; isWork?: boolean; ownerActorId?: string } = {};
     const name = editName.trim();
-    if (!name) { setNotice({ text: "Give the calendar a name.", ok: false }); return; }
-    setSubBusy(`edit:${editSub.id}`); setNotice(null);
-    const r = await api.updateCalendarSubscription(editSub.id, { name, ownerActorId: editOwner ?? undefined });
+    if (can?.edit && name !== editSub.name) {
+      if (!name) { setEditNote("Give the calendar a name."); return; }
+      patch.name = name;
+    }
+    if (can?.assign && editOwnerChanged && editOwner) patch.ownerActorId = editOwner;
+    if (canMarkWorkNow && editWork !== !!editSub.isWork) patch.isWork = editWork;
+    if (Object.keys(patch).length === 0) { setEditSub(null); return; }
+    setSubBusy(`edit:${editSub.id}`); setEditNote(null); setNotice(null);
+    const r = await api.updateCalendarSubscription(editSub.id, patch);
     setSubBusy(null);
     if (r.subscription) {
       tapHaptic("success");
@@ -274,7 +320,7 @@ export default function ConnectionsScreen() {
       await load();
     } else {
       tapHaptic("error");
-      setNotice({ text: r.error === "insufficient_role" ? "Renaming a calendar needs an adult member." : `Couldn't save: ${r.error ?? "unknown error"}`, ok: false });
+      setEditNote(refusal(r, `Couldn't save: ${r.error ?? "unknown error"}`));
     }
   };
 
@@ -283,23 +329,99 @@ export default function ConnectionsScreen() {
     const r = await api.deleteCalendarSubscription(s.id);
     setSubBusy(null);
     if (r.ok) setNotice({ text: `${s.name} removed${r.removedEvents ? ` (${r.removedEvents} events cleared)` : ""}.`, ok: true });
-    else setNotice({ text: r.error === "insufficient_role" ? "Removing needs an adult member." : `Couldn't remove: ${r.error ?? "unknown error"}`, ok: false });
+    else setNotice({ text: refusal(r, `Couldn't remove: ${r.error ?? "unknown error"}`), ok: false });
     await load();
   };
 
+  // Removing a calendar takes its events off EVERYONE's calendar, not just yours — and it may
+  // be someone else's. The confirm says both, by name.
   const confirmRemoveSub = (s: CalendarSubscription) => {
-    Alert.alert(`Remove “${s.name}”?`, "Its imported events disappear from the calendar.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Remove", style: "destructive", onPress: () => void removeSub(s) },
-    ]);
+    const whose = s.ownerActorId === me ? "your" : s.ownerActorId ? `${firstName(s.ownerActorId, s.ownerName ?? "Someone")}'s` : "this";
+    Alert.alert(
+      `Remove ${whose} calendar “${s.name}”?`,
+      `Its events leave everyone's calendar, not just yours.${s.ownerActorId && s.ownerActorId !== me ? ` ${firstName(s.ownerActorId, s.ownerName ?? "They")} would need to connect it again.` : ""}`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Remove", style: "destructive", onPress: () => void removeSub(s) },
+      ],
+    );
   };
 
-  const googleConnected = ((providers.find((p) => p.id === "google")?.accounts?.length) ?? 0) > 0;
+  // Google connects with the SIGNED-IN member's own account (the server never uses another
+  // member's tokens), so only their accounts count here.
+  const myGoogleAccounts = (providers.find((p) => p.id === "google")?.accounts ?? [])
+    .filter((a) => !a.connectedByActorId || a.connectedByActorId === me);
+  const googleConnected = myGoogleAccounts.length > 0;
+  const mine = subs.filter((s) => s.ownerActorId === me);
+  // Other people's calendars this viewer may manage (Owner, Adult Admin) — grouped by owner.
+  const family = subs.filter((s) => s.ownerActorId !== me && s.can?.view);
+  const familyOwners = [...new Set(family.map((s) => s.ownerActorId ?? ""))];
+  const showAdd = canAdd.self || canAdd.forMembers.length > 0;
+  const addForMembers = members.filter((m) => canAdd.forMembers.includes(m.actorId));
   const inputStyle = {
     backgroundColor: colors.surfaceSunken, borderRadius: radii.md, borderCurve: "continuous" as const,
     paddingHorizontal: spacing.md, paddingVertical: 12,
     color: colors.text, fontFamily: fonts.regular, fontSize: 15,
   };
+
+  if (!allowed) return null; // on its way home (see the redirect above)
+
+  const renderRow = (s: CalendarSubscription, i: number) => {
+    const can = s.can;
+    const accent = memberAccent(colors, s.color) ?? colors.sky;
+    const owner = s.ownerActorId === me ? "Yours" : s.ownerName ? `${s.ownerName}'s` : "Nobody's yet";
+    const kind = s.source === "google" ? "Google Calendar" : s.url ? "ICS feed" : "Imported .ics";
+    return (
+      <Rise key={s.id} index={Math.min(i + 2, 8)}>
+        <View testID={`calendar-row-${s.id}`}>
+          <Card style={{ gap: spacing.md }}>
+            <View
+              style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}
+              accessible
+              accessibilityLabel={`${s.name}, ${owner}${s.isWork ? ", Work calendar" : ""}${can?.view ? `, ${syncLabel(s)}` : ""}`}
+            >
+              <SymTile name={s.isWork ? "briefcase" : "calendar"} color={accent} bg={colors.surfaceSunken} />
+              <View style={{ flex: 1, gap: 2 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: accent }} />
+                  <T kind="bodyMedium" color={colors.text} numberOfLines={1} style={{ flexShrink: 1 }}>{s.name}</T>
+                  {s.isWork ? <Badge label="Work" fg={colors.lavender} bg={colors.lavenderBg} icon="briefcase" /> : null}
+                </View>
+                <T kind="sub" numberOfLines={2}>
+                  {owner} · {kind}{can?.view ? ` · ${syncLabel(s)}` : ""}
+                </T>
+              </View>
+            </View>
+            {can && (can.sync || can.edit || can.assign || can.scope || can.remove) ? (
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
+                {can.sync ? (
+                  <Button
+                    title="Sync now" variant="neutral" small icon="arrow.clockwise"
+                    loading={subBusy === `sync:${s.id}`} onPress={() => void syncSub(s)}
+                    testID={`calendar-sync-${s.id}`} accessibilityLabel={`Sync ${s.name} now`}
+                  />
+                ) : null}
+                {can.edit || can.assign || can.scope ? (
+                  <Button
+                    title="Edit" variant="neutral" small icon="pencil" onPress={() => openEditSub(s)}
+                    testID={`calendar-edit-${s.id}`} accessibilityLabel={`Edit ${s.name}`}
+                  />
+                ) : null}
+                {can.remove ? (
+                  <Button
+                    title="Remove" variant="ghost" small icon="trash"
+                    loading={subBusy === `del:${s.id}`} onPress={() => confirmRemoveSub(s)}
+                    testID={`calendar-remove-${s.id}`} accessibilityLabel={`Remove ${s.name}`}
+                  />
+                ) : null}
+              </View>
+            ) : null}
+          </Card>
+        </View>
+      </Rise>
+    );
+  };
+  const editScopeMember = editSub?.can?.scope ? members.find((m) => m.actorId === editSub.ownerActorId && m.role === "Limited Member") ?? null : null;
 
   return (
     <HScreen refreshing={refreshing} onRefresh={onRefresh} scrollRef={scroller} keyboardAware>
@@ -461,75 +583,114 @@ export default function ConnectionsScreen() {
             );
           })}
 
-          <SectionHeader title="Subscribed calendars" />
+          {/* ADR-005 — calendars refresh by themselves; this is where a person sees whose each
+              one is and does what the server says they may with it. "Your calendars" first,
+              then (Owner, Adult Admin) everyone else's, grouped under their owner. Every
+              button on a row is one of that row's `can` flags, never a role check. */}
+          <SectionHeader title="Your calendars" />
           <Rise index={1}>
-            <T kind="sub">School, sports, and holiday feeds show up on the calendar read-only and stay in sync.</T>
+            <T kind="sub">Calendars keep themselves up to date. Sync now is here for when you can't wait.</T>
           </Rise>
-          {subs.length === 0 ? (
-            <EmptyState icon="calendar.badge.plus" title="No calendar feeds yet" hint={canManage ? "Subscribe to a feed URL or paste an .ics below." : "An adult member can subscribe to feeds here."} />
+          {mine.length === 0 ? (
+            <EmptyState icon="calendar.badge.plus" title="No calendars of yours yet" hint={showAdd ? "Connect one below." : "Ask the Owner to connect one for you."} />
           ) : (
-            subs.map((s, i) => (
-              <Rise key={s.id} index={Math.min(i + 2, 8)}>
-                <Card style={{ gap: spacing.md }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
-                    <SymTile name="calendar" color={colors.sky} bg={colors.skyBg} />
-                    <View style={{ flex: 1, gap: 2 }}>
-                      <T kind="bodyMedium" color={colors.text}>{s.name}</T>
-                      <T kind="sub" numberOfLines={2}>
-                        {s.ownerName ? `${s.ownerName}'s · ` : ""}{s.source === "google" ? "Google Calendar" : s.url ? "ICS feed" : "Imported .ics"} · {syncLabel(s)}
-                      </T>
-                    </View>
-                  </View>
-                  {canManage ? (
-                    <View style={{ flexDirection: "row", gap: spacing.sm }}>
-                      <Button title="Sync now" variant="neutral" small icon="arrow.clockwise" loading={subBusy === `sync:${s.id}`} onPress={() => void syncSub(s)} />
-                      <Button title="Edit" variant="neutral" small icon="pencil" onPress={() => openEditSub(s)} />
-                      <Button title="Remove" variant="ghost" small icon="trash" loading={subBusy === `del:${s.id}`} onPress={() => confirmRemoveSub(s)} />
-                    </View>
-                  ) : null}
-                </Card>
-              </Rise>
-            ))
+            mine.map((s, i) => renderRow(s, i))
           )}
 
-          {canManage ? (
+          {family.length > 0 ? (
+            <>
+              <SectionHeader title="Family calendars" />
+              {familyOwners.map((ownerId) => {
+                const rows = family.filter((s) => (s.ownerActorId ?? "") === ownerId);
+                const who = members.find((m) => m.actorId === ownerId) ?? null;
+                return (
+                  <View key={ownerId || "nobody"} style={{ gap: spacing.sm }}>
+                    <T kind="eyebrow" style={{ marginTop: spacing.xs }}>
+                      {who?.displayName ?? rows[0]?.ownerName ?? "Nobody yet"}
+                    </T>
+                    {rows.map((s, i) => renderRow(s, i))}
+                  </View>
+                );
+              })}
+            </>
+          ) : null}
+
+          {showAdd ? (
             <Rise index={3}>
-              <Card padded={false}>
-                {/* Cluster V — "this can be collapsed a bit… I do like this connect Google
-                    Calendar button, however it should just be 'connect calendar' because it
-                    could be any type of calendar." Connecting an account is the common act
-                    and stays out front; the feed URL and file import are the rare ones and
-                    fold away until asked for. */}
-                {googleConnected ? (
-                  <View style={{ padding: spacing.lg, paddingBottom: spacing.sm }}>
-                    <Button title="Connect calendar" variant="ember" icon="calendar" full loading={subBusy === "google"} onPress={() => void connectGoogleCal()} />
-                  </View>
-                ) : (
-                  <View style={{ padding: spacing.lg, paddingBottom: spacing.sm }}>
-                    <T kind="caption" color={colors.textFaint}>Connect an account above, and its calendar comes with it.</T>
-                  </View>
-                )}
-                <CollapsibleSection title="Other calendar options">
-                  <View style={{ gap: spacing.sm, paddingTop: spacing.sm }}>
-                    <Button title="Import calendar file (.ics)" variant="neutral" icon="square.and.arrow.down" full loading={subBusy === "paste"} onPress={() => void importFile()} />
-                    <TextInput
-                      style={inputStyle}
-                      placeholder="Feed URL (webcal:// or https://…ics)"
-                      placeholderTextColor={colors.textFaint}
-                      autoCapitalize="none" autoCorrect={false} keyboardType="url"
-                      value={feedUrl} onChangeText={setFeedUrl}
-                      accessibilityLabel="Calendar feed URL"
-                    />
-                    <Button title="Subscribe to feed" variant="neutral" full loading={subBusy === "url"} disabled={!feedUrl.trim()} onPress={() => void subscribe()} />
-                  </View>
-                </CollapsibleSection>
-              </Card>
+              <View testID="calendar-add-card">
+                <Card padded={false}>
+                  {/* The Owner can connect a calendar for anyone ("For"); everyone else adds
+                      for themselves. The picker only appears when there is a choice to make. */}
+                  {addForMembers.length > 0 ? (
+                    <View testID="add-for-member-picker" style={{ padding: spacing.lg, paddingBottom: 0, gap: 6 }}>
+                      <T kind="eyebrow">For</T>
+                      <ChipRow>
+                        {canAdd.self ? (
+                          <Chip label="Me" selected={!forMemberId} onPress={() => setAddFor(null)} accessibilityLabel="Add a calendar for me" />
+                        ) : null}
+                        {addForMembers.map((m) => (
+                          <Chip
+                            key={m.actorId} label={m.displayName.split(" ")[0]}
+                            selected={forMemberId === m.actorId}
+                            onPress={() => setAddFor(m.actorId)}
+                            accessibilityLabel={`Add a calendar for ${m.displayName}`}
+                          />
+                        ))}
+                      </ChipRow>
+                    </View>
+                  ) : null}
+                  {/* Cluster V — "this can be collapsed a bit… I do like this connect Google
+                      Calendar button, however it should just be 'connect calendar' because it
+                      could be any type of calendar." Connecting an account is the common act
+                      and stays out front; the feed URL and file import are the rare ones and
+                      fold away until asked for. */}
+                  {googleConnected ? (
+                    <View style={{ padding: spacing.lg, paddingBottom: spacing.sm, gap: spacing.sm }}>
+                      {myGoogleAccounts.length > 1 ? (
+                        <ChipRow>
+                          {myGoogleAccounts.map((a) => (
+                            <Chip
+                              key={a.id} label={a.displayName || a.memberName || "Google account"}
+                              selected={(googleAccountId ?? myGoogleAccounts[0]?.id) === a.id}
+                              onPress={() => setGoogleAccountId(a.id)}
+                              accessibilityLabel={`Use ${a.displayName || "this Google account"}`}
+                            />
+                          ))}
+                        </ChipRow>
+                      ) : null}
+                      <Button
+                        title={`Connect calendar${forLabel}`} variant="ember" icon="calendar" full
+                        loading={subBusy === "google"} onPress={() => void connectGoogleCal()}
+                        testID="calendar-add-google"
+                      />
+                    </View>
+                  ) : (
+                    <View style={{ padding: spacing.lg, paddingBottom: spacing.sm }}>
+                      <T kind="caption" color={colors.textFaint}>Connect an account above, and its calendar comes with it.</T>
+                    </View>
+                  )}
+                  <CollapsibleSection title="Other calendar options">
+                    <View style={{ gap: spacing.sm, paddingTop: spacing.sm }}>
+                      <Button title={`Import calendar file (.ics)${forLabel}`} variant="neutral" icon="square.and.arrow.down" full loading={subBusy === "paste"} onPress={() => void importFile()} />
+                      <TextInput
+                        style={inputStyle}
+                        placeholder="Feed URL (webcal:// or https://…ics)"
+                        placeholderTextColor={colors.textFaint}
+                        autoCapitalize="none" autoCorrect={false} keyboardType="url"
+                        value={feedUrl} onChangeText={setFeedUrl}
+                        accessibilityLabel="Calendar feed URL"
+                      />
+                      <Button title={`Subscribe to feed${forLabel}`} variant="neutral" full loading={subBusy === "url"} disabled={!feedUrl.trim()} onPress={() => void subscribe()} />
+                    </View>
+                  </CollapsibleSection>
+                </Card>
+              </View>
             </Rise>
-          ) : (
+          ) : canAdd.limitReached ? (
             <Rise index={3}>
-              <T kind="caption" color={colors.textFaint}>Managing calendar feeds needs an adult member.</T>
+              <T kind="caption" color={colors.textFaint}>You can connect one calendar. Ask the Owner if you need another.</T>
             </Rise>
-          )}
+          ) : null}
 
           {/* THE AI PROVIDER ROW IS GONE FROM HERE ON PURPOSE.
               Keys arrive as deployment environment variables and bootstrapAIFromEnv claims
@@ -540,36 +701,76 @@ export default function ConnectionsScreen() {
               way in is. Cluster V's point still stands if it ever comes back: the model
               answering the household is a connection and belongs among them. */}
 
-          {/* "This information down here is like a connector status — it's useful, but it can
-              also benefit from a collapsed state." Folded by default: it answers a question
-              you only ask when something's wrong. */}
-          <HSheet visible={!!editSub} onClose={() => setEditSub(null)} title="This calendar" heightPct={0.62}
-            footer={<SheetCTA title={subBusy?.startsWith("edit:") ? "Saving…" : "Save"} disabled={!editName.trim() || !!subBusy} onPress={() => void saveEditSub()} />}
+          {/* The edit sheet shows only what this person may change on THIS calendar: its name
+              (can.edit), Work (can.markWork), whose it is (can.assign, the Owner) and, for a
+              limited member's calendar, what they see (can.scope, the Owner). */}
+          <HSheet visible={!!editSub} onClose={() => setEditSub(null)} title="This calendar" heightPct={0.84}
+            footer={<SheetCTA title={subBusy?.startsWith("edit:") ? "Saving…" : "Save"} disabled={(!!editSub?.can?.edit && !editName.trim()) || !!subBusy} onPress={() => void saveEditSub()} />}
           >
-            <View style={{ gap: spacing.md }}>
+            <ScrollView contentContainerStyle={{ gap: spacing.lg, paddingBottom: spacing.lg }} keyboardShouldPersistTaps="handled">
+              {editNote ? <Notice text={editNote} ok={false} /> : null}
               <View style={{ gap: 6 }}>
                 <T kind="eyebrow">Name</T>
-                <TextInput
-                  value={editName}
-                  onChangeText={setEditName}
-                  placeholder="e.g. Amelia's school"
-                  placeholderTextColor={colors.textFaint}
-                  maxLength={80}
-                  accessibilityLabel="Calendar name"
-                  style={{ height: 44, paddingHorizontal: 14, borderRadius: 14, backgroundColor: colors.surfaceSunken, color: colors.text, fontSize: 16 }}
+                {editSub?.can?.edit ? (
+                  <TextInput
+                    value={editName}
+                    onChangeText={setEditName}
+                    placeholder="e.g. Amelia's school"
+                    placeholderTextColor={colors.textFaint}
+                    maxLength={80}
+                    accessibilityLabel="Calendar name"
+                    testID="calendar-edit-name"
+                    style={{ height: 44, paddingHorizontal: 14, borderRadius: 14, backgroundColor: colors.surfaceSunken, color: colors.text, fontSize: 16 }}
+                  />
+                ) : (
+                  <T kind="bodyMedium" color={colors.text}>{editSub?.name}</T>
+                )}
+              </View>
+              {canMarkWorkNow ? (
+                <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <T kind="rowTitle">Work calendar</T>
+                    <T kind="detail">
+                      {(editOwner ?? editSub?.ownerActorId) === me
+                        ? `Your family sees these as '${firstName(me)} working' — you can share any one`
+                        : `The family sees these as '${firstName(editOwner ?? editSub?.ownerActorId)} working' — ${firstName(editOwner ?? editSub?.ownerActorId)} can share any one`}
+                    </T>
+                  </View>
+                  <Switch
+                    value={editWork} onValueChange={setEditWork} trackColor={{ true: colors.ember }}
+                    testID="work-switch" accessibilityLabel="Work calendar"
+                  />
+                </View>
+              ) : null}
+              {editSub?.can?.assign ? (
+                <View style={{ gap: 6 }}>
+                  <T kind="eyebrow">Whose calendar is this?</T>
+                  <T kind="sub">Its events take that person's colour on the calendar and count toward their day.</T>
+                  <View testID="assign-owner-chips">
+                    <ChipRow>
+                      {members.map((m) => (
+                        <Chip
+                          key={m.actorId} label={m.displayName} selected={editOwner === m.actorId}
+                          onPress={() => setEditOwner(m.actorId)}
+                          accessibilityLabel={`This is ${m.displayName}'s calendar`}
+                        />
+                      ))}
+                    </ChipRow>
+                  </View>
+                  {editOwnerChanged && !isAdultRole(editOwnerMember?.role) && editSub?.isWork ? (
+                    <T kind="detail">Work calendars belong to adults, so this one stops being Work.</T>
+                  ) : null}
+                </View>
+              ) : null}
+              {editScopeMember ? (
+                <ScopeEditor
+                  member={editScopeMember}
+                  members={members}
+                  subscriptions={subs}
+                  onSaved={(scope) => setMembers((ms) => ms.map((m) => (m.actorId === editScopeMember.actorId ? { ...m, calendarScope: scope } : m)))}
                 />
-              </View>
-              <View style={{ gap: 6 }}>
-                <T kind="eyebrow">Whose calendar is this?</T>
-                <T kind="sub">Its events take that person's colour on the calendar and count toward their day.</T>
-                <ChipRow>
-                  <Chip label="Nobody in particular" selected={editOwner === null} onPress={() => setEditOwner(null)} />
-                  {members.map((m) => (
-                    <Chip key={m.actorId} label={m.displayName} selected={editOwner === m.actorId} onPress={() => setEditOwner(m.actorId)} />
-                  ))}
-                </ChipRow>
-              </View>
-            </View>
+              ) : null}
+            </ScrollView>
           </HSheet>
 
           <SectionHeader title="Connectors" />
