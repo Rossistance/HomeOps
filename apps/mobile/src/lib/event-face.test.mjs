@@ -5,10 +5,10 @@ import assert from "node:assert/strict";
 import { eventFace, isBlock, canToggleSharing, eyeLabel } from "./event-face.ts";
 
 test("someone else's hidden time is a block, by its marker or its id", () => {
-  const b = { id: "blk_1234", title: "Beannie working", ownerId: "m-bean", block: { kind: "work", count: 3 } };
-  assert.deepEqual(eventFace(b), { mode: "block", kind: "work", label: "Beannie working", count: 3, ownerId: "m-bean" });
+  const b = { id: "blk_1234", title: "Beannie working", ownerId: "m-bean", block: { kind: "work" } };
+  assert.deepEqual(eventFace(b), { mode: "block", kind: "work", label: "Beannie working", ownerId: "m-bean" });
   assert.equal(isBlock({ id: "blk_abc" }), true, "an older server without the marker still reads as a block by id");
-  assert.equal(eventFace({ id: "blk_x", title: "Gpop busy", ownerId: "m-g", block: { kind: "busy", count: 1 } }).kind, "busy");
+  assert.equal(eventFace({ id: "blk_x", title: "Gpop busy", ownerId: "m-g", block: { kind: "busy" } }).kind, "busy");
   assert.equal(canToggleSharing(b), false);
 });
 

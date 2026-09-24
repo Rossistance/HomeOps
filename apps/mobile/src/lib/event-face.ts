@@ -18,7 +18,7 @@ export type HiddenKind = "work" | "busy";
 export type EventFace =
   | { mode: "full"; canHide: boolean; secret: boolean }
   | { mode: "ownHidden"; kind: HiddenKind; secret: boolean }
-  | { mode: "block"; kind: HiddenKind; label: string; count: number; ownerId: string | null };
+  | { mode: "block"; kind: HiddenKind; label: string; ownerId: string | null };
 
 /** A stand-in for someone else's hidden time — not a real event: never open, edit or act on it. */
 export function isBlock(e: Pick<Ev, "id"> & Partial<Pick<Ev, "block">>): boolean {
@@ -28,7 +28,7 @@ export function isBlock(e: Pick<Ev, "id"> & Partial<Pick<Ev, "block">>): boolean
 export function eventFace(e: Ev): EventFace {
   if (isBlock(e)) {
     const kind: HiddenKind = e.block?.kind === "busy" ? "busy" : "work";
-    return { mode: "block", kind, label: e.title || (kind === "work" ? "Working" : "Busy"), count: e.block?.count ?? 1, ownerId: e.ownerId ?? null };
+    return { mode: "block", kind, label: e.title || (kind === "work" ? "Working" : "Busy"), ownerId: e.ownerId ?? null };
   }
   const p = e.privacy;
   if (p?.obscured && !p.withheld) return { mode: "ownHidden", kind: p.kind === "busy" ? "busy" : "work", secret: p.secret === true };
