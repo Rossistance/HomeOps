@@ -462,6 +462,8 @@ export default function SettingsScreen() {
         visible={!!editingMember}
         onClose={() => setEditingMember(null)}
         onSaved={() => { setEditingMember(null); void load(); }}
+        // A saved scope refreshes the roster, so reopening this member shows what was saved.
+        onScopeSaved={() => void load()}
       />
     </HScreen>
   );
@@ -477,7 +479,7 @@ const ALL_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member", "Ch
 /** Edit a member. Owners/Adult Admins get the full editor (role, relationship,
  * child AI toggle); everyone else gets self-service name + color. The server
  * enforces the real rules — last-owner demotion comes back as 409 last_owner. */
-function MemberSheet({ member, canManage, isOwner = false, visible, onClose, onSaved, allMembers = [] }: {
+function MemberSheet({ member, canManage, isOwner = false, visible, onClose, onSaved, onScopeSaved, allMembers = [] }: {
   member: MemberRec | null;
   allMembers?: MemberRec[];
   canManage: boolean;
@@ -486,6 +488,7 @@ function MemberSheet({ member, canManage, isOwner = false, visible, onClose, onS
   visible: boolean;
   onClose: () => void;
   onSaved: () => void;
+  onScopeSaved?: () => void;
 }) {
   const { colors, spacing } = useTheme();
   const [name, setName] = useState("");
@@ -619,7 +622,7 @@ function MemberSheet({ member, canManage, isOwner = false, visible, onClose, onS
         {/* Here as well as in Connections, so the Owner can set it before a limited member
             has a calendar of their own. Saved on its own button: it is a separate request. */}
         {isOwner && member.role === "Limited Member" ? (
-          <ScopeEditor member={member} members={allMembers} />
+          <ScopeEditor member={member} members={allMembers} onSaved={() => onScopeSaved?.()} />
         ) : null}
 
         {!canManage ? (

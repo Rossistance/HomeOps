@@ -404,7 +404,9 @@ export default function EventFormScreen() {
     setSharingBusy(false);
     if (!r.event) { setNotice({ text: r.message ?? "Couldn't change who sees this. Try again.", ok: false }); return; }
     tapHaptic("select");
-    setPrivacy(r.event.privacy ?? { obscured: hidden, kind: privacy?.kind, secret: secret ?? privacy?.secret, canToggle: true });
+    // The server's answer as it is: no privacy back means it no longer offers the switch
+    // (e.g. an owner demoted since hiding it could share it, but cannot hide it again).
+    setPrivacy(r.event.privacy ?? null);
   };
 
   const addBring = useCallback(() => {

@@ -293,8 +293,11 @@ export default function ConnectionsScreen() {
    * judges it that way, and drops Work outright when a calendar goes to a non-adult. */
   const editOwnerChanged = !!editSub && (editOwner ?? null) !== (editSub.ownerActorId ?? null);
   const editOwnerMember = members.find((m) => m.actorId === editOwner) ?? null;
+  // Work is the calendar OWNER's choice (ADR-005): after a reassignment the switch shows only
+  // when the calendar is coming to the person holding the phone — anyone else marks it
+  // themselves once it is theirs (the server refuses it otherwise, and the whole save with it).
   const canMarkWorkNow = !!editSub?.can && (editOwnerChanged
-    ? editSub.can.assign && isAdultRole(editOwnerMember?.role)
+    ? editSub.can.assign && editOwner === me && isAdultRole(editOwnerMember?.role)
     : editSub.can.markWork);
   const saveEditSub = async () => {
     if (!editSub) return;
@@ -447,7 +450,9 @@ export default function ConnectionsScreen() {
         />
       ) : null}
       <Rise index={0}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+        {/* Carries the screen's testID for the device flows: HScreen takes none, and this row is
+            always the first thing on the screen. */}
+        <View testID="connections-screen" style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
           <T kind="sub" style={{ flex: 1 }}>Connect accounts to let plans act on your behalf.</T>
           {canManage ? (
             <Button

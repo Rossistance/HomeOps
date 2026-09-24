@@ -610,8 +610,10 @@ function Header({ icon, title, action }: { icon: string; title: string; action?:
  *  palette), so a glance shows both when a thing is and who it's for. */
 function EventLine({ event, memberById, showDay, onOpen }: { event: CalendarEvent; memberById: Map<string, Member>; showDay?: boolean; onOpen: () => void }) {
   const members = event.memberIds.map((id) => memberById.get(id)).filter((m): m is Member => !!m);
+  // Someone's hidden time (ADR-005) has nothing to open.
+  const block = !!event.block || String(event.serverId ?? event.id).startsWith("blk_");
   return (
-    <li onClick={onOpen} className="group flex cursor-pointer items-center gap-3 rounded-2xl border border-transparent px-2 py-1.5 transition-colors hover:border-ink-900/[0.06] hover:bg-surface-overlay">
+    <li onClick={block ? undefined : onOpen} className={`group flex ${block ? "" : "cursor-pointer "}items-center gap-3 rounded-2xl border border-transparent px-2 py-1.5 transition-colors hover:border-ink-900/[0.06] hover:bg-surface-overlay`}>
       <div className="flex w-12 shrink-0 flex-col items-center leading-tight">
         {showDay && <span className="text-[10px] font-semibold uppercase text-ink-400">{dayName(event.startAt).slice(0, 3)}</span>}
         <span className="text-xs font-semibold text-ink-700">{eventTimeLabel(event)}</span>

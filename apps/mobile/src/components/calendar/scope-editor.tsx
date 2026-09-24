@@ -74,7 +74,9 @@ export function ScopeEditor({ member, members, subscriptions, onSaved }: {
     for (const m of others) {
       const c = choice[m.actorId] ?? "all";
       if (c === "none") rules[m.actorId] = "none";
-      else if (c === "some") rules[m.actorId] = { calendars: picked[m.actorId] ?? [] };
+      // Only ids still drawn as chips: a calendar removed or handed to someone else since would
+      // make the server refuse the whole save, and the Owner could not see why or fix it.
+      else if (c === "some") rules[m.actorId] = { calendars: (picked[m.actorId] ?? []).filter((cal) => cal === APP || subs.some((s) => s.id === cal && s.ownerActorId === m.actorId)) };
     }
     const scope: CalendarScope | null = Object.keys(rules).length ? { members: rules } : null;
     setBusy(true); setNote(null);

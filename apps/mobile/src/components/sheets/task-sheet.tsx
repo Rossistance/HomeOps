@@ -149,7 +149,8 @@ export function TaskSheet({ visible, task, members, canEdit, onClose, onSaved, o
     }
     tapHaptic("success");
     setNotice(r.action === "updated" ? "Calendar entry updated." : "Added to the calendar.");
-    onSaved({ ...task, eventId: r.event?.id ?? null });
+    // The server may not echo an event this person's view leaves out (ADR-005) — keep what we knew.
+    onSaved({ ...task, eventId: r.event?.id ?? task.eventId ?? null });
   };
 
   const confirmDelete = () => {

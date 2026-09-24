@@ -47,6 +47,8 @@ export function HelpComposer({
   const upcomingFor = (ownerId: string) => events
     .filter((e) => { const t = +new Date(e.startAt); return !isNaN(t) && t >= now - 36e5 && t <= now + 14 * 864e5; })
     .filter((e) => e.ownerId === ownerId || (e.memberIds ?? []).includes(ownerId))
+    // A block (ADR-005) is someone's hidden time, not an event: nothing to link a request to.
+    .filter((e) => !e.block && !String(e.serverId ?? e.id).startsWith("blk_"))
     .sort((a, b) => +new Date(a.startAt) - +new Date(b.startAt)).slice(0, 30);
   const openTasksFor = (ownerId: string) => tasks
     .filter((t) => t.assignedMemberId === ownerId && t.status !== "done").slice(0, 30);
