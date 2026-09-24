@@ -13,6 +13,19 @@ import { householdTimeZone, serverTimeZone, localMidnightISO, localDateKey, stam
 import { listAccountsFor } from "./accounts.mjs";
 import { apiForAccount } from "./oauth.mjs";
 import { newEventRecord } from "./actions/schemas/event.mjs";
+import { subscriptionOwnerId } from "./calendar-permissions.mjs";
+
+/* A shared card handed to another subscription (the one that owned it stopped showing it, or
+ * was removed) becomes THAT calendar's event — its owner in ownerId AND createdBy, because
+ * canSeeEntity counts createdBy as ownership (ADR-005). */
+function handOverPatch(ev, also) {
+  const next = getSubscription(also[0]);
+  const owner = next ? subscriptionOwnerId(next, next.accountId ? getAccountRaw(next.accountId) : null) : null;
+  return {
+    provenance: { ...(ev.provenance ?? {}), subscriptionId: also[0], alsoSubscriptionIds: also.slice(1) },
+    ...(owner ? { ownerId: owner, createdBy: owner } : {}),
+  };
+}
 
 // Normalize Google Calendar API items into the same intermediate shape parseICS produces,
 // so the upsert path is shared. Pure + unit-testable (no network).
@@ -287,7 +300,7 @@ export async function syncSubscription({ sub, icsText, session }) {
     if (!Number.isNaN(staleMs) && (staleMs < windowStart || staleMs > windowEnd)) continue;
     const also = (stale.provenance?.alsoSubscriptionIds ?? []).filter((x) => x !== subId);
     if (also.length > 0) {
-      patchEvent(stale.id, { provenance: { ...(stale.provenance ?? {}), subscriptionId: also[0], alsoSubscriptionIds: also.slice(1) } });
+      patchEvent(stale.id, handOverPatch(stale, also));
     } else { deleteEventRec(stale.id); removed++; }
   }
   // One-time cleanup for duplicates that landed before dedupe existed: same
@@ -673,7 +686,7 @@ export function removeSubscriptionEvents(subId, session) {
     // ownership to it instead of deleting the household's view of the event.
     const also = (e.provenance?.alsoSubscriptionIds ?? []).filter((x) => x !== subId);
     if (also.length > 0) {
-      patchEvent(e.id, { provenance: { ...(e.provenance ?? {}), subscriptionId: also[0], alsoSubscriptionIds: also.slice(1) } });
+      patchEvent(e.id, handOverPatch(e, also));
     } else { deleteEventRec(e.id); removed++; }
   }
   // Detach this subscription's color from cards it was riding along on.

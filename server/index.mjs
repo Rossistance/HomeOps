@@ -544,8 +544,10 @@ function calendarRefusal(action, sub, owner) {
 function resolveCalendarAddTarget(session, body, { countCap = true } = {}) {
   const forMemberId = body?.forMemberId != null && String(body.forMemberId).trim() ? String(body.forMemberId).trim() : null;
   const target = forMemberId ?? session.actorId;
+  // The Limited Member cap limits what they add THEMSELVES (ADR-005 decision 3): a calendar
+  // the Owner connected for them does not use it up, so only self-added ones are counted.
   const ownedCount = countCap
-    ? listSubscriptions((s) => s.householdId === session.householdId).filter((s) => subscriptionOwnerId(s, s.accountId ? getAccountRaw(s.accountId) : null) === target).length
+    ? listSubscriptions((s) => s.householdId === session.householdId).filter((s) => subscriptionOwnerId(s, s.accountId ? getAccountRaw(s.accountId) : null) === target && (forMemberId ? true : (s.createdBy ?? null) === session.actorId)).length
     : 0;
   const can = canAddCalendar(viewerOf(session), { forMember: forMemberId ? { actorId: forMemberId } : null, ownedCount });
   if (!can.ok) return { ok: false, status: can.status, body: { error: can.error, message: can.message } };
@@ -3592,7 +3594,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const all = listSubscriptions((s) => s.householdId === g.session.householdId);
       const subs = all.map((s) => subscriptionView(s, g.session));
       // What the Add button may offer, so the client never shows a door the server shuts.
-      const ownedCount = all.filter((s) => subscriptionOwnerId(s, s.accountId ? getAccountRaw(s.accountId) : null) === g.session.actorId).length;
+      // Same count as the add routes: calendars they own AND added themselves (ADR-005 decision 3).
+      const ownedCount = all.filter((s) => subscriptionOwnerId(s, s.accountId ? getAccountRaw(s.accountId) : null) === g.session.actorId && (s.createdBy ?? null) === g.session.actorId).length;
       const self = canAddCalendar(viewerOf(g.session), { forMember: null, ownedCount });
       const canAdd = {
         self: self.ok,
@@ -3812,7 +3815,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const sub = getSubscription(subOne[1]);
       if (!sub || sub.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const { owner } = subscriptionOwnerOf(sub);
+      const { owner, ownerActorId: currentOwnerId } = subscriptionOwnerOf(sub);
       const can = calendarCan(viewerOf(g.session), sub, owner);
       const refuse = (action, who = owner) => json(res, 403, { error: "not_your_calendar", message: calendarRefusal(action, sub, who) }, req);
       const patch = {};
@@ -3828,7 +3831,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
         patch.color = body.color;
       }
       let newOwner = null;
-      if (body.ownerActorId !== undefined) {
+      // The iOS edit sheet (build 79 and earlier) sends ownerActorId on EVERY save, unchanged —
+      // naming the current owner again is not a reassignment, so it needs no assign right.
+      if (body.ownerActorId !== undefined && String(body.ownerActorId ?? "") !== String(currentOwnerId ?? "")) {
         if (!can.assign) return refuse("assign");
         // Every calendar has exactly one owner — the matrix has nothing to say about a
         // calendar that belongs to no one, so "unassign" is no longer a state it can enter.
