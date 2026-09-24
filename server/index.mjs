@@ -76,6 +76,7 @@ import { addEventTombstone } from "./store.mjs";
 import { listImessageChats, getImessageChat } from "./store.mjs";
 import { readPreviewToken, renderPreviewCard, renderPreviewGone } from "./preview-token.mjs";
 import { resolvePreview } from "./share-preview.mjs";
+import { privacyContext as eventPrivacyContext, obscureStateOf, obscuredLabel } from "./event-privacy.mjs";
 
 /** Which household owns the record a preview token names. resolvePreview gates on
  *  canSeeEntity, which never compares householdId, so this is the check that actually
@@ -2016,7 +2017,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         const p = tenantEngine().tenantPath(hh, "audit.jsonl");
         if (!fs.existsSync(p)) return [];
         return fs.readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return { unparseable: l }; } });
-      });
+      }, g.session); // whose hidden events are theirs to export in full (ADR-005)
       if (!bundle) return json(res, 503, { error: "storage_unreadable", message: "Your data can't be read cleanly right now, so an export would be incomplete. Restore from a backup first." }, req);
       audit({ type: "household.export_downloaded", collections: bundle.meta.collections }, req, g.session);
       const body = Buffer.from(JSON.stringify(bundle, null, 2), "utf8");
@@ -3389,14 +3390,20 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (hr.proposal?.threadId) {
         try {
           const ev = hr.proposal.eventId ? getEvent(hr.proposal.eventId) : null;
-          if (status === "accepted" && ev && ev.householdId === g.session.householdId && hr.proposal.patch) {
+          /* A hidden event (ADR-005) is named in the thread by its block — "Beannie working" —
+           * whoever is reading, because a thread line is read by everyone in the thread, not
+           * by its owner alone. And it is changed only on its owner's word: the owner asked,
+           * or the owner is the one saying yes. */
+          const hid = ev ? obscureStateOf(ev, eventPrivacyContext(ev.householdId)) : null;
+          const ownerAgreed = !hid?.obscured || hid.ownerId === hr.fromActorId || hid.ownerId === g.session.actorId;
+          if (status === "accepted" && ev && ev.householdId === g.session.householdId && hr.proposal.patch && ownerAgreed) {
             const pp = hr.proposal.patch;
             const patch = {};
             if (pp.driverId) patch.driverId = String(pp.driverId);
             if (pp.participantId && !(ev.participantIds ?? []).includes(String(pp.participantId))) patch.participantIds = [...(ev.participantIds ?? []), String(pp.participantId)];
             if (Object.keys(patch).length) { patchEvent(ev.id, { ...patch, updatedAt: new Date().toISOString() }); applied = { eventId: ev.id, ...patch }; }
           }
-          const what = ev ? `“${ev.title}”${ev.startAt ? ` (${formatForHousehold(ev.startAt, g.session.householdId)})` : ""}` : `“${hr.message}”`;
+          const what = ev ? `“${hid?.obscured ? obscuredLabel(hid.kind, hid.owner) : ev.title}”${ev.startAt ?` (${formatForHousehold(ev.startAt, g.session.householdId)})` : ""}` : `“${hr.message}”`;
           const line = status === "accepted"
             ? (applied ? `${hr.toName} accepted — calendar updated: ${applied.driverId ? `${hr.toName} is driving to` : `${hr.toName} is going to`} ${what}, now on ${hr.toName}'s upcoming events.` : `${hr.toName} accepted: ${what}.`)
             : `${hr.toName} declined: ${what}${responseNote ? ` — ${responseNote}` : ""}.`;

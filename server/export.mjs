@@ -16,6 +16,7 @@
 // the kind of small lie this codebase keeps finding. Everything is in unless it is a credential,
 // and the manifest names what went.
 import { tenantEngine, currentTenant, appendAudit } from "./store.mjs";
+import { privacyContext, presentEvents, hiddenEventRefusal } from "./event-privacy.mjs";
 
 /** Files whose VALUES are credentials, not family data. */
 const SECRET_FILES = new Set(["connectors.json"]);
@@ -44,15 +45,54 @@ function redact(value, keyName = "") {
 }
 
 /**
+ * Hidden events (ADR-005) are not the household's to take — they are their OWNER's. An Owner
+ * exporting sees what they see on their own calendar: their own hidden events in full, every
+ * other member's as that member's blocks ("Beannie working", the time, nothing else), through
+ * presentEvents like every other surface. Visible events pass through untouched, so nothing
+ * that was in an export before goes missing from one now.
+ *
+ * The raw feed text a pasted calendar keeps for re-syncs (icsText) holds every one of that
+ * calendar's events, so it goes too when the calendar belongs to someone else and hides
+ * anything. This file is not a restore source (backup.mjs is), so reshaping it costs no restore.
+ */
+function obscureHiddenEvents(files, householdId, viewer) {
+  const events = files["events.json"];
+  if (!events || typeof events !== "object") return { blocked: 0 };
+  const pc = privacyContext(householdId);
+  const keep = {};
+  const hidden = [];
+  for (const [id, e] of Object.entries(events)) {
+    if (e && hiddenEventRefusal(e, viewer, pc)) hidden.push(e); else keep[id] = e;
+  }
+  if (!hidden.length) return { blocked: 0 };
+  for (const b of presentEvents(hidden, viewer ?? {}, { purpose: "app", pc })) keep[b.id] = b;
+  files["events.json"] = keep;
+  const hidingSubs = new Set(hidden.map((e) => e.provenance?.subscriptionId).filter(Boolean));
+  const subs = files["calendar_subscriptions.json"];
+  if (subs && typeof subs === "object") {
+    for (const [id, s] of Object.entries(subs)) {
+      if (!s || typeof s.icsText !== "string") continue;
+      if (s.ownerActorId === viewer?.actorId) continue;
+      if (s.isWork === true || hidingSubs.has(s.id ?? id)) subs[id] = { ...s, icsText: HIDDEN_FEED };
+    }
+  }
+  return { blocked: hidden.length };
+}
+const HIDDEN_FEED = "[withheld — this calendar belongs to another member and hides events]";
+
+/**
  * Everything this household owns, as a plain object.
  *
+ * @param viewer  the exporting session ({ actorId, role }) — decides whose hidden events
+ *                are shown in full (theirs) and whose as blocks (everyone else's).
  * @returns {{ meta: object, data: object } | null} null when the tenant is unreadable
  *          (quarantined storage) — the caller must say so rather than ship an empty file.
  */
-export function exportHousehold(householdId = currentTenant()) {
+export function exportHousehold(householdId = currentTenant(), viewer = null) {
   const engine = tenantEngine();
   const files = engine.exportTenant(householdId);
   if (!files) return null;
+  const { blocked } = obscureHiddenEvents(files, householdId, viewer);
 
   const data = {};
   const redactedFiles = [];
@@ -74,6 +114,7 @@ export function exportHousehold(householdId = currentTenant()) {
       excluded: [
         "Credentials — connector API keys, OAuth access and refresh tokens, signing secrets and the household PIN hash are redacted. They are not useful outside this server and shipping them would be a liability.",
         "File CONTENTS — this export carries each file's metadata (name, type, who added it, when). Download the files themselves from Files & Knowledge.",
+        ...(blocked ? [`Other members' hidden events — ${blocked} are shown as their owner's busy/working blocks, exactly as on your calendar. Only an event's owner can export what it is.`] : []),
       ],
       redactedFiles,
     },
@@ -88,8 +129,8 @@ export function exportHousehold(householdId = currentTenant()) {
  *  it — and it is the one record saying what was done on the family's behalf and by whom, which
  *  makes it the most accountability-relevant thing in the export. Reading it needs filesystem
  *  access this module deliberately doesn't take, so the caller supplies the reader. */
-export function exportHouseholdWithAudit(householdId, readAuditLines) {
-  const base = exportHousehold(householdId);
+export function exportHouseholdWithAudit(householdId, readAuditLines, viewer = null) {
+  const base = exportHousehold(householdId, viewer);
   if (!base) return null;
   try {
     base.audit = readAuditLines(householdId) ?? [];
