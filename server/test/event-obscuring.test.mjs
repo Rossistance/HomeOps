@@ -79,7 +79,7 @@ test("a Work calendar's events reach everyone else as \"<Name> working\" blocks,
     assert.ok(!list.some((e) => Object.values(byTitle).some((w) => w.id === e.id)), `${who.actorId}: no real event id`);
     const blocks = blocksOf(list, "Casey Quinn working");
     assert.equal(blocks.length, 2, `${who.actorId}: 9–11 merged, 14–15 alone`);
-    assert.deepEqual(blocks.map((b) => b.block), [{ kind: "work", count: 2 }, { kind: "work", count: 1 }]);
+    assert.deepEqual(blocks.map((b) => b.block), [{ kind: "work" }, { kind: "work" }], "kind only — never how many meetings are inside");
     assert.equal(blocks[0].startAt, byTitle["Quarterly budget review"].startAt);
     assert.equal(Date.parse(blocks[0].endAt), Date.parse(byTitle["Zephyr launch sync"].endAt));
     for (const b of blocks) {
@@ -142,7 +142,8 @@ test("the owner shares one event: everyone sees it in full and the block splits;
     const raw = JSON.stringify(list);
     for (const s of ["Quarterly budget review", "Performance chat with Pat", "Board room 4B"]) assert.ok(!raw.includes(s), `${who.actorId}: ${s}`);
     const blocks = blocksOf(list, "Casey Quinn working");
-    assert.deepEqual(blocks.map((b) => b.block.count), [1, 1], `${who.actorId}: the 9–11 block is now 9–10`);
+    assert.equal(blocks.length, 2, `${who.actorId}: the shared event leaves two blocks`);
+    assert.equal(Date.parse(blocks[0].endAt), Date.parse(byTitle["Quarterly budget review"].endAt), `${who.actorId}: the 9–11 block is now 9–10`);
   }
 
   const back = await share(member, id, true);
@@ -151,7 +152,9 @@ test("the owner shares one event: everyone sees it in full and the block splits;
   assert.equal(back.data.event.privacy.obscured, true);
   const list = await events(owner);
   assert.ok(!list.some((e) => e.id === id));
-  assert.deepEqual(blocksOf(list, "Casey Quinn working").map((b) => b.block.count), [2, 1]);
+  const merged = blocksOf(list, "Casey Quinn working");
+  assert.equal(merged.length, 2);
+  assert.equal(Date.parse(merged[0].endAt), Date.parse(byTitle["Zephyr launch sync"].endAt), "re-hiding merges 9–11 back into one block");
 });
 
 test("secret: true and false are stored, null removes the switch", async () => {
@@ -184,7 +187,7 @@ test("create with hidden:true: an adult owner's event is hidden (\"<Name> busy\"
     assert.ok(!raw.includes("Dr. Vale") && !raw.includes("Vale Clinic"), `${who.actorId}: nothing of it — the household Owner, a participant, included`);
     const blocks = blocksOf(list, "Morgan Harper busy");
     assert.equal(blocks.length, 1, who.actorId);
-    assert.deepEqual(blocks[0].block, { kind: "busy", count: 1 });
+    assert.deepEqual(blocks[0].block, { kind: "busy" });
   }
   const mine = (await events(admin)).find((e) => e.id === morganHidden.id);
   assert.equal(mine.title, "Therapy with Dr. Vale");

@@ -184,7 +184,9 @@ export const setEventSharing = defineAction({
     // The event's OWNER (a synced event's calendar owner) — not the household Owner, not a
     // participant. Hiding someone else's time is not a thing anyone may do for them.
     if (eventOwnerOf(ev, pc) !== ctx.actorId) return err("not_event_owner", "Only the person whose event this is can hide or share it.");
-    if (!isAdultRole(pc.membersById.get(ctx.actorId)?.role ?? ctx.role)) return err("cannot_hide", "Only adults can hide events.");
+    // HIDING needs an adult; SHARING does not — a hide made before a demotion is still honoured
+    // (event-privacy.mjs), and its owner must be able to lift it, not be left with it.
+    if (input.hidden && !isAdultRole(pc.membersById.get(ctx.actorId)?.role ?? ctx.role)) return err("cannot_hide", "Only adults can hide events.");
     // secret: null REMOVES the switch (an undefined value is not stored), so the event goes
     // back to being judged by its words; absent leaves it as it was.
     patchEvent(ev.id, { shareState: input.hidden ? "hidden" : "shared", ...(input.secret !== undefined ? { secret: input.secret ?? undefined } : {}) });

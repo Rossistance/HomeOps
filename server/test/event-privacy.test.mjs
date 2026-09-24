@@ -72,7 +72,7 @@ test("surprise words are matched on word boundaries; the owner's switch wins eit
   assert.equal(P.isSecret({ title: "Gift card reimbursement", secret: false }), false, "the switch un-flags a false hit");
 });
 
-test("a Work calendar hides by default; the owner's per-event choice wins; only adults can hide", () => {
+test("a Work calendar hides by default; the owner's per-event choice wins; a hide outlives a demotion", () => {
   const c = pc();
   assert.equal(P.obscureStateOf(ev({ sub: "sub_work", title: "Standup" }), c).obscured, true);
   assert.equal(P.obscureStateOf(ev({ sub: "sub_work", title: "Standup" }), c).kind, "work");
@@ -80,9 +80,15 @@ test("a Work calendar hides by default; the owner's per-event choice wins; only 
   assert.equal(P.obscureStateOf(ev({ sub: "sub_home" }), c).obscured, false, "a non-Work calendar shows by default");
   const manual = P.obscureStateOf(ev({ ownerId: "m-bean", createdBy: "m-bean", shareState: "hidden" }), c);
   assert.deepEqual([manual.obscured, manual.kind], [true, "busy"], "hidden by hand reads busy");
-  assert.equal(P.obscureStateOf(ev({ sub: "sub_teen" }), c).obscured, false, "a Limited Member cannot hide, even on a calendar flagged Work");
-  assert.equal(P.obscureStateOf(ev({ ownerId: "m-kid", createdBy: "m-kid", shareState: "hidden" }), c).obscured, false, "nor a child");
-  assert.equal(P.obscureStateOf(ev({ sub: "sub_work" }), pc({ "m-bean": { role: "Limited Member" } })).obscured, false, "a demotion reveals rather than stranding hidden events");
+  assert.equal(P.obscureStateOf(ev({ sub: "sub_teen" }), c).canHide, false, "a Limited Member cannot hide (the routes refuse them)…");
+  // …but a hide already made is honoured whatever the owner's role is now. Otherwise the
+  // household Owner could demote an adult and read every hidden event and surprise they have.
+  const demoted = pc({ "m-bean": { role: "Limited Member" } });
+  assert.equal(P.obscureStateOf(ev({ sub: "sub_work" }), demoted).obscured, true, "a demotion does not reveal a Work calendar");
+  assert.equal(P.obscureStateOf(ev({ ownerId: "m-bean", createdBy: "m-bean", shareState: "hidden" }), demoted).obscured, true, "nor a hand-hidden event");
+  const [still] = P.presentEvents([ev({ sub: "sub_work", title: "Standup" })], who("m-bean"), { pc: demoted });
+  assert.equal(still.privacy.canToggle, true, "the demoted owner can still SHARE their own hidden event — nothing is stranded");
+  assert.equal(P.presentEvents([ev({ sub: "sub_work", title: "Standup" })], who("m-owner"), { pc: demoted })[0].title, "Beannie working");
 });
 
 test("the owner sees each hidden event in full; everyone else — the household Owner included — sees a block", () => {
@@ -97,7 +103,8 @@ test("the owner sees each hidden event in full; everyone else — the household 
     assert.equal(b.title, "Beannie working", viewer);
     assert.deepEqual([b.startAt, b.endAt, b.ownerId], [at(13), at(14), "m-bean"]);
     assert.equal(JSON.stringify(b).includes("Pat") || JSON.stringify(b).includes("Room 4") || JSON.stringify(b).includes("raise"), false, `${viewer} gets nothing of the event`);
-    assert.deepEqual([b.editable, b.appendable, b.block], [false, false, { kind: "work", count: 1 }]);
+    assert.deepEqual([b.editable, b.appendable, b.block], [false, false, { kind: "work" }]);
+    assert.equal(b.updatedAt, new Date(Date.parse(at(13))).toISOString(), "stamps come from the span, never from when the owner last edited it");
     assert.ok(b.id.startsWith("blk_") && b.id !== events[0].id, "a block never carries the real id");
   }
 });
@@ -120,22 +127,23 @@ test("back-to-back hidden events merge into one block; a shared one splits it; k
     ev({ sub: "sub_work", title: "Offsite", allDay: true, startAt: at(4), endAt: null }),
   ];
   const out = P.presentEvents(events, who("m-owner"), { pc: pc() });
-  const blocks = out.filter((e) => e.block).map((e) => [e.title, e.startAt, e.endAt, e.block.count, e.allDay]);
+  const blocks = out.filter((e) => e.block).map((e) => [e.title, e.startAt, e.endAt, e.allDay]);
   assert.deepEqual(blocks.sort((a, b) => String(a[1]).localeCompare(String(b[1]))), [
-    ["Beannie working", at(4), null, 1, true],
-    ["Beannie working", at(9), at(11), 2, false],
-    ["Beannie working", at(11, 30), at(12), 1, false],
-    ["Beannie working", at(13), at(14), 1, false],
-    ["Beannie busy", at(14), at(15), 1, false],
+    ["Beannie working", at(4), null, true],
+    ["Beannie working", at(9), at(11), false],
+    ["Beannie working", at(11, 30), at(12), false],
+    ["Beannie working", at(13), at(14), false],
+    ["Beannie busy", at(14), at(15), false],
   ]);
+  assert.ok(out.filter((e) => e.block).every((e) => !("count" in e.block)), "a block never says how many meetings are inside it");
   assert.ok(out.some((e) => e.title === "D"), "the shared event shows in full, between the blocks");
 });
 
 test("all-day hidden days in a row merge", () => {
   const d = (day) => new Date(Date.UTC(2026, 8, day, 4)).toISOString();
   const events = [ev({ sub: "sub_work", allDay: true, startAt: d(21), endAt: d(22) }), ev({ sub: "sub_work", allDay: true, startAt: d(23) }), ev({ sub: "sub_work", allDay: true, startAt: d(26) })];
-  const blocks = P.presentEvents(events, who("m-kid"), { pc: pc() }).map((b) => [b.startAt, b.endAt, b.block.count]);
-  assert.deepEqual(blocks, [[d(21), d(23), 2], [d(26), null, 1]]);
+  const blocks = P.presentEvents(events, who("m-kid"), { pc: pc() }).map((b) => [b.startAt, b.endAt]);
+  assert.deepEqual(blocks, [[d(21), d(23)], [d(26), null]]);
 });
 
 test("blocks fit the event contract every client is generated from, and keep their id across fetches", () => {
@@ -174,6 +182,12 @@ test("the assistant: the owner hears their hidden events anywhere; a surprise on
 
   const alex = P.presentEvents([work, party], who("m-owner"), { pc: pc(), purpose: "assistant", audience: "self" });
   assert.deepEqual(alex.map((e) => e.title).sort(), ["Beannie busy", "Beannie working"], "anyone else gets blocks, however private their chat");
+});
+
+test("asOthers: text the family will read gets the owner's own hidden events as blocks too", () => {
+  const e = ev({ sub: "sub_work", title: "1:1 with Pat", startAt: at(13), endAt: at(14) });
+  assert.equal(P.presentEvents([e], who("m-bean"), { pc: pc() })[0].title, "1:1 with Pat");
+  assert.equal(P.presentEvents([e], who("m-bean"), { pc: pc(), asOthers: true })[0].title, "Beannie working");
 });
 
 test("the owner's own unhidden events carry the toggle and the surprise hint; nobody else's do", () => {
