@@ -118,7 +118,7 @@ import { listProviders as listConnectorProviders, providerById as connectorProvi
 import { buildAuthUrl, exchangeCode, apiForAccount } from "./oauth.mjs";
 import { listAccountsFor, getOwnedAccount, upsertAccount, revokeAccount, checkAccountHealth, sweepAccountHealth, publicAccount, accountStatusById } from "./accounts.mjs";
 import { generateMiniApp, toolCatalog } from "./context.mjs";
-import { runAssistantAgent } from "./assistant-agent.mjs";
+import { runAssistantAgent, askAudience } from "./assistant-agent.mjs";
 // The assistant message the durable thread keeps for one turn — shared by both routes so
 // the streaming and non-streaming paths can never persist different shapes.
 function assistantTurnMessage(out, at) {
@@ -562,6 +562,12 @@ function resolveCalendarAddTarget(session, body, { countCap = true } = {}) {
 // (visibility "household"), where any household member can read and continue it.
 // canSeeMemory lives in nests.mjs now — ONE predicate for the API's GET and DELETE and for
 // the assistant's delete tool, so a tool can never touch a memory a route would hide.
+/* A run born in a turn that handed an owner's surprise over (ADR-005, sourceRef.secret) is
+ * its requester's alone — not the household's adults', not an Owner's — in the runs list, by
+ * id, and on every per-run route. Answered as a missing run, so its existence says nothing. */
+function secretRunHidden(r, session) {
+  return r?.sourceRef?.secret === true && r.actorId !== session.actorId;
+}
 function canSeeConversation(c, session) {
   if (!c || c.householdId !== session.householdId) return false;
   if (c.actorId === session.actorId) return true;
@@ -2548,7 +2554,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
       });
       // Object-level scope: adults see the household's runs; low-trust roles
       // (Child View, Guest/Helper, Limited Member) see only runs they started.
-      const scoped = isAdultRole(g.session.role) ? runs : runs.filter((r) => r.actorId === g.session.actorId);
+      const scoped = (isAdultRole(g.session.role) ? runs : runs.filter((r) => r.actorId === g.session.actorId))
+        .filter((r) => !secretRunHidden(r, g.session));
       return json(res, 200, { runs: scoped.map(publicRun) }, req);
     }
     if (path === "/api/runs/start" && method === "POST") {
@@ -2585,7 +2592,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (runGet && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const r = getRun(runGet[1]);
-      if (!r || r.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!r || r.householdId !== g.session.householdId || secretRunHidden(r, g.session)) return json(res, 404, { error: "not_found" }, req);
       return json(res, 200, { run: publicRun(r) }, req);
     }
     // Interactive email review (item 3): correlate a completed run's gmail.search results
@@ -2597,7 +2604,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (runReview && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const r = getRun(runReview[1]);
-      if (!r || r.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!r || r.householdId !== g.session.householdId || secretRunHidden(r, g.session)) return json(res, 404, { error: "not_found" }, req);
       // 1) Metadata map: id -> {subject, from} from every gmail.search result.
       const meta = {};
       const labels = [];
@@ -2631,7 +2638,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (runResume && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const r = getRun(runResume[1]);
-      if (!r || r.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!r || r.householdId !== g.session.householdId || secretRunHidden(r, g.session)) return json(res, 404, { error: "not_found" }, req);
       await resumeRun(runResume[1]);
       return json(res, 200, { run: publicRun(getRun(runResume[1])) }, req);
     }
@@ -2639,7 +2646,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (runCancel && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const r = getRun(runCancel[1]);
-      if (!r || r.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!r || r.householdId !== g.session.householdId || secretRunHidden(r, g.session)) return json(res, 404, { error: "not_found" }, req);
       await cancelRun(runCancel[1]);
       audit({ type: "run.cancel", runId: runCancel[1], ok: true }, req, g.session);
       return json(res, 200, { run: publicRun(getRun(runCancel[1])) }, req);
@@ -2651,7 +2658,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (runEvents && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const r0 = getRun(runEvents[1]);
-      if (!r0 || r0.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!r0 || r0.householdId !== g.session.householdId || secretRunHidden(r0, g.session)) return json(res, 404, { error: "not_found" }, req);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no", ...corsHeaders(req) });
       // WP-101 slice 3: partially_failed is terminal. Omitting it here would leave the SSE
       // stream open forever on a finished run (the client waits on a run that will never
@@ -5170,9 +5177,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // never shrunk — only a household's explicit DENY reaches the model's menu, and a
       // local provider additionally gets the relevance-ranked, budget-capped catalog.
       const actingAgent = ensureDefaultHelper();
+      /* Who is listening, decided here from the stored conversation (ADR-005), and the turn's
+       * ledger — read after the turn so a turn that handed a surprise over records nothing. */
+      const audience = askAudience(convForTurn, g.session);
+      const ledger = {};
       let out;
       try {
-        out = await runAssistantAgent({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) });
+        out = await runAssistantAgent({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId), audience, ledger });
       } catch (e) {
         if (turnKey) releaseAssistantTurn(turnKey);
         throw e;
@@ -5188,7 +5199,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
         // I1 — name the thread from the first exchange (see maybeNameConversation).
         if (out.ok) maybeNameConversation(convForTurn.id, { question: String(body.message), answer: out.answer ?? "", session: g.session });
         // BUG-06 — the writer memory never had. Scoped to the room it was said in.
-        if (out.ok) {
+        // Never from a turn that handed an owner's surprise over (ADR-005): it records nothing.
+        if (out.ok && !ledger.secretReleased) {
           void captureMemoryFromExchange({ householdId: g.session.householdId, actorId: g.session.actorId, visibility: convForTurn.visibility, nestId: convForTurn.nestId, message: body.message, answer: out.answer });
         }
       }
@@ -5252,8 +5264,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
         // What it's actually doing, as opposed to what the token counter implies. A web
         // lookup used to spend its whole (long) life claiming to be writing.
         const onPhase = (phase) => sse({ type: "phase", phase });
+        // Same audience and ledger as POST /api/assistant (ADR-005).
+        const audience = askAudience(conv, g.session);
+        const ledger = {};
         const out = await runAssistantAgent(
-          { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) },
+          { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId), audience, ledger },
           { onToken, onPhase, onEvent: (ev) => sse(ev) },
         );
         attachAgentRun(out);
@@ -5266,7 +5281,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
           if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? "", session: g.session });
           // BUG-06 — same as POST /api/assistant, and this is the path the app actually
           // uses, so leaving it out here would be leaving the bug in.
-          if (out.ok) {
+          if (out.ok && !ledger.secretReleased) {
             void captureMemoryFromExchange({ householdId: g.session.householdId, actorId: g.session.actorId, visibility: conv.visibility, nestId: conv.nestId, message: body.message, answer: out.answer });
           }
         }

@@ -132,6 +132,13 @@ export const INTERNAL_FUNCTIONS = {
     connectorName: "FamiliOS",
     // Persist a household/personal memory entry the assistant can recall later.
     async run(ctx, input) {
+      /* A turn that handed an owner's surprise over records NOTHING (ADR-005) — in any scope,
+       * because even a "personal" memory is text an index, a search and a later briefing read,
+       * and the whole point of a surprise is that it stays where it was said. For the rest of
+       * that turn this refuses, with a sentence the model can repeat. */
+      if (ctx?.ledger?.secretReleased) {
+        return { ok: false, error: "private_turn", message: "Nothing from this conversation is being remembered, because it included a private surprise. I haven't saved anything — say it again another time if you want it kept." };
+      }
       const text = String(input?.text ?? "").trim();
       if (!text) return { ok: false, error: "empty_text", message: "Nothing to remember." };
       // "family" was a fourth scope no reader recognised (it fell through as household-

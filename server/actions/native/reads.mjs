@@ -13,7 +13,7 @@ import { listEvents, listTasks, listMeals, listMembers, listApprovals, listMemor
 import { canSeeMemory } from "../../nests.mjs";
 import { memoryProvider } from "../../memory-provider.mjs";
 import { defineAction } from "../define-action.mjs";
-import { parseRange, withinRange, matches, publicEvent, publicTask, nativeScope, always, PROJECTION } from "./shared.mjs";
+import { parseRange, withinRange, matches, publicEvent, publicTask, nativeScope, presentForAsker, always, PROJECTION } from "./shared.mjs";
 
 const READ = { action: "Read", risk: "Low", requiresApproval: false, delivers: false, lane: "native", timeoutMs: 60_000, available: always };
 const strOrNull = { type: ["string", "null"] };
@@ -35,11 +35,17 @@ export const familiListEvents = defineAction({
   },
   errorCodes: ["invalid_input"],
   async run(ctx, input) {
-    const { hh, seeable } = nativeScope(ctx);
+    const { hh } = nativeScope(ctx);
     const { from, to } = parseRange(input, 30);
     const limit = Math.min(200, Math.max(1, Number(input?.limit) || 60));
-    const rows = listEvents((e) => e.householdId === hh).filter(seeable)
-      .filter((e) => withinRange(e.startAt, from, to) || (e.endAt && withinRange(e.endAt, from, to)))
+    /* Through event-privacy.mjs BEFORE the text search (ADR-005): presentEvents applies the
+     * channel gate itself, turns someone else's hidden time into "<Name> working" blocks and
+     * withholds the asker's own surprise where others may be listening. The search then runs
+     * on what the asker may read — searching the stored titles first would let "haircut?"
+     * find a hidden event and answer with a block at exactly its time. */
+    const inRange = listEvents((e) => e.householdId === hh)
+      .filter((e) => withinRange(e.startAt, from, to) || (e.endAt && withinRange(e.endAt, from, to)));
+    const rows = presentForAsker(ctx, inRange)
       .filter((e) => matches(input?.query, e.title, e.location))
       .sort((a, b) => String(a.startAt ?? "").localeCompare(String(b.startAt ?? "")));
     return { ok: true, result: { events: rows.slice(0, limit).map((e) => publicEvent(hh, e)), count: rows.length, range: { from: from.toISOString(), to: to?.toISOString() ?? null } } };
