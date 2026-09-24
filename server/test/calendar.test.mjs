@@ -197,16 +197,22 @@ test("a child cannot push an event to Google", async () => {
   await adult.req(`/api/events/${ev.id}`, { method: "DELETE" });
 });
 
-test("an adult can rename a feed and say whose it is; its events take the owner at once", async () => {
+test("the Owner can rename a feed and say whose it is; its events take the owner at once", async () => {
   const imp = await adult.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Imported calendar", ics: uniqueIcs("owned") }) });
   assert.equal(imp.status, 200);
   const subId = imp.data.subscription.id;
   const before = (await adult.req("/api/events")).data.events.filter((e) => e.provenance?.subscriptionId === subId);
   assert.equal(before.length, 2);
-  assert.ok(before.every((e) => !e.ownerId), "an ICS feed has no owner until someone says");
+  // Every calendar has an owner from the moment it is added: whoever added it for themselves.
+  assert.ok(before.every((e) => e.ownerId === "m-morgan"), "a feed belongs to whoever added it until reassigned");
   const bad = await child.req(`/api/calendar/subscriptions/${subId}`, { method: "PATCH", body: JSON.stringify({ name: "x" }) });
   assert.equal(bad.status, 403);
-  const r = await adult.req(`/api/calendar/subscriptions/${subId}`, { method: "PATCH", body: JSON.stringify({ name: "Lily's school", ownerActorId: "m-lily" }) });
+  // Saying whose it is is the Owner's call now — an Adult Admin may rename it, not hand it on.
+  const adminAssign = await adult.req(`/api/calendar/subscriptions/${subId}`, { method: "PATCH", body: JSON.stringify({ ownerActorId: "m-lily" }) });
+  assert.equal(adminAssign.status, 403);
+  assert.equal(adminAssign.data.error, "not_your_calendar");
+  const owner = await makeSession(ctx, "m-alex");
+  const r = await owner.req(`/api/calendar/subscriptions/${subId}`, { method: "PATCH", body: JSON.stringify({ name: "Lily's school", ownerActorId: "m-lily" }) });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   assert.equal(r.data.subscription.name, "Lily's school");
   assert.equal(r.data.subscription.ownerActorId, "m-lily");
@@ -222,6 +228,9 @@ test("an adult can rename a feed and say whose it is; its events take the owner 
   const listed = (await adult.req("/api/calendar/subscriptions")).data.subscriptions.find((s) => s.id === subId);
   assert.equal(listed.name, "Lily's school");
   assert.equal(listed.ownerName, "Lily Harper");
-  assert.equal((await adult.req(`/api/calendar/subscriptions/${subId}`, { method: "PATCH", body: JSON.stringify({ ownerActorId: "m-nobody" }) })).status, 400);
+  assert.equal((await owner.req(`/api/calendar/subscriptions/${subId}`, { method: "PATCH", body: JSON.stringify({ ownerActorId: "m-nobody" }) })).status, 400);
+  const unassign = await owner.req(`/api/calendar/subscriptions/${subId}`, { method: "PATCH", body: JSON.stringify({ ownerActorId: null }) });
+  assert.equal(unassign.status, 400, "every calendar has one owner — unassigning is no longer a state");
+  assert.equal(unassign.data.error, "owner_required");
   await adult.req(`/api/calendar/subscriptions/${subId}`, { method: "DELETE" });
 });

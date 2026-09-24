@@ -47,6 +47,8 @@ import { closeBrowser } from "./browser.mjs";
 import { orchestrate, ensureDefaultHelper, clientSourceRef } from "./orchestrator.mjs";
 import { sandboxEnabled, seedSandboxAccounts, listSandboxEffects } from "./sandbox-connectors.mjs";
 import { seedDefaults } from "./seed.mjs";
+import { calendarCan, canAddCalendar, subscriptionOwnerId, ADULT_ROLES } from "./calendar-permissions.mjs";
+import { backfillCalendarOwners, restampSubscriptionEvents } from "./calendar-owners.mjs";
 import { syncSubscription, removeSubscriptionEvents, pullGoogleEdits, resolveConflictPatch, pushEventToGoogle, autoSyncGoogle, isEditableLinkedGoogle, editLinkedGoogleEvent, deleteLinkedGoogleEvent, deleteGoogleCopy } from "./calendar.mjs";
 import { handleInboundSms, replyToSender, setLoopReplyHandler } from "./sms.mjs";
 import { bluebubblesConfig, parseInboundWebhook, webhookSecretPresented, secretMatches } from "./bluebubbles.mjs";
@@ -484,6 +486,75 @@ const SUB_COLORS = ["sky", "sage", "amber", "lavender", "coral", "ember"];
 function nextSubscriptionColor(householdId) {
   const used = listSubscriptions((s) => s.householdId === householdId).map((s) => s.color).filter(Boolean);
   return SUB_COLORS.find((c) => !used.includes(c)) ?? SUB_COLORS[used.length % SUB_COLORS.length];
+}
+/* Calendar subscriptions: whose it is, what the viewer may do, and what they may SEE.
+ * The owner is resolved once here so every route (list, add, sync, patch, delete) applies
+ * the same calendarCan matrix to the same person. An owner outside this household (a stale
+ * id) counts as no owner — the legacy branch — rather than lending a stranger's role. */
+function subscriptionOwnerOf(sub) {
+  const account = sub.accountId ? getAccountRaw(sub.accountId) : null;
+  const ownerActorId = subscriptionOwnerId(sub, account);
+  const m = ownerActorId ? getMember(ownerActorId) : null;
+  const owner = m && m.householdId === sub.householdId ? { actorId: m.actorId, role: m.role, displayName: m.displayName ?? null } : null;
+  return { account, ownerActorId, owner };
+}
+const viewerOf = (session) => ({ actorId: session.actorId, role: session.role });
+/* The ONLY shape a subscription leaves the server in. The raw record carries icsText and the
+ * feed URL, and a feed URL is often a capability in itself (Google's "secret address",
+ * school portals' tokenised links) — so a member who may not view a calendar gets only the
+ * legend row the calendar screen colours events with, never the address. */
+function subscriptionView(sub, session) {
+  const { account, ownerActorId, owner } = subscriptionOwnerOf(sub);
+  const row = {
+    id: sub.id, name: sub.name, source: sub.source, color: sub.color ?? null,
+    ownerActorId, ownerName: owner?.displayName ?? (ownerActorId ? (getMember(ownerActorId)?.displayName ?? null) : null),
+    isWork: !!sub.isWork, assigned: !!sub.ownerActorId,
+  };
+  const can = calendarCan(viewerOf(session), sub, owner);
+  if (!can.view) return row;
+  return {
+    ...row,
+    url: sub.url ?? null, lastSyncAt: sub.lastSyncAt ?? null, lastResult: sub.lastResult ?? null, eventCount: sub.eventCount ?? 0,
+    createdAt: sub.createdAt, accountId: sub.accountId ?? null, accountEmail: account?.displayName ?? null,
+    createdBy: sub.createdBy ?? null, can,
+  };
+}
+/* A refusal that says who CAN do it, derived from the same matrix so the sentence can never
+ * disagree with the rule. Error code stays not_your_calendar: clients and tests key on it. */
+const CAL_ACTION_PHRASE = { sync: "sync this calendar", edit: "change this calendar", markWork: "mark this calendar as work", assign: "change whose calendar this is", remove: "remove this calendar" };
+function calendarRefusal(action, sub, owner) {
+  const phrase = CAL_ACTION_PHRASE[action] ?? "change this calendar";
+  // Not even the Owner may: the only such case is marking a non-adult's calendar as work.
+  if (!calendarCan({ actorId: "\u0000owner", role: "Owner" }, sub, owner)[action]) return "Only an adult's calendar can be marked as work.";
+  const first = owner ? (String(owner.displayName ?? "").trim().split(/\s+/)[0] || "Another member") : null;
+  if (owner?.role === "Owner") return `Only ${first} (the Owner) can ${phrase}.`;
+  const who = [];
+  if (owner && calendarCan({ actorId: owner.actorId, role: owner.role }, sub, owner)[action]) who.push(first);
+  if (calendarCan({ actorId: "\u0000admin", role: "Adult Admin" }, sub, owner)[action]) who.push("an Adult Admin");
+  who.push("the Owner");
+  const list = who.length === 1 ? who[0] : `${who.slice(0, -1).join(", ")} or ${who[who.length - 1]}`;
+  return `Only ${list} can ${phrase}.`;
+}
+/* The shared front half of the three "add a calendar" routes: who the calendar is FOR, and
+ * whether the caller may add it. ownedCount counts calendars the TARGET already owns (the
+ * Limited Member cap is about what they have, not who added it). Returns { ok, target } or
+ * { ok:false, status, body }. `countCap: false` runs only the role/owner_only checks — used
+ * by connect-google before it knows whether it is adding or just re-syncing. */
+function resolveCalendarAddTarget(session, body, { countCap = true } = {}) {
+  const forMemberId = body?.forMemberId != null && String(body.forMemberId).trim() ? String(body.forMemberId).trim() : null;
+  const target = forMemberId ?? session.actorId;
+  const ownedCount = countCap
+    ? listSubscriptions((s) => s.householdId === session.householdId).filter((s) => subscriptionOwnerId(s, s.accountId ? getAccountRaw(s.accountId) : null) === target).length
+    : 0;
+  const can = canAddCalendar(viewerOf(session), { forMember: forMemberId ? { actorId: forMemberId } : null, ownedCount });
+  if (!can.ok) return { ok: false, status: can.status, body: { error: can.error, message: can.message } };
+  // Validated after the permission check so a caller who may not add for others learns
+  // nothing about which member ids exist.
+  if (forMemberId) {
+    const m = getMember(forMemberId);
+    if (!m || m.householdId !== session.householdId || m.archived) return { ok: false, status: 400, body: { error: "bad_member", message: "That member isn't in this household." } };
+  }
+  return { ok: true, target };
 }
 // Chat spaces: a conversation lives in its creator's PERSONAL space (private to
 // them — the long-standing behavior and the default) or in the FAMILY space
@@ -3499,27 +3570,24 @@ function mayWriteAgent(session, agent, nextVisibility) {
     /* ---- Calendar subscriptions (CAL): the read-only "linked" calendar layer ----
      * Subscribe to an .ics feed (school/sports/holidays) or paste an .ics. Synced events
      * are layer:"linked" (the events PATCH route already refuses edits — copy to edit).
-     * Creating a subscription is an Adult Member+ action; reads are household-scoped. */
+     * Who may add, sync, change or remove which calendar is the Connections matrix in
+     * calendar-permissions.mjs; every route below asks it, and every subscription leaves
+     * through subscriptionView. Reads are household-scoped: everyone gets the legend. */
     if (path === "/api/calendar/subscriptions" && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const subs = listSubscriptions((s) => s.householdId === g.session.householdId).map((s) => {
-        // Source account (google subs): the connected account's email + the member who
-        // connected it — so the UI can say WHOSE calendar this is. ICS subs have none.
-        const account = s.accountId ? getAccountRaw(s.accountId) : null;
-        // An assignment made by hand wins over "whoever connected it"; an ICS feed has only the assignment.
-        const ownerActorId = s.ownerActorId ?? account?.connectedByActorId ?? null;
-        return {
-          id: s.id, name: s.name, url: s.url ?? null, source: s.source, color: s.color ?? null,
-          lastSyncAt: s.lastSyncAt ?? null, lastResult: s.lastResult ?? null, eventCount: s.eventCount ?? 0, createdAt: s.createdAt,
-          accountId: s.accountId ?? null,
-          accountEmail: account?.displayName ?? null,
-          ownerActorId,
-          ownerName: ownerActorId ? (getMember(ownerActorId)?.displayName ?? null) : null,
-          assigned: !!s.ownerActorId,
-          createdBy: s.createdBy ?? null,
-        };
-      });
-      return json(res, 200, { subscriptions: subs }, req);
+      const all = listSubscriptions((s) => s.householdId === g.session.householdId);
+      const subs = all.map((s) => subscriptionView(s, g.session));
+      // What the Add button may offer, so the client never shows a door the server shuts.
+      const ownedCount = all.filter((s) => subscriptionOwnerId(s, s.accountId ? getAccountRaw(s.accountId) : null) === g.session.actorId).length;
+      const self = canAddCalendar(viewerOf(g.session), { forMember: null, ownedCount });
+      const canAdd = {
+        self: self.ok,
+        limitReached: !self.ok && self.error === "calendar_limit",
+        forMembers: g.session.role === "Owner"
+          ? listMembers({ householdId: g.session.householdId }).filter((m) => !m.archived && m.actorId !== g.session.actorId).map((m) => m.actorId)
+          : [],
+      };
+      return json(res, 200, { subscriptions: subs, canAdd }, req);
     }
     // One-call calendar sync: re-pull EVERY subscription (google + ics feeds), then merge
     // Google-side edits back into pushed canonical events — a single "sync now" for
@@ -3550,19 +3618,25 @@ function mayWriteAgent(session, agent, nextVisibility) {
     }
     if (path === "/api/calendar/subscriptions" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const add = resolveCalendarAddTarget(g.session, body);
+      if (!add.ok) return json(res, add.status, add.body, req);
       if (!String(body.url ?? "").trim()) return json(res, 400, { error: "url_required" }, req);
+      // webcal:// is only the "open in a calendar app" spelling of an https feed (Apple and
+      // Google both hand these out); fetch cannot speak it, so store what it means.
+      const url = String(body.url).trim().replace(/^webcals?:\/\//i, "https://");
       const sub = putSubscription({
         id: "sub_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
-        name: String(body.name ?? "Subscribed calendar").slice(0, 80), url: String(body.url).trim(), source: "url",
+        name: String(body.name ?? "Subscribed calendar").slice(0, 80), url, source: "url",
         color: nextSubscriptionColor(g.session.householdId),
+        ownerActorId: add.target, isWork: false,
         createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
       });
       const r = await syncSubscription({ sub, session: g.session });
       patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed } : { error: r.error }, eventCount: r.ok ? r.total : 0 });
-      audit({ type: "calendar.subscribe", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, req, g.session);
-      return json(res, r.ok ? 200 : 422, { subscription: getSubscription(sub.id), sync: r }, req);
+      if (r.ok) restampSubscriptionEvents(sub, add.target); // events are the owner's, not the adder's
+      audit({ type: "calendar.subscribe", subscriptionId: sub.id, forMemberId: add.target !== g.session.actorId ? add.target : undefined, ok: r.ok, error: r.ok ? undefined : r.error }, req, g.session);
+      return json(res, r.ok ? 200 : 422, { subscription: subscriptionView(getSubscription(sub.id), g.session), sync: r }, req);
     }
     // Push a FamiliOS canonical event TO Google Calendar (the write half of two-way sync).
     // Approval-first (writing to your real calendar needs sign-off) + deduped: a stored
@@ -3635,110 +3709,148 @@ function mayWriteAgent(session, agent, nextVisibility) {
     // account — repeat calls just re-sync. Push (FamiliOS → Google) is a separate build.
     if (path === "/api/calendar/connect-google" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
-      const account = listAccountsFor(g.session.householdId, g.session.actorId).find((a) => a.provider === "google");
+      const body = (await readBody(req)) ?? {};
+      // Role / owner_only / bad_member first, cap later: re-connecting an account that already
+      // has its calendar is a re-sync, and must not be refused as "a second calendar".
+      const pre = resolveCalendarAddTarget(g.session, body, { countCap: false });
+      if (!pre.ok) return json(res, pre.status, pre.body, req);
+      // Which of the CALLER's own Google accounts (a member may have a personal and a work
+      // one). Never another member's: their tokens are theirs to point at a calendar.
+      const mine = listAccountsFor(g.session.householdId, g.session.actorId).filter((a) => a.provider === "google");
+      let account;
+      if (body.accountId != null && String(body.accountId) !== "") {
+        account = mine.find((a) => a.id === String(body.accountId));
+        if (!account) return json(res, 400, { error: "bad_account", message: "That isn't one of your connected Google accounts." }, req);
+      } else account = mine[0];
       if (!account) return json(res, 422, { error: "connect_google_first", message: "Connect your Google account (with calendar access) in Connections first." }, req);
       if (!(account.scopes ?? []).some((s) => /calendar/i.test(String(s)))) return json(res, 422, { error: "calendar_scope_missing", message: "Your Google account isn't authorized for calendar. Reconnect it and grant calendar access." }, req);
       let sub = listSubscriptions((s) => s.householdId === g.session.householdId && s.source === "google" && s.accountId === account.id)[0];
       if (!sub) {
+        const add = resolveCalendarAddTarget(g.session, body);
+        if (!add.ok) return json(res, add.status, add.body, req);
         sub = putSubscription({
           id: "sub_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
           name: `Google Calendar (${account.displayName ?? "primary"})`, url: null, source: "google", accountId: account.id,
           color: nextSubscriptionColor(g.session.householdId),
+          ownerActorId: add.target, isWork: false,
           createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
         });
       }
       const r = await syncSubscription({ sub, session: g.session });
       patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed } : { error: r.error }, eventCount: r.ok ? r.total : (sub.eventCount ?? 0) });
+      if (r.ok) restampSubscriptionEvents(sub, subscriptionOwnerOf(sub).ownerActorId);
       audit({ type: "calendar.connect_google", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, req, g.session);
-      return json(res, r.ok ? 200 : 422, { subscription: getSubscription(sub.id), sync: r }, req);
+      return json(res, r.ok ? 200 : 422, { subscription: subscriptionView(getSubscription(sub.id), g.session), sync: r }, req);
     }
     // Paste-import an .ics one-off (no URL); still grouped under a subscription so it's removable.
     if (path === "/api/calendar/import-ics" && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const add = resolveCalendarAddTarget(g.session, body);
+      if (!add.ok) return json(res, add.status, add.body, req);
       if (!String(body.ics ?? "").trim()) return json(res, 400, { error: "ics_required" }, req);
       const sub = putSubscription({
         id: "sub_" + crypto.randomBytes(8).toString("hex"), householdId: g.session.householdId,
         name: String(body.name ?? "Imported calendar").slice(0, 80), url: null, source: "import",
         color: nextSubscriptionColor(g.session.householdId),
         icsText: String(body.ics).slice(0, 200_000), // kept so a re-sync can re-parse the pasted feed
+        ownerActorId: add.target, isWork: false,
         createdBy: g.session.actorId, createdAt: Date.now(), updatedAt: new Date().toISOString(),
       });
       const r = await syncSubscription({ sub, icsText: String(body.ics), session: g.session });
       if (!r.ok) { deleteSubscriptionRec(sub.id); return json(res, 422, { error: r.error, message: "That didn't look like a valid calendar file." }, req); }
       patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: { imported: r.imported, updated: r.updated }, eventCount: r.total });
-      audit({ type: "calendar.import", subscriptionId: sub.id, imported: r.imported, ok: true }, req, g.session);
-      return json(res, 200, { subscription: getSubscription(sub.id), sync: r }, req);
+      restampSubscriptionEvents(sub, add.target);
+      audit({ type: "calendar.import", subscriptionId: sub.id, imported: r.imported, forMemberId: add.target !== g.session.actorId ? add.target : undefined, ok: true }, req, g.session);
+      return json(res, 200, { subscription: subscriptionView(getSubscription(sub.id), g.session), sync: r }, req);
     }
     const subSync = path.match(/^\/api\/calendar\/subscriptions\/([^/]+)\/sync$/);
     if (subSync && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const sub = getSubscription(subSync[1]);
       if (!sub || sub.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       /* Cluster Y — "there should be no availability to sync or remove a calendar that was
-       * not added through their login… only ones that should be modifiable are the ones that
-       * the particular user account adds and is in control of." The Owner keeps household-
-       * wide stewardship; every other adult manages exactly the calendars they connected. */
-      if (sub.createdBy && sub.createdBy !== g.session.actorId && g.session.role !== "Owner") {
-        return json(res, 403, { error: "not_your_calendar", message: `${getMember(sub.createdBy)?.displayName ?? "Another member"} connected this calendar — only they (or the Owner) can sync it.` }, req);
+       * not added through their login." Now expressed as the Connections matrix: members
+       * sync their own, an Admin anything but the Owner's, the Owner anything. (A refresh of
+       * the WHOLE household — anyone may ask — is /api/calendar/sync-all, not this.) */
+      const { owner } = subscriptionOwnerOf(sub);
+      if (!calendarCan(viewerOf(g.session), sub, owner).sync) {
+        return json(res, 403, { error: "not_your_calendar", message: calendarRefusal("sync", sub, owner) }, req);
       }
       const r = await syncSubscription({ sub, session: g.session });
       patchSubscription(sub.id, { lastSyncAt: Date.now(), lastResult: r.ok ? { imported: r.imported, updated: r.updated, removed: r.removed } : { error: r.error }, eventCount: r.ok ? r.total : (sub.eventCount ?? 0) });
+      if (r.ok && owner) restampSubscriptionEvents(sub, owner.actorId); // whoever pressed Sync, the events stay the owner's
       audit({ type: "calendar.sync", subscriptionId: sub.id, ok: r.ok, error: r.ok ? undefined : r.error }, req, g.session);
-      return json(res, r.ok ? 200 : 422, { subscription: getSubscription(sub.id), sync: r }, req);
+      return json(res, r.ok ? 200 : 422, { subscription: subscriptionView(getSubscription(sub.id), g.session), sync: r }, req);
     }
     const subOne = path.match(/^\/api\/calendar\/subscriptions\/([^/]+)$/);
-    // Rename a calendar, or say whose it is. "Imported calendar" is not a name a family
-    // recognises, and an ICS feed has no account to tell us whose events these are — so an
-    // adult can name it and assign it, and every event it already imported takes the new
-    // owner (colour, free/busy) on the spot rather than at the next sync.
+    // Rename or recolour a calendar, mark it as work, or say whose it is. "Imported calendar"
+    // is not a name a family recognises, and an ICS feed has no account to tell us whose
+    // events these are. Each field needs its own flag from the matrix (edit / markWork /
+    // assign), and the request is all-or-nothing: a refused field refuses the whole patch,
+    // so a client never half-applies a form.
     if (subOne && method === "PATCH") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const sub = getSubscription(subOne[1]);
       if (!sub || sub.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const { owner } = subscriptionOwnerOf(sub);
+      const can = calendarCan(viewerOf(g.session), sub, owner);
+      const refuse = (action, who = owner) => json(res, 403, { error: "not_your_calendar", message: calendarRefusal(action, sub, who) }, req);
       const patch = {};
       if (typeof body.name === "string") {
+        if (!can.edit) return refuse("edit");
         const name = body.name.trim().slice(0, 80);
         if (!name) return json(res, 400, { error: "name_required" }, req);
         patch.name = name;
       }
+      if (body.color !== undefined) {
+        if (!can.edit) return refuse("edit");
+        if (!SUB_COLORS.includes(body.color)) return json(res, 400, { error: "bad_color", message: `Pick one of: ${SUB_COLORS.join(", ")}.` }, req);
+        patch.color = body.color;
+      }
+      let newOwner = null;
       if (body.ownerActorId !== undefined) {
-        if (body.ownerActorId === null || body.ownerActorId === "") patch.ownerActorId = null;
-        else {
-          const m = getMember(String(body.ownerActorId));
-          if (!m || m.householdId !== g.session.householdId || m.archived) return json(res, 400, { error: "bad_member" }, req);
-          patch.ownerActorId = m.actorId;
-        }
+        if (!can.assign) return refuse("assign");
+        // Every calendar has exactly one owner — the matrix has nothing to say about a
+        // calendar that belongs to no one, so "unassign" is no longer a state it can enter.
+        if (body.ownerActorId === null || body.ownerActorId === "") return json(res, 400, { error: "owner_required", message: "Every calendar belongs to someone — pick who this one is for." }, req);
+        const m = getMember(String(body.ownerActorId));
+        if (!m || m.householdId !== g.session.householdId || m.archived) return json(res, 400, { error: "bad_member" }, req);
+        patch.ownerActorId = m.actorId;
+        newOwner = m;
+        // "Work" is an adult's thing (their employer's calendar); handing it to a child or a
+        // limited member drops the flag rather than leaving a child with a work calendar.
+        if (!ADULT_ROLES.includes(m.role)) patch.isWork = false;
+      }
+      if (body.isWork !== undefined) {
+        // Judged against the owner the calendar will HAVE, so "give this to Morgan and mark it
+        // work" is one request, and "give it to Lily and mark it work" is refused outright.
+        const whoWillOwn = newOwner ? { actorId: newOwner.actorId, role: newOwner.role, displayName: newOwner.displayName ?? null } : owner;
+        const effective = newOwner ? calendarCan(viewerOf(g.session), sub, whoWillOwn) : can;
+        if (!effective.markWork) return refuse("markWork", whoWillOwn);
+        if (typeof body.isWork !== "boolean") return json(res, 400, { error: "bad_is_work", message: "isWork must be true or false." }, req);
+        patch.isWork = body.isWork;
       }
       if (!Object.keys(patch).length) return json(res, 400, { error: "nothing_to_change" }, req);
       const next = patchSubscription(sub.id, patch);
-      let restamped = 0;
-      if (patch.ownerActorId !== undefined) {
-        const account = next.accountId ? getAccountRaw(next.accountId) : null;
-        const ownerId = next.ownerActorId ?? account?.connectedByActorId ?? null;
-        for (const ev of listEvents((e) => e.householdId === g.session.householdId && e.layer === "linked" && e.provenance?.subscriptionId === sub.id)) {
-          if ((ev.ownerId ?? null) !== ownerId) { patchEvent(ev.id, { ownerId }); restamped++; }
-        }
-      }
+      // Every event this calendar already imported takes the new owner on the spot (colour,
+      // free/busy, who may see it) rather than at the next sync — ownerId AND createdBy,
+      // because canSeeEntity reads either as ownership.
+      const restamped = newOwner ? restampSubscriptionEvents(next, newOwner.actorId, "reassign") : 0;
       audit({ type: "calendar.subscription_update", subscriptionId: sub.id, fields: Object.keys(patch), restamped, ok: true }, req, g.session);
-      const account = next.accountId ? getAccountRaw(next.accountId) : null;
-      const ownerActorId = next.ownerActorId ?? account?.connectedByActorId ?? null;
-      return json(res, 200, { subscription: { id: next.id, name: next.name, url: next.url ?? null, source: next.source, color: next.color ?? null, lastSyncAt: next.lastSyncAt ?? null, lastResult: next.lastResult ?? null, eventCount: next.eventCount ?? 0, createdAt: next.createdAt, accountId: next.accountId ?? null, accountEmail: account?.displayName ?? null, ownerActorId, ownerName: ownerActorId ? (getMember(ownerActorId)?.displayName ?? null) : null, assigned: !!next.ownerActorId, createdBy: next.createdBy ?? null }, restamped }, req);
+      return json(res, 200, { subscription: subscriptionView(next, g.session), restamped }, req);
     }
     if (subOne && method === "DELETE") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const sub = getSubscription(subOne[1]);
       if (!sub || sub.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
-      // Cluster Y — same boundary as sync: removing someone else's calendar removes THEIR
-      // events from the family's view, which is not a thing another adult gets to do.
-      if (sub.createdBy && sub.createdBy !== g.session.actorId && g.session.role !== "Owner") {
-        return json(res, 403, { error: "not_your_calendar", message: `${getMember(sub.createdBy)?.displayName ?? "Another member"} connected this calendar — only they (or the Owner) can remove it.` }, req);
+      // Cluster Y — removing someone else's calendar removes THEIR events from the family's
+      // view. Who may: its owner (Adult Member and up), an Admin for non-adults' calendars,
+      // the Owner for any. A Limited Member asks the Owner.
+      const { owner } = subscriptionOwnerOf(sub);
+      if (!calendarCan(viewerOf(g.session), sub, owner).remove) {
+        return json(res, 403, { error: "not_your_calendar", message: calendarRefusal("remove", sub, owner) }, req);
       }
       const removed = removeSubscriptionEvents(sub.id, g.session);
       deleteSubscriptionRec(sub.id);
@@ -4728,6 +4840,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
     const oauthStartMatch = path.match(/^\/api\/oauth\/([^/]+)\/start$/);
     if (oauthStartMatch && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      // Children and guests never connect accounts: the lowest role that may add a calendar
+      // (a Limited Member's one) is the lowest that may start the connection behind it.
+      if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { ok: false, error: "insufficient_role" }, req);
       if (!externalActionsEnabled(g.session.householdId)) return json(res, 423, { ok: false, error: "external_actions_disabled" }, req);
       const provider = connectorProviderById(oauthStartMatch[1]);
       if (!provider) return json(res, 404, { ok: false, error: "unknown_provider" }, req);
@@ -5324,6 +5439,12 @@ server.listen(PORT, () => {
   // so a family that chose its own provider (or a local Ollama) keeps it.
   void forEachTenant(async (t) => {
     try { const boot = bootstrapAIFromEnv(t); if (boot.length) console.log(`[ai] bootstrapped ${t} from env: ${boot.join(", ")}`); } catch { /* one household must not break the rest */ }
+  });
+  // Every calendar names its owner (the Connections matrix is keyed on it), and the events
+  // it mirrored in say so too. Idempotent — writes only what is missing or wrong — so it
+  // simply runs on every boot, once per household like the backfill above.
+  void forEachTenant((t) => {
+    try { const r = backfillCalendarOwners(t); if (r.subscriptions || r.events) console.log(`[calendar] ${t}: named the owner of ${r.subscriptions} calendar(s), restamped ${r.events} event(s)`); } catch { /* one household must not break the rest */ }
   });
   registerAssistantRunHooks(); // inline chat results + one-shot self-repair for conversation runs
   // A scheduled helper fires through the trigger tick; registering the runner here (rather
