@@ -14,6 +14,14 @@ export async function loadToken(): Promise<string | null> {
   try { token = await SecureStore.getItemAsync(TOKEN_KEY); } catch { token = null; }
   return token;
 }
+/* A SIGNED-IN PHONE WHOSE SESSION HAS ENDED MUST SAY SO. The server refuses an expired token
+ * with 401 authentication_required; this app used to check its session only on a cold start,
+ * so a phone left running kept its signed-in screens and every request failed — Ask showed
+ * "couldn't reach the AI provider", read as an API-key problem (2026-09-24). Now the session
+ * provider is told, and the profile picker comes back. */
+let sessionExpiredHandler: (() => void) | null = null;
+export function onSessionExpired(handler: (() => void) | null): void { sessionExpiredHandler = handler; }
+
 export async function setToken(t: string | null): Promise<void> {
   token = t;
   try {
@@ -421,7 +429,10 @@ const OFFLINE_QUEUEABLE = (path: string, method?: string) =>
 
 async function req<T = unknown>(path: string, init?: RequestInit): Promise<Res<T>> {
   const headers: Record<string, string> = { "content-type": "application/json", ...(init?.headers as Record<string, string> | undefined) };
-  if (token) headers["authorization"] = `Bearer ${token}`;
+  // The token this request is sent with — compared on the way back, so a late answer about an
+  // OLD session can never touch the one signed in since.
+  const sentWith = token;
+  if (sentWith) headers["authorization"] = `Bearer ${sentWith}`;
   let res: Response;
   try {
     res = await fetch(`${API_URL}/api${path}`, { ...init, headers });
@@ -438,6 +449,11 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<Res<T
   const text = await res.text();
   let data: unknown;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { error: "bad_json" }; }
+  // Only a request that carried THE CURRENT token can report it ended: a /rev poll still in
+  // flight from the previous profile must not sign out the person who just signed in.
+  if (res.status === 401 && sentWith && sentWith === token && (data as { error?: string })?.error === "authentication_required") {
+    try { sessionExpiredHandler?.(); } catch { /* never let the handler break the caller */ }
+  }
   return { status: res.status, ok: res.ok, data: data as T };
 }
 
@@ -455,6 +471,17 @@ export const api = {
   async getSession(): Promise<Session | null> {
     const r = await req<{ session: Session | null }>("/session");
     return r.data?.session ?? null;
+  },
+  /** The session as the server sees it — and whether the server answered at all, so that
+   *  opening the app with no signal never signs anyone out (only a real "no session" does). */
+  async sessionStatus(): Promise<{ answered: boolean; session: Session | null }> {
+    const sentWith = token;
+    const r = await req<{ session: Session | null }>("/session");
+    // Answered means the server itself said who is signed in: a 200 carrying a "session" key,
+    // about the token still in use. A 404, a 429, a captive-portal page or an answer about a
+    // token replaced meanwhile is not an answer and changes nothing.
+    const answered = r.status === 200 && !!r.data && typeof r.data === "object" && "session" in r.data && sentWith === token;
+    return { answered, session: answered ? (r.data.session ?? null) : null };
   },
   // Pre-auth profile picker — who can sign in on this household's backend.
   async profiles(): Promise<{ profiles: ProfileRec[]; claimed: boolean } | null> {

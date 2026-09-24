@@ -543,23 +543,85 @@ export function hashInput(input) {
  * Sessions live in the _system tenant: they are resolved BEFORE we know which
  * household a request belongs to, and each carries the householdId the tenant
  * context is then set from. */
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
-export function createSession({ actorId, actorName, role, householdId }) {
+/* 12 hours is an IDLE limit, not a lifetime. It used to be measured from sign-in, so a phone
+ * that was in use all day had every request refused twelve hours after the person picked
+ * their profile — and the app, which only checks its session on a cold start, just kept
+ * failing (2026-09-24: a family member's Ask turned into "couldn't reach the AI provider"
+ * nineteen seconds past the mark). A session that is USED is renewed (touchSession, called by
+ * gate() only once a request has passed every check), at most once an hour so a busy phone is
+ * not a write per request, and never past its absolute end — after which the person picks
+ * their profile, and enters their PIN if it has one, again.
+ *
+ * The absolute end is a week. Sliding renewal means a device that keeps polling keeps its
+ * session, so the week is what bounds an unattended tablet signed in as an Owner, and what
+ * bounds everything decided only at sign-in. A role change and a PIN change also end sessions
+ * outright (the member PATCH route; deleteElevatedSessions). A session opened with the
+ * break-glass PIN keeps the old 12 hours as its absolute end: it is a recovery door, not a way
+ * to stay in. */
+export const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // idle limit
+export const SESSION_MAX_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000; // absolute
+export const BREAK_GLASS_LIFETIME_MS = 12 * 60 * 60 * 1000;
+const SESSION_RENEW_EVERY_MS = 60 * 60 * 1000;
+/* A row's absolute end: stamped at creation. A row written before 1.4.1 has no endsAt — its
+ * creation time plus the lifetime; a row with no createdAt either is dated from its original
+ * 12-hour expiry, which is exact for every row the old code wrote. Never "now": a missing date
+ * must not mean a session that never ends. */
+function sessionEndsAt(s) {
+  if (typeof s.endsAt === "number") return s.endsAt;
+  const created = typeof s.createdAt === "number" ? s.createdAt : (Number(s.expiresAt) || 0) - SESSION_TTL_MS;
+  return created + SESSION_MAX_LIFETIME_MS;
+}
+export function createSession({ actorId, actorName, role, householdId, lifetimeMs = SESSION_MAX_LIFETIME_MS }) {
   const all = sysDoc("sessions.json", {});
   const token = crypto.randomBytes(32).toString("hex");
   const csrf = crypto.randomBytes(24).toString("hex");
   const now = Date.now();
-  all[token] = { token, csrf, actorId, actorName, role, householdId: householdId ?? "local", createdAt: now, expiresAt: now + SESSION_TTL_MS };
+  const endsAt = now + Math.min(lifetimeMs, SESSION_MAX_LIFETIME_MS);
+  all[token] = { token, csrf, actorId, actorName, role, householdId: householdId ?? "local", createdAt: now, endsAt, expiresAt: Math.min(now + SESSION_TTL_MS, endsAt) };
   putSysDoc("sessions.json", all);
   return all[token];
 }
+/** A pure read: the live session for a token, or null (an ended one is deleted). */
 export function getSession(token) {
   if (!token) return null;
   const all = sysDoc("sessions.json", {});
   const s = all[token];
   if (!s) return null;
-  if (s.expiresAt < Date.now()) { delete all[token]; putSysDoc("sessions.json", all); return null; }
+  const now = Date.now();
+  if (s.expiresAt < now || sessionEndsAt(s) < now) { delete all[token]; putSysDoc("sessions.json", all); return null; }
   return s;
+}
+/** Restart a live session's idle clock — once an hour at most, never past its end. Called by
+ *  gate() for a request that passed every check, so a refused request renews nothing. */
+export function touchSession(token) {
+  if (!token) return;
+  const all = sysDoc("sessions.json", {});
+  const s = all[token];
+  if (!s) return;
+  const now = Date.now();
+  const end = sessionEndsAt(s);
+  if (s.expiresAt < now || end < now) return; // ended — getSession deletes it
+  if (s.expiresAt - now >= SESSION_TTL_MS - SESSION_RENEW_EVERY_MS) return; // renewed within the hour
+  const next = Math.min(now + SESSION_TTL_MS, end);
+  if (next !== s.expiresAt) {
+    // Pin the end before moving expiresAt: an old row's end is DERIVED from its expiry, and
+    // re-deriving it after a renewal would push it along with every renewal — forever.
+    s.endsAt = end;
+    s.expiresAt = next;
+    putSysDoc("sessions.json", all);
+  }
+}
+/** End every Owner and Adult Admin session in a household but the caller's: the household PIN
+ *  changed, and a session opened with the old one — or a leaked one — must not outlive it. */
+export function deleteElevatedSessions(householdId, keepToken = null) {
+  const all = sysDoc("sessions.json", {});
+  let killed = 0;
+  for (const [token, s] of Object.entries(all)) {
+    if (token === keepToken || (s.householdId ?? "local") !== householdId) continue;
+    if (s.role === "Owner" || s.role === "Adult Admin") { delete all[token]; killed++; }
+  }
+  if (killed) putSysDoc("sessions.json", all);
+  return killed;
 }
 export function deleteSession(token) {
   const all = sysDoc("sessions.json", {});

@@ -24,6 +24,7 @@ import Animated, { Easing, ReduceMotion, useAnimatedStyle, useSharedValue, withR
 import { useTheme, tapHaptic } from "@/theme";
 import { PressableScale } from "./pressable-scale";
 import { Sym } from "./symbol";
+import { CALL_HINT, dictationErrorMessage, endedWithoutHearing } from "@/lib/dictation-errors";
 
 /**
  * @param onText  Called with the transcript so far. The caller decides where it goes — the
@@ -33,18 +34,39 @@ export function useDictation(onText: (text: string) => void) {
   const [listening, setListening] = useState(false);
   // What the field held before we started, so interim results extend it instead of erasing it.
   const baseRef = useRef("");
+  /* One listening attempt, so an attempt that ends at once having heard nothing can say why.
+   * On a phone call iOS gives the call the microphone: recognition either errors or simply
+   * ends, and "Dictation stopped" read like a broken feature (2026-09-24). */
+  const attemptRef = useRef({ startedAt: null as number | null, heard: false, userStopped: false, hadError: false, alerted: false });
+  /* Stop, then start again quickly, and the OLD attempt's "end" can arrive after the new one
+   * began — it would end the new one's pulse while the mic is live, and look like a start that
+   * heard nothing. One such late "end" is skipped, for a short window only, so a missing one can
+   * never leave the mic looking stuck on. */
+  const skipLateEndUntil = useRef(0);
 
   useSpeechRecognitionEvent("result", (e) => {
     const said = e.results?.[0]?.transcript ?? "";
     if (!said) return;
+    attemptRef.current.heard = true;
     onText(`${baseRef.current}${baseRef.current && !baseRef.current.endsWith(" ") ? " " : ""}${said}`);
   });
-  useSpeechRecognitionEvent("end", () => setListening(false));
+  useSpeechRecognitionEvent("end", () => {
+    if (Date.now() < skipLateEndUntil.current) { skipLateEndUntil.current = 0; return; }
+    setListening(false);
+    const a = attemptRef.current;
+    if (endedWithoutHearing({ startedAt: a.startedAt, endedAt: Date.now(), heardSomething: a.heard, userStopped: a.userStopped, hadError: a.hadError })) {
+      attemptRef.current.alerted = true;
+      Alert.alert("Dictation isn't available", CALL_HINT);
+    }
+    attemptRef.current.startedAt = null;
+  });
   useSpeechRecognitionEvent("error", (e) => {
     setListening(false);
-    // "no-speech" is someone tapping the mic and thinking — not a failure worth an alert.
-    if (e.error === "no-speech" || e.error === "aborted") return;
-    Alert.alert("Dictation stopped", e.message || "Try again in a moment.");
+    attemptRef.current.hadError = true;
+    // "no-speech" / "aborted" are someone thinking or stopping it — no alert.
+    const message = dictationErrorMessage(e.error, e.message);
+    // One alert per attempt: if the attempt already ended and said why, do not say it twice.
+    if (message && !attemptRef.current.alerted) { attemptRef.current.alerted = true; Alert.alert("Dictation stopped", message); }
   });
 
   // Never leave the microphone open behind a screen the user has left.
@@ -52,6 +74,7 @@ export function useDictation(onText: (text: string) => void) {
 
   const toggle = useCallback(async (currentText = "") => {
     if (listening) {
+      attemptRef.current.userStopped = true;
       ExpoSpeechRecognitionModule.stop();
       setListening(false);
       return;
@@ -66,15 +89,29 @@ export function useDictation(onText: (text: string) => void) {
     }
     baseRef.current = currentText;
     tapHaptic("light");
+    // The previous attempt was stopped but has not ended yet: its "end" is still on the way.
+    const prev = attemptRef.current;
+    skipLateEndUntil.current = prev.startedAt != null && prev.userStopped ? Date.now() + 1500 : 0;
+    attemptRef.current = { startedAt: Date.now(), heard: false, userStopped: false, hadError: false, alerted: false };
     setListening(true);
-    ExpoSpeechRecognitionModule.start({
-      lang: "en-US",
-      // Words as they're spoken: the feedback IS the affordance.
-      interimResults: true,
-      continuous: false,
-      // Punctuation makes a dictated message readable without editing it afterwards.
-      addsPunctuation: true,
-    });
+    try {
+      ExpoSpeechRecognitionModule.start({
+        lang: "en-US",
+        // Words as they're spoken: the feedback IS the affordance.
+        interimResults: true,
+        continuous: false,
+        // Punctuation makes a dictated message readable without editing it afterwards.
+        addsPunctuation: true,
+      });
+    } catch {
+      // On iOS start() reports its failures as "error" events; a synchronous throw is the rare
+      // case of the module refusing outright. Say what is most likely rather than leave a mic
+      // that looks like it's listening — once, as for every attempt.
+      attemptRef.current.hadError = true;
+      attemptRef.current.alerted = true;
+      setListening(false);
+      Alert.alert("Dictation isn't available", CALL_HINT);
+    }
   }, [listening]);
 
   return { listening, toggle };

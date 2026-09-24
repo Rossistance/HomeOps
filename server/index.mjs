@@ -16,7 +16,7 @@ import {
   quarantinedCollections, acknowledgeQuarantine, CURRENT_TENANT, forEachTenant, runWithTenant, currentTenant,
   migrateVaultToTenantKeys, getAiUsage,
   tenantEngine, sysDoc, putSysDoc, deleteSessionsForHousehold, getPlan, setPlanFromEntitlement,
-  createSession, deleteSession, deleteSessionsForActor, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
+  createSession, deleteSession, deleteSessionsForActor, deleteElevatedSessions, BREAK_GLASS_LIFETIME_MS, createApproval, getApproval, decideApproval, consumeApproval, listApprovals,
   putOAuthState, takeOAuthState, getHealth, setHealth, getJobState, setJobState, seenWebhookNonce,
   getPushTokens, addPushToken, removePushToken,
   getRun, listRuns,
@@ -148,7 +148,7 @@ function attachAgentRun(out) {
 }
 
 const PORT = Number(process.env.PORT || 8787);
-const VERSION = "1.4.0"; // 1.4: Rung 4 (ADR-004) — native tools behind the gate, plan_meal declared, a child's group write waits for an adult
+const VERSION = "1.4.1"; // 1.4.1: a session in use renews (12h is an idle limit, a week absolute; a role or PIN change ends sessions). 1.4: Rung 4 (ADR-004) — native tools behind the gate, plan_meal declared, a child's group write waits for an adult
 
 // WP-006 s3 (connector sandbox): when HOMEOPS_CONNECTOR_SANDBOX=1, an OWNER
 // session seeds deterministic sandbox connector accounts for its household, so
@@ -1195,6 +1195,7 @@ const handleRequest = async (req, res) => {
           // reset a real PIN in Settings, then clear the env var. It is a STANDING override only
           // while the env is present; every break-glass use is audited. Remove after recovery.
           const boot = bootstrapPin();
+          let hBreakGlass = false;
           if (hRole === "Owner" || hRole === "Adult Admin") {
             if (!hPinHash && !boot && IS_PROD) {
               audit({ type: "session.login", ok: false, error: "pin_not_configured", actorId, household: sHint }, req);
@@ -1208,10 +1209,11 @@ const handleRequest = async (req, res) => {
               // it's used. Nobody is asked to reset anything, and a household that never signs
               // in again keeps working exactly as it did.
               if (ownPinOk && needsRehash(hPinHash)) await upgradeStoredPin(sHint, body.pin);
-              if (bootOk && !ownPinOk) audit({ type: "session.login.breakglass", actorId, household: sHint }, req);
+              if (bootOk && !ownPinOk) { hBreakGlass = true; audit({ type: "session.login.breakglass", actorId, household: sHint }, req); }
             }
           }
-          const hs = createSession({ actorId, actorName: hName, role: hRole, householdId: sHint });
+          // A break-glass session keeps the old 12 hours as its absolute end (store.mjs).
+          const hs = createSession({ actorId, actorName: hName, role: hRole, householdId: sHint, ...(hBreakGlass ? { lifetimeMs: BREAK_GLASS_LIFETIME_MS } : {}) });
           maybeSeedSandbox(hs);
           audit({ type: "session.login", ok: true, actorId, household: sHint }, req, hs);
           const hView = { actorId: hs.actorId, actorName: hs.actorName, role: hs.role, csrf: hs.csrf, householdId: hs.householdId };
@@ -1237,6 +1239,7 @@ const handleRequest = async (req, res) => {
         // resident household's own PIN while set (seeds the gate before a first PIN exists AND
         // recovers a forgotten one). Break-glass uses are audited; clear the env after recovery.
         const bootR = bootstrapPin();
+        let breakGlass = false;
         if (role === "Owner" || role === "Adult Admin") {
           if (!pinHash && !bootR && IS_PROD) {
             audit({ type: "session.login", ok: false, error: "pin_not_configured", actorId }, req);
@@ -1247,10 +1250,10 @@ const handleRequest = async (req, res) => {
             const bootOk = matchesPlainSecret(body.pin, bootR);
             if (!ownPinOk && !bootOk) { audit({ type: "session.login", ok: false, error: "bad_pin", actorId }, req); return json(res, 403, { error: "pin_required" }, req); }
             if (ownPinOk && needsRehash(pinHash)) await upgradeStoredPin(CURRENT_TENANT, body.pin);
-            if (bootOk && !ownPinOk) audit({ type: "session.login.breakglass", actorId, household: CURRENT_TENANT }, req);
+            if (bootOk && !ownPinOk) { breakGlass = true; audit({ type: "session.login.breakglass", actorId, household: CURRENT_TENANT }, req); }
           }
         }
-        const s = createSession({ actorId, actorName, role, householdId: member.householdId ?? "local" });
+        const s = createSession({ actorId, actorName, role, householdId: member.householdId ?? "local", ...(breakGlass ? { lifetimeMs: BREAK_GLASS_LIFETIME_MS } : {}) });
         maybeSeedSandbox(s);
         audit({ type: "session.login", ok: true, actorId }, req, s);
         const sessionView = { actorId: s.actorId, actorName: s.actorName, role: s.role, csrf: s.csrf, householdId: s.householdId };
@@ -2296,7 +2299,12 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // Child AI access — an adult toggles whether a child may chat with the assistant.
       if (body.aiEnabled !== undefined) patch.aiEnabled = !!body.aiEnabled;
       const updated = putMember({ actorId: m.actorId, ...patch });
-      audit({ type: "member.update", memberId: m.actorId, fields: Object.keys(patch), ok: true }, req, g.session);
+      /* A session carries the role it was opened with, and gate() trusts it. Sessions renew
+       * while used (store.mjs), so a demoted member's old session would otherwise keep the old
+       * role for up to a week — a role change ends the member's sessions, and their next
+       * sign-in reads the new role. (Archiving already does this.) */
+      const sessionsEnded = patch.role && patch.role !== m.role ? deleteSessionsForActor(m.actorId, g.session.householdId) : 0;
+      audit({ type: "member.update", memberId: m.actorId, fields: Object.keys(patch), ok: true, ...(sessionsEnded ? { sessionsEnded } : {}) }, req, g.session);
       return json(res, 200, { member: { actorId: updated.actorId, displayName: updated.displayName, role: updated.role, relationship: updated.relationship ?? null, color: updated.color ?? null, photoFileId: updated.photoFileId ?? null, aiEnabled: updated.aiEnabled === true } }, req);
     }
     if (memberOne && method === "DELETE") {
@@ -4905,6 +4913,12 @@ function mayWriteAgent(session, agent, nextVisibility) {
         patch.timezone = body.timezone;
       }
       const next = setSettings(patch, g.session.householdId);
+      /* REPLACING the household PIN ends every OTHER Owner / Adult Admin session: a session
+       * opened with the old PIN — which may be the reason it is being changed — must not
+       * outlive it now that sessions renew while used. The person who changed it stays signed
+       * in. Setting a FIRST PIN ends nothing: before it, elevated sign-in was either the
+       * break-glass PIN (whose sessions keep a 12-hour end, store.mjs) or a development server. */
+      if (patch.ownerPinHash && prev.ownerPinHash) deleteElevatedSessions(g.session.householdId, g.session.token);
       /* Turning it OFF deletes what was kept, in the same breath as announcing that it is
        * gone. Holding a non-member's words under a policy the household has withdrawn is the
        * one outcome this setting must never produce. */
