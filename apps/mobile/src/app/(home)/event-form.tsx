@@ -10,6 +10,7 @@ import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import { api, type ApprovalRec, type AttendeeRec, type EventRec, type MemberRec } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { loadDraft, saveDraft, clearDraft, isEmptyDraft, type EventDraft } from "@/lib/event-drafts";
+import { isBlock } from "@/lib/event-face";
 import { useTheme, tapHaptic } from "@/theme";
 import { depth, rimColor, rimGlow } from "@/theme/neumorph";
 import { AddressField } from "@/components/AddressField";
@@ -203,7 +204,9 @@ export default function EventFormScreen() {
       const [mem, evs] = await Promise.all([api.members(), id ? api.events() : Promise.resolve([] as EventRec[])]);
       setMembers(mem);
       if (id) {
-        const e = evs.find((x) => x.id === id);
+        // A block (someone else's hidden time, ADR-005) is not an event: a deep link to one
+        // opens nothing, exactly like an id that is not there.
+        const e = evs.find((x) => x.id === id && !isBlock(x));
         if (!e) {
           setNotFound(true);
         } else {

@@ -11,6 +11,9 @@ import { Alert, ScrollView, StyleSheet, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type NestRec, type CalendarSubscription, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { allDayDateKey, effectiveEndMs, weekStart } from "@/lib/event-days";
+import { eventFace, eyeLabel } from "@/lib/event-face";
+import { blockA11yLabel, hiddenCaption, showsHideEye, timeRangeLabel } from "@/lib/event-eye";
+import { EyeButton, ObscuredCard } from "@/components/calendar/obscured-card";
 import { LinearGradient } from "expo-linear-gradient";
 import { fade, memberAccent, memberColor } from "@/lib/member-colors";
 import * as SecureStore from "expo-secure-store";
@@ -446,9 +449,10 @@ export default function CalendarScreen() {
     <HScreen refreshing={refreshing} onRefresh={() => void onRefresh()}>
       {header}
 
-      {/* Agenda ⇄ Month view toggle */}
+      {/* Agenda ⇄ Month view toggle — always on screen once loaded, so it carries the
+          screen's testID for the device flows. */}
       <Rise index={0}>
-        <View style={{ flexDirection: "row", gap: spacing.sm }}>
+        <View testID="calendar-screen" style={{ flexDirection: "row", gap: spacing.sm }}>
           {(["agenda", "month"] as const).map((v) => (
             <PressableScale
               key={v}
@@ -517,8 +521,15 @@ export default function CalendarScreen() {
                       <T kind="subMedium" color={isSelected ? colors.onEmber : isToday ? colors.ember : colors.textSecondary}>{d.getDate()}</T>
                     </View>
                     <View style={{ flexDirection: "row", gap: 2, height: 4 }}>
+                      {/* A block's dot is its owner's colour, dimmed: someone's busy there, and
+                          that is all the grid says about it. */}
                       {dayEvents.slice(0, 3).map((e, j) => (
-                        <View key={j} style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: accentOf(e) ?? colors.ember }} />
+                        <View key={j} style={{
+                          width: 4, height: 4, borderRadius: 2,
+                          backgroundColor: eventFace(e).mode === "block"
+                            ? fade(colorOf(e.ownerId ?? null) ?? colors.textFaint, 0.45)
+                            : accentOf(e) ?? colors.ember,
+                        }} />
                       ))}
                     </View>
                   </PressableScale>
@@ -711,7 +722,7 @@ export default function CalendarScreen() {
                   nameOf={nameOf}
                   colorOf={colorOf}
                   subColors={subColorsOf(e)}
-                  ownerName={ownerNameOf(e)}
+                  ownerName={ownerNameOf(e)} members={members} hideEye={showsHideEye(eventFace(e), e, subs)}
                   canManage={canManage}
                   onChanged={load}
                   expanded={expanded === e.id}
@@ -763,7 +774,7 @@ export default function CalendarScreen() {
                     nameOf={nameOf}
                     colorOf={colorOf}
                     subColors={subColorsOf(e)}
-                    ownerName={ownerNameOf(e)}
+                    ownerName={ownerNameOf(e)} members={members} hideEye={showsHideEye(eventFace(e), e, subs)}
                     canManage={canManage}
                     onChanged={load}
                     expanded={expanded === e.id}
@@ -791,7 +802,7 @@ export default function CalendarScreen() {
                     nameOf={nameOf}
                     colorOf={colorOf}
                     subColors={subColorsOf(e)}
-                    ownerName={ownerNameOf(e)}
+                    ownerName={ownerNameOf(e)} members={members} hideEye={showsHideEye(eventFace(e), e, subs)}
                     canManage={canManage}
                     onChanged={load}
                     expanded={expanded === e.id}
@@ -850,7 +861,7 @@ function DayTask({ t, name, tone }: { t: TaskRec; name: string | null; tone?: st
   );
 }
 
-function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChanged, expanded, onToggle }: {
+function EventItem({ e, nameOf, colorOf, subColors, ownerName, members, hideEye, canManage, onChanged, expanded, onToggle }: {
   e: EventRec;
   nameOf: (id: string | null) => string | null;
   colorOf: (id: string | null) => string | null;
@@ -858,16 +869,22 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
   subColors: string[];
   /** Whose event this is — a member's name or the source calendar owner(s). */
   ownerName: string | null;
+  /** For the owner's photo on hidden time. */
+  members: MemberRec[];
+  /** My own shared event from a Work calendar: wears a small open eye to hide it again. */
+  hideEye: boolean;
   canManage: boolean;
   onChanged: () => Promise<void> | void;
   expanded: boolean;
   onToggle: () => void;
 }) {
   const { colors, spacing } = useTheme();
+  // ADR-005: full, the owner's own hidden event, or someone else's hidden time (a block).
+  const face = eventFace(e);
   const canonical = e.layer === "canonical";
-  // Google-originated linked events are editable two-way (server writes to Google
-  // first) — they open the form like canonical ones. ICS/public stay expand-only.
-  const editable = canonical || (e.layer === "linked" && !!e.provenance?.googleEventId);
+  // The server says, per viewer, whether this event opens the editor (a Google-linked event
+  // only for whoever connected it, a block never). ICS/public mirrors stay expand-only.
+  const editable = e.editable === true;
   // All-day events show "All day" on the rail — never a faked midnight (ISS-005).
   const start = e.allDay ? "All day" : fmtTime(e.startAt);
   const end = e.allDay ? null : fmtTime(e.endAt);
@@ -905,6 +922,81 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
     else Alert.alert("Couldn't resolve", r.message ?? (r.error === "insufficient_role" ? "Adults only." : r.error ?? "Try again."));
   };
 
+  // The eye: share (hidden=false) or hide again (hidden=true). The server's own sentence
+  // comes back on a refusal; it is the one to show.
+  const [sharing, setSharing] = useState(false);
+  const setHidden = async (hidden: boolean) => {
+    setSharing(true);
+    const r = await api.setEventSharing(e.id, hidden);
+    setSharing(false);
+    if (r.error) {
+      Alert.alert(hidden ? "Couldn't hide it" : "Couldn't share it", r.message ?? (r.error === "network" ? "Check your connection and try again." : "Try again."));
+      return;
+    }
+    tapHaptic("success");
+    await onChanged();
+  };
+
+  const timeRail = (
+    <View style={{ width: 58, alignItems: "flex-end", paddingTop: 14 }}>
+      <T kind="subMedium" color={colors.textSecondary}>{start ?? "Any"}</T>
+      {end ? <T kind="caption" color={colors.textFaint}>{end}</T> : null}
+    </View>
+  );
+
+  // Someone else's hidden time: frosted, their photo and "<Name> working" above the glass.
+  // Not an event — nothing opens, nothing expands, nothing to edit.
+  if (face.mode === "block") {
+    const owner = members.find((m) => m.actorId === face.ownerId) ?? null;
+    return (
+      <View style={{ flexDirection: "row", gap: spacing.md }}>
+        {timeRail}
+        <View style={{ flex: 1 }}>
+          <ObscuredCard
+            mode="block"
+            owner={owner}
+            label={face.label}
+            sublabel={timeRangeLabel(e)}
+            testID="event-block"
+            accessibilityLabel={blockA11yLabel(face.label, e)}
+          />
+        </View>
+      </View>
+    );
+  }
+
+  // My own hidden event: the real card under the glass; the body still opens it for me, the
+  // eye-slash shares it with everyone.
+  if (face.mode === "ownHidden") {
+    const me = members.find((m) => m.actorId === e.ownerId) ?? null;
+    return (
+      <View style={{ flexDirection: "row", gap: spacing.md }}>
+        {timeRail}
+        <View style={{ flex: 1 }}>
+          <ObscuredCard
+            mode="ownHidden"
+            owner={me}
+            label={hiddenCaption(face)}
+            sublabel={timeRangeLabel(e)}
+            testID={`event-card-${e.id}`}
+            accessibilityLabel={`${e.title}, ${start ?? "no time"}. Hidden from the family. Open event`}
+            onPress={() => router.push({ pathname: "/event-form", params: { id: e.id } })}
+            onToggle={() => void setHidden(false)}
+            toggling={sharing}
+            eyeTestID={`eye-toggle-${e.id}`}
+            eyeLabel={eyeLabel(face)}
+          >
+            <View style={{ gap: 3 }}>
+              <T kind="bodyMedium" color={colors.text} numberOfLines={2}>{e.title}</T>
+              {ownerName ? <T kind="caption" color={stripe ?? colors.textMuted}>{ownerName}</T> : null}
+              {e.location ? <T kind="sub" numberOfLines={1}>{e.location}</T> : null}
+            </View>
+          </ObscuredCard>
+        </View>
+      </View>
+    );
+  }
+
   /* A3 [14:16] — "for a long address or notes I want a DOWN-ARROW under the time, to peek at
    * it at a glance, in ADDITION to the right-arrow that fully opens the event."
    *
@@ -941,7 +1033,9 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
       </View>
 
       <View style={{ flex: 1, gap: spacing.sm }}>
+      <View>
       <PressableCard
+        testID={`event-card-${e.id}`}
         haptic={editable ? "light" : "select"}
         onPress={editable ? () => router.push({ pathname: "/event-form", params: { id: e.id } }) : onToggle}
         accessibilityRole="button"
@@ -974,7 +1068,7 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
             pointerEvents="none"
           />
         ) : null}
-        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingRight: hideEye ? 30 : 0 }}>
           {/* ISS-109: clamped to 2 lines while collapsed, but a long title is never left
               unreadable — expanding the row (the affordance already here) shows all of it. */}
           <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={expanded ? undefined : 2}>{e.title}</T>
@@ -1081,6 +1175,21 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
           </View>
         ) : null}
       </PressableCard>
+      {/* My shared Work event: a small open eye hides it from the family again. A sibling of
+          the card, not inside it, so it is its own control and not part of the card's press. */}
+      {hideEye ? (
+        <View pointerEvents="box-none" style={{ position: "absolute", top: 10, right: 10 }}>
+          <EyeButton
+            hidden={false}
+            small
+            busy={sharing}
+            onPress={() => void setHidden(true)}
+            testID={`eye-toggle-${e.id}`}
+            accessibilityLabel={eyeLabel(face)}
+          />
+        </View>
+      ) : null}
+      </View>
 
       {/* Sync conflict: both sides changed — pick the version to keep (mirrors web's
           EventDrawer conflict handling). Nothing is overwritten until you choose. */}

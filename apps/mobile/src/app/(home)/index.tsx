@@ -13,6 +13,9 @@ import { api, type ApprovalRec, type EventRec, type HelpRequestRec, type MemberR
 import { threadTitle } from "@/lib/messages";
 import { AvatarStack } from "@/components/messages/thread-list";
 import { coversDay, effectiveEndMs, eventTimeLabel } from "@/lib/event-days";
+import { eventFace } from "@/lib/event-face";
+import { blockA11yLabel, hiddenCaption, timeRangeLabel } from "@/lib/event-eye";
+import { ObscuredCard } from "@/components/calendar/obscured-card";
 import { fade, memberColor } from "@/lib/member-colors";
 import { isChild, isGrandparent, isHelper, viewModeFor } from "@/lib/roles";
 import { useSession } from "@/lib/session";
@@ -100,6 +103,25 @@ function EventChip({ event, members, showDay }: { event: EventRec; members: Memb
   const day = event.startAt
     ? new Date(event.startAt).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
     : null;
+  /* ADR-005 — hidden time on Today. Someone else's is a compact frosted chip with their face
+   * and "<Name> working"; it goes nowhere. My own hidden event is blurred with the eye-slash
+   * (sharing happens on the Calendar, where the eye is big enough to mean it) and still opens. */
+  const face = eventFace(event);
+  if (face.mode !== "full") {
+    const owner = members.find((m) => m.actorId === (face.mode === "block" ? face.ownerId : event.ownerId)) ?? null;
+    const when = [showDay ? day : null, timeRangeLabel(event)].filter(Boolean).join(" · ");
+    return face.mode === "block" ? (
+      <ObscuredCard compact mode="block" owner={owner} label={face.label} sublabel={when}
+        testID="event-block" accessibilityLabel={blockA11yLabel(face.label, event)} />
+    ) : (
+      <ObscuredCard compact mode="ownHidden" owner={owner} label={hiddenCaption(face)} sublabel={when}
+        testID={`event-card-${event.id}`}
+        accessibilityLabel={`${event.title}${day ? `, ${day}` : ""} ${eventTimeLabel(event)}. Hidden from the family. Open it`}
+        onPress={() => router.push({ pathname: "/event-form", params: { id: event.id } })}>
+        <T kind="subMedium" color={colors.text} numberOfLines={1}>{event.title}</T>
+      </ObscuredCard>
+    );
+  }
   return (
     <PressableScale
       onPress={() => router.push({ pathname: "/event-form", params: { id: event.id } })}
@@ -962,7 +984,19 @@ function AdminToday() {
             <Rise index={7}>
               <SectionHeader title="Coming up" />
               <Card padded={false}>
-                {mineSoon.map((e, i) => (
+                {mineSoon.map((e, i) => eventFace(e).mode !== "full" ? (
+                  /* ADR-005 — my own hidden event stays blurred here too (eye-slash, no toggle;
+                     sharing lives on the Calendar), and a block never opens. */
+                  <View
+                    key={e.id}
+                    style={{
+                      paddingHorizontal: spacing.lg, paddingVertical: 9,
+                      borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator,
+                    }}
+                  >
+                    <EventChip event={e} members={members} showDay />
+                  </View>
+                ) : (
                   <PressableScale
                     key={e.id}
                     haptic="select"

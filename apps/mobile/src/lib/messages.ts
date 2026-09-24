@@ -57,7 +57,8 @@ export function sourceKeyOf(n: NotificationRec): string {
 export function notificationTarget(n: NotificationRec): { pathname: string; params?: Record<string, string> } | null {
   const d = n.data ?? undefined;
   if (n.threadId || d?.type === "thread") return { pathname: "/messages/[id]", params: { id: String(n.threadId ?? d?.id) } };
-  if (d?.type === "event" && d.id) return { pathname: "/event-form", params: { id: d.id } };
+  // A block id (someone else's hidden time, ADR-005) is never an event to open.
+  if (d?.type === "event" && d.id) return String(d.id).startsWith("blk_") ? { pathname: "/calendar" } : { pathname: "/event-form", params: { id: d.id } };
   if (d?.type === "task" && d.id) return { pathname: "/tasks", params: { id: d.id } };
   if (d?.type === "help_request") return { pathname: "/help" };
   if (d?.type === "approval") return { pathname: "/inbox", params: { seg: "approvals" } };

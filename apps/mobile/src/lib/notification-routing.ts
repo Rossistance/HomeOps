@@ -8,7 +8,8 @@ export function routeForNotification(data: PushData): { pathname: string; params
   const id = data?.id;
   switch (type) {
     case "thread": return id ? { pathname: "/messages/[id]", params: { id } } : { pathname: "/inbox", params: { seg: "messages" } };
-    case "event": return id ? { pathname: "/event-form", params: { id } } : { pathname: "/calendar" };
+    // A block id (someone else's hidden time, ADR-005) never opens as an event: the calendar.
+    case "event": return id && !id.startsWith("blk_") ? { pathname: "/event-form", params: { id } } : { pathname: "/calendar" };
     case "task": return id ? { pathname: "/tasks", params: { id } } : { pathname: "/tasks" };
     case "approval": return { pathname: "/inbox", params: { seg: "approvals" } };
     case "help_request": return { pathname: "/help" };
