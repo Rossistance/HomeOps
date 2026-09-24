@@ -287,3 +287,97 @@ test("the four assistant event tools refuse someone else's hidden event, and wor
   assert.equal(after.checklist[0].text, "Slides");
   assert.equal(after.driverId, "m-morgan");
 });
+
+/* The ways a whole household leaves the server: the export and a backup DOWNLOAD. Both used to
+ * carry hidden-event and surprise content the calendar screens never show (ADR-005 privacy
+ * review): the backup download was the raw snapshot, and the export scrubbed events.json only
+ * — a surprise asked about in a Personal chat, a secret run's goal, and a task on a hidden
+ * event's slot all went to the Owner in full. */
+const CHAT_SECRET = "CHAT-SURPRISE-ROSASPLACE";
+const RUN_SECRET = "RUN-SURPRISE-GOAL-4410";
+const TASK_SECRET = "TASK-FOR-BOARD-DECK";
+const ALL_SECRETS = [...SECRETS, CHAT_SECRET, RUN_SECRET, TASK_SECRET];
+// The files a hide reaches into. (Not every file: a thread message Casey typed into a thread
+// Alex is in was shared by Casey, and is Alex's to read — the surfaces test above covers threads.)
+const SCOPED_FILES = ["events.json", "calendar_subscriptions.json", "conversations.json", "runs.json", "tasks.json"];
+function assertAllClean(files, where) {
+  const s = JSON.stringify(SCOPED_FILES.map((f) => files[f] ?? null));
+  for (const w of ALL_SECRETS) { const i = s.indexOf(w); assert.ok(i < 0, `${where}: "${w}" leaked — …${s.slice(Math.max(0, i - 400), i + 100)}`); }
+}
+let traces;
+async function seedTraces() {
+  if (traces) return traces;
+  const now = new Date().toISOString();
+  traces = T(() => {
+    const conv = (id, actorId, extra = {}) => store.putConversation({ id, householdId: "local", actorId, title: "Chat", titleAuto: false,
+      messages: [{ role: "user", text: "what's the plan?" }, { role: "assistant", text: extra.text ?? "nothing much" }], createdAt: now, updatedAt: now, ...extra });
+    conv("conv_casey_personal", casey.actorId, { text: `ANSWER: ${CHAT_SECRET}` });
+    conv("conv_casey_family", casey.actorId, { visibility: "household", text: "FAMILY-THREAD-KEEP" });
+    conv("conv_alex_personal", "m-alex", { text: "ALEX-OWN-CHAT-KEEP" });
+    const run = (id, actorId, goal) => store.createRun({ id, householdId: "local", actorId, goal, status: "succeeded", cursor: 0, steps: [], visibility: "personal", sourceRef: { secret: true }, createdAt: now });
+    run("run_casey_secret", casey.actorId, RUN_SECRET);
+    run("run_alex_secret", "m-alex", "ALEX-OWN-RUN-KEEP");
+    store.putTask({ id: "tk_on_hidden", householdId: "local", title: TASK_SECRET, notes: `${TASK_SECRET} notes`, type: "task", status: "todo",
+      spaceId: "household", priority: "medium", visibility: "household", source: "manual", createdBy: casey.actorId, createdAt: now, updatedAt: now, eventId: evA.id });
+    return true;
+  });
+  return traces;
+}
+
+test("export: other members' Personal chats, secret runs and hidden-event tasks do not leave with the Owner's export", async () => {
+  await seedTraces();
+  const r = await alex.req("/api/export");
+  assert.equal(r.status, 200);
+  assertAllClean(r.data.data, "the Owner's export");
+  const convs = r.data.data["conversations.json"];
+  assert.ok(!convs.conv_casey_personal, "Casey's Personal chat is Casey's");
+  assert.ok(convs.conv_casey_family && convs.conv_alex_personal, "a Family chat and the exporter's own chat stay");
+  const runs = r.data.data["runs.json"];
+  assert.ok(!runs.run_casey_secret && runs.run_alex_secret, "another member's secret run goes; the exporter's own stays");
+  const task = r.data.data["tasks.json"].tk_on_hidden;
+  assert.ok(task, "the task keeps its place");
+  assert.equal(task.status, "todo");
+  assert.equal(task.eventId, evA.id);
+  assert.match(task.title, /withheld/);
+  const excluded = r.data.meta.excluded.join("\n");
+  assert.match(excluded, /Personal chats — 1/);
+  assert.match(excluded, /private assistant runs — 1/);
+  assert.match(excluded, /Tasks linked .* — 1/);
+});
+
+test("backup: the Owner's DOWNLOAD is a redacted copy; the snapshot on disk stays complete; a redacted copy never restores", async () => {
+  await seedTraces();
+  const { gunzipSync } = await import("node:zlib");
+  const fs = await import("node:fs");
+  const { join } = await import("node:path");
+  const run = await alex.req("/api/backups/run", { method: "POST" });
+  assert.equal(run.status, 200, JSON.stringify(run.data));
+  const name = run.data.name;
+  const dl = await ctx.fetch(`/api/backups/${name}`, { headers: { Cookie: alex.cookie } });
+  assert.equal(dl.status, 200);
+  assert.equal(dl.headers.get("content-type"), "application/gzip");
+  const gz = Buffer.from(await dl.arrayBuffer());
+  const bundle = JSON.parse(gunzipSync(gz).toString("utf8"));
+  assert.equal(bundle.meta.redacted, true);
+  assert.equal(bundle.meta.kind, "redacted-download");
+  assert.match(bundle.meta.note, /not for restoring/);
+  assertAllClean(bundle.files, "the Owner's backup download");
+  const blocks = Object.values(bundle.files["events.json"]).filter((e) => e.block);
+  assert.ok(blocks.some((b) => b.title === BLOCK), "Casey's meetings are Casey's blocks");
+  assert.ok(bundle.files["conversations.json"].conv_alex_personal, "the downloader's own chat is there");
+
+  // The file the server keeps is untouched: a restore must bring everything back.
+  const onDisk = join(ctx.dataDir, "backups", "local", name);
+  const full = gunzipSync(fs.readFileSync(onDisk)).toString("utf8");
+  for (const w of [TITLE, CHAT_SECRET, RUN_SECRET, TASK_SECRET]) assert.ok(full.includes(w), `the snapshot keeps ${w}`);
+  assert.ok(!JSON.parse(full).meta.redacted);
+
+  // A downloaded copy put back where snapshots live is refused, not imported over the real data.
+  const planted = "familios-backup-2020-02-02.json.gz";
+  fs.writeFileSync(join(ctx.dataDir, "backups", "local", planted), gz);
+  const restore = await alex.req("/api/backups/restore", { method: "POST", body: JSON.stringify({ name: planted }) });
+  assert.equal(restore.status, 422, JSON.stringify(restore.data));
+  assert.equal(restore.data.error, "redacted_backup");
+  assert.match(restore.data.message, /lose/);
+  assert.equal(T(() => store.getEvent(evA.id)).title, TITLE, "the real record is untouched");
+});

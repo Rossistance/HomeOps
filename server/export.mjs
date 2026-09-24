@@ -79,6 +79,72 @@ function obscureHiddenEvents(files, householdId, viewer) {
   return { blocked: hidden.length };
 }
 const HIDDEN_FEED = "[withheld — this calendar belongs to another member and hides events]";
+const HIDDEN_TASK = "[withheld — linked to another member's hidden event]";
+
+/**
+ * Everything ELSE that can carry a hidden event or a surprise, for the same viewer. events.json
+ * is not the only place the words live (ADR-005 privacy review): a member asking the assistant
+ * about the surprise party in their Personal chat stores the full answer in conversations.json;
+ * a run born in that turn keeps its goal, steps and result in runs.json (sourceRef.secret);
+ * a task put on a hidden event's calendar slot repeats its title. So, for anyone but their owner:
+ *   - another member's Personal conversations go (a household or nest thread is shared already);
+ *   - another member's secret runs go (the runs list hides them the same way, secretRunHidden);
+ *   - a task linked to a hidden event keeps its shape but loses its title and notes.
+ * `events` is the ORIGINAL events map — read before obscureHiddenEvents swaps in blocks.
+ */
+function scrubHiddenTraces(files, events, householdId, viewer) {
+  const me = viewer?.actorId ?? null;
+  const counts = { conversations: 0, runs: 0, tasks: 0 };
+  const convs = files["conversations.json"];
+  if (convs && typeof convs === "object") {
+    for (const [id, c] of Object.entries(convs)) {
+      if (!c || c.actorId === me || c.visibility === "household" || c.visibility === "nest") continue;
+      delete convs[id]; counts.conversations++;
+    }
+  }
+  const runs = files["runs.json"];
+  if (runs && typeof runs === "object") {
+    for (const [id, r] of Object.entries(runs)) {
+      if (r?.sourceRef?.secret === true && r.actorId !== me) { delete runs[id]; counts.runs++; }
+    }
+  }
+  const tasks = files["tasks.json"];
+  if (tasks && typeof tasks === "object" && events && typeof events === "object") {
+    const pc = privacyContext(householdId);
+    for (const [id, t] of Object.entries(tasks)) {
+      const ev = t?.eventId ? events[t.eventId] : null;
+      if (!ev || !hiddenEventRefusal(ev, viewer, pc)) continue;
+      tasks[id] = { ...t, title: HIDDEN_TASK, notes: "" };
+      counts.tasks++;
+    }
+  }
+  return counts;
+}
+
+/**
+ * What one viewer may take away of a household's files: other members' hidden events as their
+ * blocks, their hiding calendars' feed text withheld, and the traces above scrubbed. Mutates
+ * and returns `files`. Shared by the household export and the backup DOWNLOAD (backup.mjs), so
+ * the two ways out of the server can never disagree about what a hide covers.
+ * @returns {{ blocked: number, conversations: number, runs: number, tasks: number }}
+ */
+export function scopeFilesForViewer(files, householdId, viewer) {
+  const events = files["events.json"];
+  const traces = scrubHiddenTraces(files, events, householdId, viewer);
+  const { blocked } = obscureHiddenEvents(files, householdId, viewer);
+  return { blocked, ...traces };
+}
+
+/** The manifest lines that say what scopeFilesForViewer took out — an export that omits
+ * things silently is worse than one that omits them out loud. */
+export function scopeExclusions({ blocked, conversations, runs, tasks }) {
+  return [
+    ...(blocked ? [`Other members' hidden events — ${blocked} are shown as their owner's busy/working blocks, exactly as on your calendar. Only an event's owner can export what it is.`] : []),
+    ...(conversations ? [`Other members' Personal chats — ${conversations} left out. They are theirs; shared (Family and nest) chats are included.`] : []),
+    ...(runs ? [`Other members' private assistant runs — ${runs} left out (they touched a hidden event).`] : []),
+    ...(tasks ? [`Tasks linked to another member's hidden event — ${tasks} keep their dates and status but not their title or notes.`] : []),
+  ];
+}
 
 /**
  * Everything this household owns, as a plain object.
@@ -92,7 +158,7 @@ export function exportHousehold(householdId = currentTenant(), viewer = null) {
   const engine = tenantEngine();
   const files = engine.exportTenant(householdId);
   if (!files) return null;
-  const { blocked } = obscureHiddenEvents(files, householdId, viewer);
+  const scoped = scopeFilesForViewer(files, householdId, viewer);
 
   const data = {};
   const redactedFiles = [];
@@ -114,7 +180,7 @@ export function exportHousehold(householdId = currentTenant(), viewer = null) {
       excluded: [
         "Credentials — connector API keys, OAuth access and refresh tokens, signing secrets and the household PIN hash are redacted. They are not useful outside this server and shipping them would be a liability.",
         "File CONTENTS — this export carries each file's metadata (name, type, who added it, when). Download the files themselves from Files & Knowledge.",
-        ...(blocked ? [`Other members' hidden events — ${blocked} are shown as their owner's busy/working blocks, exactly as on your calendar. Only an event's owner can export what it is.`] : []),
+        ...scopeExclusions(scoped),
       ],
       redactedFiles,
     },

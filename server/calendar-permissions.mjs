@@ -52,21 +52,27 @@ export function calendarCan(viewer, sub, owner) {
   }
   const own = owner.actorId === viewer.actorId;
   const ownerAdult = ADULT_ROLES.includes(owner.role);
+  // markWork is the calendar OWNER's alone ("adults who can edit THEIR calendars can mark a
+  // calendar as Work"). A Work calendar hides its events from everyone but its owner — the
+  // household Owner and Adult Admins included — so if they could set or clear the flag, they
+  // could lift the hide and read what it covers (found by the ADR-005 privacy review). They
+  // still rename and recolour; they never decide what someone else's calendar hides.
+  const markWork = own && ownerAdult;
   if (role === "Owner") {
-    return { view: true, sync: true, edit: true, markWork: ownerAdult, assign: true, remove: true, scope: owner.role === "Limited Member" };
+    return { view: true, sync: true, edit: true, markWork, assign: true, remove: true, scope: owner.role === "Limited Member" };
   }
   if (role === "Adult Admin") {
     // Everything but the Owner's own calendars; never reassigns (that is the Owner's call).
     const notOwners = owner.role !== "Owner";
     const edit = notOwners;
     return {
-      view: true, sync: notOwners, edit, markWork: edit && ownerAdult, assign: false,
+      view: true, sync: notOwners, edit, markWork, assign: false,
       remove: own || ADMIN_REMOVABLE_OWNER_ROLES.includes(owner.role), scope: false,
     };
   }
   if (role === "Adult Member") {
     if (!own) return { ...NONE };
-    return { view: true, sync: true, edit: true, markWork: ownerAdult, assign: false, remove: true, scope: false };
+    return { view: true, sync: true, edit: true, markWork, assign: false, remove: true, scope: false };
   }
   if (role === "Limited Member") {
     // Sees and refreshes their one calendar; changing or removing it goes through the Owner.

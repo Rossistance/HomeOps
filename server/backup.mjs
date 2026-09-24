@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { getSettings, setSettings, appendAudit, addNotification, listMembers, tenantEngine, CURRENT_TENANT } from "./store.mjs";
 import { currentTenant } from "./tenant-context.mjs";
+import { scopeFilesForViewer, scopeExclusions } from "./export.mjs";
 
 const DATA_DIR = process.env.HOMEOPS_DATA_DIR || join(process.cwd(), "server", ".data");
 const BACKUP_DIR = join(DATA_DIR, "backups");
@@ -88,6 +89,58 @@ export function readBackup(name, householdId = currentTenant()) {
 }
 
 /**
+ * The copy of a snapshot that LEAVES the server, for one viewer.
+ *
+ * A snapshot is the complete tenant — every member's hidden events, surprises, Personal chats
+ * and secret runs in full — because a restore must bring all of it back. But the household
+ * Owner downloading it is not the owner of the other members' hidden events, and "even the
+ * Owner cannot see through a hide" (ADR-005) would be two requests deep if the raw file went
+ * out (found by the ADR-005 privacy review). So the download is passed through the export's
+ * own scoping (export.mjs scopeFilesForViewer) and stamped `redacted: true`; the file on disk
+ * stays complete and is what /api/backups/restore restores, by name, from the server.
+ *
+ * Nothing restores from an upload today; restoreBackup still refuses a bundle stamped
+ * redacted, so if one is ever put back on disk it cannot quietly replace the family's hidden
+ * events with their blocks.
+ *
+ * Every format comes out as format 3 holding ONLY the caller's own household (a legacy
+ * format-2 file carries neighbours' slices, which never leave either).
+ * @returns {Buffer|null|{error:string}} gzip bytes; null when there is no such snapshot
+ */
+export function readBackupForDownload(name, viewer, householdId = currentTenant()) {
+  const raw = readBackup(name, householdId);
+  if (!raw) return null;
+  let bundle;
+  try { bundle = JSON.parse(gunzipSync(raw).toString("utf8")); } catch { return { error: "corrupt_backup" }; }
+  let files = null, audit = "";
+  if (bundle?.meta?.format === 3 && bundle.files && typeof bundle.files === "object") {
+    files = bundle.files; audit = bundle.audit ?? "";
+  } else if (bundle?.meta?.format === 2 && bundle.tenants) {
+    const slice = bundle.tenants[householdId];
+    if (slice && typeof slice.files === "object") { files = slice.files; audit = slice.audit ?? ""; }
+  } else if (bundle?.meta?.format === 1 && bundle.files) {
+    files = {};
+    for (const [f, content] of Object.entries(bundle.files)) {
+      if (!f.endsWith(".json")) continue;
+      try { files[f] = typeof content === "string" ? JSON.parse(content) : content; } catch { return { error: "corrupt_backup" }; }
+    }
+    audit = typeof bundle.files["audit.jsonl"] === "string" ? bundle.files["audit.jsonl"] : "";
+  }
+  if (!files) return { error: "bad_format" };
+  const scoped = scopeFilesForViewer(files, householdId, viewer);
+  const out = {
+    meta: {
+      at: bundle.meta?.at ?? null, app: "familios", format: 3, tenant: householdId, count: Object.keys(files).length,
+      redacted: true, kind: "redacted-download", viewer: viewer?.actorId ?? null, downloadedAt: new Date().toISOString(),
+      note: "A downloaded copy for reading, not for restoring: other members' hidden events are their busy/working blocks and their private chats and runs are left out. The complete snapshot stays on the server — restore it from the backups panel.",
+      excluded: scopeExclusions(scoped),
+    },
+    files, audit,
+  };
+  return gzipSync(JSON.stringify(out));
+}
+
+/**
  * Restore ONE household from its own bundle. Verify the whole payload before importing
  * anything, then import in a single transaction for that tenant.
  *
@@ -101,6 +154,13 @@ export function restoreBackup(name, householdId = currentTenant()) {
   let bundle;
   try { bundle = JSON.parse(gunzipSync(raw).toString("utf8")); } catch { return { ok: false, error: "corrupt_backup" }; }
   const engine = tenantEngine();
+
+  // A downloaded copy (readBackupForDownload) has other members' hidden events as blocks and
+  // their private chats removed. Importing it would replace the real records with those —
+  // silent data loss for everyone but the downloader — so it is refused, whatever its format.
+  if (bundle?.meta?.redacted === true) {
+    return { ok: false, error: "redacted_backup", message: "This is a downloaded copy with other members' hidden events and private chats taken out, so restoring it would lose them. Restore one of the snapshots kept on the server instead." };
+  }
 
   // Format 3 — single-tenant, the only shape we write now.
   if (bundle?.meta?.format === 3) {
