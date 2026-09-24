@@ -318,6 +318,12 @@ export async function syncSubscription({ sub, icsText, session }) {
     g.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     const keeper = g.find((e) => (e.layer ?? "canonical") === "canonical") ?? g[0];
     const subsSet = new Set([...(keeper.provenance?.alsoSubscriptionIds ?? [])]);
+    /* The owner's hide/surprise choice (ADR-005) lives on the card, so deleting the copy that
+     * carried it would quietly un-hide the event on the next sync. When only a removed copy
+     * has a choice, the surviving card takes it; "hidden" and a surprise win over their
+     * opposites, since revealing is the mistake that cannot be taken back. A choice already
+     * on the keeper is the keeper's own and stays. */
+    const carried = {};
     let changed = false;
     for (const dupe of g) {
       if (dupe.id === keeper.id) continue;
@@ -325,9 +331,11 @@ export async function syncSubscription({ sub, icsText, session }) {
       if (dupe.layer !== "linked" || !dupe.provenance?.subscriptionId) continue;
       if (dupe.provenance.subscriptionId !== keeper.provenance?.subscriptionId) subsSet.add(dupe.provenance.subscriptionId);
       for (const x of dupe.provenance?.alsoSubscriptionIds ?? []) if (x !== keeper.provenance?.subscriptionId) subsSet.add(x);
+      if (keeper.shareState === undefined && dupe.shareState !== undefined && carried.shareState !== "hidden") carried.shareState = dupe.shareState;
+      if (keeper.secret === undefined && typeof dupe.secret === "boolean" && carried.secret !== true) carried.secret = dupe.secret;
       deleteEventRec(dupe.id); removed++; changed = true;
     }
-    if (changed) patchEvent(keeper.id, { provenance: { ...(keeper.provenance ?? {}), alsoSubscriptionIds: [...subsSet] } });
+    if (changed) patchEvent(keeper.id, { ...carried, provenance: { ...(keeper.provenance ?? {}), alsoSubscriptionIds: [...subsSet] } });
   }
   return { ok: true, imported, updated, removed, merged, total: parsed.length };
 }
