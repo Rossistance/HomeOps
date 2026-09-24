@@ -7,25 +7,29 @@
 //   plus the boot migration that names an owner on every legacy calendar.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, stopServer, makeSession, readStoreRecord } from "./harness.mjs";
+import { startServer, stopServer, makeSession, readStoreRecord, writeStoreRecord } from "./harness.mjs";
 import { calendarCan, canAddCalendar, subscriptionOwnerId, ADULT_ROLES } from "../calendar-permissions.mjs";
 
 /* ------------------------------ (a) the matrix ------------------------------ */
 
 // Letters: V view, S sync, E edit, W markWork, A assign, R remove, P scope.
 // "own" rows exist only where viewer and owner share a role (it is the same person).
+// W (markWork) appears ONLY on "own" rows: whether a calendar is Work — which hides its events
+// from everyone but its owner — is the owner's call, not the household Owner's or an Admin's
+// (ADR-005 privacy review; before, the Owner had W on every adult's calendar and an Admin on
+// every non-Owner adult's, so either could clear the flag and read what it hid).
 const MATRIX = {
   "Owner|Owner|own": "VSEWAR",
-  "Owner|Owner|other": "VSEWAR",
-  "Owner|Adult Admin|other": "VSEWAR",
-  "Owner|Adult Member|other": "VSEWAR",
+  "Owner|Owner|other": "VSEAR",
+  "Owner|Adult Admin|other": "VSEAR",
+  "Owner|Adult Member|other": "VSEAR",
   "Owner|Limited Member|other": "VSEARP",
   "Owner|Child View|other": "VSEAR",
 
   "Adult Admin|Owner|other": "V",
   "Adult Admin|Adult Admin|own": "VSEWR",
-  "Adult Admin|Adult Admin|other": "VSEW",
-  "Adult Admin|Adult Member|other": "VSEW",
+  "Adult Admin|Adult Admin|other": "VSE",
+  "Adult Admin|Adult Member|other": "VSE",
   "Adult Admin|Limited Member|other": "VSER",
   "Adult Admin|Child View|other": "VSER",
 
@@ -326,8 +330,15 @@ test("an Adult Admin cannot reassign a calendar", async () => {
   assert.equal(r.data.message, "Only the Owner can change whose calendar this is.");
 });
 
-test("the Owner reassigns a Work calendar to a Limited Member: isWork clears, events restamped", async () => {
-  const id = subs["Casey own"];
+// Before the ADR-005 privacy review this test had the Owner reassign CASEY's Work calendar to
+// a Limited Member (200, isWork cleared, events restamped). That was the hole: whoever takes a
+// calendar becomes its events' owner and sees through every hide. Now only a calendar's owner
+// hands over one that hides anything, so the restamp is proven on the Owner's OWN Work calendar,
+// and Casey's is refused below.
+test("the Owner hands over their OWN Work calendar to a Limited Member: isWork clears, events restamped", async () => {
+  const id = subs["Alex own"];
+  const work = await owner.req(`/api/calendar/subscriptions/${id}`, { method: "PATCH", body: JSON.stringify({ isWork: true }) });
+  assert.equal(work.status, 200, JSON.stringify(work.data));
   const r = await owner.req(`/api/calendar/subscriptions/${id}`, { method: "PATCH", body: JSON.stringify({ ownerActorId: limited.actorId }) });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   assert.equal(r.data.subscription.ownerActorId, limited.actorId);
@@ -340,9 +351,86 @@ test("the Owner reassigns a Work calendar to a Limited Member: isWork clears, ev
     assert.equal(rec.ownerId, limited.actorId);
     assert.equal(rec.createdBy, limited.actorId, "createdBy is ownership in canSeeEntity — it must follow the calendar");
   }
-  // Casey no longer sees it in full.
-  const row = (await member.req("/api/calendar/subscriptions")).data.subscriptions.find((s) => s.id === id);
-  assert.ok(!("can" in row));
+});
+
+test("nobody but its owner lifts a Work calendar's hide: no clearing isWork, no handing it over", async () => {
+  const id = subs["Casey own"];
+  assert.equal(readStoreRecord(ctx, "calendar_subscriptions", id)?.isWork, true, "Casey marked it as work above");
+  const titles = async (who) => JSON.stringify((await who.req("/api/events")).data.events);
+  assert.match(await titles(member), /Caseyown one/, "Casey reads their own meetings");
+  assert.ok(!/Caseyown/.test(await titles(owner)), "the Owner sees blocks, not titles");
+
+  // Clearing the flag: refused to the household Owner and to an Adult Admin alike.
+  for (const who of [owner, admin]) {
+    const r = await who.req(`/api/calendar/subscriptions/${id}`, { method: "PATCH", body: JSON.stringify({ isWork: false }) });
+    assert.equal(r.status, 403, `${who.actorId}: ${JSON.stringify(r.data)}`);
+    assert.equal(r.data.error, "not_your_calendar");
+    assert.equal(r.data.message, "Only Casey can mark or unmark this calendar as work.");
+  }
+  // Handing it over — to the Owner himself, or to a child-level member (which would clear
+  // Work and reveal it to everyone): refused, and it says who can.
+  for (const to of [owner.actorId, limited.actorId]) {
+    const r = await owner.req(`/api/calendar/subscriptions/${id}`, { method: "PATCH", body: JSON.stringify({ ownerActorId: to }) });
+    assert.equal(r.status, 403, JSON.stringify(r.data));
+    assert.equal(r.data.error, "not_your_calendar");
+    assert.equal(r.data.message, "Casey has hidden events on this calendar — only Casey can hand it over.");
+  }
+  const rec = readStoreRecord(ctx, "calendar_subscriptions", id);
+  assert.equal(rec.isWork, true);
+  assert.equal(rec.ownerActorId, member.actorId);
+  assert.ok(!/Caseyown/.test(await titles(owner)), "still blocks");
+  // The Owner can still rename it — edit is not the hide.
+  const rename = await owner.req(`/api/calendar/subscriptions/${id}`, { method: "PATCH", body: JSON.stringify({ name: "Casey work" }) });
+  assert.equal(rename.status, 200, JSON.stringify(rename.data));
+  assert.equal(rename.data.subscription.isWork, true);
+  // Nor can the Owner reassign it to someone and mark it Work in the same breath.
+  const combo = await owner.req(`/api/calendar/subscriptions/${subs["Morgan own"]}`, { method: "PATCH", body: JSON.stringify({ isWork: true }) });
+  assert.equal(combo.status, 403, "Morgan's calendar is Morgan's to mark");
+});
+
+test("a calendar carrying an event hidden by hand is handed over by its owner only", async () => {
+  const imp = await member.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Casey home", ics: ics("caseyhome") }) });
+  assert.equal(imp.status, 200, JSON.stringify(imp.data));
+  const id = imp.data.subscription.id;
+  const evs = (await member.req("/api/events")).data.events.filter((e) => e.provenance?.subscriptionId === id);
+  assert.equal(evs.length, 2);
+  const rec = readStoreRecord(ctx, "events", evs[0].id);
+  writeStoreRecord(ctx, "events", rec.id, { ...rec, shareState: "hidden", secret: true });
+  const r = await owner.req(`/api/calendar/subscriptions/${id}`, { method: "PATCH", body: JSON.stringify({ ownerActorId: owner.actorId }) });
+  assert.equal(r.status, 403, JSON.stringify(r.data));
+  assert.equal(r.data.message, "Casey has hidden events on this calendar — only Casey can hand it over.");
+  assert.equal(readStoreRecord(ctx, "events", rec.id).ownerId, member.actorId, "nothing was restamped");
+  const seen = (await owner.req("/api/events")).data.events.find((e) => e.id === rec.id || (e.block && e.startAt === rec.startAt));
+  assert.ok(!seen || !/caseyhome/.test(seen.title ?? ""), "the Owner still does not read it");
+  // (Its owner handing it over is the Owner-owns-it case above: only the Owner has assign.)
+  // A calendar that hides nothing is still the Owner's to reassign.
+  const plain = await member.req("/api/calendar/import-ics", { method: "POST", body: JSON.stringify({ name: "Casey plain", ics: ics("caseyplain") }) });
+  const ok = await owner.req(`/api/calendar/subscriptions/${plain.data.subscription.id}`, { method: "PATCH", body: JSON.stringify({ ownerActorId: admin.actorId }) });
+  assert.equal(ok.status, 200, JSON.stringify(ok.data));
+});
+
+test("a feed address reaches its calendar's owner only — not the household Owner, not an Admin", async () => {
+  // Loopback egress is refused in the harness, so the sync fails (422) — the record stays.
+  const add = await member.req("/api/calendar/subscriptions", { method: "POST", body: JSON.stringify({ name: "Casey feed", url: "https://127.0.0.1/work.ics?token=CASEYWORKTOKEN" }) });
+  assert.ok(add.data?.subscription, JSON.stringify(add.data));
+  const id = add.data.subscription.id;
+  assert.equal(add.data.subscription.url, "https://127.0.0.1/work.ics?token=CASEYWORKTOKEN", "the owner gets it back");
+  const work = await member.req(`/api/calendar/subscriptions/${id}`, { method: "PATCH", body: JSON.stringify({ isWork: true }) });
+  assert.equal(work.status, 200, JSON.stringify(work.data));
+  assert.equal(work.data.subscription.url, "https://127.0.0.1/work.ics?token=CASEYWORKTOKEN");
+  for (const who of [owner, admin]) {
+    const list = await who.req("/api/calendar/subscriptions");
+    assert.ok(!JSON.stringify(list.data).includes("CASEYWORKTOKEN"), `${who.actorId} never holds Casey's feed address`);
+    const row = list.data.subscriptions.find((s) => s.id === id);
+    assert.equal(row.url, null, "the key stays (clients type it string | null), the address does not");
+    assert.ok(row.can?.view && "lastSyncAt" in row, "a manager still sees the calendar's status");
+    const sync = await who.req(`/api/calendar/subscriptions/${id}/sync`, { method: "POST" });
+    assert.ok(!JSON.stringify(sync.data).includes("CASEYWORKTOKEN"), `${who.actorId}: not in a sync response either`);
+  }
+  // The Owner's own feed: the Admin no longer gets it either.
+  const adminRaw = JSON.stringify((await admin.req("/api/calendar/subscriptions")).data);
+  assert.ok(!adminRaw.includes("s3cret-feed-token"), "an Admin never holds the Owner's feed address");
+  assert.ok(JSON.stringify((await owner.req("/api/calendar/subscriptions")).data).includes("s3cret-feed-token"), "the Owner still has their own");
 });
 
 test("connect-google picks only among the caller's OWN Google accounts; children never start OAuth", async () => {

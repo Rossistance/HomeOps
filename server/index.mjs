@@ -39,7 +39,7 @@ import {
   assistantTurnKey, claimAssistantTurn, finishAssistantTurn, releaseAssistantTurn,
 } from "./store.mjs";
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases } from "./engine.mjs";
-import { createBackup, listBackups, readBackup, restoreBackup, backupTick, deleteBackupsFor, listLegacyBackups, readLegacyBackup, restoreLegacyBundle } from "./backup.mjs";
+import { createBackup, listBackups, readBackupForDownload, restoreBackup, backupTick, deleteBackupsFor, listLegacyBackups, readLegacyBackup, restoreLegacyBundle } from "./backup.mjs";
 import { exportHouseholdWithAudit } from "./export.mjs";
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { platformMailReady, sendPlatformEmail, platformMailStatus } from "./mailer.mjs";
@@ -515,9 +515,15 @@ function subscriptionView(sub, session) {
   };
   const can = calendarCan(viewerOf(session), sub, owner);
   if (!can.view) return row;
+  // The feed address goes to the calendar's OWNER alone. Holding it is reading the calendar:
+  // fetch it directly and every title, place and attendee is there, around every hide a Work
+  // calendar or a hidden event makes (only the event's owner sees through one — not the
+  // household Owner, not an Admin; ADR-005 privacy review). Managers keep everything else
+  // (sync status, can); url stays in the shape as null, which clients already handle.
+  const ownsIt = !!ownerActorId && ownerActorId === session.actorId;
   return {
     ...row,
-    url: sub.url ?? null, lastSyncAt: sub.lastSyncAt ?? null, lastResult: sub.lastResult ?? null, eventCount: sub.eventCount ?? 0,
+    url: ownsIt ? (sub.url ?? null) : null, lastSyncAt: sub.lastSyncAt ?? null, lastResult: sub.lastResult ?? null, eventCount: sub.eventCount ?? 0,
     createdAt: sub.createdAt, accountId: sub.accountId ?? null, accountEmail: account?.displayName ?? null,
     createdBy: sub.createdBy ?? null, can,
   };
@@ -527,9 +533,17 @@ function subscriptionView(sub, session) {
 const CAL_ACTION_PHRASE = { sync: "sync this calendar", edit: "change this calendar", markWork: "mark this calendar as work", assign: "change whose calendar this is", remove: "remove this calendar" };
 function calendarRefusal(action, sub, owner) {
   const phrase = CAL_ACTION_PHRASE[action] ?? "change this calendar";
-  // Not even the Owner may: the only such case is marking a non-adult's calendar as work.
-  if (!calendarCan({ actorId: "\u0000owner", role: "Owner" }, sub, owner)[action]) return "Only an adult's calendar can be marked as work.";
   const first = owner ? (String(owner.displayName ?? "").trim().split(/\s+/)[0] || "Another member") : null;
+  // Work is the calendar owner's call alone (calendarCan): nobody else — not the Owner — can
+  // set or clear it, so the sentence names the owner, or says no one can when it is not an
+  // adult's calendar.
+  if (action === "markWork") {
+    if (!owner || !ADULT_ROLES.includes(owner.role)) return "Only an adult's calendar can be marked as work.";
+    return `Only ${first} can mark or unmark this calendar as work.`;
+  }
+  // Not even the Owner may: no other action is refused to the Owner today; kept so a new one
+  // cannot produce a sentence naming the Owner as able to.
+  if (!calendarCan({ actorId: "\u0000owner", role: "Owner" }, sub, owner)[action]) return `Nobody can ${phrase}.`;
   if (owner?.role === "Owner") return `Only ${first} (the Owner) can ${phrase}.`;
   const who = [];
   if (owner && calendarCan({ actorId: owner.actorId, role: owner.role }, sub, owner)[action]) who.push(first);
@@ -2043,8 +2057,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
     const backupOne = path.match(/^\/api\/backups\/([^/]+)$/);
     if (backupOne && backupOne[1] !== "run" && backupOne[1] !== "restore" && method === "GET") {
       const g = gate(req, { requireSession: true, minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const raw = readBackup(backupOne[1]);
+      // The redacted copy, never the file on disk: the snapshot holds every member's hidden
+      // events and surprises in full, and the Owner is not their owner (ADR-005). Restore
+      // still uses the complete snapshot, by name, server-side. See readBackupForDownload.
+      const raw = readBackupForDownload(backupOne[1], viewerOf(g.session));
       if (!raw) return json(res, 404, { error: "not_found" }, req);
+      if (!Buffer.isBuffer(raw)) return json(res, 422, { error: raw.error }, req);
+      audit({ type: "backup.downloaded", name: backupOne[1], redacted: true, ok: true }, req, g.session);
       res.writeHead(200, { "content-type": "application/gzip", "content-disposition": `attachment; filename="${backupOne[1]}"`, ...corsHeaders(req) });
       return res.end(raw);
     }
@@ -3894,6 +3913,18 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // naming the current owner again is not a reassignment, so it needs no assign right.
       if (body.ownerActorId !== undefined && String(body.ownerActorId ?? "") !== String(currentOwnerId ?? "")) {
         if (!can.assign) return refuse("assign");
+        // Reassigning makes the new owner the events' owner (restampSubscriptionEvents, and
+        // eventOwnerOf reads the calendar's owner), and only an event's owner sees through a
+        // hide. So handing over a Work calendar, or one carrying events hidden by hand, would
+        // let whoever does it read them — or, to a child, reveal them to everyone (the ADR-005
+        // privacy review). What the calendar hides is its owner's to hand over, nobody else's.
+        const hides = sub.isWork === true || listEvents((e) => e.householdId === sub.householdId && e.layer === "linked"
+          && e.provenance?.subscriptionId === sub.id && e.shareState === "hidden").length > 0;
+        if (hides && currentOwnerId !== g.session.actorId) {
+          const first = String(owner?.displayName ?? "").trim().split(/\s+/)[0] || "Its owner";
+          const them = owner ? first : "its owner";
+          return json(res, 403, { error: "not_your_calendar", message: `${first} has hidden events on this calendar — only ${them} can hand it over.` }, req);
+        }
         // Every calendar has exactly one owner — the matrix has nothing to say about a
         // calendar that belongs to no one, so "unassign" is no longer a state it can enter.
         if (body.ownerActorId === null || body.ownerActorId === "") return json(res, 400, { error: "owner_required", message: "Every calendar belongs to someone — pick who this one is for." }, req);
