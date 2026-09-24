@@ -10,7 +10,7 @@
 // writer (syncMealGroceries — plan_meal kept a loop of its own until ADR-004, whatever the
 // earlier record said), one meal-to-event composer (mealEventFields) and one retire
 // cascade (retireMeal), which the meal routes in index.mjs and famili.delete_meal use too.
-import { listTasks, putTask, patchTask, listMeals, putMeal, patchMeal, deleteMealRec, listEvents, putEvent, patchEvent, deleteEventRec, getSettings, appendAudit, canSeeEntity, normalizeVisibility } from "../store.mjs";
+import { listTasks, putTask, patchTask, listMeals, putMeal, patchMeal, deleteMealRec, listEvents, putEvent, patchEvent, deleteEventRec, getSettings, appendAudit, canSeeEntity, normalizeVisibility, getMember } from "../store.mjs";
 import { resolveVisibility } from "../nests.mjs";
 import { roleAtLeast } from "../auth.mjs";
 import { householdTimeZone, wallClockISO } from "../household-time.mjs";
@@ -19,6 +19,7 @@ import { defineAction } from "./define-action.mjs";
 import { nowISO } from "./shared.mjs";
 import { MEAL_RECORD, MEAL_SLOTS, newMealRecord } from "./schemas/meal.mjs";
 import { EVENT_RECORD, newEventRecord } from "./schemas/event.mjs";
+import { hiddenEventRefusal, presentEvent } from "../event-privacy.mjs";
 import { newTaskRecord } from "./schemas/task.mjs";
 
 const err = (error, message) => ({ ok: false, error, message });
@@ -106,6 +107,9 @@ export async function retireMeal(meal, ctx, { mode = "archive" } = {}) {
   let eventsRemoved = 0;
   let google = null;
   for (const e of listEvents((x) => x.householdId === hh && x.mealId === meal.id)) {
+    // A meal event its owner has since hidden (ADR-005) is the owner's to delete — retiring
+    // the meal does not reach through the hide. It stays, uncounted, meal link and all.
+    if (hiddenEventRefusal(e, { actorId: ctx.actorId, role: ctx.role })) continue;
     if (e.provenance?.googleEventId) {
       if (!reach) google = "kept (external actions paused)";
       else {
@@ -441,10 +445,16 @@ export const planMeal = defineAction({
     // the meal's own visibility — a private dish used to put a household-visible
     // "Dinner: X" on the calendar.
     let event = null;
+    // The engine's internal-tool ctx carries no role, so it is read from the roster.
+    const viewer = { actorId: ctx.actorId, role: ctx.role ?? getMember(ctx.actorId)?.role };
     if (meal.date) {
       const fields = mealEventFields(meal, householdTimeZone(ctx.householdId));
       const existing = listEvents((e) => e.householdId === ctx.householdId && e.mealId === meal.id)[0];
-      event = existing
+      // The dish's event, hidden by its owner since (ADR-005): only the owner may rewrite it,
+      // so the meal is planned and the event left alone — no id, no record, a note saying so.
+      if (existing && hiddenEventRefusal(existing, viewer)) {
+        scheduleNote = [scheduleNote, "Its calendar event is hidden by its owner, so it was left as it was."].filter(Boolean).join(" ");
+      } else event = existing
         ? patchEvent(existing.id, fields)
         : putEvent(newEventRecord({
             ...fields, ownerId: ctx.actorId, mealId: meal.id,
@@ -465,12 +475,14 @@ export const planMeal = defineAction({
         google = r.ok ? { pushed: true, googleEventId: r.googleEventId, action: r.action } : { pushed: false, error: r.error };
       }
     }
+    // As the planner's own screen shows it — never the raw record.
+    const shownEvent = event ? presentEvent(event, viewer, { purpose: "app" }) : null;
     return {
       ok: true,
       result: {
         id: meal.id, mealId: meal.id, title: meal.title, date: meal.date ?? null, slot: meal.slot, groceryItems,
         eventId: event?.id ?? null, google, ...(scheduleNote ? { note: scheduleNote } : {}),
-        meal, ...(event ? { event } : {}),
+        meal, ...(shownEvent ? { event: shownEvent } : {}),
       },
     };
   },
