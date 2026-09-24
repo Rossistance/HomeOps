@@ -2,7 +2,7 @@
 // The control plane is deny-by-default: mutations require a valid session cookie,
 // a matching CSRF token, and an allowed Origin. Reads of sensitive state
 // (audit, settings, connector config, webhook history) require a session too.
-import { getSession } from "./store.mjs";
+import { getSession, SESSION_MAX_LIFETIME_MS } from "./store.mjs";
 import { setTenant } from "./tenant-context.mjs";
 
 const IS_PROD = (process.env.HOMEOPS_ENV || process.env.NODE_ENV) === "production";
@@ -55,7 +55,11 @@ export function sessionFromReq(req) {
 
 export function sessionCookie(token) {
   // httpOnly so JS can't read it; SameSite=Lax + (Secure in prod). Path=/.
-  const attrs = ["homeops_session=" + token, "HttpOnly", "Path=/", "SameSite=Lax", "Max-Age=" + 12 * 60 * 60];
+  // As long as the session could possibly live: the server's idle limit (store.mjs) is what
+  // ends a web session, so a cookie that expired 12 hours after sign-in would cut off a
+  // browser tab the server still considered in use. A cookie outliving its session is
+  // harmless — the server simply no longer knows the token.
+  const attrs = ["homeops_session=" + token, "HttpOnly", "Path=/", "SameSite=Lax", "Max-Age=" + Math.floor(SESSION_MAX_LIFETIME_MS / 1000)];
   if (IS_PROD) attrs.push("Secure");
   return attrs.join("; ");
 }

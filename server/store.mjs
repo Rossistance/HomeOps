@@ -543,7 +543,16 @@ export function hashInput(input) {
  * Sessions live in the _system tenant: they are resolved BEFORE we know which
  * household a request belongs to, and each carries the householdId the tenant
  * context is then set from. */
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
+/* 12 hours is an IDLE limit, not a lifetime. It used to be measured from sign-in, so a phone
+ * that was in use all day had every request refused twelve hours after the person picked
+ * their profile — and the app, which only checks its session on a cold start, just kept
+ * failing (2026-09-24: a family member's Ask turned into "couldn't reach the AI provider"
+ * nineteen seconds past the mark). A session that is used is renewed, at most once an hour
+ * so a busy phone is not a write per request, and never past an absolute lifetime — after
+ * which the person picks their profile, and enters their PIN if it has one, again. */
+export const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // idle limit
+export const SESSION_MAX_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000; // absolute
+const SESSION_RENEW_EVERY_MS = 60 * 60 * 1000;
 export function createSession({ actorId, actorName, role, householdId }) {
   const all = sysDoc("sessions.json", {});
   const token = crypto.randomBytes(32).toString("hex");
@@ -558,7 +567,15 @@ export function getSession(token) {
   const all = sysDoc("sessions.json", {});
   const s = all[token];
   if (!s) return null;
-  if (s.expiresAt < Date.now()) { delete all[token]; putSysDoc("sessions.json", all); return null; }
+  const now = Date.now();
+  const endOfLife = (s.createdAt ?? now) + SESSION_MAX_LIFETIME_MS;
+  if (s.expiresAt < now || endOfLife < now) { delete all[token]; putSysDoc("sessions.json", all); return null; }
+  // Renewed on use: once an hour has passed since the last renewal, the idle clock restarts.
+  if (s.expiresAt - now < SESSION_TTL_MS - SESSION_RENEW_EVERY_MS) {
+    const next = Math.min(now + SESSION_TTL_MS, endOfLife);
+    // Near the end of its lifetime a session cannot be pushed further — no write for nothing.
+    if (next !== s.expiresAt) { s.expiresAt = next; putSysDoc("sessions.json", all); }
+  }
   return s;
 }
 export function deleteSession(token) {
