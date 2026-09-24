@@ -32,7 +32,7 @@ Three existing behaviours would have undone this, so they were fixed as part of 
 
 `calendarCan(viewer, sub, owner)` in `server/calendar-permissions.mjs` is the only place the matrix lives. Routes enforce it, and GET returns it per row as `can`, so the app draws buttons from the server's answer instead of repeating role logic.
 
-| Viewer | See | Sync | Edit (name, colour, Work) | Assign | Remove | Add |
+| Viewer | See | Sync | Edit (name, colour) | Assign | Remove | Add |
 |---|---|---|---|---|---|---|
 | Owner | all | all | all | yes | all | unlimited; also for any member |
 | Adult Admin | all | all but the Owner's | all but the Owner's | no | own, Limited Members', children's | unlimited for self |
@@ -41,8 +41,9 @@ Three existing behaviours would have undone this, so they were fixed as part of 
 | Child View / Guest | nothing (legend rows only) | no | no | no | no | no |
 
 Additional rules:
-- `isWork` can be set only by someone with edit permission, and only on a calendar whose owner is an adult. Reassigning a calendar to a non-adult clears it.
-- Feed URLs and pasted `.ics` text leave the server only on rows the viewer may manage.
+- `isWork` is the calendar **owner's** choice alone, and only an adult owner's: "adults who can edit their calendars can mark a calendar as Work". The household Owner and Adult Admins may rename or recolour another member's calendar, but they can never set or clear its Work flag. If they could clear it, they could read through every hide on it (privacy review, 2026-09-24).
+- A calendar that is Work, or that carries a hidden event, can be reassigned only by its current owner. Reassigning moves ownership, and ownership is what sees through a hide. Reassigning a calendar to a non-adult clears `isWork`.
+- A feed URL can carry a private token, so it leaves the server only to the calendar's owner. Pasted `.ics` text never leaves the server.
 - A boot migration names an owner for every legacy calendar and re-stamps its events' `createdBy`.
 
 ### 2. Refresh is a household operation anyone may trigger and the server makes safe
@@ -61,7 +62,10 @@ When it runs:
 
 `server/event-privacy.mjs` gives four answers:
 - **full**: the event as stored.
-- **block**: "<Name> working" or "<Name> busy", the owner's time and nothing else, merged back-to-back. Blocks have their own `blk_` ids, are never editable, and fit `EVENT_RECORD`, so an older app renders them as ordinary read-only events.
+- **block**: "<Name> working" or "<Name> busy", the owner's time and nothing else, merged back-to-back.
+  - Blocks have their own `blk_` ids and are never editable.
+  - They fit `EVENT_RECORD`, so an older app renders them as ordinary read-only events.
+  - A block does not say how many meetings it merges. Its timestamps come from its time span, not from when the owner last edited it.
 - **withheld**: the owner's own surprise, when the assistant is asked where others may be listening.
 - **absent**: the viewer cannot see the event at all.
 
@@ -91,12 +95,16 @@ How that plays out:
 1. An Adult Admin treats another Admin's calendar like an Adult Member's: they may sync and edit it, but not remove it.
 2. An Adult Admin may edit a Limited Member's calendar. Assigning a calendar and setting a Limited Member's view are Owner-only.
 3. The one-calendar cap limits what a Limited Member adds themselves; the Owner may add more for them.
-4. Only adults can hide or own a Work calendar. A demotion reveals hidden events rather than stranding them.
+4. Only adults can hide events or mark a calendar as Work. A hide that already exists stays in place whatever the owner's role becomes, and a demoted owner can still share their own hidden events. If a demotion revealed hidden events, the household Owner could demote an adult to read them (privacy review, 2026-09-24).
 5. Blocks merge when the next piece starts within 15 minutes of the last one's end. All-day pieces merge across consecutive days. Timed and all-day never mix, and neither do "working" and "busy".
 6. The owner can open their own hidden event to read or edit it without sharing it. Only the eye toggle shares.
 7. A hidden event's reminders go to its owner only.
 8. Surprises are detected by word-boundary keywords (birthday/bday, anniversary, gift, vacation, surprise, 🎂 🎁), Google's birthday type, and the owner's explicit switch, which always wins.
-9. The household export writes other people's hidden events as blocks. Even the Owner cannot see through a hide.
+9. Even the Owner cannot see through a hide, and that includes the household export and backup downloads.
+   - Other people's hidden events are written as blocks.
+   - Other members' Personal chats are left out, and so are runs that handled a surprise.
+   - Tasks linked to someone else's hidden event lose their title and notes.
+   - The complete bundle stays on the server for restoring.
 10. Google still reads each account's primary calendar. A separate work calendar connects as its own account or feed.
 11. The web client renders blocks and hidden badges. The eye toggle, the Work switch and the scope editor are iOS only.
 12. A Limited Member's scope never hides their own events, or events they take part in as participant, attendee or driver. A member the scope does not mention is shown.
