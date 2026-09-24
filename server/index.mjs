@@ -4082,6 +4082,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
         if (body.visibility === "household" && isAdultMemberOnly(g.session)) {
           return json(res, 403, { error: "personal_only", message: "Your chats stay private to you. Sharing one with the household needs an Owner or Adult Admin." }, req);
         }
+        // A chat where Famili handed over a SURPRISE (ADR-005) stays personal: moving it to
+        // Family would publish that history to the very person it may be about.
+        if (body.visibility === "household" && c.secretReleasedAt) {
+          return json(res, 403, { error: "holds_a_surprise", message: "This chat talks about a surprise, so it stays in Personal. Start a new Family chat instead." }, req);
+        }
         patch.visibility = body.visibility === "household" ? "household" : "personal";
       }
       if (Object.keys(patch).length === 0) return json(res, 400, { error: "nothing_to_change" }, req);

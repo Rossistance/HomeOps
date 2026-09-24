@@ -145,3 +145,20 @@ test("a family thread's suggestion context shows the poster's own hidden events 
   }
   assert.ok(existing.includes("Morgan Harper busy"), `her hidden time is there as a block: ${existing.slice(0, 400)}`);
 });
+
+test("a chat that handled a surprise cannot be moved to Family — that would publish it", async () => {
+  const conv = await personalChat(morgan);
+  const day = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10);
+  fake.state.script.push(
+    { toolCalls: [{ name: "homeops__create_event_draft", args: { title: "Surprise anniversary trip", startAt: day } }] },
+    { text: "Added." },
+  );
+  await ask(morgan, "put the surprise anniversary trip on my calendar", conv);
+  assert.ok(readStoreRecord(ctx, "conversations", conv).secretReleasedAt);
+  const move = await morgan.req(`/api/conversations/${conv}`, { method: "PATCH", body: JSON.stringify({ visibility: "household" }) });
+  assert.equal(move.status, 403, JSON.stringify(move.data));
+  assert.equal(move.data.error, "holds_a_surprise");
+  assert.equal(readStoreRecord(ctx, "conversations", conv).visibility, "personal", "it stays personal");
+  const plain = await personalChat(morgan);
+  assert.equal((await morgan.req(`/api/conversations/${plain}`, { method: "PATCH", body: JSON.stringify({ visibility: "household" }) })).status, 200, "a chat without a surprise still moves");
+});
