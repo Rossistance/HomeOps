@@ -175,6 +175,10 @@ export function newEventRecord(fields, ctx) {
     category: fields.category ?? "Family", layer: fields.layer ?? "canonical", status: fields.status ?? "confirmed",
     source: fields.source ?? "FamiliOS",
     ...(fields.mealId ? { mealId: fields.mealId } : {}), ...(fields.taskId ? { taskId: fields.taskId } : {}),
+    // The owner's hide/surprise choice (ADR-005) — only when a writer states one; absent
+    // means "the calendar default" and "judge by the words", so no default is written.
+    ...(fields.shareState !== undefined ? { shareState: fields.shareState } : {}),
+    ...(fields.secret !== undefined ? { secret: fields.secret } : {}),
     provenance: fields.provenance,
     createdBy: ctx.actorId, createdAt: Date.now(), updatedAt: nowISO(),
   };
