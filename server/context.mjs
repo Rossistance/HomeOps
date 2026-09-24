@@ -17,6 +17,7 @@ import { listInternalFunctions } from "./internal-functions.mjs";
 import { ACTION_INPUTS } from "./actions/registry.mjs";
 import { searchWeb, readPage } from "./web.mjs";
 import { memoryProvider } from "./memory-provider.mjs";
+import { presentEvents } from "./event-privacy.mjs";
 import { householdTimeZone, localDayBounds, localDateKey, stampToMs } from "./household-time.mjs";
 
 // Input hints for the internal family-data tools, so the planner knows how to fill
@@ -409,14 +410,25 @@ export async function buildServerContext(session, clientContext, { goal, channel
   // A day-scoped window matches how a household actually thinks ("until 12 PM tonight it
   // is still upcoming"), and the extra clause keeps multi-day events that began earlier
   // but haven't finished yet.
-  const events = listEvents((e) => e.householdId === hh)
-    .filter(inChannel)
-    .filter((e) => isUpcomingForContext(e, now, tz))
+  //
+  // Hidden events (ADR-005) go through event-privacy.mjs as the "snapshot": the briefing the
+  // model holds before anyone asks it anything. Someone else's hidden time is a "<Name>
+  // working/busy" block, and an owner's SURPRISE is withheld here even in their own Personal
+  // chat — it is handed over only by a tool call that asked for it, which marks the turn so
+  // it records nothing. (presentEvents applies the channel gate itself.)
+  const events = presentEvents(
+    listEvents((e) => e.householdId === hh).filter((e) => isUpcomingForContext(e, now, tz)),
+    session, { channel, purpose: "snapshot" },
+  )
     .sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)))
     .slice(0, 12)
     // endAt/allDay ride along so the assistant can say "All day" or "until 8pm" instead of
     // inventing a time, and can reason about what is happening RIGHT NOW.
-    .map((e) => ({ id: e.id, title: e.title, startAt: e.startAt, endAt: e.endAt ?? null, allDay: e.allDay === true, location: e.location, driverId: e.driverId, participants: e.participantIds }));
+    .map((e) => (e.block
+      ? { id: e.id, title: e.title, startAt: e.startAt, endAt: e.endAt ?? null, allDay: e.allDay === true, hidden: true }
+      : e.privacy?.withheld
+        ? { id: e.id, title: "Private event", startAt: e.startAt, endAt: e.endAt ?? null, allDay: e.allDay === true, withheld: true }
+        : { id: e.id, title: e.title, startAt: e.startAt, endAt: e.endAt ?? null, allDay: e.allDay === true, location: e.location, driverId: e.driverId, participants: e.participantIds }));
   const tasks = listTasks((t) => t.householdId === hh)
     .filter(inChannel)
     .filter((t) => t.status !== "done")

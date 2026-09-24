@@ -384,12 +384,16 @@ export async function runHelper({ helperId, session = null, reason = "manual", p
       : `Run now — ${when}. Do your job for the household as it stands right now.${note}`;
 
   const startedAt = Date.now();
+  // A helper's run is never an owner alone with the assistant (ADR-005): its note is read by
+  // whoever the helper reports to, so a surprise is withheld. The ledger is checked anyway
+  // before its exchange is remembered, so that stays true if the audience rule ever changes.
+  const ledger = {};
   let out;
   try {
     out = await runAssistantAgent({
       message: ask, context: null, session: runSession, history,
       agent: helper, conversationId: conversation.id, visibility: helper.visibility ?? "household",
-      asHelper: true,
+      asHelper: true, audience: "shared", ledger,
     });
   } catch (e) {
     out = { ok: false, error: "helper_failed", message: String(e?.message ?? e) };
@@ -427,7 +431,7 @@ export async function runHelper({ helperId, session = null, reason = "manual", p
   // What a helper found out is household intelligence too — a briefing that discovers the
   // family has a Nest thermostat, or that dance is every Thursday, is worth remembering
   // exactly as a chat answer would be. Scoped to the helper's room; never blocks the run.
-  if (out.ok && out.answer) {
+  if (out.ok && out.answer && !ledger.secretReleased) {
     void captureMemoryFromExchange({
       householdId: helper.householdId, actorId: helper.createdBy ?? runSession.actorId,
       visibility: helper.visibility ?? "household", nestId: helper.nestId ?? null,

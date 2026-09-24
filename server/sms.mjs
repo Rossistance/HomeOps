@@ -134,7 +134,12 @@ export function samePhone(a, b) {
 }
 
 /** Resolve an inbound sender to a household member: a VERIFIED, OPTED-IN
- *  Phone/Text contact method matching the From number. Anything else → null. */
+ *  Phone/Text contact method matching the From number. Anything else → null.
+ *
+ *  `sharedNumber` (ADR-005): how many members of this household this number belongs to, on
+ *  ANY Phone/Text method of theirs, verified or not. A family landline or a phone two people
+ *  share is answered as the first verified member, as always — but it is not a place where
+ *  one person is alone with the assistant, so their surprises are not spoken there. */
 export function resolveSmsSender(from) {
   const method = listContactMethods((m) =>
     m.type === "Phone/Text" && m.verified === true && m.optInStatus === "Opted In" && samePhone(m.value, from),
@@ -142,7 +147,10 @@ export function resolveSmsSender(from) {
   if (!method) return null;
   const member = getMember(method.memberId);
   if (!member || member.archived) return null;
-  return { method, member };
+  const owners = new Set(listContactMethods((m) => m.type === "Phone/Text" && samePhone(m.value, from))
+    .map((m) => m.memberId)
+    .filter((id) => { const who = id ? getMember(id) : null; return who && !who.archived; }));
+  return { method, member, memberCount: owners.size, sharedNumber: owners.size > 1 };
 }
 
 /** Find (or create) the member's durable text thread — the same server-owned
@@ -337,9 +345,15 @@ async function respondInTenant({ from, body }) {
    * what makes the allow-list and the policy ladder apply at all."
    *
    * The 1:1 channel is `personal`: one person asked and one person reads the answer, so this
-   * is the one surface where their own private items are the right thing to see. */
+   * is the one surface where their own private items are the right thing to see.
+   *
+   * …and its AUDIENCE (ADR-005) is "self" only when the number belongs to exactly one member.
+   * A number two people share reaches both of them, so an owner's surprise is withheld there.
+   * The ledger is the turn's; a 1:1 text records no memory of its own, but a run it queues
+   * after a surprise was handed over is stamped secret by the agent. */
   const agent = resolveActingHelper({ session });
-  const out = await runAssistantAgent({ message: String(body), session, conversationId: conv.id, visibility: "personal", channel: "personal", agent });
+  const audience = sender.memberCount === 1 ? "self" : "shared";
+  const out = await runAssistantAgent({ message: String(body), session, conversationId: conv.id, visibility: "personal", channel: "personal", agent, audience, ledger: {} });
   const replyText = smsReplyText(out);
   appendConversationMessage(conv.id, out.ok
     ? { role: "assistant", kind: "answer", text: out.answer ?? replyText, model: out.model ?? null, channel: "sms", at, ...(out.toolCalls?.length ? { toolCalls: out.toolCalls } : {}) }

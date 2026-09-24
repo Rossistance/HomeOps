@@ -12,7 +12,18 @@ import { defineAction } from "../define-action.mjs";
 // Every successful write below refreshes the household's calendars, as the app's routes do.
 import { kickCalendarRefresh } from "../../calendar-refresh.mjs";
 import { badStamp } from "../shared.mjs";
-import { KEY_HINTS, publicEvent, readOnly, nativeScope, always, PROJECTION } from "./shared.mjs";
+import { KEY_HINTS, publicEvent, readOnly, nativeScope, presentOneForAsker, always, PROJECTION } from "./shared.mjs";
+import { hiddenEventRefusal } from "../../event-privacy.mjs";
+
+/* A hidden event is its owner's alone (ADR-005): anyone else — the household Owner included —
+ * is told whose it is and that it is hidden, never what it is, and cannot change or remove it.
+ * The owner edits and cancels their own hidden events exactly as any other ("cancel the
+ * haircut I have at 2"). The result the model reads is the event as THIS asker may see it. */
+function hiddenRefusal(ev, session) {
+  const r = hiddenEventRefusal(ev, session);
+  return r ? { ok: false, error: r.error, message: r.message } : null;
+}
+const asSeen = (ctx, hh, e) => publicEvent(hh, presentOneForAsker(ctx, e) ?? e);
 
 const NATIVE = { requiresApproval: false, delivers: false, lane: "native", timeoutMs: 60_000, available: always };
 // What editLinkedGoogleEvent / deleteLinkedGoogleEvent can answer, passed through as is.
@@ -38,6 +49,8 @@ export const familiUpdateEvent = defineAction({
      * one: "isn't visible" would tell the thread it exists. Elsewhere unchanged. (ADR-004.) */
     if (!ev || ev.householdId !== hh || (channel === "group" && !seeable(ev))) return { ok: false, error: "event_not_found", message: "No such event — list events to find the right id." };
     if (!seeable(ev)) return { ok: false, error: "forbidden", message: "That event isn't visible to this person." };
+    const hidden = hiddenRefusal(ev, session);
+    if (hidden) return hidden;
     const { eventId, ...patch } = input ?? {};
     for (const k of Object.keys(patch)) if (patch[k] === undefined) delete patch[k];
     if (badStamp(patch.startAt)) return { ok: false, error: "invalid_startAt", message: "startAt isn't a valid timestamp." };
@@ -66,7 +79,7 @@ export const familiUpdateEvent = defineAction({
       const updated = patchEvent(ev.id, patch);
       appendAudit({ type: "event.append", eventId: ev.id, fields: Object.keys(patch), via: "assistant", householdId: hh, actorId: session.actorId });
       kickCalendarRefresh(hh, "event.update");
-      return { ok: true, result: { event: publicEvent(hh, updated), localOnly: true } };
+      return { ok: true, result: { event: asSeen(ctx, hh, updated), localOnly: true } };
     }
     if (linkedGoogle) {
       const { title, startAt, endAt, location, notes, ...localOnly } = patch;
@@ -79,7 +92,7 @@ export const familiUpdateEvent = defineAction({
       }
       const updated = Object.keys(localOnly).length ? patchEvent(ev.id, localOnly) : getEvent(ev.id);
       kickCalendarRefresh(hh, "event.update");
-      return { ok: true, result: { event: publicEvent(hh, updated), google: "updated" } };
+      return { ok: true, result: { event: asSeen(ctx, hh, updated), google: "updated" } };
     }
     const updated = patchEvent(ev.id, patch);
     appendAudit({ type: "event.update", eventId: ev.id, fields: Object.keys(patch), via: "assistant", householdId: hh, actorId: session.actorId });
@@ -89,7 +102,7 @@ export const familiUpdateEvent = defineAction({
       google = r.ok ? "updated" : `not updated (${r.error})`;
     }
     kickCalendarRefresh(hh, "event.update");
-    return { ok: true, result: { event: publicEvent(hh, updated), ...(google ? { google } : {}) } };
+    return { ok: true, result: { event: asSeen(ctx, hh, updated), ...(google ? { google } : {}) } };
   },
 });
 
@@ -114,7 +127,12 @@ export const familiDeleteEvent = defineAction({
      * whose it is, its title in the result) reaches a thread people outside the household read.
      * Elsewhere unchanged: the ownership rule below is the app's. (ADR-004 decision C.) */
     if (!ev || ev.householdId !== hh || (channel === "group" && !seeable(ev))) return { ok: false, error: "event_not_found", message: "No such event." };
+    const hidden = hiddenRefusal(ev, session);
+    if (hidden) return hidden;
     if (!isAdultRole(session.role) && ev.ownerId !== session.actorId) return { ok: false, error: "forbidden", message: "Only the event's owner or an adult can delete it." };
+    // The title the result echoes is the one this asker may read here (a surprise stays
+    // "Private event" where others are listening), taken before the record is gone.
+    const shownTitle = (presentOneForAsker(ctx, ev) ?? ev).title;
     const editableLinked = isEditableLinkedGoogle(ev, hh, session.actorId);
     if (ev.layer && ev.layer !== "canonical" && !editableLinked) return { ok: false, error: "read_only_layer", message: "This event is synced from another calendar and can't be deleted here." };
     const external = googleReachAllowed(hh);
@@ -124,7 +142,7 @@ export const familiDeleteEvent = defineAction({
       appendAudit({ type: "event.delete", eventId: ev.id, ok: r.ok, target: "google-linked", via: "assistant", householdId: hh, actorId: session.actorId });
       if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "Google rejected the delete." };
       kickCalendarRefresh(hh, "event.delete");
-      return { ok: true, result: { deleted: true, title: ev.title, google: "deleted" } };
+      return { ok: true, result: { deleted: true, title: shownTitle, google: "deleted" } };
     }
     let google = null;
     if (ev.provenance?.googleEventId) {
@@ -134,6 +152,6 @@ export const familiDeleteEvent = defineAction({
     deleteEventRec(ev.id);
     appendAudit({ type: "event.delete", eventId: ev.id, ok: true, via: "assistant", ...(google ? { google } : {}), householdId: hh, actorId: session.actorId });
     kickCalendarRefresh(hh, "event.delete");
-    return { ok: true, result: { deleted: true, title: ev.title, ...(google ? { google } : {}) } };
+    return { ok: true, result: { deleted: true, title: shownTitle, ...(google ? { google } : {}) } };
   },
 });
