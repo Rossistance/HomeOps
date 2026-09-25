@@ -15,6 +15,7 @@ import { roleAtLeast } from "../auth.mjs";
 import { defineAction } from "./define-action.mjs";
 import { badStamp, unknownMember, ghostMessage } from "./shared.mjs";
 import { TASK_RECORD, newTaskRecord } from "./schemas/task.mjs";
+import { kickCalendarRefresh } from "../calendar-refresh.mjs";
 
 const err = (error, message) => ({ ok: false, error, message });
 const str = { type: "string" };
@@ -106,6 +107,9 @@ export const createTask = defineAction({
       source: via === "agent" ? "agent" : "user",
       ...(via === "agent" ? { createdByAgentId: input.agentId ?? ctx.agentId ?? null } : {}),
     }, ctx));
+    // In the one run (POST /api/tasks and homeops.create_task alike; a list item comes through
+    // here too): refresh the household's calendars after the write succeeded.
+    kickCalendarRefresh(ctx.householdId, "task.create");
     return { ok: true, result: { task: rec } };
   },
 });
