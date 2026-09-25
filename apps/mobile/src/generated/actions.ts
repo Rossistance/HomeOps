@@ -92,6 +92,10 @@ export interface EventRecord {
   localNotes?: string;
   mealId?: string;
   taskId?: string;
+  /** The owner hid or shared this event; absent = the calendar default. */
+  shareState?: "hidden" | "shared";
+  /** The owner's Keep-it-a-surprise switch; absent = decided from the text. */
+  secret?: boolean;
   createdBy: string;
   /** Epoch milliseconds. */
   createdAt: number;
@@ -110,6 +114,18 @@ export interface EventRecord {
     }>;
     [k: string]: unknown;
   } | null;
+  /** Only on the OWNER's own events: is it hidden, why, and may they toggle it. */
+  privacy?: {
+    obscured: boolean;
+    kind?: "work" | "busy";
+    secret?: boolean;
+    canToggle?: boolean;
+    withheld?: boolean;
+  };
+  /** Present on a stand-in for someone else's hidden time: <Name> working, merged back-to-back. */
+  block?: {
+    kind: "work" | "busy";
+  };
   /** Present when the synced calendar this came from can no longer refresh. */
   staleSource?: {
     accountId: string;
@@ -228,6 +244,10 @@ export type CreateEventDraftInput = {
   category?: string;
   travel?: unknown;
   mealImpact?: unknown;
+  /** true hides it from everyone but its owner, who must be the adult creating it (others see "<Name> busy"). Ignored otherwise. */
+  hidden?: boolean;
+  /** The owner's Keep-it-a-surprise switch. Same rule as hidden. */
+  secret?: boolean;
 };
 
 /** Result of homeops.create_event_draft. */
@@ -237,6 +257,24 @@ export type CreateEventDraftResult = {
 
 /** Error codes homeops.create_event_draft can return. */
 export type CreateEventDraftError = "invalid_input" | "empty_title" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_in_nest" | "bad_reminder" | "end_before_start";
+
+/** Input of homeops.set_event_sharing. The event's owner hides one of their events (others see "<Name> busy" or "<Name> working") or shares it in full, and may mark it a surprise. */
+export type SetEventSharingInput = {
+  /** The event id (ev_…). */
+  id: string;
+  /** true hides it from everyone but you; false shares it in full. */
+  hidden: boolean;
+  /** Keep it a surprise: true or false sets it, null goes back to judging by the event's words. */
+  secret?: boolean | null;
+};
+
+/** Result of homeops.set_event_sharing. */
+export type SetEventSharingResult = {
+  event: EventRecord;
+};
+
+/** Error codes homeops.set_event_sharing can return. */
+export type SetEventSharingError = "invalid_input" | "not_found" | "not_event_owner" | "cannot_hide";
 
 /** Input of homeops.create_task. Create a household task, chore, bill or errand. dueAt (or a startAt/endAt window) is ISO 8601 or YYYY-MM-DD. assignedMemberId must be a member id from the roster (famili__list_members). A reminder only fires once the task has a dueAt or startAt to count back from, so set one when you set a reminder. */
 export type CreateTaskInput = {
@@ -583,7 +621,7 @@ export type FamiliUpdateEventResult = {
 };
 
 /** Error codes famili.update_event can return. */
-export type FamiliUpdateEventError = "invalid_input" | "read_only_profile" | "event_not_found" | "forbidden" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_event_owner" | "read_only_layer" | "external_actions_disabled" | "not_linked_google" | "needs_reconnect" | "google_error";
+export type FamiliUpdateEventError = "invalid_input" | "read_only_profile" | "event_not_found" | "forbidden" | "invalid_startAt" | "invalid_endAt" | "unknown_member" | "not_event_owner" | "event_hidden" | "read_only_layer" | "external_actions_disabled" | "not_linked_google" | "needs_reconnect" | "google_error";
 
 /** Input of famili.delete_event. Remove a calendar event the asker owns (or any event, for an adult). Look it up first and confirm it is the right one. Events mirrored from an outside calendar can't be deleted here. */
 export type FamiliDeleteEventInput = {
@@ -599,7 +637,7 @@ export type FamiliDeleteEventResult = {
 };
 
 /** Error codes famili.delete_event can return. */
-export type FamiliDeleteEventError = "invalid_input" | "read_only_profile" | "event_not_found" | "forbidden" | "read_only_layer" | "external_actions_disabled" | "not_linked_google" | "needs_reconnect" | "google_error";
+export type FamiliDeleteEventError = "invalid_input" | "read_only_profile" | "event_not_found" | "forbidden" | "event_hidden" | "read_only_layer" | "external_actions_disabled" | "not_linked_google" | "needs_reconnect" | "google_error";
 
 /** Input of famili.update_task. Update a task or list item: mark done (status "done") or reopen ("todo"), rename, change due date, assignee, priority, notes, or list. Look the task up first. */
 export type FamiliUpdateTaskInput = {
@@ -779,6 +817,7 @@ export type FamiliRunHelperError = "invalid_input" | "helper_not_found" | "unkno
 /** Every declared action that answers over HTTP, by id. */
 export const ACTION_ROUTES = {
   "homeops.create_event_draft": { method: "POST", path: "/api/events" },
+  "homeops.set_event_sharing": { method: "POST", path: "/api/events/sharing" },
   "homeops.create_task": { method: "POST", path: "/api/tasks" },
   "homeops.list_events": { method: "GET", path: "/api/events" },
   "homeops.list_tasks": { method: "GET", path: "/api/tasks" },

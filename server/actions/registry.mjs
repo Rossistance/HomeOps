@@ -9,7 +9,7 @@
 // half-built. The import-order smoke test in server/test/actions-define.test.mjs pins this.
 // The native tools keep to the same rule: native/helpers.mjs reaches helpers.mjs (which
 // reaches the engine) only when a tool runs, never at load.
-import { createEvent } from "./events.mjs";
+import { createEvent, setEventSharing } from "./events.mjs";
 import { createTask, createListItem } from "./tasks.mjs";
 import { readEvents, readTasks } from "./reads.mjs";
 import { createMeal, readMeals, planMeal } from "./meals.mjs";
@@ -44,7 +44,7 @@ export const NATIVE_ACTIONS = Object.freeze([
   familiUpdateEvent, familiDeleteEvent, familiUpdateTask, familiDeleteTask, familiDeleteMeal, familiDeleteMemory,
   familiListHelpers, familiCreateHelper, familiUpdateHelper, familiRunHelper,
 ]);
-export const ACTIONS = Object.freeze([createEvent, createTask, createListItem, readEvents, readTasks, createMeal, readMeals, planMeal, ...NATIVE_ACTIONS]);
+export const ACTIONS = Object.freeze([createEvent, setEventSharing, createTask, createListItem, readEvents, readTasks, createMeal, readMeals, planMeal, ...NATIVE_ACTIONS]);
 const { byId, byRoute } = buildRegistry(ACTIONS);
 
 export const getAction = (id) => byId.get(id) ?? null;

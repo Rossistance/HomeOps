@@ -22,8 +22,9 @@ import { apiForAccount } from "./oauth.mjs";
 import { getInternalFunction } from "./internal-functions.mjs";
 import { NATIVE_ACTIONS } from "./actions/registry.mjs";
 import { approvalPreview } from "./actions/native/shared.mjs";
-import { getAgent, getMember, defaultApproverRoles, isAdultRole } from "./store.mjs";
+import { getAgent, getMember, defaultApproverRoles, isAdultRole, getConversation } from "./store.mjs";
 import { roleAtLeast } from "./auth.mjs";
+import { canSeeNest } from "./nests.mjs";
 import { isToolStepAllowed } from "./helper-shape.mjs";
 import { resolveEffectivePolicy, reachesOutside, BLOCKED } from "./policy.mjs";
 import { pushApprovalNotification } from "./notify.mjs";
@@ -124,11 +125,42 @@ const MEMORY_JUDGE_SYS = `You decide whether a completed household-assistant run
 Remember ONLY lasting facts, preferences, routines, or rules (e.g. "The family does taco night on Wednesdays", "Noah's dentist is Dr. Lee").
 Do NOT remember one-off task outcomes, generic summaries, or anything already obvious from the run title.
 Respond with ONLY JSON: {"remember": boolean, "text": string, "type": "fact"|"preference"|"routine"|"rule"|"insight"}. When remember is false, text may be empty.`;
+/* A run born in a turn that handed an owner's surprise over (ADR-005) records NOTHING: no
+ * memory in any scope, and only its requester can see it (index.mjs runs routes). Stamped on
+ * sourceRef — server-only, like channel and actorRole — when the run is created in such a
+ * turn, and again after the turn for runs it created before the surprise came up. */
+export function markRunSecret(runId) {
+  const run = getRun(runId);
+  if (!run || run.sourceRef?.secret === true) return;
+  // Personal as well: a run that touched a surprise is the asker's alone — its later approval
+  // pushes and listings follow run.visibility, and this run may predate the release.
+  patchRun(runId, { visibility: "personal", sourceRef: { ...(run.sourceRef ?? {}), secret: true } });
+}
+export const isSecretRun = (run) => run?.sourceRef?.secret === true;
+
+/* WHICH ROOM a run's memory belongs to: the room it was asked in. A run from someone's
+ * Personal chat is theirs (visibility "personal", or its conversation is personal); a nest
+ * chat's is the nest's; only a run from a shared room — or with no room at all, a schedule —
+ * is the household's. This judge used to write "household" for every run, so a fact from a
+ * private chat surfaced in everyone's Memory. */
+function runMemoryRoom(run) {
+  const conv = run.sourceRef?.conversationId ? getConversation(run.sourceRef.conversationId) : null;
+  if (run.visibility === "personal") return { scope: "personal" };
+  // The conversation id is correlation a client may set, so it narrows only to a room the
+  // requester is really in: their own personal thread, or a nest they belong to.
+  if (conv && conv.householdId === run.householdId) {
+    if (conv.visibility === "nest" && conv.nestId) {
+      if (canSeeNest(conv.nestId, run.householdId, run.actorId)) return { scope: "nest", nestId: conv.nestId };
+    } else if (conv.visibility !== "household" && conv.actorId === run.actorId) return { scope: "personal" };
+  }
+  return { scope: "household" };
+}
 async function proposeRunMemory(runId) {
   const run = getRun(runId);
   // WP-101 slice 3: a partially-failed run still did real work whose succeeded steps can
   // hold a durable household fact — the judge below only ever reads succeeded steps.
   if (!run || !["completed", "partially_failed"].includes(run.status)) return;
+  if (isSecretRun(run)) return;
   const provider = activeAiProvider(run.householdId);
   if (!provider) return;
   const material = run.steps
@@ -148,8 +180,12 @@ async function proposeRunMemory(runId) {
   const existing = listMemory({ householdId: run.householdId, limit: 500 });
   if (existing.some((m) => String(m.text).trim().toLowerCase() === text.toLowerCase())) return;
   const type = ["fact", "preference", "routine", "rule", "insight"].includes(parsed.type) ? parsed.type : "insight";
-  addMemory({ householdId: run.householdId, scope: "household", type, text, source: { runId, actorId: run.actorId, via: "auto" } });
-  appendAudit({ type: "run.memory_captured", runId, householdId: run.householdId, memoryType: type });
+  // Asked again after the judge: the turn that created this run may have handed a surprise
+  // over while the judge was thinking, and stamped the run on its way out.
+  if (isSecretRun(getRun(runId))) return;
+  const room = runMemoryRoom(run);
+  addMemory({ householdId: run.householdId, scope: room.scope, ...(room.nestId ? { nestId: room.nestId } : {}), type, text, source: { runId, actorId: run.actorId, via: "auto" } });
+  appendAudit({ type: "run.memory_captured", runId, householdId: run.householdId, memoryType: type, scope: room.scope });
 }
 function extractJSONLoose(text) {
   if (!text) return null;
@@ -373,7 +409,9 @@ async function execResolved(resolved, input, ctx, approvalId) {
     // WP-005: the acting AGENT travels with the call. homeops.notify_contact enforces
     // the recipient's per-agent allowlist, and it cannot do that without knowing who
     // is acting — an unattributed send would silently skip that gate.
-    return await resolved.def.run({ householdId: ctx.householdId, actorId: ctx.actorId, runId: ctx.runId, agentId: ctx.agentId ?? null }, input);
+    // `ledger` (ADR-005): the turn's record of whether a surprise was handed over, which
+    // homeops.write_memory reads to record nothing for the rest of that turn.
+    return await resolved.def.run({ householdId: ctx.householdId, actorId: ctx.actorId, runId: ctx.runId, agentId: ctx.agentId ?? null, ledger: ctx.ledger ?? null }, input);
   }
   if (resolved.kind === "native") {
     /* A native action's body reads the session and the channel (actions/native/*), so its
@@ -386,6 +424,9 @@ async function execResolved(resolved, input, ctx, approvalId) {
     if (!ctx.role) return { ok: false, error: "no_requester_role", message: "This step can only run for the person who asked for it, and this run doesn't say who that was — nothing was changed." };
     const session = { householdId: ctx.householdId, actorId: ctx.actorId, role: ctx.role, ...(ctx.actorName ? { actorName: ctx.actorName } : {}) };
     const channel = ctx.channel ?? "personal";
+    /* Who could read the turn that queued this step (ADR-005), as the turn decided it; a run
+     * that recorded none reads as "shared" — a surprise is withheld, never spoken. */
+    const audience = ctx.audience === "self" ? "self" : "shared";
     /* A backstop (review finding L4): the chat lane only offers a tool whose available() says
      * yes for this person here — the helper tools need an adult, outside the group thread — so a
      * run should never hold one that does not. It is asked again before the step runs, for the
@@ -393,10 +434,14 @@ async function execResolved(resolved, input, ctx, approvalId) {
     if (!resolved.def.available({ session, channel, asHelper: false })) {
       return { ok: false, error: "tool_not_available", message: "That isn't something that can be done for this person from here — nothing was changed." };
     }
-    return await resolved.def.invoke({
-      householdId: ctx.householdId, actorId: ctx.actorId, role: ctx.role, channel, session,
+    const ledger = ctx.ledger ?? {};
+    const out = await resolved.def.invoke({
+      householdId: ctx.householdId, actorId: ctx.actorId, role: ctx.role, channel, audience, ledger, session,
       via: "agent", runId: ctx.runId ?? null, agentId: ctx.agentId ?? null, asHelper: false,
     }, input);
+    // A step that handed a surprise over marks its run as the turn would have (ADR-005).
+    if (ledger.secretReleased && ctx.runId) markRunSecret(ctx.runId);
+    return out;
   }
   if (resolved.kind === "provider") {
     if (!externalActionsEnabled(ctx.householdId) && ["Write", "Send", "Download"].includes(resolved.action)) {
@@ -461,7 +506,7 @@ async function execResolved(resolved, input, ctx, approvalId) {
  * behaviour change families would feel as new nagging, and it is not what was asked for.
  * The rule itself is written channel-agnostically; only the group lane passes the flag,
  * so widening it later is a change at a call site rather than a rewrite of the policy. */
-export async function executeToolForChat({ toolId, input = {}, session, agent = null, conversationId = null, actorIsAdult = null } = {}) {
+export async function executeToolForChat({ toolId, input = {}, session, agent = null, conversationId = null, actorIsAdult = null, ledger = null } = {}) {
   const householdId = session?.householdId;
   const actorId = session?.actorId ?? null;
   if (!householdId) return { ok: false, error: "no_session", message: "No household session." };
@@ -492,7 +537,7 @@ export async function executeToolForChat({ toolId, input = {}, session, agent = 
   let out;
   const t0 = Date.now();
   try {
-    out = await withTimeout(execResolved(resolved, input, { householdId, actorId, runId: null, accountId: null, agentId: agent?.id ?? null }, undefined), RUN_STEP_TIMEOUT_MS);
+    out = await withTimeout(execResolved(resolved, input, { householdId, actorId, runId: null, accountId: null, agentId: agent?.id ?? null, ledger }, undefined), RUN_STEP_TIMEOUT_MS);
   } catch (e) {
     out = { ok: false, error: "timeout", message: String(e?.message ?? e) };
   }
@@ -563,7 +608,7 @@ export function gateToolCall({ cap, toolId, agent = null, householdId, actorId =
  * policy, { ok:false, error, message, policyBlocked:true } with the errors
  * executeToolForChat uses — or, for decision C, { ok:false, needsApproval:true, rule }. */
 const NATIVE_NEVER_ASKS = "This helper is set to ask before doing this, and a change like this is never held for approval — nothing was done.";
-export async function runNativeAction({ action, input = {}, session, agent = null, channel = "personal", conversationId = null, asHelper = false, actorIsAdult = null } = {}) {
+export async function runNativeAction({ action, input = {}, session, agent = null, channel = "personal", audience = "shared", ledger = null, conversationId = null, asHelper = false, actorIsAdult = null } = {}) {
   const householdId = session?.householdId;
   const actorId = session?.actorId ?? null;
   if (!householdId) return { ok: false, error: "no_session", message: "No household session." };
@@ -586,7 +631,10 @@ export async function runNativeAction({ action, input = {}, session, agent = nul
     appendAudit({ type: "assistant.tool_blocked", toolId, agentId: agent?.id ?? null, rule, reason: gate.decision?.reason ?? null, householdId, actorId, conversationId });
     return { ok: false, error: `policy_${rule}`, message: NATIVE_NEVER_ASKS, policyBlocked: true };
   }
-  const ctx = { householdId, actorId, role: session.role, channel, session, via: "agent", runId: null, agentId: agent?.id ?? null, asHelper: !!asHelper };
+  /* `audience` and `ledger` (ADR-005) ride next to the channel: who can read this turn, so a
+   * read knows whether an owner's surprise may be spoken, and the turn's record of whether one
+   * was — the chat lane decides both for the turn, never a client. */
+  const ctx = { householdId, actorId, role: session.role, channel, audience: audience === "self" ? "self" : "shared", ledger, session, via: "agent", runId: null, agentId: agent?.id ?? null, asHelper: !!asHelper };
   let out;
   const t0 = Date.now();
   try {
@@ -1092,7 +1140,9 @@ async function _drive(runId) {
     const who = native ? requesterSession(run) : null;
     const stepCtx = {
       householdId: run.householdId, actorId: run.actorId, runId, accountId: run.params?.accountId, agentId: run.sourceRef?.agentId ?? null,
-      ...(native ? { role: who.role, channel: run.sourceRef?.channel ?? null, actorName: who.actorName } : {}),
+      ...(native ? { role: who.role, channel: run.sourceRef?.channel ?? null, audience: run.sourceRef?.audience ?? null, actorName: who.actorName } : {}),
+      // A run from a turn that handed a surprise over writes no memory either (ADR-005).
+      ...(isSecretRun(run) ? { ledger: { secretReleased: true } } : {}),
     };
     try {
       out = await withTimeout(execResolved(resolved, stepNow.input, stepCtx, approvalId), native ? resolved.def.timeoutMs : RUN_STEP_TIMEOUT_MS);

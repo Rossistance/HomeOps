@@ -2,7 +2,8 @@
 // own durable state (memory, artifacts, approved decisions). These are first-class
 // executable tools in the run engine, distinct from external connector/provider
 // tools. Every handler does real work and returns a real result — no simulation.
-import { addMemory, addArtifact, getEvent, patchEvent, listContactMethods, listAgents, getAgent, getMember } from "./store.mjs";
+import { addMemory, addArtifact, getEvent, patchEvent, listContactMethods, listAgents, getAgent, getMember, canSeeEntity } from "./store.mjs";
+import { hiddenEventRefusal } from "./event-privacy.mjs";
 import { localMidnightISO } from "./household-time.mjs";
 import { searchPlaces } from "./places.mjs";
 import { understandFile } from "./file-understanding.mjs";
@@ -17,7 +18,31 @@ import { ACTION_INTERNAL_FUNCTIONS } from "./actions/registry.mjs";
 import crypto from "node:crypto";
 
 const MEMORY_SCOPES = ["household", "personal", "nest"];
+/** The refusal create_artifact and send_notification_draft give in a turn (or conversation)
+ * that handed a surprise over — see homeops.write_memory for the rule. */
+const PRIVATE_TURN_ARTIFACT = Object.freeze({ ok: false, error: "private_turn", message: "I can't save that as a document, because this conversation included a private surprise and anything saved there would be visible to the household. I haven't saved anything — I can write it out here instead." });
 const PRIORITIES = ["low", "medium", "high"];
+
+/* The four event-editing tools below (checklist, driver, what-to-bring, attach) once took any
+ * event id in the household and wrote to it: no visibility check, no owner check, and a ctx
+ * with no role in it (engine.mjs hands an internal tool householdId/actorId/runId only). So
+ * the actor is resolved from the roster here — the role is the store's, never the run's — and
+ * the event is refused when that person could not see it, or when it is someone else's hidden
+ * event (ADR-005: a hidden event is its owner's alone to change).
+ * @returns {{ ev } | { error: { ok: false, error, message } }} */
+function eventForActor(ctx, eventId) {
+  const ev = getEvent(eventId);
+  if (!ev || ev.householdId !== ctx.householdId) return { error: { ok: false, error: "event_not_found", message: "No such event." } };
+  const m = getMember(ctx.actorId);
+  if (!m || m.archived || (m.householdId && m.householdId !== ctx.householdId)) {
+    return { error: { ok: false, error: "forbidden", message: "This can only be done for a current member of the household — nothing was changed." } };
+  }
+  const actor = { actorId: m.actorId, role: m.role };
+  if (!canSeeEntity(ev, actor)) return { error: { ok: false, error: "forbidden", message: "That event isn't one you can change — nothing was changed." } };
+  const hidden = hiddenEventRefusal(ev, actor);
+  if (hidden) return { error: { ok: false, error: hidden.error, message: hidden.message } };
+  return { ev };
+}
 
 export const INTERNAL_FUNCTIONS = {
   /* ---- Helper (agent) inspection + iteration is NOT in this registry ----------------
@@ -132,6 +157,13 @@ export const INTERNAL_FUNCTIONS = {
     connectorName: "FamiliOS",
     // Persist a household/personal memory entry the assistant can recall later.
     async run(ctx, input) {
+      /* A turn that handed an owner's surprise over records NOTHING (ADR-005) — in any scope,
+       * because even a "personal" memory is text an index, a search and a later briefing read,
+       * and the whole point of a surprise is that it stays where it was said. For the rest of
+       * that turn this refuses, with a sentence the model can repeat. */
+      if (ctx?.ledger?.secretReleased) {
+        return { ok: false, error: "private_turn", message: "Nothing from this conversation is being remembered, because it included a private surprise. I haven't saved anything — say it again another time if you want it kept." };
+      }
       const text = String(input?.text ?? "").trim();
       if (!text) return { ok: false, error: "empty_text", message: "Nothing to remember." };
       // "family" was a fourth scope no reader recognised (it fell through as household-
@@ -168,6 +200,11 @@ export const INTERNAL_FUNCTIONS = {
     connectorName: "FamiliOS",
     // Produce a durable artifact (briefing / report / checklist) tied to the run.
     async run(ctx, input) {
+      /* A turn that handed an owner's surprise over records nothing (ADR-005), and an artifact
+       * is a record — a chat turn's has no run, so the Library lists it to the WHOLE household,
+       * the person the surprise is for included. The artifact store has no personal scope to
+       * narrow it to, so it is refused, with a sentence the model can repeat. */
+      if (ctx?.ledger?.secretReleased) return PRIVATE_TURN_ARTIFACT;
       const title = String(input?.title ?? "Untitled").trim();
       const body = String(input?.body ?? "");
       const rec = addArtifact({
@@ -230,8 +267,8 @@ export const INTERNAL_FUNCTIONS = {
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
-      const ev = getEvent(input?.eventId);
-      if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
+      const { ev, error } = eventForActor(ctx, input?.eventId);
+      if (error) return error;
       const items = Array.isArray(input?.items) ? input.items : [];
       const checklist = items.map((it) => (typeof it === "string" ? { text: it, done: false } : { text: String(it.text ?? ""), done: !!it.done }));
       const rec = patchEvent(ev.id, { checklist });
@@ -249,8 +286,8 @@ export const INTERNAL_FUNCTIONS = {
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
-      const ev = getEvent(input?.eventId);
-      if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
+      const { ev, error } = eventForActor(ctx, input?.eventId);
+      if (error) return error;
       const rec = patchEvent(ev.id, { driverId: input?.driverId ?? null });
       return { ok: true, result: { id: rec.id, driverId: rec.driverId } };
     },
@@ -266,8 +303,8 @@ export const INTERNAL_FUNCTIONS = {
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
-      const ev = getEvent(input?.eventId);
-      if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
+      const { ev, error } = eventForActor(ctx, input?.eventId);
+      if (error) return error;
       const items = Array.isArray(input?.items) ? input.items : [];
       const whatToBring = items.map((it) => (typeof it === "string" ? { item: it, memberId: null } : { item: String(it.item ?? ""), memberId: it.memberId ?? null }));
       const rec = patchEvent(ev.id, { whatToBring });
@@ -296,8 +333,8 @@ export const INTERNAL_FUNCTIONS = {
     connectorId: "homeops",
     connectorName: "FamiliOS",
     async run(ctx, input) {
-      const ev = getEvent(input?.eventId);
-      if (!ev || ev.householdId !== ctx.householdId) return { ok: false, error: "event_not_found", message: "No such event." };
+      const { ev, error } = eventForActor(ctx, input?.eventId);
+      if (error) return error;
       const attachment = { kind: input?.fileRef ? "file" : "note", text: String(input?.note ?? ""), fileRef: input?.fileRef ?? null, at: nowISO(), by: ctx.actorId };
       const rec = patchEvent(ev.id, { attachments: [...(ev.attachments ?? []), attachment] });
       return { ok: true, result: { id: rec.id, attachmentCount: rec.attachments.length } };
@@ -322,6 +359,8 @@ export const INTERNAL_FUNCTIONS = {
     // Review-first: produces a DRAFT artifact for a human to review, never sends.
     // Actually sending goes through a gated connector tool (sms/gmail) + approval.
     async run(ctx, input) {
+      // A draft is an artifact too, listed to the household — same refusal as create_artifact.
+      if (ctx?.ledger?.secretReleased) return PRIVATE_TURN_ARTIFACT;
       const to = String(input?.to ?? "").trim();
       const body = String(input?.body ?? input?.message ?? "").trim();
       if (!body) return { ok: false, error: "empty_body", message: "Nothing to draft." };

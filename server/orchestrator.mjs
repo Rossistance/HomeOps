@@ -94,8 +94,15 @@ export function resolveActingHelper({ agentId = null, session = null } = {}) {
  * sourceRef — where the engine reads authority — and, like agentId, they are SERVER-ASSIGNED:
  * a caller's sourceRef can never carry them in (they are dropped from it here, and
  * index.mjs clientSourceRef strips them from a request body), and only the parameters below,
- * which only server code passes, can put them on a run. */
-const VERDICT_INPUTS = ["channel", "actorIsAdult", "actorRole"];
+ * which only server code passes, can put them on a run.
+ *
+ * `audience` and `secret` (ADR-005) ride the same way. audience ("self" | "shared") is who
+ * can read the conversation the step came from — whether an owner's surprise may be spoken
+ * there — so a write executed later from an approval reads events as the turn did. secret
+ * marks a run born in a turn that handed a surprise over: it records nothing to memory and
+ * only its requester can see it. A body that could set either could unlock a surprise in a
+ * group thread, or hide its run from the household. */
+const VERDICT_INPUTS = ["channel", "actorIsAdult", "actorRole", "audience", "secret"];
 
 /* ---- SECURITY (WP-005 adversarial review, finding C1) ----
  * `sourceRef` is not decoration: the engine reads `sourceRef.agentId` to decide which
@@ -122,11 +129,14 @@ const VERDICT_INPUTS = ["channel", "actorIsAdult", "actorRole"];
  *                  Stage 2): whether policy rule 4b applies in the run, whether a native
  *                  write is held for an adult, and the role a native step runs as. A body
  *                  that could set them could clear its own park or run as an Owner.
+ *   audience, secret → who could read the turn, and whether it handed over a surprise
+ *                  (ADR-005): a body that set them could read a surprise in a shared room,
+ *                  or hide a run from the household.
  *
  * Moved here from index.mjs (which starts a server when it loads) so it can be tested on its
  * own. It is the route's half of the guard; orchestrate's own drop of VERDICT_INPUTS below is
  * the other, and each is tested without the other. */
-const SERVER_ASSIGNED_SOURCEREF = ["agentId", "skillId", "triggerId", "automationId", "channel", "actorIsAdult", "actorRole"];
+const SERVER_ASSIGNED_SOURCEREF = ["agentId", "skillId", "triggerId", "automationId", "channel", "actorIsAdult", "actorRole", "audience", "secret"];
 export function clientSourceRef(raw) {
   if (!raw || typeof raw !== "object") return {};
   const out = { ...raw };
@@ -137,7 +147,7 @@ export function clientSourceRef(raw) {
 export async function orchestrate({
   source = "manual", via, plan = null, goal = null, agentId = null,
   params = {}, session, conversationId = null, sourceRef = {}, visibility,
-  channel = null, actorIsAdult = null, actorRole = null,
+  channel = null, actorIsAdult = null, actorRole = null, audience = null, secret = false,
 } = {}) {
   if (!plan || typeof plan !== "object") {
     return { error: "nothing_to_run", message: "A run needs a plan." };
@@ -177,6 +187,8 @@ export async function orchestrate({
     ...(typeof channel === "string" && channel ? { channel } : {}),
     ...(typeof actorIsAdult === "boolean" ? { actorIsAdult } : {}),
     ...(typeof actorRole === "string" && actorRole ? { actorRole } : {}),
+    ...(audience === "self" || audience === "shared" ? { audience } : {}),
+    ...(secret === true ? { secret: true } : {}),
   };
 
   const run = await startRun({

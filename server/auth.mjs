@@ -70,7 +70,7 @@ export function clearSessionCookie() {
 export function corsHeaders(req) {
   const origin = req.headers.origin;
   const h = {
-    "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
+    "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     // x-homeops-bearer is the mobile client's "hand me a token" marker. Native fetch sends no
     // preflight, so its absence here only ever bit the mobile WEB build — which could load
     // profiles but never sign in (the POST was refused at the CORS preflight).

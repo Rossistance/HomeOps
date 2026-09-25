@@ -24,7 +24,7 @@ import {
   toolCatalog, pruneCatalogForPrompt, buildServerContext, activeProviderId, INTERNAL_INPUTS,
   attachmentSection,
 } from "./context.mjs";
-import { executeToolForChat, runNativeAction } from "./engine.mjs";
+import { executeToolForChat, runNativeAction, markRunSecret } from "./engine.mjs";
 import { getAction, NATIVE_ACTIONS } from "./actions/registry.mjs";
 import { KEY_HINTS, short } from "./actions/native/shared.mjs";
 import { splitList } from "./actions/define-action.mjs";
@@ -158,6 +158,27 @@ function summarizeForCard(toolId, result) {
  * whether it is on this turn's menu — the helper tools need an adult, not a helper run, and
  * never the group thread — and buildToolSet runs it through engine.mjs runNativeAction.
  * ------------------------------------------------------------------------------------ */
+/* WHO IS LISTENING (ADR-005). Every turn has an audience, decided here on the server from
+ * where it arrived and never taken from a client: "self" when the asker is alone with the
+ * assistant, "shared" when anyone else can read the answer. It decides one thing — whether an
+ * owner's SURPRISE (a birthday, a gift, a vacation…) may be spoken — and, with it, whether the
+ * catalog's raw calendar reads are on the menu at all (buildToolSet).
+ *
+ * An Ask turn is "self" only in a Personal chat that belongs to the asker, or with no stored
+ * conversation (the answer reaches only the asker). A Family chat, a nest chat, or anyone
+ * else's thread is "shared". The 1:1 text lane and the group lane decide their own (sms.mjs,
+ * group-agent.mjs); a helper's run is always "shared". */
+export function askAudience(conv, session) {
+  if (!conv) return "self";
+  if (conv.householdId !== session?.householdId || conv.actorId !== session?.actorId) return "shared";
+  return conv.visibility === "household" || conv.visibility === "nest" ? "shared" : "self";
+}
+
+/* The catalog's own calendar readers read the ASKER'S raw provider calendar — no Work-calendar
+ * blocks, no surprise rule, no channel gate. On a turn others can read they are simply not
+ * offered; famili.list_events, which goes through event-privacy.mjs, is. */
+const RAW_CALENDAR_READS = new Set(["calendar.list", "mscal.list"]);
+
 function nativeTools(ctx) {
   return NATIVE_ACTIONS.filter((a) => a.available({ session: ctx.session, channel: ctx.channel ?? "personal", asHelper: !!ctx.asHelper }));
 }
@@ -193,7 +214,13 @@ function buildToolSet(ctx) {
    * a person's one-off request: the engine's "an automation keeps not finishing" alert is for
    * the first and never the second (engine.mjs notifyRepeatedNonDelivery). */
   const queueForApproval = async (entry, { toolId, input, title, actorIsAdult }) => {
-    const q = await queueApprovalRun({ toolId, input, title, session, conversationId, goal: message, visibility, agentId: agent?.id ?? null, channel: ctx.channel, actorIsAdult, via: ctx.asHelper ? "agent" : "chat" });
+    /* A run queued after this turn handed a surprise over is born secret (ADR-005): it records
+     * nothing, only the asker can see it, and its approval stays with the asker rather than
+     * reaching every adult with the ask it came from. Runs queued earlier in the turn are
+     * stamped when the turn ends (runAssistantAgent). */
+    const secret = !!ctx.ledger?.secretReleased;
+    const q = await queueApprovalRun({ toolId, input, title, session, conversationId, goal: message, visibility: secret ? "personal" : visibility, agentId: agent?.id ?? null, channel: ctx.channel, actorIsAdult, via: ctx.asHelper ? "agent" : "chat", audience: ctx.audience, secret });
+    if (q.runId) ctx.createdRunIds?.push(q.runId);
     if (!q.ok) { record(entry, "failed", { ok: false, summary: q.message ?? q.error }); return { ok: false, error: q.error, message: q.message }; }
     if (q.status === "completed") { record(entry, "done", { ok: true, summary: summarizeForCard(toolId, q.result), runId: q.runId }); return { ok: true, result: boundResult(q.result), runId: q.runId }; }
     if (!ctx.firstRunId) ctx.firstRunId = q.runId;
@@ -207,6 +234,7 @@ function buildToolSet(ctx) {
 
   for (const t of catalog) {
     if (!permittedIds.has(t.toolId)) continue;
+    if (ctx.audience !== "self" && RAW_CALENDAR_READS.has(t.toolId)) continue;
     if (!t.connected) { if (t.connectorName) notConnected.push(`${t.connectorName} (${t.name})`); continue; }
     const name = toToolName(t.toolId);
     const entry = { id: t.toolId, label: t.name, action: t.action, connectorName: t.connectorName };
@@ -225,7 +253,7 @@ function buildToolSet(ctx) {
          * than executed. `null` everywhere else leaves the ladder exactly as it was. */
         const actorIsAdult = ctx.channel === "group" ? isAdultRole(session.role) : null;
         const out = await executeToolForChat({
-          toolId: t.toolId, input, session, agent, conversationId, actorIsAdult,
+          toolId: t.toolId, input, session, agent, conversationId, actorIsAdult, ledger: ctx.ledger,
         });
         if (out.ok) {
           record(entry, "done", { summary: summarizeForCard(t.toolId, out.result), ok: true });
@@ -250,7 +278,7 @@ function buildToolSet(ctx) {
         ctx.onToolStart?.(entry);
         const actorIsAdult = ctx.channel === "group" ? isAdultRole(session.role) : null;
         const out = await runNativeAction({
-          action, input, session, agent, channel: ctx.channel, conversationId, asHelper: !!ctx.asHelper, actorIsAdult,
+          action, input, session, agent, channel: ctx.channel, audience: ctx.audience, ledger: ctx.ledger, conversationId, asHelper: !!ctx.asHelper, actorIsAdult,
         });
         if (out?.ok) { record(entry, "done", { ok: true, summary: summarizeForCard(action.id, out.result) }); return { ok: true, result: boundResult(out.result) }; }
         // Decision C: a non-adult's write in the group thread waits for an adult, exactly as a
@@ -290,14 +318,14 @@ function buildToolSet(ctx) {
 export async function queueApprovalRun({
   toolId, input, title, session, conversationId, goal, visibility,
   source = "assistant", via = "chat", summaryPrefix = "Asked in chat",
-  agentId = null, channel = null, actorIsAdult = null,
+  agentId = null, channel = null, actorIsAdult = null, audience = null, secret = false,
 }) {
   if (!roleAtLeast(session.role, "Limited Member")) return { ok: false, error: "insufficient_role", message: "This profile can't start actions that need approval." };
   let r;
   try {
     r = await orchestrate({
       source, via, session, conversationId, goal, visibility,
-      agentId, channel, actorIsAdult, actorRole: session.role ?? null,
+      agentId, channel, actorIsAdult, actorRole: session.role ?? null, audience, secret,
       plan: { title, summary: `${summaryPrefix}: ${String(goal).slice(0, 140)}`, steps: [{ toolId, title, detail: String(goal).slice(0, 240), input, requiresApproval: true }] },
     });
   } catch (e) { return { ok: false, error: "run_failed", message: String(e?.message ?? e) }; }
@@ -338,6 +366,7 @@ HOW YOU WORK
 - Durable facts and preferences the family states ("we're vegetarian", "Grandma visits Sundays"): save them with homeops__write_memory (scope household) so every future conversation knows.
 - Attachments: an ATTACHED section in the message is the real contents of a file just read on the server — answer from it. context.attachedAlsoNames lists files you have NOT read; say so. A schedule/invitation/permission slip in a file: use homeops__extract_from_file so the family picks what to add; don't add nine events yourself.
 - Roster changes (add/remove members) are done by people in Settings → Household; point there.
+- Hidden time: an event titled "<Name> working" or "<Name> busy" (hidden: true) is someone's hidden time — say only that they are working/busy then, and never guess what it is. A "Private event" (withheld: true) is the asker's own surprise: tell them its details stay private in this conversation and that they can ask in their Personal chat.
 ${managesHelpers ? `- Something that should keep happening — "every morning", "each week", "from now on", "remind us whenever…" — is a HELPER. Call famili__list_helpers first (extend one that already covers it rather than making a near-duplicate), then famili__create_helper with instructions written as a clear paragraph addressed to the helper. It is created immediately: say what you made, when it next runs, and that they can edit or pause it in Helpers. A one-off request is never a helper — just do it.
 - To fix a helper that is doing the wrong thing: famili__list_helpers to find it, then famili__update_helper with the COMPLETE rewritten instructions — it applies immediately, so say exactly what changed. "Don't ask for permission any more" means famili__update_helper with autonomy "act"; say plainly that it will now act on its own.` : `- This profile can't set up or change helpers; do the one-off version now and say an adult can make it a standing helper.`}
 ${channel === "group" ? `
@@ -412,7 +441,7 @@ function turnNotice({ fellBackFrom, actionsDegraded }) {
  * Run one Ask Famili turn.
  * @returns {Promise<{ok:true, kind:"answer"|"build", answer:string, model:string, toolCalls:Array, runId?:string, runIds:string[], build?:object, degraded?:boolean, fellBackFrom?:string, notice?:string, actionsDegraded?:boolean, steps:number} | {ok:false, error:string, message:string}>}
  */
-export async function runAssistantAgent({ message, context, session, providerId, history, agent = null, conversationId = null, visibility, asHelper = false, channel = "personal" } = {}, { onToken, onPhase, onEvent } = {}) {
+export async function runAssistantAgent({ message, context, session, providerId, history, agent = null, conversationId = null, visibility, asHelper = false, channel = "personal", audience = "shared", ledger = null } = {}, { onToken, onPhase, onEvent } = {}) {
   const text = String(message ?? "").trim();
   if (!text) return { ok: false, error: "empty_message", message: "Type a message first." };
   if (!session?.householdId) return { ok: false, error: "authentication_required", message: "Sign in first." };
@@ -420,6 +449,13 @@ export async function runAssistantAgent({ message, context, session, providerId,
   if (!primaryId) return { ok: false, error: "no_provider", message: "No AI provider is connected for this household yet — that is set up by whoever runs this deployment, not in the app." };
   if (aiBudgetExhausted(session.householdId)) return { ok: false, error: "ai_budget_exhausted", message: "Your household's daily AI budget is used up — it resets at midnight (UTC). An admin can raise or remove the limit in Settings." };
 
+  /* The turn's audience and ledger (ADR-005). The caller decided who is listening and made the
+   * ledger at its entry point, so it can read ledger.secretReleased when the turn is done and
+   * record nothing; absent, the safe answers: "shared", and a ledger of our own. Every run the
+   * turn creates is collected here, across provider fallbacks, so it can be stamped secret. */
+  const turnAudience = audience === "self" && !asHelper ? "self" : "shared";
+  const turnLedger = ledger ?? {};
+  const createdRunIds = [];
   const phase = (p) => { try { onPhase?.(p); } catch { /* progress must never break a turn */ } };
   const event = (e) => { try { onEvent?.(e); } catch { /* ditto */ } };
   const settings = getSettings(session.householdId);
@@ -440,6 +476,7 @@ export async function runAssistantAgent({ message, context, session, providerId,
     if (!lm.ok) return { ok: false, error: lm.error, message: lm.message };
     const ctx = {
       session, agent, message: text, providerId: pid, conversationId, visibility, channel,
+      audience: turnAudience, ledger: turnLedger, createdRunIds,
       toolCalls: [], runIds: [], firstRunId: null, asHelper,
       onToolStart: (entry) => {
         event({ type: "tool", tool: entry.id, label: entry.label, status: "running" });
@@ -559,5 +596,8 @@ export async function runAssistantAgent({ message, context, session, providerId,
     }
   }
   if (!out.ok) delete out.transient;
+  /* A turn that handed a surprise over records nothing (ADR-005): every run it created is
+   * secret — including the ones created BEFORE the surprise came up in it. */
+  if (turnLedger.secretReleased) for (const id of createdRunIds) { try { markRunSecret(id); } catch { /* best effort; proposeRunMemory re-checks */ } }
   return out;
 }

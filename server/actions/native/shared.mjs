@@ -4,12 +4,13 @@
 // read-only refusal, and the per-turn scope every body derives from its ctx.
 //
 // A LEAF, like the registry that imports these files: store, auth, nests (which reaches only
-// the store) and nothing that reaches context.mjs, internal-functions.mjs or
-// assistant-agent.mjs. assistant-agent.mjs imports
+// the store), event-privacy (store and the event schema) and nothing that reaches
+// context.mjs, internal-functions.mjs or assistant-agent.mjs. assistant-agent.mjs imports
 // KEY_HINTS and short() back from here.
 import { listMembers, canSeeEntityInChannel, getEvent, getTask, getMeal, getMemoryEntry, getSettings } from "../../store.mjs";
 import { roleAtLeast } from "../../auth.mjs";
 import { canForgetMemory } from "../../nests.mjs";
+import { presentEvent, presentEvents, obscuredLabel, eventOwnerOf } from "../../event-privacy.mjs";
 
 /* The model's input hints by key name. The catalog's hand-written tools get their types and
  * meaning from this table (assistant-agent.mjs propFor), and the native schemas embed the
@@ -86,7 +87,29 @@ export function parseRange(input, defaultDays) {
 export const matches = (q, ...fields) => !q || fields.some((f) => String(f ?? "").toLowerCase().includes(String(q).toLowerCase()));
 export const memberName = (hh, id) => (id ? listMembers({ householdId: hh }).find((m) => m.actorId === id)?.displayName ?? id : null);
 
+/* What the model is told a WITHHELD record is (ADR-005): the asker's own surprise, asked about
+ * where others can read the answer. The sentence is the model's to pass on, so it says why and
+ * where the details can be had. */
+export const WITHHELD_NOTE = "This is the asker's own private event. Its details are kept private because other people can see this conversation — the asker can ask about it in their Personal chat with Famili.";
+
+/* The compact projection a model reads. Takes an event already through presentEvents (see
+ * presentForAsker below) — a hidden stretch of someone else's time arrives as a BLOCK and
+ * leaves as "<Name> working" with its owner and times only; the asker's own surprise, asked
+ * about where others may be listening, arrives WITHHELD and leaves as "Private event". Neither
+ * can carry a field presentEvents did not keep, because neither copies one. */
 export function publicEvent(hh, e) {
+  if (e?.block) {
+    return {
+      id: e.id, title: e.title, startAt: e.startAt ?? null, endAt: e.endAt ?? null, allDay: e.allDay === true,
+      owner: memberName(hh, e.ownerId), hidden: true, editable: false,
+    };
+  }
+  if (e?.privacy?.withheld) {
+    return {
+      id: e.id, title: "Private event", startAt: e.startAt ?? null, endAt: e.endAt ?? null, allDay: e.allDay === true,
+      withheld: true, note: WITHHELD_NOTE,
+    };
+  }
   return {
     id: e.id, title: e.title, startAt: e.startAt ?? null, endAt: e.endAt ?? null, allDay: e.allDay === true,
     location: e.location || undefined, status: e.status ?? undefined, category: e.category ?? undefined,
@@ -123,16 +146,37 @@ export const readOnly = () => ({ ok: false, error: "read_only_profile", message:
  * calendar on its very first tool call — the filter has to be where the data is read, not
  * where it is summarised. `seeable` is that one place for the native lane.
  *
- * The native ctx is { householdId, actorId, role, channel, session, via, runId, agentId,
- * asHelper } (engine.mjs runNativeAction). The bodies read the session, as they always did:
- * listHelpers / publicHelper / runHelper take it whole. */
+ * The native ctx is { householdId, actorId, role, channel, audience, ledger, session, via,
+ * runId, agentId, asHelper } (engine.mjs runNativeAction). The bodies read the session, as
+ * they always did: listHelpers / publicHelper / runHelper take it whole.
+ *
+ * `audience` is who can read the answer (ADR-005): "self" only where the asker is alone with
+ * the assistant, decided by the server for the turn. Absent means "shared" — the direction
+ * that withholds a surprise rather than speaking it. `ledger` is the turn's record of whether
+ * a surprise was handed over (so it records nothing); a call without one records nowhere. */
 export function nativeScope(ctx) {
   const { session } = ctx;
   const hh = session.householdId;
   const channel = ctx.channel ?? "personal";
+  const audience = ctx.audience === "self" ? "self" : "shared";
+  const ledger = ctx.ledger ?? null;
   const seeable = (e) => canSeeEntityInChannel(e, session, channel);
   const canWrite = roleAtLeast(session.role, "Limited Member");
-  return { session, hh, channel, seeable, canWrite };
+  return { session, hh, channel, audience, ledger, seeable, canWrite };
+}
+
+/* EVERY EVENT THE ASSISTANT READS GOES THROUGH event-privacy.mjs (ADR-005), for this asker,
+ * here, with this turn's ledger: someone else's hidden time becomes a block, the asker's own
+ * surprise is withheld unless they are alone with the assistant, and handing one over marks
+ * the turn. `presentForAsker` is the list form; `presentOneForAsker` one record (null when
+ * the asker may not see it at all). */
+export function presentForAsker(ctx, events) {
+  const { session, channel, audience, ledger } = nativeScope(ctx);
+  return presentEvents(events, session, { channel, purpose: "assistant", audience, ledger });
+}
+export function presentOneForAsker(ctx, e) {
+  const { session, channel, audience, ledger } = nativeScope(ctx);
+  return presentEvent(e, session, { channel, purpose: "assistant", audience, ledger });
 }
 
 /* Who gets which tool on a turn's menu — reproducing what nativeTools did inline. Reads and
@@ -176,7 +220,7 @@ const changes = (list) => (list.length ? ` → ${list.join(", ")}` : "");
 const visibleThere = (rec, session, channel) => canSeeEntityInChannel(rec, session, channel);
 const APPROVAL_LINES = {
   "famili.delete_task": { verb: "Delete a task", get: (i) => getTask(String(i.taskId ?? "")), visible: visibleThere, what: (t) => t.title },
-  "famili.delete_event": { verb: "Delete an event", get: (i) => getEvent(String(i.eventId ?? "")), visible: visibleThere, what: (e) => e.title },
+  "famili.delete_event": { verb: "Delete an event", get: (i) => getEvent(String(i.eventId ?? "")), event: true, visible: visibleThere, what: (e) => e.title },
   "famili.delete_meal": { verb: "Remove a meal", get: (i) => getMeal(String(i.mealId ?? "")), visible: (m, s, c) => !m.archived && visibleThere(m, s, c), what: (m) => m.title },
   "famili.delete_memory": {
     verb: "Forget a memory",
@@ -202,7 +246,7 @@ const APPROVAL_LINES = {
     ])}`,
   },
   "famili.update_event": {
-    verb: "Change an event", get: (i) => getEvent(String(i.eventId ?? "")), visible: visibleThere,
+    verb: "Change an event", get: (i) => getEvent(String(i.eventId ?? "")), event: true, visible: visibleThere,
     what: (e, i, hh, tz) => `${e.title}${changes([
       ...(i.startAt ? [whenText(i.startAt, tz)] : []),
       ...(i.endAt && !i.startAt ? [`ends ${whenText(i.endAt, tz)}`] : []),
@@ -216,13 +260,29 @@ const APPROVAL_LINES = {
     ])}`,
   },
 };
+/* An event on an approval is named as the ASKER may see it (ADR-005) — and, because the
+ * approval and its push reach every adult, a hidden event is named as its time block even
+ * when the asker is its owner: "<Name> busy", never the title they hid. (An owner's own write
+ * never parks today — only a non-adult's group write does, and only adults can hide — so this
+ * is the backstop, not the common path.) null: the asker could not see it; the line then names
+ * the action alone. */
+function eventAsNamed(e, hh, session, channel) {
+  const shown = presentEvent(e, session, { channel, purpose: "assistant", audience: "shared" });
+  if (!shown) return null;
+  if (shown.block) return shown;
+  if (shown.privacy?.obscured) {
+    return { ...shown, title: obscuredLabel(shown.privacy.kind, { displayName: memberName(hh, eventOwnerOf(e)) }) };
+  }
+  return shown;
+}
 export function approvalPreview(action, input = {}, { session = {}, channel = "personal" } = {}) {
   const hh = session?.householdId;
   const i = input && typeof input === "object" ? input : {};
   const spec = APPROVAL_LINES[action?.id];
   let head = action?.name ?? "A change";
   if (spec) {
-    const rec = spec.get(i);
+    const raw = spec.get(i);
+    const rec = raw && spec.event && raw.householdId === hh ? eventAsNamed(raw, hh, session, channel) : raw;
     const named = rec && rec.householdId === hh && spec.visible(rec, session, channel);
     let tz = null;
     try { tz = getSettings(hh).timezone || null; } catch { /* the stamp is still shown, unzoned */ }

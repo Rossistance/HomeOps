@@ -26,7 +26,7 @@ import {
   listSubscriptions, getSubscription, putSubscription, patchSubscription, deleteSubscriptionRec,
   listMeals, getMeal, putMeal, patchMeal,
   listKnowledge, getKnowledge, addKnowledge, patchKnowledge, removeKnowledge, normalizeVisibility,
-  listConversations, getConversation, putConversation, appendConversationMessage, deleteConversationRec,
+  listConversations, getConversation, putConversation, patchConversation, appendConversationMessage, deleteConversationRec,
   canSeeEntity, listMemory, listArtifacts, getMemoryEntry, deleteMemoryEntry,
   listRiskOverrides, putRiskOverride, deleteRiskOverrideRec, getRiskOverride,
   listNotifications, markNotificationRead,
@@ -39,7 +39,7 @@ import {
   assistantTurnKey, claimAssistantTurn, finishAssistantTurn, releaseAssistantTurn,
 } from "./store.mjs";
 import { startRun, resumeRun, cancelRun, recoverRuns, findRunByApprovalId, runEmitter, expireStaleRuns, setDraining, releaseAllLeases } from "./engine.mjs";
-import { createBackup, listBackups, readBackup, restoreBackup, backupTick, deleteBackupsFor, listLegacyBackups, readLegacyBackup, restoreLegacyBundle } from "./backup.mjs";
+import { createBackup, listBackups, readBackupForDownload, restoreBackup, backupTick, deleteBackupsFor, listLegacyBackups, readLegacyBackup, restoreLegacyBundle } from "./backup.mjs";
 import { exportHouseholdWithAudit } from "./export.mjs";
 import { registerAssistantRunHooks } from "./assistant-runs.mjs";
 import { platformMailReady, sendPlatformEmail, platformMailStatus } from "./mailer.mjs";
@@ -76,6 +76,7 @@ import { addEventTombstone } from "./store.mjs";
 import { listImessageChats, getImessageChat } from "./store.mjs";
 import { readPreviewToken, renderPreviewCard, renderPreviewGone } from "./preview-token.mjs";
 import { resolvePreview } from "./share-preview.mjs";
+import { privacyContext as eventPrivacyContext, obscureStateOf, obscuredLabel } from "./event-privacy.mjs";
 
 /** Which household owns the record a preview token names. resolvePreview gates on
  *  canSeeEntity, which never compares householdId, so this is the check that actually
@@ -101,6 +102,7 @@ import { getTrigger } from "./store.mjs";
 import { pushApprovalNotification, deliverNotification, sendVerificationCode, sendRecoveryCode, pushToMember } from "./notify.mjs";
 import { handleFamilyMessageRoutes } from "./family-messages-routes.mjs";
 import { handleActionRoutes } from "./actions/routes.mjs";
+import { hiddenEventRefusal, privacyContext, normalizeCalendarScope, calendarScopeAllows, presentEvent } from "./event-privacy.mjs";
 import { newEventRecord } from "./actions/schemas/event.mjs";
 import { newTaskRecord } from "./actions/schemas/task.mjs";
 import { syncMealGroceries, mealEventFields, retireMeal } from "./actions/meals.mjs";
@@ -118,7 +120,7 @@ import { listProviders as listConnectorProviders, providerById as connectorProvi
 import { buildAuthUrl, exchangeCode, apiForAccount } from "./oauth.mjs";
 import { listAccountsFor, getOwnedAccount, upsertAccount, revokeAccount, checkAccountHealth, sweepAccountHealth, publicAccount, accountStatusById } from "./accounts.mjs";
 import { generateMiniApp, toolCatalog } from "./context.mjs";
-import { runAssistantAgent } from "./assistant-agent.mjs";
+import { runAssistantAgent, askAudience } from "./assistant-agent.mjs";
 // The assistant message the durable thread keeps for one turn — shared by both routes so
 // the streaming and non-streaming paths can never persist different shapes.
 function assistantTurnMessage(out, at) {
@@ -141,6 +143,18 @@ function assistantTurnKeyFor(session, body) {
   return id ? assistantTurnKey(session, body?.conversationId ?? null, id) : null;
 }
 const TURN_IN_PROGRESS = { ok: false, error: "turn_in_progress", message: "That message is still being handled — it will show up in the thread in a moment." };
+/* ADR-005 — the ledger is per turn, but a surprise handed over in one turn is still in the
+ * conversation's history for every turn after it: the next "remind me to buy candles" would
+ * be remembered alongside the party it is for. So the release is stamped on the conversation
+ * (secretReleasedAt), and every later turn in it starts with a ledger that already says so —
+ * memory capture, write_memory and the artifact tools then record nothing, and its runs are
+ * born secret, exactly as in the turn that released it. */
+function turnLedger(conv) {
+  return conv?.secretReleasedAt ? { secretReleased: true } : {};
+}
+function stampSecretRelease(conv, ledger) {
+  if (conv && ledger.secretReleased && !conv.secretReleasedAt) patchConversation(conv.id, { secretReleasedAt: new Date().toISOString() });
+}
 // An agent turn that queued an approval-gated step reports the durable run the way a
 // legacy plan did, so both clients attach to it and watch it to a terminal state.
 function attachAgentRun(out) {
@@ -151,7 +165,7 @@ function attachAgentRun(out) {
 }
 
 const PORT = Number(process.env.PORT || 8787);
-const VERSION = "1.5.0"; // 1.5.0: calendar connections by role (who sees, syncs, edits, assigns, removes which calendar) and household auto-refresh. 1.4.1: a session in use renews (12h is an idle limit, a week absolute; a role or PIN change ends sessions). 1.4: Rung 4 (ADR-004) — native tools behind the gate, plan_meal declared, a child's group write waits for an adult
+const VERSION = "1.6.0"; // 1.6.0: hidden events and Work calendars (ADR-005) — only an event's owner sees through a hide; the assistant tells the owner everything, a surprise only where they are alone, and records nothing from that turn; Limited Member calendar scope. 1.5.0: calendar connections by role (who sees, syncs, edits, assigns, removes which calendar) and household auto-refresh. 1.4.1: a session in use renews (12h is an idle limit, a week absolute; a role or PIN change ends sessions). 1.4: Rung 4 (ADR-004) — native tools behind the gate, plan_meal declared, a child's group write waits for an adult
 
 // WP-006 s3 (connector sandbox): when HOMEOPS_CONNECTOR_SANDBOX=1, an OWNER
 // session seeds deterministic sandbox connector accounts for its household, so
@@ -500,6 +514,17 @@ function subscriptionOwnerOf(sub) {
   return { account, ownerActorId, owner };
 }
 const viewerOf = (session) => ({ actorId: session.actorId, role: session.role });
+/* ADR-005 — the doors that look an event up BY ID. GET /api/events honours a Limited Member's
+ * Owner-set calendar scope, but an id learned elsewhere (a task's eventId, a notification, a
+ * help request) used to walk straight round it: PATCH answered with the full record in a 409
+ * or a viewer-note reply. Out of scope is therefore "not found" — the same answer as a wrong
+ * id, so a probe cannot tell the two apart. */
+function eventOutOfScope(ev, session) {
+  return !calendarScopeAllows(ev, session, privacyContext(ev.householdId));
+}
+/** An event echoed in a reply, as this viewer's own screen would show it — never the raw
+ * record, which carries what a hide or a scope keeps back. */
+const eventForReply = (ev, session) => presentEvent(ev, session, { purpose: "app" });
 /* The ONLY shape a subscription leaves the server in. The raw record carries icsText and the
  * feed URL, and a feed URL is often a capability in itself (Google's "secret address",
  * school portals' tokenised links) — so a member who may not view a calendar gets only the
@@ -513,9 +538,15 @@ function subscriptionView(sub, session) {
   };
   const can = calendarCan(viewerOf(session), sub, owner);
   if (!can.view) return row;
+  // The feed address goes to the calendar's OWNER alone. Holding it is reading the calendar:
+  // fetch it directly and every title, place and attendee is there, around every hide a Work
+  // calendar or a hidden event makes (only the event's owner sees through one — not the
+  // household Owner, not an Admin; ADR-005 privacy review). Managers keep everything else
+  // (sync status, can); url stays in the shape as null, which clients already handle.
+  const ownsIt = !!ownerActorId && ownerActorId === session.actorId;
   return {
     ...row,
-    url: sub.url ?? null, lastSyncAt: sub.lastSyncAt ?? null, lastResult: sub.lastResult ?? null, eventCount: sub.eventCount ?? 0,
+    url: ownsIt ? (sub.url ?? null) : null, lastSyncAt: sub.lastSyncAt ?? null, lastResult: sub.lastResult ?? null, eventCount: sub.eventCount ?? 0,
     createdAt: sub.createdAt, accountId: sub.accountId ?? null, accountEmail: account?.displayName ?? null,
     createdBy: sub.createdBy ?? null, can,
   };
@@ -525,9 +556,17 @@ function subscriptionView(sub, session) {
 const CAL_ACTION_PHRASE = { sync: "sync this calendar", edit: "change this calendar", markWork: "mark this calendar as work", assign: "change whose calendar this is", remove: "remove this calendar" };
 function calendarRefusal(action, sub, owner) {
   const phrase = CAL_ACTION_PHRASE[action] ?? "change this calendar";
-  // Not even the Owner may: the only such case is marking a non-adult's calendar as work.
-  if (!calendarCan({ actorId: "\u0000owner", role: "Owner" }, sub, owner)[action]) return "Only an adult's calendar can be marked as work.";
   const first = owner ? (String(owner.displayName ?? "").trim().split(/\s+/)[0] || "Another member") : null;
+  // Work is the calendar owner's call alone (calendarCan): nobody else — not the Owner — can
+  // set or clear it, so the sentence names the owner, or says no one can when it is not an
+  // adult's calendar.
+  if (action === "markWork") {
+    if (!owner || !ADULT_ROLES.includes(owner.role)) return "Only an adult's calendar can be marked as work.";
+    return `Only ${first} can mark or unmark this calendar as work.`;
+  }
+  // Not even the Owner may: no other action is refused to the Owner today; kept so a new one
+  // cannot produce a sentence naming the Owner as able to.
+  if (!calendarCan({ actorId: "\u0000owner", role: "Owner" }, sub, owner)[action]) return `Nobody can ${phrase}.`;
   if (owner?.role === "Owner") return `Only ${first} (the Owner) can ${phrase}.`;
   const who = [];
   if (owner && calendarCan({ actorId: owner.actorId, role: owner.role }, sub, owner)[action]) who.push(first);
@@ -564,6 +603,12 @@ function resolveCalendarAddTarget(session, body, { countCap = true } = {}) {
 // (visibility "household"), where any household member can read and continue it.
 // canSeeMemory lives in nests.mjs now — ONE predicate for the API's GET and DELETE and for
 // the assistant's delete tool, so a tool can never touch a memory a route would hide.
+/* A run born in a turn that handed an owner's surprise over (ADR-005, sourceRef.secret) is
+ * its requester's alone — not the household's adults', not an Owner's — in the runs list, by
+ * id, and on every per-run route. Answered as a missing run, so its existence says nothing. */
+function secretRunHidden(r, session) {
+  return r?.sourceRef?.secret === true && r.actorId !== session.actorId;
+}
 function canSeeConversation(c, session) {
   if (!c || c.householdId !== session.householdId) return false;
   if (c.actorId === session.actorId) return true;
@@ -2015,7 +2060,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         const p = tenantEngine().tenantPath(hh, "audit.jsonl");
         if (!fs.existsSync(p)) return [];
         return fs.readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return { unparseable: l }; } });
-      });
+      }, g.session); // whose hidden events are theirs to export in full (ADR-005)
       if (!bundle) return json(res, 503, { error: "storage_unreadable", message: "Your data can't be read cleanly right now, so an export would be incomplete. Restore from a backup first." }, req);
       audit({ type: "household.export_downloaded", collections: bundle.meta.collections }, req, g.session);
       const body = Buffer.from(JSON.stringify(bundle, null, 2), "utf8");
@@ -2035,8 +2080,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
     const backupOne = path.match(/^\/api\/backups\/([^/]+)$/);
     if (backupOne && backupOne[1] !== "run" && backupOne[1] !== "restore" && method === "GET") {
       const g = gate(req, { requireSession: true, minRole: "Owner" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
-      const raw = readBackup(backupOne[1]);
+      // The redacted copy, never the file on disk: the snapshot holds every member's hidden
+      // events and surprises in full, and the Owner is not their owner (ADR-005). Restore
+      // still uses the complete snapshot, by name, server-side. See readBackupForDownload.
+      const raw = readBackupForDownload(backupOne[1], viewerOf(g.session));
       if (!raw) return json(res, 404, { error: "not_found" }, req);
+      if (!Buffer.isBuffer(raw)) return json(res, 422, { error: raw.error }, req);
+      audit({ type: "backup.downloaded", name: backupOne[1], redacted: true, ok: true }, req, g.session);
       res.writeHead(200, { "content-type": "application/gzip", "content-disposition": `attachment; filename="${backupOne[1]}"`, ...corsHeaders(req) });
       return res.end(raw);
     }
@@ -2276,6 +2326,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
         photoFileId: m.photoFileId ?? null,
         // Adult-granted AI access for a child (default off).
         aiEnabled: m.aiEnabled === true,
+        // The Owner's narrowing of a Limited Member's calendar (ADR-005). The Owner sets it
+        // and the Owner alone reads it back — that the teenager's view leaves out a parent's
+        // work calendar is not everyone's business, the teenager's included.
+        ...(g.session.role === "Owner" ? { calendarScope: m.calendarScope ?? null } : {}),
       }));
       return json(res, 200, { members }, req);
     }
@@ -2380,6 +2434,25 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const sessionsEnded = patch.role && patch.role !== m.role ? deleteSessionsForActor(m.actorId, g.session.householdId) : 0;
       audit({ type: "member.update", memberId: m.actorId, fields: Object.keys(patch), ok: true, ...(sessionsEnded ? { sessionsEnded } : {}) }, req, g.session);
       return json(res, 200, { member: { actorId: updated.actorId, displayName: updated.displayName, role: updated.role, relationship: updated.relationship ?? null, color: updated.color ?? null, photoFileId: updated.photoFileId ?? null, aiEnabled: updated.aiEnabled === true } }, req);
+    }
+    /* A Limited Member's calendar scope (ADR-005): the Owner narrows what their calendar
+     * shows — per other member "all", "none" or chosen calendars. Its own route, not a field
+     * on PATCH /api/members/:id (whose allow-list never admits it): the Owner-only rule and
+     * the validation live in one place, and nobody can set their own scope by editing their
+     * profile. Their own events and the ones they take part in always show (event-privacy). */
+    const memberScope = path.match(/^\/api\/members\/([^/]+)\/calendar-scope$/);
+    if (memberScope && method === "PUT") {
+      const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
+      if (g.session.role !== "Owner") return json(res, 403, { error: "owner_only", message: "Only the Owner can choose what a limited member's calendar shows." }, req);
+      const m = getMember(memberScope[1]);
+      if (!m || m.archived || (m.householdId && m.householdId !== g.session.householdId)) return json(res, 404, { error: "not_found" }, req);
+      if (m.role !== "Limited Member") return json(res, 400, { error: "not_limited_member", message: "A calendar scope applies to limited members only." }, req);
+      const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
+      const r = normalizeCalendarScope(body.scope, m, privacyContext(g.session.householdId));
+      if (!r.ok) return json(res, 400, { error: r.error, message: r.message }, req);
+      const updated = putMember({ actorId: m.actorId, calendarScope: r.value });
+      audit({ type: "member.calendar_scope", memberId: m.actorId, cleared: r.value === null, members: r.value ? Object.keys(r.value.members).length : 0, ok: true }, req, g.session);
+      return json(res, 200, { member: { actorId: updated.actorId, calendarScope: updated.calendarScope ?? null } }, req);
     }
     if (memberOne && method === "DELETE") {
       const g = gate(req, { minRole: "Adult Admin" }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
@@ -2550,7 +2623,8 @@ function mayWriteAgent(session, agent, nextVisibility) {
       });
       // Object-level scope: adults see the household's runs; low-trust roles
       // (Child View, Guest/Helper, Limited Member) see only runs they started.
-      const scoped = isAdultRole(g.session.role) ? runs : runs.filter((r) => r.actorId === g.session.actorId);
+      const scoped = (isAdultRole(g.session.role) ? runs : runs.filter((r) => r.actorId === g.session.actorId))
+        .filter((r) => !secretRunHidden(r, g.session));
       return json(res, 200, { runs: scoped.map(publicRun) }, req);
     }
     if (path === "/api/runs/start" && method === "POST") {
@@ -2587,7 +2661,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (runGet && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const r = getRun(runGet[1]);
-      if (!r || r.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!r || r.householdId !== g.session.householdId || secretRunHidden(r, g.session)) return json(res, 404, { error: "not_found" }, req);
       return json(res, 200, { run: publicRun(r) }, req);
     }
     // Interactive email review (item 3): correlate a completed run's gmail.search results
@@ -2599,7 +2673,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (runReview && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const r = getRun(runReview[1]);
-      if (!r || r.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!r || r.householdId !== g.session.householdId || secretRunHidden(r, g.session)) return json(res, 404, { error: "not_found" }, req);
       // 1) Metadata map: id -> {subject, from} from every gmail.search result.
       const meta = {};
       const labels = [];
@@ -2633,7 +2707,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (runResume && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const r = getRun(runResume[1]);
-      if (!r || r.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!r || r.householdId !== g.session.householdId || secretRunHidden(r, g.session)) return json(res, 404, { error: "not_found" }, req);
       await resumeRun(runResume[1]);
       return json(res, 200, { run: publicRun(getRun(runResume[1])) }, req);
     }
@@ -2641,7 +2715,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (runCancel && method === "POST") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const r = getRun(runCancel[1]);
-      if (!r || r.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!r || r.householdId !== g.session.householdId || secretRunHidden(r, g.session)) return json(res, 404, { error: "not_found" }, req);
       await cancelRun(runCancel[1]);
       audit({ type: "run.cancel", runId: runCancel[1], ok: true }, req, g.session);
       return json(res, 200, { run: publicRun(getRun(runCancel[1])) }, req);
@@ -2653,7 +2727,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (runEvents && method === "GET") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const r0 = getRun(runEvents[1]);
-      if (!r0 || r0.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!r0 || r0.householdId !== g.session.householdId || secretRunHidden(r0, g.session)) return json(res, 404, { error: "not_found" }, req);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no", ...corsHeaders(req) });
       // WP-101 slice 3: partially_failed is terminal. Omitting it here would leave the SSE
       // stream open forever on a finished run (the client waits on a run that will never
@@ -2703,8 +2777,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       if (!roleAtLeast(g.session.role, "Limited Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const ev = getEvent(eventAttendees[1]);
-      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!ev || ev.householdId !== g.session.householdId || eventOutOfScope(ev, g.session)) return json(res, 404, { error: "not_found" }, req);
       if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      { const hidden = hiddenEventRefusal(ev, g.session); if (hidden) return json(res, hidden.status, { error: hidden.error, message: hidden.message }, req); }
       /* "I shouldn't be able to change who's coming. That would be handled by the event
        * creator." Owner of the EVENT — being an adult, or even the household Owner, is not
        * a seat at someone else's guest list. Wanting on it goes through request-attend.
@@ -2751,7 +2826,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         }).catch(() => {});
       }
       audit({ type: "event.attendees_set", eventId: ev.id, count: ids.length, notified: added.length, ok: true }, req, g.session);
-      return json(res, 200, { event: updated, notified: added.length }, req);
+      return json(res, 200, { event: eventForReply(updated, g.session), notified: added.length }, req);
     }
     // E7 — accept or decline, for YOURSELF. An adult may answer on behalf of a child they can
     // already act for; nobody else can put words in another member's mouth.
@@ -2759,8 +2834,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (eventRsvp && method === "POST") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const ev = getEvent(eventRsvp[1]);
-      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!ev || ev.householdId !== g.session.householdId || eventOutOfScope(ev, g.session)) return json(res, 404, { error: "not_found" }, req);
       if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      // A participant of a hidden event is not its owner: they see a block, and a block
+      // has nothing to answer (ADR-005).
+      { const hidden = hiddenEventRefusal(ev, g.session); if (hidden) return json(res, hidden.status, { error: hidden.error, message: hidden.message }, req); }
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
       const status = ["accepted", "declined", "invited"].includes(body.status) ? body.status : null;
       if (!status) return json(res, 400, { error: "bad_status", message: "Answer with accepted, declined, or invited." }, req);
@@ -2809,7 +2887,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         }).catch(() => {});
       }
       audit({ type: "event.rsvp", eventId: ev.id, memberId, status, ok: true }, req, g.session);
-      return json(res, 200, { event: updated }, req);
+      return json(res, 200, { event: eventForReply(updated, g.session) }, req);
     }
 
     /* ---- Cluster D: the polite doors into someone else's event ----
@@ -2827,8 +2905,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (eventAsk && method === "POST") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const ev = getEvent(eventAsk[1]);
-      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!ev || ev.householdId !== g.session.householdId || eventOutOfScope(ev, g.session)) return json(res, 404, { error: "not_found" }, req);
       if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      { const hidden = hiddenEventRefusal(ev, g.session); if (hidden) return json(res, hidden.status, { error: hidden.error, message: hidden.message }, req); }
       const kind = eventAsk[2] === "request-attend" ? "attend" : eventAsk[2] === "offer-drive" ? "drive" : "bring";
       const owner = ev.ownerId ?? ev.createdBy;
       if (!owner) return json(res, 422, { error: "no_owner", message: "This event has no owner to ask." }, req);
@@ -2870,7 +2949,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
     if (eventRespond && method === "POST") {
       const g = gate(req, { requireSession: true }); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const ev = getEvent(eventRespond[1]);
-      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!ev || ev.householdId !== g.session.householdId || eventOutOfScope(ev, g.session)) return json(res, 404, { error: "not_found" }, req);
+      /* ownerId/createdBy below can disagree with who OWNS a hidden event (a synced event
+       * belongs to its calendar's owner), so the hide is checked first, by eventOwnerOf. */
+      { const hidden = hiddenEventRefusal(ev, g.session); if (hidden) return json(res, hidden.status, { error: hidden.error, message: hidden.message }, req); }
       // Only the owner answers — the same boundary as everywhere else in Cluster D.
       if (ev.ownerId !== g.session.actorId && ev.createdBy !== g.session.actorId) {
         return json(res, 403, { error: "not_event_owner", message: "Only the person whose event this is can answer requests on it." }, req);
@@ -2908,16 +2990,20 @@ function mayWriteAgent(session, agent, nextVisibility) {
         data: { type: "event", id: ev.id },
       }).catch(() => {});
       audit({ type: "event.request_responded", eventId: ev.id, kind, requester: actorId, accept, ok: true }, req, g.session);
-      return json(res, 200, { event: updated }, req);
+      return json(res, 200, { event: eventForReply(updated, g.session) }, req);
     }
     const eventOne = path.match(/^\/api\/events\/([^/]+)$/);
     if (eventOne && (method === "PATCH" || method === "POST")) {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const ev = getEvent(eventOne[1]);
-      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!ev || ev.householdId !== g.session.householdId || eventOutOfScope(ev, g.session)) return json(res, 404, { error: "not_found" }, req);
       // Seeing it is the only entry requirement — what you may WRITE is decided below,
       // where owner and viewer take different doors.
       if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      /* A hidden event (ADR-005) is its owner's alone — including the viewer's-margin door
+       * below: someone shown only "<Name> working" must not keep notes on the meeting
+       * underneath it, and a private note would also prove the event exists. */
+      { const hidden = hiddenEventRefusal(ev, g.session); if (hidden) return json(res, hidden.status, { error: hidden.error, message: hidden.message }, req); }
       // Three-layer calendar: canonical (FamiliOS-owned) events are always editable.
       // Linked events that originated in a connected Google Calendar are editable
       // TWO-WAY: the edit is written to Google first, then mirrored locally, so the
@@ -2929,13 +3015,18 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // is read-only here — you can see it and it syncs, but you can't edit or push it.
       const linkedGoogle = ev.layer === "linked" && isEditableLinkedGoogle(ev, g.session.householdId, g.session.actorId);
       const body = await readBody(req); if (!body) return json(res, 400, { error: "malformed_json" }, req);
-      const { id, householdId, createdBy, createdAt, ifUpdatedAt, ...patch } = body; // never reassign identity/ownership-of-record
+      // never reassign identity/ownership-of-record. shareState and secret are the owner's
+      // hide/surprise choice and have ONE door, POST /api/events/sharing (adult owner only);
+      // privacy and block are per-viewer decorations GET adds, never stored — a client that
+      // echoes the record back must not write them onto it.
+      const { id, householdId, createdBy, createdAt, ifUpdatedAt, shareState, secret, privacy, block, ...patch } = body;
       // ISS-105: the same guard on edit — a bad stamp here would make an event that
       // renders today silently vanish from every day view.
       if (badTimestamp(patch.startAt)) return json(res, 400, { error: "invalid_startAt", message: "That start date/time isn't a valid timestamp." }, req);
       if (badTimestamp(patch.endAt)) return json(res, 400, { error: "invalid_endAt", message: "That end date/time isn't a valid timestamp." }, req);
       if (ifUpdatedAt && ev.updatedAt && ifUpdatedAt !== ev.updatedAt) {
-        return json(res, 409, { error: "stale_write", message: "This event changed on another device — refresh and try again.", current: ev }, req);
+        // current is shown to whoever sent the stale write — as their screen shows it.
+        return json(res, 409, { error: "stale_write", message: "This event changed on another device — refresh and try again.", current: eventForReply(ev, g.session) }, req);
       }
       if ("remindOffsets" in patch && patch.remindOffsets !== undefined && !isValidReminderList(patch.remindOffsets)) {
         return json(res, 400, { error: "bad_reminder", message: "Pick reminder times from the offered list." }, req);
@@ -2993,7 +3084,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         const myNotes = putViewerNote({ eventId: ev.id, actorId: g.session.actorId, note: patch.localNotes, bring: patch.myBring });
         audit({ type: "event.viewer_note", eventId: ev.id, ok: true }, req, g.session);
         // viewerOnly: nothing on the shared record moved, and the client should say so.
-        return json(res, 200, { event: { ...ev, myNotes }, localOnly: true, viewerOnly: true }, req);
+        return json(res, 200, { event: { ...eventForReply(ev, g.session), myNotes }, localOnly: true, viewerOnly: true }, req);
       }
       /* Q2 — "it says edit at the source or copy it on the web app. Let me append to it
        * here in FamiliOS without syncing it back out."
@@ -3019,7 +3110,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         audit({ type: "event.append", eventId: ev.id, fields: Object.keys(patch), ok: true }, req, g.session);
         kickCalendarRefresh(g.session.householdId, "event.update");
         // localOnly is the honest part: nothing left this app.
-        return json(res, 200, { event: updated, localOnly: true }, req);
+        return json(res, 200, { event: eventForReply(updated, g.session), localOnly: true }, req);
       }
       if (linkedGoogle) {
         // Google-owned fields only — participants/checklists etc. stay FamiliOS-local
@@ -3034,7 +3125,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         }
         const updated = Object.keys(localOnly).length > 0 ? patchEvent(ev.id, localOnly) : getEvent(ev.id);
         kickCalendarRefresh(g.session.householdId, "event.update");
-        return json(res, 200, { event: updated }, req);
+        return json(res, 200, { event: eventForReply(updated, g.session) }, req);
       }
       const updated = patchEvent(ev.id, patch);
       audit({ type: "event.update", eventId: ev.id, ok: true }, req, g.session);
@@ -3048,12 +3139,15 @@ function mayWriteAgent(session, agent, nextVisibility) {
           .then((r) => appendAudit({ type: "calendar.autopush", eventId: updated.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) }))
           .catch(() => {});
       }
-      return json(res, 200, { event: updated }, req);
+      return json(res, 200, { event: eventForReply(updated, g.session) }, req);
     }
     if (eventOne && method === "DELETE") {
       const g = gate(req, {}); if (!g.ok) return json(res, g.status, { error: g.error }, req);
       const ev = getEvent(eventOne[1]);
-      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!ev || ev.householdId !== g.session.householdId || eventOutOfScope(ev, g.session)) return json(res, 404, { error: "not_found" }, req);
+      // Before the adult test: being an adult (even the household Owner) is no way into
+      // someone else's hidden event (ADR-005).
+      { const hidden = hiddenEventRefusal(ev, g.session); if (hidden) return json(res, hidden.status, { error: hidden.error, message: hidden.message }, req); }
       if (!isAdultRole(g.session.role) && ev.ownerId !== g.session.actorId) return json(res, 403, { error: "forbidden" }, req);
       // Edit-own-only: a linked event you didn't connect is read-only — refuse rather than
       // delete the local mirror (which would just re-import on the next sync anyway).
@@ -3207,7 +3301,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (mirrorKeys.length) {
         const linked = listEvents((e) => e.householdId === g.session.householdId && (e.taskId === tk.id || (tk.eventId && e.id === tk.eventId)))[0];
         const startAt = updated.startAt || updated.dueAt;
-        if (linked && startAt) {
+        /* ADR-005: once its owner has hidden the event, the task is no longer a way to write
+         * on it. Anyone else's edit (the household Owner's included) changes the task and
+         * leaves the hidden event exactly as its owner left it. */
+        if (linked && startAt && !hiddenEventRefusal(linked, g.session)) {
           const ev2 = patchEvent(linked.id, { title: updated.title, startAt, endAt: updated.endAt ?? null, notes: updated.notes ?? "" });
           if (getSettings(g.session.householdId).calendarAutoSync === true && ev2.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
             void pushEventToGoogle({ ev: ev2, householdId: g.session.householdId, actorId: updated.assignedMemberId || g.session.actorId })
@@ -3227,7 +3324,10 @@ function mayWriteAgent(session, agent, nextVisibility) {
       deleteTaskRec(tk.id);
       // The task's calendar mirror goes with it — including the pushed Google copy, best
       // effort — exactly as a meal's does. Deleting only the task left a phantom event.
-      const linkedEvents = listEvents((e) => e.householdId === g.session.householdId && (e.taskId === tk.id || (tk.eventId && e.id === tk.eventId)));
+      // Except a mirror its owner has since hidden (ADR-005): that is the owner's to delete,
+      // not a side effect of someone else clearing a task. It stays, and is not counted.
+      const linkedEvents = listEvents((e) => e.householdId === g.session.householdId && (e.taskId === tk.id || (tk.eventId && e.id === tk.eventId)))
+        .filter((e) => !hiddenEventRefusal(e, g.session));
       for (const e of linkedEvents) {
         if (e.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
           void deleteGoogleCopy({ ev: e, householdId: g.session.householdId, actorId: g.session.actorId })
@@ -3264,6 +3364,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
         notes: tk.notes ?? "",
       };
       const existing = listEvents((e) => e.householdId === g.session.householdId && e.taskId === tk.id)[0];
+      // Re-pushing overwrites the event's title, time and notes — which, on an event its owner
+      // has hidden, only the owner may do (ADR-005). Refused by name, as every event door is.
+      { const hidden = existing ? hiddenEventRefusal(existing, g.session) : null; if (hidden) return json(res, hidden.status, { error: hidden.error, message: hidden.message }, req); }
       if (existing) {
         const updated = patchEvent(existing.id, fields);
         if (getSettings(g.session.householdId).calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
@@ -3272,7 +3375,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         }
         audit({ type: "task.to_calendar", taskId: tk.id, eventId: existing.id, action: "updated", ok: true }, req, g.session);
         kickCalendarRefresh(g.session.householdId, "task.to-calendar");
-        return json(res, 200, { ok: true, event: updated, action: "updated" }, req);
+        return json(res, 200, { ok: true, event: eventForReply(updated, g.session), action: "updated" }, req);
       }
       const ev = putEvent(newEventRecord({
         ...fields, allDay: false, spaceId: tk.spaceId ?? "sp-family",
@@ -3283,7 +3386,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
       patchTask(tk.id, { eventId: ev.id });   // so the task row can say it's on the calendar
       audit({ type: "task.to_calendar", taskId: tk.id, eventId: ev.id, action: "created", ok: true }, req, g.session);
       kickCalendarRefresh(g.session.householdId, "task.to-calendar");
-      return json(res, 200, { ok: true, event: ev, action: "created" }, req);
+      return json(res, 200, { ok: true, event: eventForReply(ev, g.session), action: "created" }, req);
     }
 
     /* ---- Help requests: "can you help?" asks between members ----
@@ -3346,14 +3449,20 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (hr.proposal?.threadId) {
         try {
           const ev = hr.proposal.eventId ? getEvent(hr.proposal.eventId) : null;
-          if (status === "accepted" && ev && ev.householdId === g.session.householdId && hr.proposal.patch) {
+          /* A hidden event (ADR-005) is named in the thread by its block — "Beannie working" —
+           * whoever is reading, because a thread line is read by everyone in the thread, not
+           * by its owner alone. And it is changed only on its owner's word: the owner asked,
+           * or the owner is the one saying yes. */
+          const hid = ev ? obscureStateOf(ev, eventPrivacyContext(ev.householdId)) : null;
+          const ownerAgreed = !hid?.obscured || hid.ownerId === hr.fromActorId || hid.ownerId === g.session.actorId;
+          if (status === "accepted" && ev && ev.householdId === g.session.householdId && hr.proposal.patch && ownerAgreed) {
             const pp = hr.proposal.patch;
             const patch = {};
             if (pp.driverId) patch.driverId = String(pp.driverId);
             if (pp.participantId && !(ev.participantIds ?? []).includes(String(pp.participantId))) patch.participantIds = [...(ev.participantIds ?? []), String(pp.participantId)];
             if (Object.keys(patch).length) { patchEvent(ev.id, { ...patch, updatedAt: new Date().toISOString() }); applied = { eventId: ev.id, ...patch }; }
           }
-          const what = ev ? `“${ev.title}”${ev.startAt ? ` (${formatForHousehold(ev.startAt, g.session.householdId)})` : ""}` : `“${hr.message}”`;
+          const what = ev ? `“${hid?.obscured ? obscuredLabel(hid.kind, hid.owner) : ev.title}”${ev.startAt ?` (${formatForHousehold(ev.startAt, g.session.householdId)})` : ""}` : `“${hr.message}”`;
           const line = status === "accepted"
             ? (applied ? `${hr.toName} accepted — calendar updated: ${applied.driverId ? `${hr.toName} is driving to` : `${hr.toName} is going to`} ${what}, now on ${hr.toName}'s upcoming events.` : `${hr.toName} accepted: ${what}.`)
             : `${hr.toName} declined: ${what}${responseNote ? ` — ${responseNote}` : ""}.`;
@@ -3413,7 +3522,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       const affectsEvent = ["date", "slot", "time", "title", "notes", "ingredients", "instructions", "servings", "recipeUrl"].some((k) => k in patch);
       if (affectsEvent) {
         const linked = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id)[0];
-        if (linked && updated.date) {
+        // A meal event its owner has hidden is theirs to change (ADR-005): the meal moves,
+        // the hidden event stays as it is, and eventSynced says so.
+        if (linked && updated.date && !hiddenEventRefusal(linked, g.session)) {
           const ev2 = patchEvent(linked.id, mealEventFields(updated, householdTimeZone(g.session.householdId)));
           eventSynced = true;
           if (getSettings(g.session.householdId).calendarAutoSync === true && ev2.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
@@ -3480,6 +3591,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // Calendar's description — composed once, in mealEventFields, for every writer.
       const fields = mealEventFields(m, householdTimeZone(g.session.householdId));
       const existing = listEvents((e) => e.householdId === g.session.householdId && e.mealId === m.id)[0];
+      // Same rule as a task's to-calendar: a re-push rewrites the event, and a hidden one is
+      // its owner's alone to rewrite (ADR-005).
+      { const hidden = existing ? hiddenEventRefusal(existing, g.session) : null; if (hidden) return json(res, hidden.status, { error: hidden.error, message: hidden.message }, req); }
       if (existing) {
         const updated = patchEvent(existing.id, fields);
         if (getSettings(g.session.householdId).calendarAutoSync === true && updated.provenance?.googleEventId && externalActionsEnabled(g.session.householdId)) {
@@ -3487,7 +3601,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
             .then((r) => appendAudit({ type: "calendar.autopush", eventId: updated.id, ok: r.ok, ...(r.ok ? { action: r.action } : { error: r.error }) })).catch(() => {});
         }
         audit({ type: "meal.to_calendar", mealId: m.id, eventId: existing.id, action: "updated", ok: true }, req, g.session);
-        return json(res, 200, { ok: true, event: updated, action: "updated" }, req);
+        return json(res, 200, { ok: true, event: eventForReply(updated, g.session), action: "updated" }, req);
       }
       const ev = putEvent(newEventRecord({
         ...fields, ownerId: g.session.actorId, mealId: m.id,
@@ -3495,7 +3609,7 @@ function mayWriteAgent(session, agent, nextVisibility) {
         provenance: { via: "meal", actorId: g.session.actorId },
       }, g.session));
       audit({ type: "meal.to_calendar", mealId: m.id, eventId: ev.id, action: "created", ok: true }, req, g.session);
-      return json(res, 200, { ok: true, event: ev, action: "created" }, req);
+      return json(res, 200, { ok: true, event: eventForReply(ev, g.session), action: "created" }, req);
     }
 
     /* ---- Knowledge (KN): user-authored household knowledge ----
@@ -3667,8 +3781,9 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const body = (await readBody(req)) ?? {};
       const ev = getEvent(pushMatch[1]);
-      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!ev || ev.householdId !== g.session.householdId || eventOutOfScope(ev, g.session)) return json(res, 404, { error: "not_found" }, req);
       if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      { const hidden = hiddenEventRefusal(ev, g.session); if (hidden) return json(res, hidden.status, { error: hidden.error, message: hidden.message }, req); }
       if (ev.layer && ev.layer !== "canonical") return json(res, 400, { error: "not_pushable", message: "This event is synced from another calendar — only your own FamiliOS events can be pushed to Google." }, req);
       if (!ev.startAt) return json(res, 400, { error: "no_start", message: "Give the event a start time before pushing it." }, req);
       const account = listAccountsFor(g.session.householdId, g.session.actorId).find((a) => a.provider === "google");
@@ -3716,14 +3831,15 @@ function mayWriteAgent(session, agent, nextVisibility) {
       if (!roleAtLeast(g.session.role, "Adult Member")) return json(res, 403, { error: "insufficient_role" }, req);
       const body = (await readBody(req)) ?? {};
       const ev = getEvent(resolveMatch[1]);
-      if (!ev || ev.householdId !== g.session.householdId) return json(res, 404, { error: "not_found" }, req);
+      if (!ev || ev.householdId !== g.session.householdId || eventOutOfScope(ev, g.session)) return json(res, 404, { error: "not_found" }, req);
       if (!canSeeEntity(ev, g.session)) return json(res, 403, { error: "forbidden" }, req);
+      { const hidden = hiddenEventRefusal(ev, g.session); if (hidden) return json(res, hidden.status, { error: hidden.error, message: hidden.message }, req); }
       const patch = resolveConflictPatch(ev, body.choice);
       if (!patch) return json(res, 400, { error: ev.provenance?.conflict ? "bad_choice" : "no_conflict", message: ev.provenance?.conflict ? 'choice must be "google" or "local".' : "This event has no pending sync conflict." }, req);
       const updated = patchEvent(ev.id, patch);
       audit({ type: "calendar.resolve_conflict", eventId: ev.id, choice: body.choice, ok: true }, req, g.session);
       kickCalendarRefresh(g.session.householdId, "event.resolve-conflict");
-      return json(res, 200, { ok: true, event: updated }, req);
+      return json(res, 200, { ok: true, event: eventForReply(updated, g.session) }, req);
     }
     // Connect the actor's Google Calendar as a read-only linked source (pull sync). Needs a
     // Google account connected in Connections with calendar access. One subscription per
@@ -3835,6 +3951,18 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // naming the current owner again is not a reassignment, so it needs no assign right.
       if (body.ownerActorId !== undefined && String(body.ownerActorId ?? "") !== String(currentOwnerId ?? "")) {
         if (!can.assign) return refuse("assign");
+        // Reassigning makes the new owner the events' owner (restampSubscriptionEvents, and
+        // eventOwnerOf reads the calendar's owner), and only an event's owner sees through a
+        // hide. So handing over a Work calendar, or one carrying events hidden by hand, would
+        // let whoever does it read them — or, to a child, reveal them to everyone (the ADR-005
+        // privacy review). What the calendar hides is its owner's to hand over, nobody else's.
+        const hides = sub.isWork === true || listEvents((e) => e.householdId === sub.householdId && e.layer === "linked"
+          && e.provenance?.subscriptionId === sub.id && e.shareState === "hidden").length > 0;
+        if (hides && currentOwnerId !== g.session.actorId) {
+          const first = String(owner?.displayName ?? "").trim().split(/\s+/)[0] || "Its owner";
+          const them = owner ? first : "its owner";
+          return json(res, 403, { error: "not_your_calendar", message: `${first} has hidden events on this calendar — only ${them} can hand it over.` }, req);
+        }
         // Every calendar has exactly one owner — the matrix has nothing to say about a
         // calendar that belongs to no one, so "unassign" is no longer a state it can enter.
         if (body.ownerActorId === null || body.ownerActorId === "") return json(res, 400, { error: "owner_required", message: "Every calendar belongs to someone — pick who this one is for." }, req);
@@ -3953,6 +4081,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
         }
         if (body.visibility === "household" && isAdultMemberOnly(g.session)) {
           return json(res, 403, { error: "personal_only", message: "Your chats stay private to you. Sharing one with the household needs an Owner or Adult Admin." }, req);
+        }
+        // A chat where Famili handed over a SURPRISE (ADR-005) stays personal: moving it to
+        // Family would publish that history to the very person it may be about.
+        if (body.visibility === "household" && c.secretReleasedAt) {
+          return json(res, 403, { error: "holds_a_surprise", message: "This chat talks about a surprise, so it stays in Personal. Start a new Family chat instead." }, req);
         }
         patch.visibility = body.visibility === "household" ? "household" : "personal";
       }
@@ -5175,9 +5308,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // never shrunk — only a household's explicit DENY reaches the model's menu, and a
       // local provider additionally gets the relevance-ranked, budget-capped catalog.
       const actingAgent = ensureDefaultHelper();
+      /* Who is listening, decided here from the stored conversation (ADR-005), and the turn's
+       * ledger — read after the turn so a turn that handed a surprise over records nothing. */
+      const audience = askAudience(convForTurn, g.session);
+      const ledger = turnLedger(convForTurn);
       let out;
       try {
-        out = await runAssistantAgent({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) });
+        out = await runAssistantAgent({ message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId), audience, ledger });
       } catch (e) {
         if (turnKey) releaseAssistantTurn(turnKey);
         throw e;
@@ -5190,10 +5327,12 @@ function mayWriteAgent(session, agent, nextVisibility) {
       // must not erase the exchange (that was the "history gone after refresh" bug).
       if (convForTurn) {
         appendConversationMessage(convForTurn.id, assistantTurnMessage(out, new Date().toISOString()));
+        stampSecretRelease(convForTurn, ledger);
         // I1 — name the thread from the first exchange (see maybeNameConversation).
         if (out.ok) maybeNameConversation(convForTurn.id, { question: String(body.message), answer: out.answer ?? "", session: g.session });
         // BUG-06 — the writer memory never had. Scoped to the room it was said in.
-        if (out.ok) {
+        // Never from a turn that handed an owner's surprise over (ADR-005): it records nothing.
+        if (out.ok && !ledger.secretReleased) {
           void captureMemoryFromExchange({ householdId: g.session.householdId, actorId: g.session.actorId, visibility: convForTurn.visibility, nestId: convForTurn.nestId, message: body.message, answer: out.answer });
         }
       }
@@ -5257,8 +5396,11 @@ function mayWriteAgent(session, agent, nextVisibility) {
         // What it's actually doing, as opposed to what the token counter implies. A web
         // lookup used to spend its whole (long) life claiming to be writing.
         const onPhase = (phase) => sse({ type: "phase", phase });
+        // Same audience and ledger as POST /api/assistant (ADR-005).
+        const audience = askAudience(conv, g.session);
+        const ledger = turnLedger(conv);
         const out = await runAssistantAgent(
-          { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId) },
+          { message: body.message, context: body.context, session: g.session, providerId: body.providerId, history, agent: actingAgent, conversationId: body.conversationId ?? null, visibility: chatRunVisibility(body.conversationId), audience, ledger },
           { onToken, onPhase, onEvent: (ev) => sse(ev) },
         );
         attachAgentRun(out);
@@ -5266,12 +5408,13 @@ function mayWriteAgent(session, agent, nextVisibility) {
 
         if (conv) {
           appendConversationMessage(conv.id, assistantTurnMessage(out, new Date().toISOString()));
+          stampSecretRelease(conv, ledger);
           // I1 — the streaming path is the one the real chat UI uses, so naming has to happen
           // here too or it would never fire in practice.
           if (out.ok) maybeNameConversation(conv.id, { question: String(body.message), answer: out.answer ?? "", session: g.session });
           // BUG-06 — same as POST /api/assistant, and this is the path the app actually
           // uses, so leaving it out here would be leaving the bug in.
-          if (out.ok) {
+          if (out.ok && !ledger.secretReleased) {
             void captureMemoryFromExchange({ householdId: g.session.householdId, actorId: g.session.actorId, visibility: conv.visibility, nestId: conv.nestId, message: body.message, answer: out.answer });
           }
         }

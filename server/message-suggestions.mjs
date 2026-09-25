@@ -34,6 +34,21 @@ import { createHelpRequest } from "./help-requests.mjs";
 import { postMessage, withThreadLock, isParentRole } from "./family-messages.mjs";
 import { newEventRecord } from "./actions/schemas/event.mjs";
 import { newTaskRecord } from "./actions/schemas/task.mjs";
+import { privacyContext, presentEvents, obscureStateOf, obscuredLabel, hiddenEventRefusal } from "./event-privacy.mjs";
+
+/* Hidden events (ADR-005). Everything this module writes lands in a SHARED thread — the
+ * suggestion chip, the "Already on the calendar" note, the system line — so a hidden event
+ * is spoken of by its block ("Beannie working") here even when the person acting owns it.
+ * That holds for the context handed to the model too: the model's output (the chip's title,
+ * summary and patch) is stored on the message and read by everyone in the thread, so the
+ * poster's OWN hidden events go in as blocks as well (presentEvents asOthers) — otherwise
+ * "Move Interview at Globex to 3pm" is one chip away (ADR-005 privacy review). */
+function shownTitle(e, pc) {
+  const st = obscureStateOf(e, pc ?? privacyContext(e.householdId));
+  return st.obscured ? obscuredLabel(st.kind, st.owner) : e.title;
+}
+/** A hidden event someone other than `session` owns: nothing of it may be used for them. */
+const hiddenFromActor = (e, session) => !!(e && hiddenEventRefusal(e, session));
 
 const MAX_SUGGESTIONS = 3;
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -54,7 +69,12 @@ function visibleItems(session, days = 30) {
   const now = Date.now();
   const horizon = now + days * 86400e3;
   const view = { role: session.role, actorId: session.actorId };
-  const events = listEvents((e) => e.householdId === session.householdId && !e.deletedAt && canSeeEntity(e, view) && (e.startAt ? Date.parse(e.startAt) : 0) >= now - 86400e3 && (e.startAt ? Date.parse(e.startAt) : 0) <= horizon)
+  // Through presentEvents (which applies the same canSeeEntity gate): every hidden event —
+  // the poster's own included (asOthers), since what the model writes lands in the shared
+  // thread — reaches the model as its block: busy time, with an id that matches nothing, so
+  // it can never become an update target or a coordination proposal.
+  const inWindow = listEvents((e) => e.householdId === session.householdId && !e.deletedAt && (e.startAt ? Date.parse(e.startAt) : 0) >= now - 86400e3 && (e.startAt ? Date.parse(e.startAt) : 0) <= horizon);
+  const events = presentEvents(inWindow, view, { purpose: "assistant", audience: "shared", asOthers: true, pc: privacyContext(session.householdId) })
     .slice(0, 60).map((e) => ({ id: e.id, type: "event", title: e.title, startAt: e.startAt ?? null, allDay: !!e.allDay, location: e.location || null, owner: e.ownerId ?? e.createdBy ?? null }));
   const tasks = listTasks((t) => t.householdId === session.householdId && t.status !== "done" && t.type !== "list" && canSeeEntity(t, view))
     .slice(0, 60).map((t) => ({ id: t.id, type: "task", title: t.title, dueAt: t.dueAt ?? null, assignedMemberId: t.assignedMemberId ?? null }));
@@ -116,7 +136,8 @@ function normalizeSuggestion(raw, session) {
   let ownerActorId = null;
   if (targetId) {
     const target = type === "event" ? getEvent(targetId) : type === "task" ? getTask(targetId) : null;
-    if (!target || target.householdId !== session.householdId) { targetId = null; kind = "create"; }
+    // Someone else's hidden event is not a target: it is treated as if it did not match.
+    if (!target || target.householdId !== session.householdId || (type === "event" && hiddenFromActor(target, session))) { targetId = null; kind = "create"; }
     else { kind = "update"; ownerActorId = type === "event" ? (target.ownerId ?? target.createdBy ?? null) : (target.assignedMemberId ?? target.createdBy ?? null); }
   }
   let hideFrom = [];
@@ -125,7 +146,8 @@ function normalizeSuggestion(raw, session) {
     // The person being asked should not be the one who taps "ask them"; everyone else in the
     // chat may. A linked event is checked here so the yes/no is never about a phantom.
     if (patch.toActorId) hideFrom = [String(patch.toActorId)];
-    if (patch.eventId && !(getEvent(String(patch.eventId))?.householdId === session.householdId)) { delete patch.eventId; delete patch.apply; }
+    const linked = patch.eventId ? getEvent(String(patch.eventId)) : null;
+    if (patch.eventId && (!(linked?.householdId === session.householdId) || hiddenFromActor(linked, session))) { delete patch.eventId; delete patch.apply; }
   }
   return { id: sid(), kind, type, title, summary: String(raw?.summary ?? "").slice(0, 240), patch, targetId, ownerActorId, hideFrom, status: "open", by: null, at: null, result: null };
 }
@@ -160,7 +182,12 @@ function findDuplicate({ type, title, when, householdId, tz }) {
   if (!key) return null;
   const day = when ? (DATE_ONLY_RE.test(when) ? when : dayOf(when, tz)) : null;
   if (type === "event") {
-    return listEvents((e) => e.householdId === householdId && !e.deletedAt && norm(e.title) === key && (!day || dayOf(e.startAt, tz) === day))[0] ?? null;
+    // Compared by the title the THREAD may read: a hidden event is its block, for everyone.
+    // Matching its real title — even for its owner — would tell the chat "Surprise party for
+    // Mom" is already on Beannie's calendar, since the suggestion's own title is on screen.
+    const pc = privacyContext(householdId);
+    const hit = listEvents((e) => e.householdId === householdId && !e.deletedAt && (!day || dayOf(e.startAt, tz) === day) && norm(shownTitle(e, pc)) === key)[0] ?? null;
+    return hit ? { id: hit.id, title: shownTitle(hit, pc) } : null;
   }
   return listTasks((t) => t.householdId === householdId && t.status !== "done" && norm(t.title) === key && (!day || !t.dueAt || dayOf(t.dueAt, tz) === day))[0] ?? null;
 }
@@ -175,6 +202,13 @@ function stamp(v, tz) {
 async function applyCreate(s, session, tz, { threadId, messageId } = {}) {
   const p = s.patch ?? {};
   if (s.type === "help") {
+    // The poster may have owned the event; the person tapping may not. Someone else's hidden
+    // event is not something they can propose a change to (or link to), so the ask goes out
+    // without it.
+    if (p.eventId && hiddenFromActor(getEvent(String(p.eventId)), session)) {
+      const { eventId: _e, apply: _a, ...rest } = p;
+      return applyCreate({ ...s, patch: rest }, session, tz, { threadId, messageId });
+    }
     const apply = p.apply && typeof p.apply === "object" && p.eventId ? p.apply : null;
     const proposal = apply ? { threadId, messageId, eventId: p.eventId, patch: apply } : (threadId ? { threadId, messageId, eventId: p.eventId ?? null, patch: null } : null);
     const out = createHelpRequest({ session, toActorId: p.toActorId, message: p.message ?? s.title, eventId: p.eventId ?? null, taskId: p.taskId ?? null, proposal });
@@ -214,7 +248,17 @@ function applyUpdate(s, session, tz) {
   const p = { ...(s.patch ?? {}) };
   const target = s.type === "event" ? getEvent(s.targetId) : getTask(s.targetId);
   if (!target || target.householdId !== session.householdId) return { ok: false, error: "target_gone", message: "That item no longer exists." };
-  const owner = s.ownerActorId ?? (s.type === "event" ? (target.ownerId ?? target.createdBy) : (target.assignedMemberId ?? target.createdBy));
+  // A hidden event is its owner's alone — a parent's usual right to edit does not reach it,
+  // and neither does a "Can you help?" that would quote its title.
+  if (s.type === "event") {
+    const refusal = hiddenEventRefusal(target, session);
+    if (refusal) return { ok: false, error: refusal.error, message: refusal.message };
+  }
+  // What the thread may call it: the block, when it is hidden (the owner is acting, but the
+  // line lands where everyone reads it).
+  const hidden = s.type === "event" && obscureStateOf(target, privacyContext(target.householdId)).obscured;
+  const label = hidden ? shownTitle(target) : target.title;
+  const owner =s.ownerActorId ?? (s.type === "event" ? (target.ownerId ?? target.createdBy) : (target.assignedMemberId ?? target.createdBy));
   const mayEdit = owner === session.actorId || isParentRole(session.role);
   // The owner sees the concrete change, not the model's gloss on it.
   const changes = Object.entries(p).filter(([k, v]) => k !== "title" && v != null && v !== "").map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`).join(", ");
@@ -243,7 +287,7 @@ function applyUpdate(s, session, tz) {
     if (["low", "medium", "high"].includes(p.priority)) patch.priority = p.priority;
     patchTask(target.id, { ...patch, updatedAt: nowISO() });
   }
-  return { ok: true, result: { updated: { type: s.type, id: target.id } }, line: `updated “${target.title}” (${summary})` };
+  return { ok: true, result: { updated: { type: s.type, id: target.id } }, line: hidden ? `updated “${label}”` : `updated “${target.title}” (${summary})` };
 }
 
 /**

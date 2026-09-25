@@ -183,7 +183,9 @@ test("THE RUNNER: the native ctx carries the session and the channel, and the au
   const out = await runNativeAction({ action: a, input: { x: "1" }, session, agent: agentWith(), channel: "group", conversationId: "conv_1", asHelper: true, actorIsAdult: true });
   assert.deepEqual(out, { ok: true, result: { did: true } });
   const { ctx } = calls[0];
-  assert.deepEqual({ ...ctx, session: undefined }, { householdId: "local", actorId: "m-alex", role: "Owner", channel: "group", session: undefined, via: "agent", runId: null, agentId: "agt_native_test", asHelper: true });
+  // audience/ledger (ADR-005): a caller that names no audience is "shared" (a surprise is
+  // withheld, never spoken) and has no turn ledger.
+  assert.deepEqual({ ...ctx, session: undefined }, { householdId: "local", actorId: "m-alex", role: "Owner", channel: "group", audience: "shared", ledger: null, session: undefined, via: "agent", runId: null, agentId: "agt_native_test", asHelper: true });
   assert.equal(ctx.session, session, "the bodies read the session whole (listHelpers, publicHelper, runHelper)");
   const row = lastAudit((r) => r.type === "assistant.tool" && r.toolId === "test.native_ctx");
   assert.ok(row, "an assistant.tool row");

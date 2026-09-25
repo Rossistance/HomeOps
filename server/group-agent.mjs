@@ -126,6 +126,10 @@ export async function runWakeTurn({ chatId, householdId, prompt, messageGuid, se
         conversationId: null,
         visibility: "household",
         channel: "group",
+        /* A group thread is read by everyone in it (ADR-005): an owner still hears their own
+         * hidden events in full here — asking counts as consent — but never a surprise. */
+        audience: "shared",
+        ledger: {},
       });
 
       const text = out.ok ? clamp(out.answer) : clamp(failureText(out));
