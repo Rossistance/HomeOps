@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { TextInput, View } from "react-native";
 import { api, type AppSettingsRec, type Autonomy, type EventRec, type FileRec, type Meal, type MemberRec, type TaskRec } from "@/lib/api";
 import { fade, memberColor } from "@/lib/member-colors";
+import { isBlock } from "@/lib/event-face";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic, type HearthColors } from "@/theme";
 import { Badge, Button, Card, EmptyState, ErrorState, HScreen, Notice, PinPrompt, PressableCard, Rise, SectionHeader, SkeletonCards, Sym, T, Well } from "@/components/ui";
@@ -189,7 +190,8 @@ export default function HouseholdScreen() {
   const spaces = useMemo(() => {
     const map: Record<string, SpaceItem[]> = {};
     const put = (id: string | undefined, item: SpaceItem) => { (map[id || "sp-family"] ??= []).push(item); };
-    for (const e of events) put(e.spaceId, { kind: "event", title: e.title });
+    // Blocks (someone else's hidden time, ADR-005) are stand-ins, not events a space holds.
+    for (const e of events) if (!isBlock(e)) put(e.spaceId, { kind: "event", title: e.title });
     for (const t of tasks) put((t as TaskRec & { spaceId?: string }).spaceId, { kind: "task", title: t.title });
     for (const m of meals) put(undefined, { kind: "meal", title: m.title });
     for (const f of files) put(f.spaceId, { kind: "file", title: f.name });

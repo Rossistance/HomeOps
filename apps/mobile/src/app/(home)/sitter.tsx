@@ -9,11 +9,13 @@ import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { coversDay, eventTimeLabel } from "@/lib/event-days";
+import { eventFace } from "@/lib/event-face";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
 import { T, Coach, Card, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
 import { HelpRequestsSection } from "./grandparent";
 import { MemberAvatar } from "./profile";
+import { CompactHiddenEvent } from "@/components/calendar/obscured-card";
 
 export function SitterHome({ memberId, preview = false }: { memberId: string; preview?: boolean }) {
   const { colors, spacing } = useTheme();
@@ -23,6 +25,8 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
   const [refreshing, setRefreshing] = useState(false);
   const [member, setMember] = useState<MemberRec | null>(null);
   const [events, setEvents] = useState<EventRec[]>([]);
+  // Whose face goes on a hidden-time row (ADR-005).
+  const [people, setPeople] = useState<MemberRec[]>([]);
   const [assigned, setAssigned] = useState<TaskRec[]>([]);
   const [allTasks, setAllTasks] = useState<TaskRec[]>([]);
   const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
@@ -31,6 +35,7 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
   const load = useCallback(async () => {
     const [members, evts, tasks, hh, hrs] = await Promise.all([api.members(), api.events(), api.tasks(), api.household(), api.helpRequests()]);
     setMember(members.find((m) => m.actorId === memberId) ?? null);
+    setPeople(members);
     setEvents(evts.filter((e) => e.startAt).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt))));
     setAssigned(tasks.filter((t) => t.assignedMemberId === memberId && t.status !== "done"));
     setAllTasks(tasks);
@@ -147,10 +152,15 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
                   return (
                     <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, minHeight: 60, paddingHorizontal: spacing.lg, paddingVertical: 13, borderTopWidth: i > 0 ? StyleSheet.hairlineWidth : 0, borderTopColor: colors.separator }}>
                       <T kind="subMedium" color={mine ? colors.ember : colors.textMuted} style={{ width: 78, fontSize: 15 }}>{eventTimeLabel(e)}</T>
+                      {/* Someone's hidden time: a frosted row with their face, never a title. */}
+                      {eventFace(e).mode !== "full" ? (
+                        <View style={{ flex: 1 }}><CompactHiddenEvent event={e} members={people} /></View>
+                      ) : (
                       <View style={{ flex: 1, gap: 2 }}>
                         <T kind="rowTitle" style={{ fontSize: 17 }}>{e.title}{mine ? " — with you" : ""}</T>
                         {!!e.location && <T kind="sub" style={{ fontSize: 14 }}>{e.location}</T>}
                       </View>
+                      )}
                     </View>
                   );
                 })}
@@ -167,7 +177,11 @@ export function SitterHome({ memberId, preview = false }: { memberId: string; pr
                     <T kind="subMedium" color={colors.textMuted} style={{ width: 78, fontSize: 14 }}>
                       {new Date(e.startAt!).toLocaleDateString(undefined, { weekday: "short" })} {eventTimeLabel(e)}
                     </T>
-                    <T kind="rowTitle" style={{ flex: 1, fontSize: 16 }}>{e.title}</T>
+                    {eventFace(e).mode !== "full" ? (
+                      <View style={{ flex: 1 }}><CompactHiddenEvent event={e} members={people} /></View>
+                    ) : (
+                      <T kind="rowTitle" style={{ flex: 1, fontSize: 16 }}>{e.title}</T>
+                    )}
                   </View>
                 ))}
               </Card>

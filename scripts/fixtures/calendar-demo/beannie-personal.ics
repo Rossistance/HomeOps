@@ -1,0 +1,19 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//FamiliOS//Calendar demo fixture//EN
+X-WR-CALNAME:Beannie personal
+X-DEMO-NOTE:Template. scripts/seed-calendar-demo.mjs renders {{DAY+N HH:MM}} relative to today (local time).
+BEGIN:VEVENT
+UID:yoga@demo.familios
+SUMMARY:Morning yoga
+DTSTART:{{DAY+1 07:00}}
+DTEND:{{DAY+1 08:00}}
+END:VEVENT
+BEGIN:VEVENT
+UID:moms-birthday-dinner@demo.familios
+SUMMARY:Mom's birthday dinner
+LOCATION:Lucia's Trattoria
+DTSTART:{{DAY+2 18:30}}
+DTEND:{{DAY+2 20:30}}
+END:VEVENT
+END:VCALENDAR

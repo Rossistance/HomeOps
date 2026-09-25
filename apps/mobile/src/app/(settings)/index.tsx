@@ -7,7 +7,8 @@ import { LinearGradient } from "expo-linear-gradient";
 import Constants from "expo-constants";
 import { api, type MemberRec } from "@/lib/api";
 import { memberAccent } from "@/lib/member-colors";
-import { roleAtLeast } from "@/lib/roles";
+import { canOpenConnections, roleAtLeast } from "@/lib/roles";
+import { ScopeEditor } from "@/components/calendar/scope-editor";
 import { useSession } from "@/lib/session";
 import { ColorPicker } from "@/components/ui/color-picker";
 import { useTheme, useThemePref, tapHaptic } from "@/theme";
@@ -274,6 +275,8 @@ export default function SettingsScreen() {
             </Coach>
           </Rise>
 
+          {/* A Child View has no Connections at all (ADR-005): no accounts, no calendars. */}
+          {canOpenConnections(session?.role) ? (
           <Rise index={3}>
             <SectionHeader title="Connections" />
             <Coach id="settings.connections">
@@ -304,6 +307,7 @@ export default function SettingsScreen() {
             </Card>
             </Coach>
           </Rise>
+          ) : null}
         </>
       )}
 
@@ -454,9 +458,12 @@ export default function SettingsScreen() {
         allMembers={members}
         member={editingMember}
         canManage={canManage}
+        isOwner={isOwner}
         visible={!!editingMember}
         onClose={() => setEditingMember(null)}
         onSaved={() => { setEditingMember(null); void load(); }}
+        // A saved scope refreshes the roster, so reopening this member shows what was saved.
+        onScopeSaved={() => void load()}
       />
     </HScreen>
   );
@@ -472,13 +479,16 @@ const ALL_ROLES = ["Owner", "Adult Admin", "Adult Member", "Limited Member", "Ch
 /** Edit a member. Owners/Adult Admins get the full editor (role, relationship,
  * child AI toggle); everyone else gets self-service name + color. The server
  * enforces the real rules — last-owner demotion comes back as 409 last_owner. */
-function MemberSheet({ member, canManage, visible, onClose, onSaved, allMembers = [] }: {
+function MemberSheet({ member, canManage, isOwner = false, visible, onClose, onSaved, onScopeSaved, allMembers = [] }: {
   member: MemberRec | null;
   allMembers?: MemberRec[];
   canManage: boolean;
+  /** The Owner alone chooses what a Limited Member's calendar shows (ADR-005). */
+  isOwner?: boolean;
   visible: boolean;
   onClose: () => void;
   onSaved: () => void;
+  onScopeSaved?: () => void;
 }) {
   const { colors, spacing } = useTheme();
   const [name, setName] = useState("");
@@ -607,6 +617,12 @@ function MemberSheet({ member, canManage, visible, onClose, onSaved, allMembers 
             </View>
             <Switch value={aiEnabled} onValueChange={setAiEnabled} trackColor={{ true: colors.ember }} />
           </View>
+        ) : null}
+
+        {/* Here as well as in Connections, so the Owner can set it before a limited member
+            has a calendar of their own. Saved on its own button: it is a separate request. */}
+        {isOwner && member.role === "Limited Member" ? (
+          <ScopeEditor member={member} members={allMembers} onSaved={() => onScopeSaved?.()} />
         ) : null}
 
         {!canManage ? (

@@ -1,0 +1,14 @@
+# Open the Calendar screen by deep link (expo-router: familios://calendar → (home)/calendar).
+appId: ai.familios.app
+---
+- openLink: "familios://calendar"
+- tapOn:
+    text: "Open"
+    optional: true
+- extendedWaitUntil:
+    visible:
+      id: "calendar-screen"
+    timeout: 30000
+# The calendar refreshes itself on focus; give the first answer a moment to draw.
+- waitForAnimationToEnd:
+    timeout: 5000

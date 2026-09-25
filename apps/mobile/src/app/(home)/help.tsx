@@ -13,6 +13,7 @@ import { ScrollView, TextInput, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
 import { api, type CalendarSubscription, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { allDayDateKey } from "@/lib/event-days";
+import { eventFace, isBlock } from "@/lib/event-face";
 import { memberColor } from "@/lib/member-colors";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic } from "@/theme";
@@ -95,6 +96,8 @@ export default function HelpScreen() {
     if (!itemsOwnerId) return [];
     const now = Date.now();
     return events
+      // Someone's hidden time (ADR-005) is not a plan anyone can help with or be linked to.
+      .filter((e) => !isBlock(e))
       .filter((e) => e.startAt && !isNaN(+new Date(e.startAt)))
       .filter((e) => {
         const t = new Date(e.startAt!).getTime();
@@ -170,8 +173,12 @@ export default function HelpScreen() {
       const e = ev.endAt && !isNaN(+new Date(ev.endAt)) ? new Date(ev.endAt).getTime() : s + HOUR;
       return s < end && e > start;
     });
+    /* A block is their hidden time: it still means "not free", but say only what the family
+     * is allowed to know — working or busy — never a title. */
+    const cf = conflict ? eventFace(conflict) : null;
+    const what = cf?.mode === "block" ? `is ${cf.kind === "work" ? "working" : "busy"}` : `has ${conflict?.title}`;
     return conflict
-      ? { free: false as const, text: `⚠ ${toMember.displayName.split(" ")[0]} has ${conflict.title} then` }
+      ? { free: false as const, text: `⚠ ${toMember.displayName.split(" ")[0]} ${what} then` }
       : { free: true as const, text: `✓ ${toMember.displayName.split(" ")[0]} looks free then` };
   }, [mode, toMember, selectedEvent, subs, events]);
 

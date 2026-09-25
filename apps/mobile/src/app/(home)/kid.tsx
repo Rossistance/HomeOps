@@ -10,10 +10,12 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming, ZoomIn } from "react-native-reanimated";
 import { api, type EventRec, type HelpRequestRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { coversDay, eventTimeLabel } from "@/lib/event-days";
+import { eventFace } from "@/lib/event-face";
 import { useSession } from "@/lib/session";
 import { useTheme, tapHaptic, motion } from "@/theme";
 import { Button, T, Card, Coach, SectionHeader, SkeletonCards, Rise, HScreen, Sym, SymTile, PressableScale } from "@/components/ui";
 import { MemberAvatar } from "./profile";
+import { CompactHiddenEvent } from "@/components/calendar/obscured-card";
 
 const CHORE_ICONS: [RegExp, string][] = [
   [/pet|dog|cat|feed|fish/i, "pawprint"],
@@ -46,11 +48,14 @@ export function KidHome({ memberId, preview = false }: { memberId: string; previ
   const [kid, setKid] = useState<MemberRec | null>(null);
   const [chores, setChores] = useState<TaskRec[]>([]);
   const [events, setEvents] = useState<EventRec[]>([]);
+  // Whose face goes on a hidden-time row (ADR-005: children see blocks too).
+  const [people, setPeople] = useState<MemberRec[]>([]);
   const [helpRequests, setHelpRequests] = useState<HelpRequestRec[]>([]);
 
   const load = useCallback(async () => {
     const [members, tasks, evts, hrs] = await Promise.all([api.members(), api.tasks(), api.events(), api.helpRequests()]);
     setKid(members.find((m) => m.actorId === memberId) ?? null);
+    setPeople(members);
     setChores(tasks.filter((t) => t.assignedMemberId === memberId && t.type !== "bill"));
     // The whole family's day (read-only) — the kid sees where everyone is going.
     // Multi-day events (ISS-004) count as "today" on every spanned day.
@@ -220,10 +225,15 @@ export function KidHome({ memberId, preview = false }: { memberId: string; previ
                       <T kind="subMedium" color={mine ? colors.ember : colors.textMuted} style={{ width: 70 }}>
                         {eventTimeLabel(e)}
                       </T>
+                      {/* Someone's hidden time: a frosted row with their face, never a title. */}
+                      {eventFace(e).mode !== "full" ? (
+                        <View style={{ flex: 1 }}><CompactHiddenEvent event={e} members={people} /></View>
+                      ) : (
                       <View style={{ flex: 1, gap: 2 }}>
                         <T kind="rowTitle">{e.title}{mine ? " — you" : ""}</T>
                         {!!e.location && <T kind="detail">{e.location}</T>}
                       </View>
+                      )}
                     </View>
                   );
                 })}

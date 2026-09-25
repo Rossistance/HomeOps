@@ -1474,6 +1474,9 @@ export const useStore = create<Store>((set, get) => {
         whatToBring: e.whatToBring, checklist: e.checklist,
         notes: (e as { notes?: string }).notes || undefined,
         provenance: (e as { provenance?: CalendarEvent["provenance"] }).provenance ?? null,
+        // ADR-005: the Calendar draws blocks and "Hidden from family" from these two.
+        privacy: e.privacy ?? null,
+        block: e.block ?? null,
       });
       const mapTask = (t: ServerTask): Task => ({
         id: t.id, serverId: t.id, title: t.title, type: (t.type as Task["type"]) ?? "task",

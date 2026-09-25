@@ -1,0 +1,71 @@
+# Beannie shares one Work event with the eye: her card unblurs, and then Alex sees that one
+# title while the rest of her morning stays "Beannie working", split around it.
+appId: ai.familios.app
+name: beannie-eye-toggle
+tags: [calendar, privacy]
+---
+# The event id is dynamic; the script finds the next "Q3 roadmap review" (today's, or the next
+# workday's once 9:30 has passed) and hides it again if
+# an earlier run shared it. → output.shareId
+- runScript:
+    file: scripts/demo-api.js
+    env:
+      ACTION: prepare
+      HIDE: "true"
+- runFlow:
+    file: subflows/sign-in.yaml
+    env:
+      NAME: Beannie
+- runFlow: subflows/open-calendar.yaml
+# Her own hidden meetings: blurred cards with the eye-slash on top. No blocks of her own.
+- scrollUntilVisible:
+    element:
+      id: "eye-toggle-${output.shareId}"
+    direction: DOWN
+    timeout: 20000
+    centerElement: true
+- assertVisible:
+    id: "event-card-${output.shareId}"
+- takeScreenshot: beannie-01-own-work-events-blurred
+- tapOn:
+    id: "eye-toggle-${output.shareId}"
+- waitForAnimationToEnd:
+    timeout: 5000
+- assertVisible: "Q3 roadmap review"
+# A shared event from a Work calendar keeps a small open-eye button to hide it again.
+- assertVisible:
+    id: "eye-toggle-${output.shareId}"
+- takeScreenshot: beannie-02-roadmap-shared-unblurred
+# The card body (not the eye) still opens her event form.
+- tapOn:
+    id: "event-card-${output.shareId}"
+- extendedWaitUntil:
+    visible:
+      id: "event-form-hide-switch"
+    timeout: 15000
+- takeScreenshot: beannie-03-event-form-with-hide-switch
+# Now Alex.
+- runFlow:
+    file: subflows/sign-in.yaml
+    env:
+      NAME: Alex
+- runFlow: subflows/open-calendar.yaml
+- scrollUntilVisible:
+    element:
+      text: "Q3 roadmap review"
+    direction: DOWN
+    timeout: 20000
+- assertVisible: "Beannie working.*"
+- assertNotVisible: "Team standup"
+- assertNotVisible: "1:1 with Priya"
+- takeScreenshot: alex-04-sees-shared-title-and-split-blocks
+- runScript:
+    file: scripts/demo-api.js
+    env:
+      ACTION: view
+      VIEWER: m-alex
+- assertTrue: ${output.view.sees.roadmap}
+- assertTrue: ${output.view.workTitleCount == 1}
+# 9:00-12:00 was one block; with 9:30-10:30 shared it is 9:00-9:30 and 10:30-12:00, plus the
+# afternoon block.
+- assertTrue: ${output.view.blocksToday == 3}

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as Notifications from "expo-notifications";
 import * as SplashScreen from "expo-splash-screen";
-import { ActivityIndicator, StyleSheet, View } from "react-native";
+import { ActivityIndicator, AppState, StyleSheet, View } from "react-native";
 import { router } from "expo-router";
 import { NativeTabs } from "expo-router/unstable-native-tabs";
 import { ThemeProvider, DarkTheme, DefaultTheme } from "expo-router/react-navigation";
@@ -26,6 +26,7 @@ import { Onboarding } from "@/components/Onboarding";
 import { useTheme } from "@/theme";
 import { api } from "@/lib/api";
 import { routeForNotification, type PushData } from "@/lib/notification-routing";
+import { refreshCalendars } from "@/lib/calendar-refresh";
 
 // Installed at module scope so a crash during the FIRST render is still reported —
 // a handler wired up inside a component is too late for exactly the worst case.
@@ -159,6 +160,21 @@ function PushRegistrar() {
   return null;
 }
 
+/** Calendars refresh by themselves (ADR-005): once when a session starts, and whenever the app
+ *  comes back to the foreground. Every role, children included — anyone may start the
+ *  household's refresh, and the server keeps it to one a minute. */
+function CalendarRefresher() {
+  const { session } = useSession();
+  const signedIn = session?.actorId ?? null;
+  useEffect(() => {
+    if (!signedIn) return;
+    void refreshCalendars("launch");
+    const sub = AppState.addEventListener("change", (s) => { if (s === "active") void refreshCalendars("foreground"); });
+    return () => { sub.remove(); };
+  }, [signedIn]);
+  return null;
+}
+
 function Gate() {
   const { loading, session } = useSession();
   const { loaded: obLoaded, onboarded } = useOnboarding();
@@ -192,6 +208,7 @@ function Gate() {
     <>
       <TabsNav caps={caps} />
       <PushRegistrar />
+      <CalendarRefresher />
       {/* Last, so it draws over the tabs. Renders nothing unless a walkthrough is running. */}
       <CoachMarks />
     </>

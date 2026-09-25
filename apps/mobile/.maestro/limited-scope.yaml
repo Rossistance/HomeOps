@@ -1,0 +1,44 @@
+# Sam (Limited Member): the Owner's scope shows Beannie's app events only and nothing of
+# Gpop's; Sam's own calendar and Alex's (unmentioned, so "all") still show.
+appId: ai.familios.app
+name: limited-scope
+tags: [calendar, privacy, roles]
+---
+- runFlow:
+    file: subflows/sign-in.yaml
+    env:
+      NAME: Sam
+- runFlow: subflows/open-calendar.yaml
+- takeScreenshot: sam-01-calendar-today
+# Today: no "Beannie working" blocks (her Work calendar is not an app event), no Gpop golf.
+- assertNotVisible: "Beannie working.*"
+- assertNotVisible:
+    id: "event-block"
+- assertNotVisible: "Gpop golf with Frank"
+- assertNotVisible: "Q3 roadmap review"
+# Tomorrow: Beannie's pottery class (an app event) and Sam's own study group.
+- scrollUntilVisible:
+    element:
+      text: "Beannie pottery class"
+    direction: DOWN
+    timeout: 20000
+- assertVisible: "Sam chemistry study group"
+- takeScreenshot: sam-02-beannie-app-event-and-own-calendar
+- scrollUntilVisible:
+    element:
+      text: "Alex dentist"
+    direction: DOWN
+    timeout: 20000
+- assertNotVisible: "Mom's birthday dinner"
+- assertNotVisible: "Gpop busy.*"
+- takeScreenshot: sam-03-later-no-gpop-no-personal
+# The whole list as the server gave it to Sam, not only what is on screen.
+- runScript:
+    file: scripts/demo-api.js
+    env:
+      ACTION: view
+      VIEWER: m-sam
+- assertTrue: ${output.view.sees.pottery && output.view.sees.samStudy && output.view.sees.alexDentist}
+- assertTrue: ${!output.view.sees.beannieWorking && !output.view.sees.birthdayDinner}
+- assertTrue: ${!output.view.sees.gpopGolf && !output.view.sees.gpopBusy}
+- assertTrue: ${output.view.workTitleCount == 0}

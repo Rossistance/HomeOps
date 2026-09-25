@@ -4,17 +4,23 @@
 // Canonical events and Google-linked events open the form sheet to edit (Google
 // edits write back two-way); ICS-fed events are read-only mirrors that expand
 // inline. Each subscribed calendar gets its own accent color on its cards.
-// Calendar subscriptions with sync status sit beside the Sync control, folded behind an
-// expander (feeds managed in Connections) — they used to trail every agenda day as a card.
+// Calendars refresh by themselves (ADR-005): on focus, every minute while open, and whenever
+// anyone changes something. There is no Sync button here any more — manual sync lives only in
+// Connections. The connected calendars fold is a read-only legend.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, View } from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { api, type NestRec, type CalendarSubscription, type EventRec, type MemberRec, type TaskRec } from "@/lib/api";
 import { allDayDateKey, effectiveEndMs, weekStart } from "@/lib/event-days";
+import { eventFace, eyeLabel } from "@/lib/event-face";
+import { blockA11yLabel, hiddenCaption, showsHideEye, timeRangeLabel } from "@/lib/event-eye";
+import { EyeButton, ObscuredCard } from "@/components/calendar/obscured-card";
 import { LinearGradient } from "expo-linear-gradient";
 import { fade, memberAccent, memberColor } from "@/lib/member-colors";
 import * as SecureStore from "expo-secure-store";
 import { useSession } from "@/lib/session";
+import { refreshCalendars } from "@/lib/calendar-refresh";
+import { useRevSync } from "@/lib/rev-sync";
 import { isOpen } from "@/lib/task-state";
 import { useTheme, tapHaptic } from "@/theme";
 // Deep imports (not the "@/components/ui" barrel): the legacy src/components/ui.tsx
@@ -120,18 +126,19 @@ export default function CalendarScreen() {
     const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d;
   });
   const [expanded, setExpanded] = useState<string | null>(null);
-  // Subscriptions fold shut by default: sync status is a glance, not a section you scroll past.
+  // The calendars legend folds shut by default: whose colour is whose is a glance, not a
+  // section you scroll past.
   const [subsOpen, setSubsOpen] = useState(false);
-  const [syncing, setSyncing] = useState<string | null>(null);
-  const [syncingAll, setSyncingAll] = useState(false);
-  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
   const [nests, setNests] = useState<NestRec[]>([]);
   // The household's zone, for placing all-day events on the right DATE on a phone that is
   // somewhere else. Settings may be refused for a child session; the helper then falls back.
   const [householdTz, setHouseholdTz] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
-  // Guards the auto-sync interval against overlapping runs (a slow sync + a 60s tick).
-  const syncBusyRef = useRef(false);
+  // Connections exists for every role that may hold a calendar; Child View (and a guest) has
+  // none, so no link may point there. The server decides what each role may do inside it.
+  const hasConnections = canManage;
+  // Whether the first load has landed — a focus after that keeps the screen as it is while
+  // the refresh runs, instead of flashing a skeleton.
+  const readyRef = useRef(false);
 
   /* Cluster H — "a filter right next to the sync button that allows me to select from
    * seeing the entire family's calendar, my nest's calendar, or just my calendar… that
@@ -163,11 +170,24 @@ export default function CalendarScreen() {
     if (!health) { setPhase("error"); return; }
     setEvents(ev); setMembers(mem); setSubs(s); setTasks(tks); setNests(ns.nests);
     if (st?.timezone) setHouseholdTz(st.timezone);
+    readyRef.current = true;
     setPhase("ready");
   }, []);
 
-  // Reload on every focus so edits made in the form sheet show up immediately.
-  useFocusEffect(useCallback(() => { if (session) void load(); }, [session, load]));
+  // On every focus: ask the household's calendars to refresh and load once that has answered,
+  // so edits made in the form sheet and changes at the source both show up. The very first
+  // focus also loads straight away, so the screen never waits on Google to draw.
+  useFocusEffect(useCallback(() => {
+    if (!session) return;
+    let alive = true;
+    if (!readyRef.current) void load();
+    void refreshCalendars("calendar_open", { wait: true }).then(() => { if (alive) void load(); });
+    return () => { alive = false; };
+  }, [session, load]));
+
+  // A refresh finished in the background, or someone changed something elsewhere: the data
+  // revision moves and the screen reloads.
+  useRevSync(useCallback(() => { void load(); }, [load]));
 
   const onRefresh = useCallback(async () => { setRefreshing(true); await load(); setRefreshing(false); }, [load]);
 
@@ -207,52 +227,17 @@ export default function CalendarScreen() {
     return map;
   }, [tasks]);
 
-  // ONE sync: every subscription syncs and Google-side edits pull back in a single
-  // pass (POST /calendar/sync-all). Also runs silently every ~60s while the screen
-  // is focused, so the calendar keeps itself fresh without any button-pressing.
-  const syncAll = useCallback(async (opts?: { silent?: boolean }) => {
-    if (syncBusyRef.current) return;
-    syncBusyRef.current = true;
-    if (!opts?.silent) { setSyncingAll(true); setNotice(null); }
-    try {
-      const r = await api.syncAllCalendars();
-      if (r.ok) {
-        setLastSyncedAt(new Date());
-        await load();
-        if (!opts?.silent) {
-          const bits = [
-            r.imported ? `${r.imported} new` : null,
-            r.updated ? `${r.updated} updated` : null,
-            r.removed ? `${r.removed} removed` : null,
-            r.pulled?.merged ? `${r.pulled.merged} merged from Google` : null,
-            r.pulled?.conflicts ? `${r.pulled.conflicts} conflict${r.pulled.conflicts === 1 ? "" : "s"} to review` : null,
-            r.errors?.length ? `${r.errors.length} feed${r.errors.length === 1 ? "" : "s"} failed` : null,
-          ].filter(Boolean);
-          setNotice({
-            text: `Synced ${r.synced ?? 0} calendar${(r.synced ?? 0) === 1 ? "" : "s"}. ${bits.length ? bits.join(" · ") : "Everything already up to date."}`,
-            ok: !r.pulled?.conflicts && !r.errors?.length,
-          });
-        }
-      } else if (!opts?.silent) {
-        setNotice({
-          text: r.error === "insufficient_role"
-            ? "Syncing needs Adult Member or higher."
-            : `Couldn't sync: ${r.message ?? r.error ?? "unknown error"}`,
-          ok: false,
-        });
-      }
-    } finally {
-      syncBusyRef.current = false;
-      setSyncingAll(false);
-    }
-  }, [load]);
-
-  // Auto-sync: a silent sync-all every ~60s while this screen is focused.
+  // Every minute while this screen is open, for every role (a child's calendar goes stale just
+  // the same): refresh the household's calendars, then reload. Anyone may start a refresh; the
+  // server runs one at a time and at most once a minute.
   useFocusEffect(useCallback(() => {
-    if (!canManage) return;
-    const t = setInterval(() => { void syncAll({ silent: true }); }, 60_000);
-    return () => clearInterval(t);
-  }, [canManage, syncAll]));
+    if (!session) return;
+    let alive = true;
+    const t = setInterval(() => {
+      void refreshCalendars("calendar_tick", { wait: true }).then(() => { if (alive) void load(); });
+    }, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [session, load]));
 
   const nameOf = useCallback(
     (id: string | null) => (id ? members.find((m) => m.actorId === id)?.displayName ?? null : null),
@@ -390,20 +375,9 @@ export default function CalendarScreen() {
     router.push(date ? { pathname: "/event-form", params: { date } } : "/event-form");
   }, []);
 
-  const syncLabel = (s: CalendarSubscription) => {
-    if (s.lastResult?.error) return `Sync failed: ${s.lastResult.error}`;
-    if (s.lastSyncAt) return `Synced ${new Date(s.lastSyncAt).toLocaleString()} · ${s.eventCount} event${s.eventCount === 1 ? "" : "s"}`;
-    return "Not synced yet";
-  };
-
-  const syncNow = async (s: CalendarSubscription) => {
-    setSyncing(s.id); setNotice(null);
-    const r = await api.syncCalendar(s.id);
-    setSyncing(null);
-    if (r.sync?.ok) setNotice({ text: `${s.name}: ${r.sync.imported ?? 0} new, ${r.sync.updated ?? 0} updated, ${r.sync.removed ?? 0} removed.`, ok: true });
-    else setNotice({ text: `Sync failed: ${r.sync?.error ?? r.error ?? "unknown error"}`, ok: false });
-    await load();
-  };
+  /** Whose calendar a legend row is: the owning member, else the account, else the source. */
+  const legendOwner = (s: CalendarSubscription) =>
+    s.ownerName ?? (s.ownerActorId ? nameOf(s.ownerActorId) : null) ?? s.accountEmail ?? s.source;
 
   const header = (
     <Stack.Screen
@@ -446,9 +420,10 @@ export default function CalendarScreen() {
     <HScreen refreshing={refreshing} onRefresh={() => void onRefresh()}>
       {header}
 
-      {/* Agenda ⇄ Month view toggle */}
+      {/* Agenda ⇄ Month view toggle. It carries the screen's testID: HScreen takes none, and
+          this row is always the first thing on a loaded calendar. */}
       <Rise index={0}>
-        <View style={{ flexDirection: "row", gap: spacing.sm }}>
+        <View testID="calendar-screen" style={{ flexDirection: "row", gap: spacing.sm }}>
           {(["agenda", "month"] as const).map((v) => (
             <PressableScale
               key={v}
@@ -517,8 +492,15 @@ export default function CalendarScreen() {
                       <T kind="subMedium" color={isSelected ? colors.onEmber : isToday ? colors.ember : colors.textSecondary}>{d.getDate()}</T>
                     </View>
                     <View style={{ flexDirection: "row", gap: 2, height: 4 }}>
+                      {/* A block's dot is its owner's colour, dimmed: someone's busy there, and
+                          that is all the grid says about it. */}
                       {dayEvents.slice(0, 3).map((e, j) => (
-                        <View key={j} style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: accentOf(e) ?? colors.ember }} />
+                        <View key={j} style={{
+                          width: 4, height: 4, borderRadius: 2,
+                          backgroundColor: eventFace(e).mode === "block"
+                            ? fade(colorOf(e.ownerId ?? null) ?? colors.textFaint, 0.45)
+                            : accentOf(e) ?? colors.ember,
+                        }} />
                       ))}
                     </View>
                   </PressableScale>
@@ -580,86 +562,78 @@ export default function CalendarScreen() {
       </Rise>
       ) : null}
 
-      {/* One Sync: every subscription + Google-edit pull in a single pass (and it
-          re-runs silently every minute while this screen is open). */}
+      {/* Cluster H — the lens, in his order, remembered across launches. My Nest only
+          offers itself when a nest exists to mean something by it. No Sync button: the
+          calendars refresh by themselves (ADR-005). */}
       {canManage ? (
-        <View style={{ gap: 4 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
-            <Button
-              small
-              variant="neutral"
-              icon="arrow.triangle.2.circlepath"
-              title={syncingAll ? "Syncing…" : "Sync"}
-              loading={syncingAll}
-              onPress={() => void syncAll()}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" }}>
+          <Chip label="Family" icon="house.fill" selected={calScope === "family"} onPress={() => pickScope("family")} />
+          {nests.length > 0 ? <Chip label="My Nest" icon="person.2.fill" selected={calScope === "nest"} onPress={() => pickScope("nest")} /> : null}
+          <Chip label="Just me" icon="lock" selected={calScope === "me"} onPress={() => pickScope("me")} />
+          {conflictCount > 0 ? (
+            <Badge
+              label={`${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`}
+              fg={colors.coral}
+              bg={colors.coralBg}
+              icon="exclamationmark.triangle.fill"
             />
-            {/* Cluster H — the lens, in his order, remembered across launches. My Nest only
-                offers itself when a nest exists to mean something by it. */}
-            <Chip label="Family" icon="house.fill" selected={calScope === "family"} onPress={() => pickScope("family")} />
-            {nests.length > 0 ? <Chip label="My Nest" icon="person.2.fill" selected={calScope === "nest"} onPress={() => pickScope("nest")} /> : null}
-            <Chip label="Just me" icon="lock" selected={calScope === "me"} onPress={() => pickScope("me")} />
-            {conflictCount > 0 ? (
-              <Badge
-                label={`${conflictCount} conflict${conflictCount === 1 ? "" : "s"} to review`}
-                fg={colors.coral}
-                bg={colors.coralBg}
-                icon="exclamationmark.triangle.fill"
-              />
-            ) : null}
-          </View>
-          {lastSyncedAt ? (
-            <T kind="caption" color={colors.textFaint}>
-              Last synced {lastSyncedAt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
-            </T>
           ) : null}
         </View>
       ) : null}
 
-      {/* Synced feeds — the read-only "linked" layer, next to the Sync that drives them and
-          folded shut. Feeds are added/removed in Connections. */}
+      {/* The connected calendars, as a legend: whose colour is whose, and which ones are Work.
+          Read-only — adding, syncing and editing live in Connections. */}
       <View>
         <PressableScale
           haptic="select"
           onPress={() => setSubsOpen((v) => !v)}
           accessibilityRole="button"
           accessibilityState={{ expanded: subsOpen }}
-          accessibilityLabel={`Subscriptions, ${subs.length} synced calendar${subs.length === 1 ? "" : "s"}`}
+          accessibilityLabel={`Calendars, ${subs.length} connected`}
         >
           <SectionHeader
-            title={`Subscriptions${subs.length ? ` · ${subs.length}` : ""}`}
+            title={`Calendars${subs.length ? ` · ${subs.length}` : ""}`}
             trailing={<Expander open={subsOpen} size={26} />}
           />
         </PressableScale>
         {subsOpen ? (
-          subs.length === 0 ? (
-            <Card>
-              <T kind="sub">No synced calendars yet. Subscribe to school or team feeds in More → Connections.</T>
-            </Card>
-          ) : (
-            <Card padded={false}>
-              {subs.map((s, i) => {
-                // Whose calendar this is: "Ross · wrhixon@gmail.com" when the server
-                // knows the owning account; otherwise fall back to the source label.
-                const owner = [s.ownerName, s.accountEmail].filter(Boolean).join(" · ") || s.source;
-                return (
+          <View style={{ gap: spacing.sm }}>
+            {subs.length === 0 ? (
+              <Card>
+                <T kind="sub">
+                  {hasConnections ? "No connected calendars yet. Add school, team or work calendars in Connections." : "No connected calendars yet."}
+                </T>
+              </Card>
+            ) : (
+              <Card padded={false}>
+                {subs.map((s, i) => (
                   <Row
                     key={s.id}
-                    icon="antenna.radiowaves.left.and.right"
+                    icon="calendar"
                     iconColor={subColorForId(s.id) ?? colors.sky}
-                    iconBg={colors.skyBg}
+                    iconBg={fade(subColorForId(s.id) ?? colors.sky, 0.14)}
                     title={s.name}
-                    subtitle={`${owner}\n${syncLabel(s)}`}
+                    subtitle={legendOwner(s)}
                     last={i === subs.length - 1}
-                    trailing={<Button small title="Sync" loading={syncing === s.id} onPress={() => void syncNow(s)} />}
+                    trailing={s.isWork ? <Badge label="Work" fg={colors.textMuted} bg={colors.surfaceSunken} icon="briefcase.fill" /> : undefined}
                   />
-                );
-              })}
-            </Card>
-          )
+                ))}
+              </Card>
+            )}
+            {hasConnections ? (
+              <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+                <PressableScale
+                  onPress={() => router.push({ pathname: "/connections", params: { from: "/(home)/calendar" } })}
+                  haptic="select" hitSlop={8} accessibilityRole="link" accessibilityLabel="Manage calendars in Connections"
+                  testID="calendar-manage-connections"
+                >
+                  <T kind="subMedium" color={colors.ember}>Manage in Connections</T>
+                </PressableScale>
+              </View>
+            ) : null}
+          </View>
         ) : null}
       </View>
-
-      {notice ? <Notice text={notice.text} ok={notice.ok} /> : null}
 
       {/* ISS-121: a connected calendar that can no longer refresh must never contribute
           SILENTLY. Its events stay visible — hiding a family's events would be the worse
@@ -671,6 +645,8 @@ export default function CalendarScreen() {
             text={`${staleEvents.length} event${staleEvents.length === 1 ? "" : "s"} here ${staleEvents.length === 1 ? "comes" : "come"} from a calendar that can't refresh — ${staleEvents.length === 1 ? "it" : "they"} may be out of date until it's reconnected.`}
             ok={false}
           />
+          {/* Child View has no Connections, so no Reconnect for them — the notice still says why. */}
+          {hasConnections ? (
           <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
             {/* F2/F4 — say WHICH provider needs attention and WHERE we came from, so
                 Connections can scroll to that card, ring it, and give Back a real
@@ -686,6 +662,7 @@ export default function CalendarScreen() {
               <T kind="subMedium" color={colors.ember}>Reconnect</T>
             </PressableScale>
           </View>
+          ) : null}
         </View>
       ) : null}
 
@@ -711,7 +688,7 @@ export default function CalendarScreen() {
                   nameOf={nameOf}
                   colorOf={colorOf}
                   subColors={subColorsOf(e)}
-                  ownerName={ownerNameOf(e)}
+                  ownerName={ownerNameOf(e)} members={members} hideEye={showsHideEye(eventFace(e), e, subs)}
                   canManage={canManage}
                   onChanged={load}
                   expanded={expanded === e.id}
@@ -727,7 +704,7 @@ export default function CalendarScreen() {
           title="Nothing on the calendar yet"
           hint={canManage
             ? "Add an event with the + button, subscribe to a school or team feed in Connections, or ask Famili to plan something."
-            : "Subscribe to a school or team feed in Connections, or ask Famili to plan something."}
+            : "When someone in the family adds a plan or connects a calendar, it shows up here."}
           action={canManage ? { title: "New event", onPress: () => openCreate() } : undefined}
         />
       ) : selectedDay && visibleDays.length === 0 ? (
@@ -763,7 +740,7 @@ export default function CalendarScreen() {
                     nameOf={nameOf}
                     colorOf={colorOf}
                     subColors={subColorsOf(e)}
-                    ownerName={ownerNameOf(e)}
+                    ownerName={ownerNameOf(e)} members={members} hideEye={showsHideEye(eventFace(e), e, subs)}
                     canManage={canManage}
                     onChanged={load}
                     expanded={expanded === e.id}
@@ -791,7 +768,7 @@ export default function CalendarScreen() {
                     nameOf={nameOf}
                     colorOf={colorOf}
                     subColors={subColorsOf(e)}
-                    ownerName={ownerNameOf(e)}
+                    ownerName={ownerNameOf(e)} members={members} hideEye={showsHideEye(eventFace(e), e, subs)}
                     canManage={canManage}
                     onChanged={load}
                     expanded={expanded === e.id}
@@ -850,7 +827,7 @@ function DayTask({ t, name, tone }: { t: TaskRec; name: string | null; tone?: st
   );
 }
 
-function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChanged, expanded, onToggle }: {
+function EventItem({ e, nameOf, colorOf, subColors, ownerName, members, hideEye, canManage, onChanged, expanded, onToggle }: {
   e: EventRec;
   nameOf: (id: string | null) => string | null;
   colorOf: (id: string | null) => string | null;
@@ -858,16 +835,22 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
   subColors: string[];
   /** Whose event this is — a member's name or the source calendar owner(s). */
   ownerName: string | null;
+  /** For the owner's photo on hidden time. */
+  members: MemberRec[];
+  /** My own shared event from a Work calendar: wears a small open eye to hide it again. */
+  hideEye: boolean;
   canManage: boolean;
   onChanged: () => Promise<void> | void;
   expanded: boolean;
   onToggle: () => void;
 }) {
   const { colors, spacing } = useTheme();
+  // ADR-005: full, the owner's own hidden event, or someone else's hidden time (a block).
+  const face = eventFace(e);
   const canonical = e.layer === "canonical";
-  // Google-originated linked events are editable two-way (server writes to Google
-  // first) — they open the form like canonical ones. ICS/public stay expand-only.
-  const editable = canonical || (e.layer === "linked" && !!e.provenance?.googleEventId);
+  // The server says, per viewer, whether this event opens the editor (a Google-linked event
+  // only for whoever connected it, a block never). ICS/public mirrors stay expand-only.
+  const editable = e.editable === true;
   // All-day events show "All day" on the rail — never a faked midnight (ISS-005).
   const start = e.allDay ? "All day" : fmtTime(e.startAt);
   const end = e.allDay ? null : fmtTime(e.endAt);
@@ -905,6 +888,81 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
     else Alert.alert("Couldn't resolve", r.message ?? (r.error === "insufficient_role" ? "Adults only." : r.error ?? "Try again."));
   };
 
+  // The eye: share (hidden=false) or hide again (hidden=true). The server's own sentence
+  // comes back on a refusal; it is the one to show.
+  const [sharing, setSharing] = useState(false);
+  const setHidden = async (hidden: boolean) => {
+    setSharing(true);
+    const r = await api.setEventSharing(e.id, hidden);
+    setSharing(false);
+    if (r.error) {
+      Alert.alert(hidden ? "Couldn't hide it" : "Couldn't share it", r.message ?? (r.error === "network" ? "Check your connection and try again." : "Try again."));
+      return;
+    }
+    tapHaptic("success");
+    await onChanged();
+  };
+
+  const timeRail = (
+    <View style={{ width: 58, alignItems: "flex-end", paddingTop: 14 }}>
+      <T kind="subMedium" color={colors.textSecondary}>{start ?? "Any"}</T>
+      {end ? <T kind="caption" color={colors.textFaint}>{end}</T> : null}
+    </View>
+  );
+
+  // Someone else's hidden time: frosted, their photo and "<Name> working" above the glass.
+  // Not an event — nothing opens, nothing expands, nothing to edit.
+  if (face.mode === "block") {
+    const owner = members.find((m) => m.actorId === face.ownerId) ?? null;
+    return (
+      <View style={{ flexDirection: "row", gap: spacing.md }}>
+        {timeRail}
+        <View style={{ flex: 1 }}>
+          <ObscuredCard
+            mode="block"
+            owner={owner}
+            label={face.label}
+            sublabel={timeRangeLabel(e)}
+            testID="event-block"
+            accessibilityLabel={blockA11yLabel(face.label, e)}
+          />
+        </View>
+      </View>
+    );
+  }
+
+  // My own hidden event: the real card under the glass; the body still opens it for me, the
+  // eye-slash shares it with everyone.
+  if (face.mode === "ownHidden") {
+    const me = members.find((m) => m.actorId === e.ownerId) ?? null;
+    return (
+      <View style={{ flexDirection: "row", gap: spacing.md }}>
+        {timeRail}
+        <View style={{ flex: 1 }}>
+          <ObscuredCard
+            mode="ownHidden"
+            owner={me}
+            label={hiddenCaption(face)}
+            sublabel={timeRangeLabel(e)}
+            testID={`event-card-${e.id}`}
+            accessibilityLabel={`${e.title}, ${start ?? "no time"}. Hidden from the family. Open event`}
+            onPress={() => router.push({ pathname: "/event-form", params: { id: e.id } })}
+            onToggle={() => void setHidden(false)}
+            toggling={sharing}
+            eyeTestID={`eye-toggle-${e.id}`}
+            eyeLabel={eyeLabel(face)}
+          >
+            <View style={{ gap: 3 }}>
+              <T kind="bodyMedium" color={colors.text} numberOfLines={2}>{e.title}</T>
+              {ownerName ? <T kind="caption" color={stripe ?? colors.textMuted}>{ownerName}</T> : null}
+              {e.location ? <T kind="sub" numberOfLines={1}>{e.location}</T> : null}
+            </View>
+          </ObscuredCard>
+        </View>
+      </View>
+    );
+  }
+
   /* A3 [14:16] — "for a long address or notes I want a DOWN-ARROW under the time, to peek at
    * it at a glance, in ADDITION to the right-arrow that fully opens the event."
    *
@@ -941,7 +999,9 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
       </View>
 
       <View style={{ flex: 1, gap: spacing.sm }}>
+      <View>
       <PressableCard
+        testID={`event-card-${e.id}`}
         haptic={editable ? "light" : "select"}
         onPress={editable ? () => router.push({ pathname: "/event-form", params: { id: e.id } }) : onToggle}
         accessibilityRole="button"
@@ -974,7 +1034,7 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
             pointerEvents="none"
           />
         ) : null}
-        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingRight: hideEye ? 30 : 0 }}>
           {/* ISS-109: clamped to 2 lines while collapsed, but a long title is never left
               unreadable — expanding the row (the affordance already here) shows all of it. */}
           <T kind="bodyMedium" color={colors.text} style={{ flex: 1 }} numberOfLines={expanded ? undefined : 2}>{e.title}</T>
@@ -1081,6 +1141,21 @@ function EventItem({ e, nameOf, colorOf, subColors, ownerName, canManage, onChan
           </View>
         ) : null}
       </PressableCard>
+      {/* My shared Work event: a small open eye hides it from the family again. A sibling of
+          the card, not inside it, so it is its own control and not part of the card's press. */}
+      {hideEye ? (
+        <View pointerEvents="box-none" style={{ position: "absolute", top: 10, right: 10 }}>
+          <EyeButton
+            hidden={false}
+            small
+            busy={sharing}
+            onPress={() => void setHidden(true)}
+            testID={`eye-toggle-${e.id}`}
+            accessibilityLabel={eyeLabel(face)}
+          />
+        </View>
+      ) : null}
+      </View>
 
       {/* Sync conflict: both sides changed — pick the version to keep (mirrors web's
           EventDrawer conflict handling). Nothing is overwritten until you choose. */}

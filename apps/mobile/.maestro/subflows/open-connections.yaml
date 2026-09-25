@@ -1,0 +1,16 @@
+# Open Connections the way an adult does: Settings tab → "All connections & calendars".
+appId: ai.familios.app
+---
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element:
+      text: "All connections & calendars.*"
+    direction: DOWN
+    timeout: 20000
+- tapOn: "All connections & calendars.*"
+- extendedWaitUntil:
+    visible:
+      id: "connections-screen"
+    timeout: 30000
+- waitForAnimationToEnd:
+    timeout: 5000

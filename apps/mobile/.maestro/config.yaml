@@ -1,0 +1,13 @@
+# Maestro workspace config: run the calendar privacy flows (ADR-005) in this order.
+# Seed first: node scripts/seed-calendar-demo.mjs --serve --port 8787 (from the repo root).
+# docs/verification/ios-simulator-mac.md has the whole walk-through.
+flows:
+  - "*.yaml"
+executionOrder:
+  continueOnFailure: true
+  flowsOrder:
+    - owner-calendar
+    - limited-scope
+    - child-no-connections
+    - connections-by-role
+    - beannie-eye-toggle

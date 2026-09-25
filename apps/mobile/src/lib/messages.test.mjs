@@ -40,6 +40,10 @@ test("a tap goes to the thing the notification names", () => {
   assert.equal(notificationTarget(note()), null);
 });
 
+test("a block is someone else's hidden time, never an event to open", () => {
+  assert.deepEqual(notificationTarget(note({ data: { type: "event", id: "blk_1" } })), { pathname: "/calendar" });
+});
+
 // ---- threads ----
 import { canStartWith, threadTitle, groupByDay, dayLabel, formatDuration, receiptsFor } from "./messages.ts";
 

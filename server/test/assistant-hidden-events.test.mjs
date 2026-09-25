@@ -47,6 +47,14 @@ let ctx, alex, morgan, fake, hh;
 let workId, surpriseId, haircutId;
 let n = 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/* The fake model answers from ONE shared script. A background call left over from the previous
+ * test (memory capture, a run judge, a chat title) can take the next scripted answer under
+ * full-suite load — so wait until the model has been quiet for a moment before scripting. */
+async function settle(quietMs = 400, maxMs = 8000) {
+  const end = Date.now() + maxMs;
+  let n = fake.state.requests.length;
+  while (Date.now() < end) { await sleep(quietMs); if (fake.state.requests.length === n) return; n = fake.state.requests.length; }
+}
 
 async function text(from, body, guid) {
   const r = await ctx.fetch("/api/webhooks/bluebubbles", {
@@ -292,6 +300,7 @@ test("a sourceRef.secret or audience in a request body is dropped — only the s
 
 test("a normal Personal-chat run remembers in PERSONAL scope, authored by the asker — not the household", async () => {
   fake.state.memoryJudge = { remember: false };
+  await settle();
   const conv = await newChat(morgan, "personal");
   fake.state.script.push({ toolCalls: [{ name: "homeops__create_approval", args: { subject: "Coffee order", detail: "Oat milk" } }] }, { text: "Queued." });
   const out = await ask(morgan, "ask for sign-off on the coffee order with oat milk", conv);

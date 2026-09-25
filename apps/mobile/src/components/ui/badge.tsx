@@ -17,7 +17,7 @@ export function Badge({ label, fg, bg, icon }: { label: string; fg: string; bg: 
   );
 }
 
-export function Chip({ label, selected, onPress, onLongPress, icon }: { label: string; selected?: boolean; onPress?: () => void; onLongPress?: () => void; icon?: string }) {
+export function Chip({ label, selected, onPress, onLongPress, icon, testID, accessibilityLabel }: { label: string; selected?: boolean; onPress?: () => void; onLongPress?: () => void; icon?: string; testID?: string; accessibilityLabel?: string }) {
   const { colors, dark } = useTheme();
   return (
     <PressableScale
@@ -26,6 +26,8 @@ export function Chip({ label, selected, onPress, onLongPress, icon }: { label: s
       haptic={null}
       accessibilityRole="button"
       accessibilityState={{ selected: !!selected }}
+      accessibilityLabel={accessibilityLabel}
+      testID={testID}
       style={{
         flexDirection: "row", alignItems: "center", gap: 6,
         paddingHorizontal: 13, paddingVertical: 8, borderRadius: 999,

@@ -26,6 +26,8 @@
     "topgun:web:all": "playwright test -c tests/topgun/playwright.config.ts",
     "topgun:pwa": "playwright test -c tests/topgun/playwright.config.ts web/pwa.spec.ts --project=web-chromium",
     "topgun:appetize": "playwright test -c tests/topgun/appetize/appetize.config.ts",
+    "test:calendar-privacy": "playwright test -c tests/topgun/calendar-privacy.config.ts",
+    "seed:calendar-demo": "node scripts/seed-calendar-demo.mjs",
     "topgun:ios": "node tests/topgun/appium/run.mjs",
     "topgun:ios:probe": "node tests/topgun/appium/run.mjs --probe",
     "topgun:report": "playwright show-report tests/topgun/.artifacts/web/report"

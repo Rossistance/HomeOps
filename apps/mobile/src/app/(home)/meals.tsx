@@ -151,7 +151,8 @@ export default function MealsScreen() {
     setBusy(`c:${m.id}`); setNotice(null);
     const r = await api.mealToCalendar(m.id);
     setBusy(null);
-    if (r.ok && r.event) { tapHaptic("success"); setNotice({ text: `${r.action === "updated" ? "Updated" : "Added"} “${r.event.title}” on the calendar. Push it to Google from the web Calendar if you want it there too.`, ok: true }); }
+    // ok with no event: it was added, but the server doesn't echo an event this person's view leaves out.
+    if (r.ok) { tapHaptic("success"); setNotice({ text: r.event ? `${r.action === "updated" ? "Updated" : "Added"} “${r.event.title}” on the calendar. Push it to Google from the web Calendar if you want it there too.` : (r.action === "updated" ? "Updated on the calendar." : "Added to the calendar."), ok: true }); }
     else setNotice({ text: r.error === "date_required" ? "Give the meal a date first." : `Couldn't add to calendar: ${r.message ?? r.error ?? "unknown error"}`, ok: false });
   };
 
